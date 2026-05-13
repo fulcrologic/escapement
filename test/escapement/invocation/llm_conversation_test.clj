@@ -11,7 +11,7 @@
    [escapement.llm.protocol :as llm]
    [escapement.tools.builtin :as builtin]
    [escapement.tools.protocol :as tp]
-   [fulcro-spec.core :refer [specification behavior assertions =>]])
+   [fulcro-spec.core :refer [specification behavior component assertions =>]])
   (:import
    (java.util.concurrent LinkedBlockingDeque TimeUnit)))
 
@@ -326,6 +326,72 @@
                   "earlier tool defs are NOT stamped (Anthropic caches the prefix only)"
                   (every? nil? (mapv :cache-control (drop-last (:tools first-req))))
                   => true)))
+
+;; ---------------------------------------------------------------------------
+;; #3d: auto-cache defaults
+;; ---------------------------------------------------------------------------
+
+(defn- run-cache-chart!
+  "Spin up a tiny one-turn chart whose params-fn returns `params-extra` merged
+   over a stable base, and return the first Request that landed on the mock
+   backend."
+  [params-extra]
+  (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
+                                (end-turn-response "ok")])
+        registry (builtin/new-builtin-registry)
+        base     {:system               "stable system prompt"
+                  :real-tools           [:fs/read :fs/grep]
+                  :allowed-events       [{:event :done :data-schema [:map]}]
+                  :initial-user-message "go"}
+        chart    (chart/statechart
+                  {:initial :wrap}
+                  (state {:id :wrap :initial :work}
+                         (state {:id :work}
+                                (h/llm-conversation
+                                 {:id        "auto"
+                                  :params-fn (fn [_ _] (merge base params-extra))})
+                                (transition {:event :done :target :finished}))
+                         (final {:id :finished})))
+        t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
+        _        (await-config! t :finished 3000)]
+    (-> backend :call-log deref first)))
+
+(specification "auto-cache defaults"
+               (component "no cache flags set → ephemeral defaults are applied"
+                          (let [req (run-cache-chart! {})]
+                            (assertions
+                             "system-cache-control defaulted to ephemeral"
+                             (:system-cache-control req) => {:type :ephemeral}
+
+                             "last tool stamped ephemeral via tools-cache-control default"
+                             (-> req :tools last :cache-control) => {:type :ephemeral}
+
+                             "earlier tools NOT stamped (prefix-up-to-marker rule)"
+                             (every? nil? (mapv :cache-control (drop-last (:tools req)))) => true)))
+
+               (component ":auto-cache? false fully opts out"
+                          (let [req (run-cache-chart! {:auto-cache? false})]
+                            (assertions
+                             "no system-cache-control"
+                             (:system-cache-control req) => nil
+
+                             "no tool-level cache-control either"
+                             (every? nil? (mapv :cache-control (:tools req))) => true)))
+
+               (component "explicit :system-cache-control overrides the auto-default"
+                          (let [req (run-cache-chart! {:system-cache-control {:type :ephemeral :ttl :1h}})]
+                            (assertions
+                             "explicit value wins"
+                             (:system-cache-control req) => {:type :ephemeral :ttl :1h})))
+
+               (component "false on an individual marker disables just that one"
+                          (let [req (run-cache-chart! {:system-cache-control false})]
+                            (assertions
+                             "system disabled"
+                             (:system-cache-control req) => nil
+
+                             "tools STILL get the auto-default"
+                             (-> req :tools last :cache-control) => {:type :ephemeral}))))
 
 ;; ---------------------------------------------------------------------------
 ;; #4: Bad input twice -> fatal error

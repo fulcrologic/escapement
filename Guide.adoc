@@ -539,15 +539,28 @@ actual answer.
   Optional `{:user-id "..."}`. Surfaces in Anthropic's audit/abuse
   tracking. Use a stable, non-PII identifier (e.g. a hash).
 
+`:auto-cache?`::
+  Boolean, **default `true`**. When true, any absent
+  `:system-cache-control` / `:tools-cache-control` key is filled in
+  with `{:type :ephemeral}` (Anthropic's 5-minute cache window —
+  cheap; the 1-hour `:ttl :1h` variant costs noticeably more). Set
+  `:auto-cache? false` to skip defaulting entirely (no cache markers
+  emitted at all). See <<prompt-caching>> for the rationale.
+
 `:system-cache-control` and `:tools-cache-control`::
-  Optional cache_control markers (e.g. `{:type :ephemeral}` or
-  `{:type :ephemeral :ttl :1h}`) that turn on Anthropic prompt caching
-  for this conversation. `:system-cache-control` caches the system
-  prompt; `:tools-cache-control` stamps the last tool def so the
-  prefix-through-end of `tools` is cached too. The biggest wins are in
-  tool-heavy single-state loops (refine in the unit-test demo is the
-  canonical case). See <<prompt-caching>> for the full explanation and
-  when caching is wasted effort.
+  Optional cache_control markers. Each is one of:
++
+* a marker map like `{:type :ephemeral}` (5-minute TTL — the default)
+  or `{:type :ephemeral :ttl :1h}` (1-hour TTL, costs more to write)
+* `false` — explicit "don't cache this one"
+* absent / `nil` — falls through to the `:auto-cache?` default
+  (`{:type :ephemeral}` when auto-cache is on)
++
+`:system-cache-control` marks the system prompt; `:tools-cache-control`
+stamps the LAST tool def so the prefix-through-end of `tools` is
+cached. The biggest wins are in tool-heavy single-state loops (refine
+in the unit-test demo is the canonical case). See <<prompt-caching>>
+for the full explanation and when caching is wasted effort.
 
 `:on-end-turn-event`::
   Optional chart event keyword fired to the parent when the LLM returns
@@ -665,26 +678,56 @@ the system prompt and the tool definitions.
   Escapement's phases use *different* system prompts on purpose, so
   cross-state hits are rare.
 
-==== How to turn it on
+==== Defaults
 
-Set two keys in your `params-fn` map. The chart wires them through to
-the wire layer; tests cover the round-trip.
+**Caching is on by default.** An `:llm-conversation` state with no
+cache keys set behaves as if you had written
+
+[source,clojure]
+----
+{:system-cache-control {:type :ephemeral}
+ :tools-cache-control  {:type :ephemeral}}
+----
+
+i.e. ephemeral (5-minute TTL) markers on both the system prompt and the
+tail of the tool defs. The reasoning: Anthropic silently ignores
+`cache_control` on prompts below the minimum cacheable size (1024
+tokens for Sonnet/Opus, 2048 for Haiku), so the default is free for
+small prompts and a clear win for any multi-turn state with a
+substantial prefix. We default to the 5-minute TTL because the 1-hour
+TTL (`:ttl :1h`) costs noticeably more to *write* — only worth it for
+prefixes that the next state is likely to reuse.
+
+To opt out:
+
+* `:auto-cache? false` — skip defaulting entirely; no cache markers
+  emitted (use this for guaranteed single-turn states with a 1K+ prompt
+  you truly never reuse).
+* `:system-cache-control false` or `:tools-cache-control false` —
+  disable just one marker while letting the other auto-default.
+* An explicit map for either key always wins (e.g.
+  `:system-cache-control {:type :ephemeral :ttl :1h}` when you know
+  the next state will reuse this same system prompt within the hour).
+
+==== Overriding for the 1-hour TTL
+
+Set the explicit map:
 
 [source,clojure]
 ----
 {:system               (slurp "prompts/refine.md")        ; ~13 KB
- :system-cache-control {:type :ephemeral}                 ; or {:type :ephemeral :ttl :1h}
- :tools-cache-control  {:type :ephemeral}                 ; stamps the LAST tool def
+ :system-cache-control {:type :ephemeral :ttl :1h}        ; longer-lived
+ :tools-cache-control  {:type :ephemeral :ttl :1h}
  :real-tools           [:fs/read :fs/edit :shell/run]
  :max-tokens           16384
  :allowed-events       [...]
  :initial-user-message "..."}
 ----
 
-`tools-cache-control` stamps the *last* tool def with the marker
-because Anthropic caches everything up through the marker — stamping
-the tail therefore covers every tool. You normally want either both
-flags or neither: caching system but not tools means the tools section
+`tools-cache-control` stamps the *last* tool def because Anthropic
+caches everything up through the marker — stamping the tail therefore
+covers every tool. You normally want either both flags set to the same
+value or neither: caching system but not tools means the tools section
 ends the cache prefix, so the system prefix is the only thing reused.
 
 ==== When the cache wins are real
@@ -715,6 +758,77 @@ jq -r 'select(.event == "llm/response") |
 ----
 
 First request shows a creation count, subsequent ones show reads.
+
+[[context-tracking]]
+=== Context-window tracking
+
+Anthropic never returns the context-window size on a response. We keep
+a small lookup table at `src/escapement/llm/models.clj` and use it to
+enrich the transcript so chart authors and reviewers can see, at any
+point in a run, how much of the model's context the running
+conversation has consumed.
+
+==== `escapement.llm.models`
+
+[source,clojure]
+----
+(require '[escapement.llm.models :as m])
+
+(m/info "claude-opus-4-7")
+;; => {:context-tokens 200000 :max-output-tokens 64000 :provider :anthropic}
+
+(m/context-window "claude-sonnet-4-6")           ; => 200000
+(m/max-output-tokens "claude-haiku-4-5")         ; => 32000
+(m/approaching-limit? "claude-opus-4-7" 180000)  ; => true (≥ 80% of cap)
+----
+
+Resolution is exact-match-first, then longest-prefix. Dated ids like
+`claude-opus-4-7-20260101` resolve to the `claude-opus-4-7` family
+entry. Add new model rows to the `known-models` map at the top of
+the namespace as Anthropic ships them.
+
+==== Transcript enrichment
+
+The worker stamps every `:llm/response` event with:
+
+* `:usage`  — the Anthropic `usage` block (`:input-tokens`,
+  `:output-tokens`, `:cache-creation-input-tokens`,
+  `:cache-read-input-tokens` when present)
+* `:model` — the model id reported by the API (or our request model)
+* `:context-window` — the lookup-table value for that model, when
+  known
+* `:context-used-frac` — `:input-tokens` / `:context-window`, rounded
+  to three decimals; absent when we can't look up the model
+
+Additionally, whenever `:context-used-frac` ≥ 0.8 a separate
+`:llm/context-warning` event is emitted into the transcript with the
+same data. Charts can ignore it (the worker keeps running) or chain a
+transition on it via the parent session's autoforward path if they
+want to do something proactive (compact history, swap to a smaller
+model for the next state, etc.).
+
+==== Plotting usage from a transcript
+
+[source,bash]
+----
+# Per-response: input tokens, output tokens, fraction of context used.
+jq -r 'select(.event == "llm/response") |
+       [(.data.usage["input-tokens"]   // 0),
+        (.data.usage["output-tokens"]  // 0),
+        (.data["context-used-frac"]    // 0)] | @tsv' transcript.jsonl
+----
+
+Pipe through `column -t` for tidy display, or into any plotting tool
+for a per-turn growth curve.
+
+==== Pre-flight token counting
+
+Anthropic ships a separate Messages `count_tokens` endpoint for
+predicting an input size before sending. Escapement does not call it
+today; if you need a hard pre-flight gate, the simplest approach is to
+add a chart-side script that calls `count_tokens` via `:shell/run` and
+either transitions to a compaction state or trims `messages-atom`
+before the request goes out.
 
 [[tokens-and-turns]]
 === Tokens and turns — what `:max-tokens` actually limits

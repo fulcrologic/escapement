@@ -20,6 +20,7 @@
   See `plan.md` for the design and `SPIKE_FINDINGS.md` for library errata."
   (:require
    [clojure.string :as str]
+   [escapement.llm.models :as models]
    [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
    [com.fulcrologic.statecharts :as sc]
    [com.fulcrologic.statecharts.environment :as env-ns]
@@ -164,45 +165,65 @@
                      extended thinking. Requires `:max-tokens` > `N`.
      * `:tool-choice` — `:auto` | `:any` | `:none` | `{:type :tool :name \"...\"}`
      * `:metadata` — `{:user-id \"...\"}`
+     * `:auto-cache?` — boolean, default `true`. When true, fills in
+       `:system-cache-control` and `:tools-cache-control` with
+       `{:type :ephemeral}` if the caller didn't set them. Set to `false`
+       to fully disable prompt-cache markers (use this for guaranteed
+       single-turn states where the cache-write surcharge has no payoff).
      * `:system-cache-control` — Anthropic prompt-cache marker on the system
-       block (e.g. `{:type :ephemeral}` or `{:type :ephemeral :ttl :1h}`).
-       Lets repeated turns within the same conversation re-use the system
-       prefix at 0.1× cost. Combine with `:tools-cache-control` to cover
-       the tool defs as well.
-     * `:tools-cache-control` — Same shape; applies to every entry in
-       `:tools`. Anthropic caches the prefix up through the last
-       cache_control marker, so caching tools when the chart never
-       mutates them is essentially free win.
+       block. Defaulted to `{:type :ephemeral}` via `:auto-cache?`; pass a
+       map (e.g. `{:type :ephemeral :ttl :1h}`) to override or `false` to
+       disable just this marker.
+     * `:tools-cache-control` — Same shape; applies to the LAST entry in
+       `:tools` so the prefix-through-end of `tools` is cached. Defaulted
+       to `{:type :ephemeral}` via `:auto-cache?`; pass `false` to disable.
      * `:conv-id` — claude-p `--resume` correlation id (string/keyword/uuid)"
   [{:keys [system messages tools model max-tokens conv-id
            temperature top-p top-k stop-sequences thinking tool-choice metadata
-           system-cache-control tools-cache-control]}]
-  ;; Note: :model is omitted from the Request when the caller didn't supply
-  ;; one. The backend's `send-turn` fills it from its configured
-  ;; `:default-model` before schema validation. That way the chart can simply
-  ;; not set :model and the runner's chosen default wins, instead of every
-  ;; chart silently locking onto a stale hardcoded model.
-  (cond-> {:messages messages
-           :tools    (if (and (seq tools) tools-cache-control)
-                       ;; Anthropic caches the PREFIX up through the last
-                       ;; cache_control marker. Stamping the last tool with
-                       ;; the marker therefore caches all tool defs.
-                       (-> (vec tools)
-                           (update (dec (count tools))
-                                   assoc :cache-control tools-cache-control))
-                       tools)}
-    model                (assoc :model model)
-    system               (assoc :system system)
-    max-tokens           (assoc :max-tokens max-tokens)
-    system-cache-control (assoc :system-cache-control system-cache-control)
-    (some? temperature)  (assoc :temperature temperature)
-    (some? top-p)        (assoc :top-p top-p)
-    (some? top-k)        (assoc :top-k top-k)
-    (seq stop-sequences) (assoc :stop-sequences (vec stop-sequences))
-    thinking             (assoc :thinking thinking)
-    (some? tool-choice)  (assoc :tool-choice tool-choice)
-    (seq metadata)       (assoc :metadata metadata)
-    conv-id              (assoc :conversation/id conv-id)))
+           system-cache-control tools-cache-control auto-cache?]
+    :or   {auto-cache? true}}]
+  ;; Auto-cache defaulting: an absent (== `nil`) cache-control marker
+  ;; becomes ephemeral when :auto-cache? is true. Anthropic ignores
+  ;; cache_control on prompts below ~1024 tokens, so the default is free
+  ;; for small prompts and a clear win for any multi-turn state with a
+  ;; substantial prefix. Pass `:auto-cache? false` to fully opt out, or
+  ;; pass an explicit map / `false` on either individual key.
+  (let [system-cache-control (cond
+                               (false? system-cache-control)         nil
+                               (some? system-cache-control)          system-cache-control
+                               auto-cache?                           {:type :ephemeral}
+                               :else                                 nil)
+        tools-cache-control  (cond
+                               (false? tools-cache-control)          nil
+                               (some? tools-cache-control)           tools-cache-control
+                               auto-cache?                           {:type :ephemeral}
+                               :else                                 nil)]
+    ;; Note: :model is omitted from the Request when the caller didn't supply
+    ;; one. The backend's `send-turn` fills it from its configured
+    ;; `:default-model` before schema validation. That way the chart can simply
+    ;; not set :model and the runner's chosen default wins, instead of every
+    ;; chart silently locking onto a stale hardcoded model.
+    (cond-> {:messages messages
+             :tools    (if (and (seq tools) tools-cache-control)
+                         ;; Anthropic caches the PREFIX up through the last
+                         ;; cache_control marker. Stamping the last tool with
+                         ;; the marker therefore caches all tool defs.
+                         (-> (vec tools)
+                             (update (dec (count tools))
+                                     assoc :cache-control tools-cache-control))
+                         tools)}
+      model                (assoc :model model)
+      system               (assoc :system system)
+      max-tokens           (assoc :max-tokens max-tokens)
+      system-cache-control (assoc :system-cache-control system-cache-control)
+      (some? temperature)  (assoc :temperature temperature)
+      (some? top-p)        (assoc :top-p top-p)
+      (some? top-k)        (assoc :top-k top-k)
+      (seq stop-sequences) (assoc :stop-sequences (vec stop-sequences))
+      thinking             (assoc :thinking thinking)
+      (some? tool-choice)  (assoc :tool-choice tool-choice)
+      (seq metadata)       (assoc :metadata metadata)
+      conv-id              (assoc :conversation/id conv-id))))
 
 ;; ---------------------------------------------------------------------------
 ;; Worker loop
@@ -320,6 +341,7 @@
                                           :metadata             (:metadata params)
                                           :system-cache-control (:system-cache-control params)
                                           :tools-cache-control  (:tools-cache-control params)
+                                          :auto-cache?          (get params :auto-cache? true)
                                           :conv-id              (:conversation/id params)})
                   _       (transcript! transcript-fn {:event :llm/request :ts (now-ms)
                                                       :data  {:n-messages (count (:messages request))}})
@@ -364,10 +386,33 @@
                   (recur))
 
                 :else
-                (let [{:keys [stop-reason content]} response]
-                  (transcript! transcript-fn {:event :llm/response :ts (now-ms)
-                                              :data  {:stop-reason stop-reason
-                                                      :n-blocks    (count content)}})
+                (let [{:keys [stop-reason content usage model]} response
+                      ;; Compute context-utilization hint when we know the model.
+                      ctx-window     (some-> model models/context-window)
+                      input-tokens   (:input-tokens usage)
+                      ctx-used-frac  (when (and ctx-window input-tokens (pos? ctx-window))
+                                       (/ (double input-tokens) (double ctx-window)))]
+                  (transcript! transcript-fn
+                               {:event :llm/response
+                                :ts    (now-ms)
+                                :data  (cond-> {:stop-reason stop-reason
+                                                :n-blocks    (count content)
+                                                :usage       (or usage {})}
+                                         model         (assoc :model model)
+                                         ctx-window    (assoc :context-window ctx-window)
+                                         ctx-used-frac (assoc :context-used-frac
+                                                              (Double/parseDouble (format "%.3f" ctx-used-frac))))})
+                  ;; Soft warning when context approaches the model's ceiling.
+                  ;; This is a transcript-level signal — chart-side scripts can
+                  ;; also call `escapement.llm.models/approaching-limit?` themselves.
+                  (when (and ctx-used-frac (>= ctx-used-frac 0.8))
+                    (transcript! transcript-fn
+                                 {:event :llm/context-warning
+                                  :ts    (now-ms)
+                                  :data  {:input-tokens   input-tokens
+                                          :context-window ctx-window
+                                          :used-frac      ctx-used-frac
+                                          :model          model}}))
                   (swap! messages-atom conj (assistant-message content))
                   (case stop-reason
                     :end_turn
