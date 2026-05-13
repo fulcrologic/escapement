@@ -102,7 +102,7 @@
              sys (system->wire system system-cache-control)]
          (cond-> {"model"      model
                   "messages"   (mapv message->wire messages)
-                  "max_tokens" (or max-tokens 4096)}
+                  "max_tokens" (or max-tokens 8192)}
            sys                      (assoc "system" sys)
            (seq tools)              (assoc "tools" (mapv tool->wire tools))
            (some? temperature)      (assoc "temperature" temperature)

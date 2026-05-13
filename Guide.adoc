@@ -489,7 +489,10 @@ makes `tell-llm` work).
   edits, the next Haiku for cheap fan-out.
 
 `:max-tokens`::
-  Optional int; defaults to `4096` in the api backend's request builder.
+  Optional int; defaults to **8192** in the api backend's request builder.
+  This caps generation in ONE assistant HTTP response — not the whole
+  conversation, not a tool round-trip. See <<tokens-and-turns>> for the
+  full mechanics, when to raise it, and how `:thinking` interacts with it.
   Required to be strictly greater than `:thinking`'s `:budget-tokens`
   when extended thinking is enabled.
 
@@ -602,6 +605,94 @@ keywords are flattened: `:my.ns/foo-bar` becomes `event__my_ns_foo_bar`.
 Anthropic enforces alphanum/underscore in tool names, so any other character
 in the keyword is replaced by `_`. See `kw->anthropic-name` in
 `src/escapement/invocation/llm_conversation.clj:41`.
+
+[[tokens-and-turns]]
+=== Tokens and turns — what `:max-tokens` actually limits
+
+This trips people up the first time. The short version:
+
+* `:max-tokens` caps generation in **one HTTP response** from the model.
+  It is not a session budget, not a per-tool budget, not a per-chart
+  budget. It only constrains "how long can the assistant's single
+  message be."
+* A tool round-trip is a **separate HTTP call** with a **separate fresh
+  budget**. The worker emits one request, the model returns
+  `stop_reason=tool_use` with some text + tool_use blocks (≤ `:max-tokens`
+  for that response), the worker dispatches tools, appends `tool_result`
+  to the message history, and POSTs the next request. The next response
+  gets its own clean `:max-tokens` allocation.
+* So a long, tool-heavy conversation can produce far more total tokens
+  than `:max-tokens` over many turns. The only failure mode that
+  `:max-tokens` actually causes is **truncation inside a single
+  response** — for example, when you ask the model to write a 6 KB file
+  in one shot and `:max-tokens` is set to 4 KB.
+
+==== Stop reasons
+
+When a response completes, Anthropic returns `stop_reason`:
+
+* `:end_turn` — the model is done with this turn. The worker fires
+  `:on-end-turn-event` (default `:llm.idle`) and parks in
+  `:awaiting-user`. The chart can transition on the event if it cares
+  about turn boundaries.
+* `:tool_use` — the response contains at least one tool_use block. The
+  worker dispatches the tools, appends results, and immediately POSTs
+  the next request. Chart-side scripts don't see this.
+* `:max_tokens` — the response was truncated at the cap. The worker
+  treats this as `:unexpected-stop` and fires `:on-error-event`
+  (default `:llm.error`). The chart can either transition to an error
+  path or just let the binding die. Treat this as a "bump `:max-tokens`
+  for this state" signal.
+* `:stop_sequence`, `:pause_turn`, `:refusal` — same as `:max_tokens`:
+  fired as `:unexpected-stop`. Charts that opt into `:stop-sequences`
+  can wire a real transition on `:llm.error` and inspect the event data
+  for the cause.
+
+==== Default and recommended values
+
+The wire-layer default is **8192**. That is high enough that most agent
+turns (short reasoning + a tool call + a short summary) never truncate,
+while staying well below every Claude 4 model's hard output ceiling
+(64K+).
+
+When to raise `:max-tokens` per state:
+
+* **Whole-file authoring** — emitting a complete `.cljc` test file,
+  a markdown report, or any long-form text. The unit-test demo uses
+  8192 for the write/critique/patch states and 16384 for refine.
+* **Long markdown analysis** — behavior or coverage reports that may
+  span many sections.
+* **Extended thinking enabled** — `:max-tokens` must be strictly greater
+  than `:thinking`'s `:budget-tokens` (the cap covers BOTH the thinking
+  blocks and the visible answer). A working pair is e.g.
+  `{:max-tokens 16384 :thinking {:type :enabled :budget-tokens 8192}}`.
+
+When NOT to raise:
+
+* **Routine tool-driven states** — extra budget is just extra room for
+  the model to ramble; it doesn't make tool work better.
+* **Per-call rate-limit sensitivity** — higher caps don't cost more if
+  the model stops earlier (you pay per token actually generated), but
+  they DO raise the per-request rate-limit allotment used.
+
+==== Cost note
+
+Anthropic bills per token actually generated, not per `:max-tokens`
+ceiling. Raising the cap doesn't cost more on its own — it just gives
+the model permission to produce more. Real cost driver is the number of
+tokens in the request (your accumulated message history and system
+prompt). Use `cache_control` markers on `system` and stable message
+prefixes to drive that down; see `escapement.llm.cache` and the
+`:system-cache-control` / `:cache-control` keys in the type schemas.
+
+==== If you really want a continuation
+
+The current worker has no automatic continuation for
+`stop_reason="max_tokens"`. You can build one chart-side: catch
+`:llm.error`, inspect `:_event` for `:reason :unexpected-stop` +
+`:stop-reason :max_tokens`, send a follow-up via `h/tell-llm` ("continue
+your previous response"), and let the model pick up. That's a chart
+decision, not a library default.
 
 [[backends]]
 == LLM backends
