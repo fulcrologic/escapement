@@ -1,0 +1,11 @@
+target/
+.cpcache/
+.calva/
+transcripts/
+checkpoints/
+.deep-cookie/
+.nrepl-port
+.nrepl-test-port
+.nrepl-dev-port
+*.log
+.DS_Store

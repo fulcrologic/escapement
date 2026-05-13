@@ -1,0 +1,16 @@
+{:paths ["src"]
+ :deps  {org.clojure/clojure         {:mvn/version "1.12.0"}
+         com.fulcrologic/statecharts {:mvn/version "1.4.0-RC13"}
+         com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
+         metosin/malli               {:mvn/version "0.16.4"}
+         cheshire/cheshire           {:mvn/version "5.13.0"}
+         babashka/process            {:mvn/version "0.5.22"}
+         org.babashka/http-client    {:mvn/version "0.4.22"}}
+ :aliases
+ {:dev  {:extra-paths ["dev" "spike"]
+         :jvm-opts    ["-Dguardrails.enabled=true"]}
+  :test   {:extra-paths ["test" "bb_test"]
+           :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.8"}
+                         lambdaisland/kaocha     {:mvn/version "1.91.1392"}}
+           :jvm-opts    ["-Dguardrails.enabled=true" "-Dguardrails.mode=:all"]}
+  :kaocha {:main-opts ["-m" "kaocha.runner"]}}}

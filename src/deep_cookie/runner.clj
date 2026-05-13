@@ -1,0 +1,181 @@
+(ns deep-cookie.runner
+  "The driver loop. Pumps the event queue through the chart processor, checkpointing
+  working memory after each pass. Terminates when the queue is quiescent AND no
+  invocation processor has any live workers.
+
+  Public entry: `run!`. Public helper: `load-chart`."
+  (:require
+   [clojure.edn :as edn]
+   [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
+   [com.fulcrologic.statecharts :as sc]
+   [com.fulcrologic.statecharts.protocols :as sp]
+   [deep-cookie.engine.env :as engine-env]
+   [deep-cookie.invocation.llm-conversation :as llm-conv]
+   [deep-cookie.transcript :as transcript]))
+
+(defn- now-ms [] (System/currentTimeMillis))
+
+(defn load-chart
+  "Given a fully-qualified symbol such as `'deep-cookie.charts.hello/agent`, `require` the
+   namespace and return the resolved var's value. Throws if it can't be resolved."
+  [chart-sym]
+  (assert (qualified-symbol? chart-sym) "chart-sym must be qualified, e.g. my.ns/agent")
+  (let [ns-sym (symbol (namespace chart-sym))]
+    (require ns-sym)
+    (let [v (resolve chart-sym)]
+      (when-not v
+        (throw (ex-info (str "Could not resolve chart: " chart-sym) {:chart-sym chart-sym})))
+      (deref v))))
+
+(defn- count-live-invocations
+  "Sum live worker counts across all `InvocationProcessor`s in the env that support it."
+  [env]
+  (reduce
+   (fn [n proc]
+     (cond
+       ;; Our LLM conversation processor — uses the public accessor.
+       (instance? deep_cookie.invocation.llm_conversation.LlmConversationProcessor proc)
+       (+ n (llm-conv/active-worker-count proc))
+
+       ;; Generic fallback: any processor that exposes a `:workers` atom of map entries
+       ;; whose vals have a `:worker-state` atom (e.g. test stand-ins) is honored.
+       (and (record? proc) (some-> proc :workers deref map?))
+       (+ n (reduce-kv
+             (fn [m _ entry]
+               (let [s (some-> (:worker-state entry) deref)]
+                 (if (or (nil? s) (= :dying s)) m (inc m))))
+             0
+             @(:workers proc)))
+
+       :else n))
+   0
+   (::sc/invocation-processors env)))
+
+(defn- drain-once!
+  "Drain currently-deliverable events for `session-id` through the processor exactly once,
+   checkpointing after each event. Returns true if at least one event was processed."
+  [{:keys [env session-id transcript-fn]}]
+  (let [queue       (::sc/event-queue env)
+        store       (::sc/working-memory-store env)
+        processor   (::sc/processor env)
+        progressed? (atom false)]
+    (sp/receive-events!
+     queue env
+     (fn [_ event]
+       (reset! progressed? true)
+       (let [wmem  (sp/get-working-memory store env session-id)
+             wmem' (sp/process-event! processor env wmem event)]
+         (sp/save-working-memory! store env session-id wmem')
+         (transcript-fn {:event :runner/event-processed
+                         :data  {:event-name   (:name event)
+                                 :config-after (vec (::sc/configuration wmem' #{}))}})
+         (transcript-fn {:event :checkpoint/written
+                         :data  {:session-id (str session-id)}})))
+     {:session-id session-id})
+    @progressed?))
+
+(defn- final-config? [env session-id]
+  ;; Heuristic: if the configuration is empty, the chart has terminated via top-level final.
+  (let [store (::sc/working-memory-store env)
+        wmem  (sp/get-working-memory store env session-id)]
+    (empty? (::sc/configuration wmem #{}))))
+
+(>defn run!
+       "Run a chart to quiescence. Returns a summary map.
+
+        `opts`:
+         * `:chart` (required) — a statechart value (e.g. from `chart/statechart`)
+         * `:chart-id` (default `::chart`) — the id under which to register it
+         * `:session-id` (required) — the session id for this run
+         * `:transcript-path` (required) — JSONL output file path
+         * `:checkpoint-dir` (required) — directory for atomic checkpoint files
+         * `:backend` (optional) — an `LLMBackend`; required only if chart uses `:llm-conversation`
+         * `:tool-registry` (optional) — tool registry atom
+         * `:initial-data` (optional) — initial chart data (passed as data-model seed)
+         * `:resume?` (default false) — if true and a checkpoint exists, do not call `start!`
+         * `:trace?` (default false) — write `:runner/tick` events on every loop turn
+         * `:max-iterations` (default 100000) — safety bound on the pump loop
+         * `:quiescent-sleep-ms` (default 50) — how long to sleep when queue is empty
+                                                but live invocations exist"
+       [{:keys [chart chart-id session-id transcript-path checkpoint-dir
+                backend tool-registry initial-data resume? trace?
+                max-iterations quiescent-sleep-ms]
+         :or   {chart-id          ::chart
+                resume?           false
+                trace?            false
+                max-iterations    100000
+                quiescent-sleep-ms 50}}]
+       [:map => :map]
+       (assert chart "chart is required")
+       (assert session-id "session-id is required")
+       (assert transcript-path "transcript-path is required")
+       (assert checkpoint-dir "checkpoint-dir is required")
+       (let [sink          (transcript/open-transcript {:path transcript-path :append? false})
+             transcript-fn (transcript/make-transcript-fn sink)
+             env           (engine-env/new-env {:checkpoint-dir checkpoint-dir
+                                                :llm-backend    backend
+                                                :tool-registry  tool-registry
+                                                :transcript-fn  transcript-fn})
+             registry      (::sc/statechart-registry env)
+             store         (::sc/working-memory-store env)
+             processor     (::sc/processor env)]
+         (sp/register-statechart! registry chart-id chart)
+         (transcript-fn {:event :runner/started
+                         :data  {:session-id (str session-id)
+                                 :chart-id   (str chart-id)
+                                 :resume?    (boolean resume?)}})
+         (try
+           ;; Start or resume
+           (let [existing (sp/get-working-memory store env session-id)]
+             (if (and resume? existing (seq (::sc/configuration existing #{})))
+               (transcript-fn {:event :runner/resumed
+                               :data  {:config (vec (::sc/configuration existing))}})
+               ;; Seed the chart's data model with `:initial-data` by passing it as
+               ;; `::sc/invocation-data` in the start params (per the library's
+               ;; v20150901_impl/initialize!).
+               (let [w0 (sp/start! processor env chart-id
+                                   (cond-> {::sc/session-id session-id}
+                                     initial-data (assoc ::sc/invocation-data initial-data)))]
+                 (sp/save-working-memory! store env session-id w0)
+                 (transcript-fn {:event :runner/start-config
+                                 :data  {:config (vec (::sc/configuration w0))}}))))
+           ;; Pump
+           (loop [i max-iterations]
+             (when trace?
+               (transcript-fn {:event :runner/tick :data {:i (- max-iterations i)}}))
+             (cond
+               (zero? i)
+               (transcript-fn {:event :runner/aborted
+                               :data {:reason :max-iterations}})
+
+               :else
+               (let [progressed? (drain-once! {:env env
+                                               :session-id session-id
+                                               :transcript-fn transcript-fn})]
+                 (if progressed?
+                   (recur (dec i))
+                   (let [live (count-live-invocations env)]
+                     (transcript-fn {:event :runner/quiescent
+                                     :data  {:live-invocations live}})
+                     (cond
+                       (zero? live)
+                       nil ;; done
+
+                       :else
+                       (do (Thread/sleep ^long quiescent-sleep-ms)
+                           (recur (dec i)))))))))
+           (let [final-wmem (sp/get-working-memory store env session-id)
+                 cfg        (vec (::sc/configuration final-wmem #{}))]
+             (transcript-fn {:event :runner/done
+                             :data  {:final-config cfg}})
+             {:final-config cfg
+              :session-id   session-id
+              :transcript   transcript-path
+              :checkpoint-dir checkpoint-dir
+              :env          env})
+           (catch Throwable t
+             (transcript-fn {:event :runner/error
+                             :data  {:message (.getMessage t)}})
+             (throw t))
+           (finally
+             (transcript/close! sink)))))

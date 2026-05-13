@@ -1,0 +1,13 @@
+{:paths ["src" "bb_test" "spike"]
+ :deps  {com.fulcrologic/statecharts {:mvn/version "1.4.0-RC13"}
+         com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
+         metosin/malli               {:mvn/version "0.16.4"}
+         cheshire/cheshire           {:mvn/version "5.13.0"}}
+ :tasks {repl   {:override-builtin true
+                 :doc  "Start a babashka nrepl on port 1667"
+                 :requires ([babashka.nrepl.server :as s])
+                 :task (do (s/start-server! {:port 1667})
+                           (println "bb nREPL on 1667")
+                           (deref (promise)))}
+         sanity {:doc  "Run the bb sanity script for the engine."
+                 :task (shell "bb bb_test/sanity.clj")}}}
