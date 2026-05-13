@@ -7,9 +7,10 @@
          babashka/process            {:mvn/version "0.5.22"}
          org.babashka/http-client    {:mvn/version "0.4.22"}}
  :aliases
- {:dev  {:extra-paths ["dev" "spike"]
+ {:demos {:extra-paths ["demos"]}
+  :dev  {:extra-paths ["dev" "spike" "demos"]
          :jvm-opts    ["-Dguardrails.enabled=true"]}
-  :test   {:extra-paths ["test" "bb_test"]
+  :test   {:extra-paths ["test" "bb_test" "demos"]
            :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.8"}
                          lambdaisland/kaocha     {:mvn/version "1.91.1392"}}
            :jvm-opts    ["-Dguardrails.enabled=true" "-Dguardrails.mode=:all"]}

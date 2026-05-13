@@ -252,14 +252,38 @@
                              (catch Throwable t
                                {:_throw t}))]
               (cond
-                (:_throw response)
+                ;; Clean shutdown: the chart left this state and our thread was
+                ;; interrupted mid-HTTP. Not an error — exit quietly.
+                (and (:_throw response)
+                     (or (instance? InterruptedException (:_throw response))
+                         (instance? InterruptedException (ex-cause (:_throw response)))
+                         (= :dying @worker-state)))
                 (do
-                  (transcript! transcript-fn {:event :llm/error :ts (now-ms)
-                                              :data  {:reason :backend-threw
-                                                      :message (.getMessage ^Throwable (:_throw response))}})
+                  (transcript! transcript-fn {:event :llm/worker-exit :ts (now-ms)
+                                              :data  {:reason :interrupted-mid-turn}})
+                  (reset! worker-state :dying)
+                  (recur))
+
+                (:_throw response)
+                (let [^Throwable t (:_throw response)
+                      message (or (.getMessage t)
+                                  (some-> (ex-cause t) .getMessage)
+                                  (.toString t))
+                      details {:reason     :backend-threw
+                               :message    message
+                               :class      (-> t class .getName)
+                               :ex-data    (when-let [d (ex-data t)]
+                                             (try (pr-str d)
+                                                  (catch Throwable _ "<unprintable>")))
+                               :stack      (->> (.getStackTrace t)
+                                                (take 6)
+                                                (mapv #(str (.getClassName ^StackTraceElement %)
+                                                            "." (.getMethodName ^StackTraceElement %)
+                                                            "(" (.getFileName ^StackTraceElement %)
+                                                            ":" (.getLineNumber ^StackTraceElement %) ")")))}]
+                  (transcript! transcript-fn {:event :llm/error :ts (now-ms) :data details})
                   (post-event-to-parent! parent-ctx on-error-event
-                                         {:reason :backend-threw
-                                          :message (.getMessage ^Throwable (:_throw response))})
+                                         (select-keys details [:reason :message :class]))
                   (reset! worker-state :dying)
                   (recur))
 
@@ -345,9 +369,16 @@
   (start-invocation! [_this env {:keys [invokeid params]}]
     (let [parent-session-id (env-ns/session-id env)
           k                 (worker-key parent-session-id invokeid)
-          ;; Idempotency: stop any pre-existing worker for the same key.
+          ;; Idempotency: signal any pre-existing worker for this key to die
+          ;; gracefully (it polls `:worker-state` between turns). We deliberately
+          ;; DO NOT `.interrupt` the thread here — doing so would also abort an
+          ;; HTTP call already in flight on the NEW thread when start-invocation!
+          ;; is invoked twice in quick succession (e.g. during a state-transition
+          ;; race), surfacing as `InterruptedException` on the legitimate new
+          ;; request. Letting the old worker die at its next loop iteration is
+          ;; the safe choice; it is a daemon thread and will exit naturally.
           _                 (when-let [old (get @workers k)]
-                              (stop-worker-entry! old))
+                              (reset! (:worker-state old) :dying))
           queue             (::sc/event-queue env)
           {:keys [real-tools allowed-events initial-user-message]} params
           [real-defs name->tool-kw]   (real-tool-defs tool-registry (or real-tools []))

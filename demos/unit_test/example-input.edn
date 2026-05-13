@@ -1,0 +1,3 @@
+{:source-path    "src/escapement/prompts.clj"
+ :function       "render"
+ :max-iterations 5}

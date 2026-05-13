@@ -1,4 +1,4 @@
-{:paths ["src" "bb_test" "spike"]
+{:paths ["src" "bb_test" "spike" "demos"]
  :deps  {com.fulcrologic/statecharts {:mvn/version "1.4.0-RC13"}
          com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
          metosin/malli               {:mvn/version "0.16.4"}
