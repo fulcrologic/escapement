@@ -167,9 +167,14 @@
      * `:conv-id` — claude-p `--resume` correlation id (string/keyword/uuid)"
   [{:keys [system messages tools model max-tokens conv-id
            temperature top-p top-k stop-sequences thinking tool-choice metadata]}]
-  (cond-> {:model    (or model "claude-sonnet-4-5")
-           :messages messages
+  ;; Note: :model is omitted from the Request when the caller didn't supply
+  ;; one. The backend's `send-turn` fills it from its configured
+  ;; `:default-model` before schema validation. That way the chart can simply
+  ;; not set :model and the runner's chosen default wins, instead of every
+  ;; chart silently locking onto a stale hardcoded model.
+  (cond-> {:messages messages
            :tools    tools}
+    model                (assoc :model model)
     system               (assoc :system system)
     max-tokens           (assoc :max-tokens max-tokens)
     (some? temperature)  (assoc :temperature temperature)
