@@ -73,11 +73,14 @@
    ANTHROPIC_API_KEY takes precedence over ZAI_API_KEY (Anthropic is canonical;
    z.ai is a compat endpoint)."
   []
-  (let [anthropic (System/getenv "ANTHROPIC_API_KEY")
-        zai       (System/getenv "ZAI_API_KEY")]
+  (let [anthropic  (System/getenv "ANTHROPIC_API_KEY")
+        zai        (System/getenv "ZAI_API_KEY")
+        openai     (System/getenv "OPENAI_API_KEY")
+        openrouter (System/getenv "OPENROUTER_API_KEY")]
     (cond
       (and anthropic (not (str/blank? anthropic)))
       {:source        "ANTHROPIC_API_KEY"
+       :backend-kind  :api
        :api-key       anthropic
        :base-url      "https://api.anthropic.com"
        :default-model "claude-sonnet-4-6"
@@ -85,10 +88,27 @@
 
       (and zai (not (str/blank? zai)))
       {:source        "ZAI_API_KEY"
+       :backend-kind  :api
        :api-key       zai
        :base-url      "https://api.z.ai/api/anthropic"
        :default-model "glm-4.6"
        :auth-mode     :bearer}
+
+      (and openai (not (str/blank? openai)))
+      {:source        "OPENAI_API_KEY"
+       :backend-kind  :openai
+       :api-key       openai
+       :base-url      "https://api.openai.com/v1"
+       :default-model (or (System/getenv "OPENAI_MODEL") "gpt-4o-mini")}
+
+      (and openrouter (not (str/blank? openrouter)))
+      ;; OpenRouter is OpenAI-shaped; route it through the openai backend.
+      ;; Default to a free/cheap model unless OPENROUTER_MODEL overrides.
+      {:source        "OPENROUTER_API_KEY"
+       :backend-kind  :openai
+       :api-key       openrouter
+       :base-url      "https://openrouter.ai/api/v1"
+       :default-model (or (System/getenv "OPENROUTER_MODEL") "openai/gpt-4o-mini")}
 
       :else nil)))
 
@@ -96,6 +116,12 @@
   (require 'escapement.llm.api)
   (let [ctor (resolve 'escapement.llm.api/new-backend)]
     (assert ctor "escapement.llm.api/new-backend not found")
+    (ctor opts)))
+
+(defn- build-openai-backend [opts]
+  (require 'escapement.llm.openai)
+  (let [ctor (resolve 'escapement.llm.openai/new-backend)]
+    (assert ctor "escapement.llm.openai/new-backend not found")
     (ctor opts)))
 
 (defn- make-backend
@@ -120,15 +146,25 @@
                            api-base-url (assoc :base-url api-base-url)
                            api-key-env  (assoc :api-key (System/getenv api-key-env))))
 
+      "openai"
+      (build-openai-backend (cond-> {:base-url      (or api-base-url "https://api.openai.com/v1")
+                                     :default-model (or model "gpt-4o-mini")}
+                              api-key-env (assoc :api-key (System/getenv api-key-env))
+                              (not api-key-env) (assoc :api-key (System/getenv "OPENAI_API_KEY"))))
+
       (die! (str "Unknown backend: " backend)))
     ;; No --backend: try env auto-detect.
     (when-let [auto (autodetect-api-opts)]
       (binding [*out* *err*]
         (println (str "[cli] auto-detected LLM backend from " (:source auto)
                       " (" (:base-url auto) ", model " (:default-model auto) ")")))
-      (build-api-backend (-> auto
-                             (dissoc :source)
-                             (cond-> model (assoc :default-model model)))))))
+      (let [kind (:backend-kind auto)
+            opts (-> auto
+                     (dissoc :source :backend-kind)
+                     (cond-> model (assoc :default-model model)))]
+        (case kind
+          :openai (build-openai-backend opts)
+          (build-api-backend opts))))))
 
 (defn- needs-llm?
   "Heuristic: does this chart require an LLM backend? We treat any chart loaded

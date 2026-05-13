@@ -30,8 +30,39 @@
    "claude-3-5-haiku"    {:context-tokens 200000 :max-output-tokens  8192 :provider :anthropic}
    "claude-3-opus"       {:context-tokens 200000 :max-output-tokens  4096 :provider :anthropic}
 
-   ;; z.ai's Anthropic-compatible GLM-4.6 — 128K context.
-   "glm-4.6"             {:context-tokens 128000 :max-output-tokens 32000 :provider :z-ai}})
+   ;; z.ai's GLM family. Served over z.ai's Anthropic-shaped
+   ;; /api/anthropic endpoint AND over its OpenAI-shaped /api/paas/v4 endpoint.
+   ;; Context windows from https://docs.z.ai/guides/overview/overview
+   ;; GLM-5 series (current flagship)
+   "glm-5.1"             {:context-tokens 200000 :max-output-tokens 32000 :provider :z-ai}
+   "glm-5"               {:context-tokens 200000 :max-output-tokens 32000 :provider :z-ai}
+   "glm-5-turbo"         {:context-tokens 200000 :max-output-tokens 32000 :provider :z-ai}
+   ;; GLM-4.7 series
+   "glm-4.7"             {:context-tokens 200000 :max-output-tokens 32000 :provider :z-ai}
+   "glm-4.7-flashx"      {:context-tokens 200000 :max-output-tokens 32000 :provider :z-ai}
+   "glm-4.7-flash"       {:context-tokens 200000 :max-output-tokens 32000 :provider :z-ai}
+   ;; GLM-4.6 / 4.5 series
+   "glm-4.6"             {:context-tokens 200000 :max-output-tokens 32000 :provider :z-ai}
+   "glm-4.5"             {:context-tokens 128000 :max-output-tokens 32000 :provider :z-ai}
+   "glm-4.5-air"         {:context-tokens 128000 :max-output-tokens 32000 :provider :z-ai}
+   "glm-4.5-x"           {:context-tokens 128000 :max-output-tokens 32000 :provider :z-ai}
+   "glm-4.5-airx"        {:context-tokens 128000 :max-output-tokens 32000 :provider :z-ai}
+   "glm-4.5-flash"       {:context-tokens 128000 :max-output-tokens 32000 :provider :z-ai}
+   "glm-4-32b-0414-128k" {:context-tokens 128000 :max-output-tokens 32000 :provider :z-ai}
+
+   ;; OpenAI — current generation. Values are the documented input context
+   ;; window and the per-response output cap. Used by the OpenAI backend (and
+   ;; any OpenAI-compatible Codex-style endpoint that serves the same ids).
+   "gpt-5"               {:context-tokens 400000 :max-output-tokens 128000 :provider :openai}
+   "gpt-5-mini"          {:context-tokens 400000 :max-output-tokens 128000 :provider :openai}
+   "gpt-5-nano"          {:context-tokens 400000 :max-output-tokens 128000 :provider :openai}
+   "gpt-4.1"             {:context-tokens 1000000 :max-output-tokens 32768 :provider :openai}
+   "gpt-4.1-mini"        {:context-tokens 1000000 :max-output-tokens 32768 :provider :openai}
+   "gpt-4o"              {:context-tokens 128000 :max-output-tokens 16384 :provider :openai}
+   "gpt-4o-mini"         {:context-tokens 128000 :max-output-tokens 16384 :provider :openai}
+   "o3"                  {:context-tokens 200000 :max-output-tokens 100000 :provider :openai}
+   "o3-mini"             {:context-tokens 200000 :max-output-tokens 100000 :provider :openai}
+   "o1"                  {:context-tokens 200000 :max-output-tokens 100000 :provider :openai}})
 
 (defn info
   "Return the model fact map for `model`, or nil when unknown.
