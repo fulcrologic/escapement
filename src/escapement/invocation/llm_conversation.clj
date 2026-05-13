@@ -164,19 +164,37 @@
                      extended thinking. Requires `:max-tokens` > `N`.
      * `:tool-choice` — `:auto` | `:any` | `:none` | `{:type :tool :name \"...\"}`
      * `:metadata` — `{:user-id \"...\"}`
+     * `:system-cache-control` — Anthropic prompt-cache marker on the system
+       block (e.g. `{:type :ephemeral}` or `{:type :ephemeral :ttl :1h}`).
+       Lets repeated turns within the same conversation re-use the system
+       prefix at 0.1× cost. Combine with `:tools-cache-control` to cover
+       the tool defs as well.
+     * `:tools-cache-control` — Same shape; applies to every entry in
+       `:tools`. Anthropic caches the prefix up through the last
+       cache_control marker, so caching tools when the chart never
+       mutates them is essentially free win.
      * `:conv-id` — claude-p `--resume` correlation id (string/keyword/uuid)"
   [{:keys [system messages tools model max-tokens conv-id
-           temperature top-p top-k stop-sequences thinking tool-choice metadata]}]
+           temperature top-p top-k stop-sequences thinking tool-choice metadata
+           system-cache-control tools-cache-control]}]
   ;; Note: :model is omitted from the Request when the caller didn't supply
   ;; one. The backend's `send-turn` fills it from its configured
   ;; `:default-model` before schema validation. That way the chart can simply
   ;; not set :model and the runner's chosen default wins, instead of every
   ;; chart silently locking onto a stale hardcoded model.
   (cond-> {:messages messages
-           :tools    tools}
+           :tools    (if (and (seq tools) tools-cache-control)
+                       ;; Anthropic caches the PREFIX up through the last
+                       ;; cache_control marker. Stamping the last tool with
+                       ;; the marker therefore caches all tool defs.
+                       (-> (vec tools)
+                           (update (dec (count tools))
+                                   assoc :cache-control tools-cache-control))
+                       tools)}
     model                (assoc :model model)
     system               (assoc :system system)
     max-tokens           (assoc :max-tokens max-tokens)
+    system-cache-control (assoc :system-cache-control system-cache-control)
     (some? temperature)  (assoc :temperature temperature)
     (some? top-p)        (assoc :top-p top-p)
     (some? top-k)        (assoc :top-k top-k)
@@ -288,19 +306,21 @@
                 :else (recur)))
 
             (= :running s)
-            (let [request (build-request {:system         (:system params)
-                                          :messages       @messages-atom
-                                          :tools          tool-defs
-                                          :model          (:model params)
-                                          :max-tokens     (:max-tokens params)
-                                          :temperature    (:temperature params)
-                                          :top-p          (:top-p params)
-                                          :top-k          (:top-k params)
-                                          :stop-sequences (:stop-sequences params)
-                                          :thinking       (:thinking params)
-                                          :tool-choice    (:tool-choice params)
-                                          :metadata       (:metadata params)
-                                          :conv-id        (:conversation/id params)})
+            (let [request (build-request {:system               (:system params)
+                                          :messages             @messages-atom
+                                          :tools                tool-defs
+                                          :model                (:model params)
+                                          :max-tokens           (:max-tokens params)
+                                          :temperature          (:temperature params)
+                                          :top-p                (:top-p params)
+                                          :top-k                (:top-k params)
+                                          :stop-sequences       (:stop-sequences params)
+                                          :thinking             (:thinking params)
+                                          :tool-choice          (:tool-choice params)
+                                          :metadata             (:metadata params)
+                                          :system-cache-control (:system-cache-control params)
+                                          :tools-cache-control  (:tools-cache-control params)
+                                          :conv-id              (:conversation/id params)})
                   _       (transcript! transcript-fn {:event :llm/request :ts (now-ms)
                                                       :data  {:n-messages (count (:messages request))}})
                   response (try

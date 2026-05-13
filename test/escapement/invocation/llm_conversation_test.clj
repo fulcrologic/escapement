@@ -289,6 +289,45 @@
                             => #{"fs_read" "fs_grep" "event__done"}))))
 
 ;; ---------------------------------------------------------------------------
+;; #3c: prompt caching flows from params-fn through to the Request
+;; ---------------------------------------------------------------------------
+
+(specification "params-fn cache-control flags reach the Request"
+               (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
+                                             (end-turn-response "ok")])
+                     registry (builtin/new-builtin-registry)
+                     chart    (chart/statechart
+                               {:initial :wrap}
+                               (state {:id :wrap :initial :work}
+                                      (state {:id :work}
+                                             (h/llm-conversation
+                                              {:id        "cached"
+                                               :params-fn (fn [_ _]
+                                                            {:system               "stable system prompt"
+                                                             :real-tools           [:fs/read :fs/grep]
+                                                             :system-cache-control {:type :ephemeral}
+                                                             :tools-cache-control  {:type :ephemeral}
+                                                             :allowed-events       [{:event :done :data-schema [:map]}]
+                                                             :initial-user-message "go"})})
+                                             (transition {:event :done :target :finished}))
+                                      (final {:id :finished})))
+                     t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
+                     _        (await-config! t :finished 3000)
+                     first-req (-> backend :call-log deref first)]
+                 (assertions
+                  ":system-cache-control was forwarded onto the Request"
+                  (:system-cache-control first-req)
+                  => {:type :ephemeral}
+
+                  ":tools-cache-control stamps the LAST tool def (so the prefix-through-end is cached)"
+                  (-> first-req :tools last :cache-control)
+                  => {:type :ephemeral}
+
+                  "earlier tool defs are NOT stamped (Anthropic caches the prefix only)"
+                  (every? nil? (mapv :cache-control (drop-last (:tools first-req))))
+                  => true)))
+
+;; ---------------------------------------------------------------------------
 ;; #4: Bad input twice -> fatal error
 ;; ---------------------------------------------------------------------------
 

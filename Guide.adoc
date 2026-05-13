@@ -539,6 +539,16 @@ actual answer.
   Optional `{:user-id "..."}`. Surfaces in Anthropic's audit/abuse
   tracking. Use a stable, non-PII identifier (e.g. a hash).
 
+`:system-cache-control` and `:tools-cache-control`::
+  Optional cache_control markers (e.g. `{:type :ephemeral}` or
+  `{:type :ephemeral :ttl :1h}`) that turn on Anthropic prompt caching
+  for this conversation. `:system-cache-control` caches the system
+  prompt; `:tools-cache-control` stamps the last tool def so the
+  prefix-through-end of `tools` is cached too. The biggest wins are in
+  tool-heavy single-state loops (refine in the unit-test demo is the
+  canonical case). See <<prompt-caching>> for the full explanation and
+  when caching is wasted effort.
+
 `:on-end-turn-event`::
   Optional chart event keyword fired to the parent when the LLM returns
   `:end_turn`. Defaults to `:llm.idle`. The chart can transition on this if
@@ -605,6 +615,106 @@ keywords are flattened: `:my.ns/foo-bar` becomes `event__my_ns_foo_bar`.
 Anthropic enforces alphanum/underscore in tool names, so any other character
 in the keyword is replaced by `_`. See `kw->anthropic-name` in
 `src/escapement/invocation/llm_conversation.clj:41`.
+
+[[prompt-caching]]
+=== Prompt caching and the conversation lifecycle
+
+This is one of the more impactful knobs in the `params-fn` map and it is
+not obvious. Read the lifecycle paragraph first, then the caching
+recipe.
+
+==== Conversation lifecycle is state lifecycle
+
+Every `:llm-conversation` invocation owns a worker thread, a
+`messages-atom`, and a `user-msg-queue`. They are all created when the
+chart enters the state that hosts the invocation and torn down when the
+chart leaves it. **A fresh state means a fresh conversation, starting
+from the system prompt with an empty message history.** This is the
+"escapement" principle: the chart drives lifecycle; the model never
+chooses when to forget.
+
+Practical consequences:
+
+* The accumulated message history inside one state grows monotonically.
+  An assistant `tool_use` response, the dispatched `tool_result`, the
+  next assistant turn, etc. all stack up on `messages-atom`. The
+  state's `:on-end-turn-event` parks the worker; another
+  `tell-llm`/`:llm.user-message` resumes it with the history intact.
+* Crossing a state boundary discards that history. The next state's
+  worker starts cold.
+* Parallel regions get independent conversations — no shared history.
+
+==== Where Anthropic caching helps (and where it doesn't)
+
+Anthropic prompt-caching reuses the *prefix* of a request when its
+content matches a recent prior request. Cache hits return the cached
+tokens at 0.1× the normal input price; cache writes cost 1.25×. The
+prefix is everything UP TO the last `cache_control` marker — typically
+the system prompt and the tool definitions.
+
+* **Within a state**: a tool-heavy loop (refine in the unit-test demo
+  is ~25 round-trips against a 13 KB system prompt and 8 tools) is the
+  prime caching target. The system + tools prefix is identical on every
+  HTTP call; only the growing tail of tool_result/text differs. Marking
+  `system` and the tail-end of `tools` with `cache_control` makes every
+  call after the first read those prefix tokens at 10% price.
+* **Across states**: the cache window is 5 minutes (`{:type :ephemeral}`
+  default) or 1 hour with the Anthropic extended-cache-ttl beta. So
+  cache CAN technically survive a state transition if the next state's
+  conversation happens to share a long prefix. In practice
+  Escapement's phases use *different* system prompts on purpose, so
+  cross-state hits are rare.
+
+==== How to turn it on
+
+Set two keys in your `params-fn` map. The chart wires them through to
+the wire layer; tests cover the round-trip.
+
+[source,clojure]
+----
+{:system               (slurp "prompts/refine.md")        ; ~13 KB
+ :system-cache-control {:type :ephemeral}                 ; or {:type :ephemeral :ttl :1h}
+ :tools-cache-control  {:type :ephemeral}                 ; stamps the LAST tool def
+ :real-tools           [:fs/read :fs/edit :shell/run]
+ :max-tokens           16384
+ :allowed-events       [...]
+ :initial-user-message "..."}
+----
+
+`tools-cache-control` stamps the *last* tool def with the marker
+because Anthropic caches everything up through the marker — stamping
+the tail therefore covers every tool. You normally want either both
+flags or neither: caching system but not tools means the tools section
+ends the cache prefix, so the system prefix is the only thing reused.
+
+==== When the cache wins are real
+
+* Long system prompts (4 KB+).
+* Many tool round-trips inside one state.
+* Stable tool defs.
+* Long-running refine loops, iterative coding agents, RAG-prompt agents.
+
+==== When caching is wasted effort
+
+* States that fire one turn and exit — the cache-write surcharge runs
+  but no second turn ever uses the cached prefix.
+* Charts whose system prompt is templated with per-turn data (the
+  prefix differs every time, so cache always misses).
+
+==== Verifying the cache
+
+The Anthropic response includes `cache_creation_input_tokens` and
+`cache_read_input_tokens` in `usage`. Our `Response.usage` schema
+already carries both. Look at them in the transcript:
+
+[source,bash]
+----
+jq -r 'select(.event == "llm/response") |
+       (.data.usage // {}) | [.cache_creation_input_tokens,
+                              .cache_read_input_tokens] | @tsv' transcript.jsonl
+----
+
+First request shows a creation count, subsequent ones show reads.
 
 [[tokens-and-turns]]
 === Tokens and turns — what `:max-tokens` actually limits
