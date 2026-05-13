@@ -15,6 +15,11 @@
         --model <name>          Model name.
         --api-base-url <url>    API base URL.
         --api-key-env <name>    Env-var name holding the API key.
+        --tools-ns <sym>        Qualified symbol of a registration fn called with the
+                                builtin registry atom. The fn can register any number
+                                of additional tools (or compose other registration
+                                fns), so one --tools-ns is enough per run.
+                                e.g. --tools-ns my.app.tools/register-tools!
         --trace                 Emit per-tick transcript events.
 
     info              — Print version + environment info.
@@ -166,12 +171,35 @@
                                "See: escapement info --backends   (or:  Guide.adoc, \"LLM backends\")")
                           1))
         backend (make-backend opts)
+        ;; Load the chart FIRST. Its require-graph may include namespaces
+        ;; whose top-level forms call
+        ;; `(tp/register! escapement.tools.builtin/default-registry ...)`.
+        ;; Those side-effects mutate the singleton registry atom and are then
+        ;; visible to `runner/run!` below.
+        chart   (runner/load-chart chart-sym)
         tool-registry (when backend
                         (require 'escapement.tools.builtin)
-                        (let [ctor (resolve 'escapement.tools.builtin/new-builtin-registry)]
-                          (assert ctor "escapement.tools.builtin/new-builtin-registry not found")
-                          (ctor)))
-        chart   (runner/load-chart chart-sym)]
+                        (let [reg-var (resolve 'escapement.tools.builtin/default-registry)
+                              _       (assert reg-var "escapement.tools.builtin/default-registry not found")
+                              reg     (deref reg-var)]
+                          ;; --tools-ns is an explicit hook for cases where the
+                          ;; chart can't transitively require the tools, or you
+                          ;; want declarative wiring at the entry point.
+                          (when-let [sym-str (:tools-ns opts)]
+                            (let [sym (try (symbol sym-str)
+                                           (catch Throwable _
+                                             (die! (str "Invalid --tools-ns symbol: " sym-str))))
+                                  _   (when-not (qualified-symbol? sym)
+                                        (die! (str "--tools-ns must be qualified (namespace/name), got: " sym-str)))
+                                  ns-sym (symbol (namespace sym))]
+                              (try (require ns-sym)
+                                   (catch Throwable t
+                                     (die! (str "Could not require --tools-ns namespace "
+                                                ns-sym ": " (.getMessage t)) 1)))
+                              (if-let [v (resolve sym)]
+                                ((deref v) reg)
+                                (die! (str "Could not resolve --tools-ns: " sym) 1))))
+                          reg))]
     (try
       (let [summary (runner/run! {:chart           chart
                                   :session-id      (keyword "session" session)

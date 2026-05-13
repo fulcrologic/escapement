@@ -79,7 +79,16 @@ Claude-Code-parity ergonomics for the LLM.
 | `:shell/run`     | `bash -lc` with timeout |
 | `:repl/eval`     | Sandboxed Clojure eval (fresh namespace per call) |
 
-See the *Tools → Built-in tools* section of the [Guide](Guide.adoc) for full schemas.
+These are seeded into `escapement.tools.builtin/default-registry` — a `defonce` singleton the CLI uses. Custom tools self-register by side effect at the top of their namespace:
+
+```clojure
+(ns my.app.tools
+  (:require [escapement.tools.builtin :as builtin]
+            [escapement.tools.protocol :as tp]))
+(tp/register! builtin/default-registry (->HttpGetTool))
+```
+
+Any chart whose require-graph reaches `my.app.tools` will then have `:http/get` available. By default a chart state's `:llm-conversation` exposes **every** real tool in the registry; pass `:real-tools [:fs/read :http/get]` (vector or set) to whitelist a subset. See the *Tools* section of the [Guide](Guide.adoc) for full schemas, the `--tools-ns` CLI flag, and how to use a fresh isolated registry (`new-builtin-registry`) for tests or multi-tenant hosts.
 
 ## File-based prompts
 

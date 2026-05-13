@@ -559,7 +559,24 @@
         (->ReplEvalTool)])
 
 (>defn new-builtin-registry
-       "Return a fresh registry populated with the five built-in tools."
+       "Return a FRESH registry populated with the eight built-in tools. Use
+        this when you want isolation — most commonly in tests, or when a host
+        process drives multiple chart runs that need disjoint tool sets."
        []
        [=> any?]
        (tp/new-registry (builtin-tools)))
+
+(defonce ^{:doc "The default tool registry used by `escapement.cli` and any
+  host that calls `(default-registry)`. Process-global: top-level
+  `(tp/register! escapement.tools.builtin/default-registry ...)` calls in
+  any namespace that is loaded before `runner/run!` will be visible to the
+  chart. Seeded with the eight built-ins on namespace load.
+
+  This is the Clojure-idiomatic registration pattern: require your tool
+  namespace from the chart and it self-registers — no CLI flag needed.
+
+  If you need isolation, prefer `new-builtin-registry` (returns a fresh
+  registry) or build your own via `escapement.tools.protocol/new-registry`
+  and thread it through `runner/run!` as `:tool-registry`."}
+  default-registry
+  (tp/new-registry (builtin-tools)))

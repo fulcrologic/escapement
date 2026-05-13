@@ -229,6 +229,66 @@
                   => true)))
 
 ;; ---------------------------------------------------------------------------
+;; #3b: real-tools selector — absent = expose everything in the registry
+;; ---------------------------------------------------------------------------
+
+(defn- last-request-tool-names
+  "Return the set of tool `name` strings declared on the most recent request the
+   mock backend received."
+  [backend]
+  (->> @(:call-log backend) last :tools (mapv :name) set))
+
+(specification "real-tools selector"
+               (behavior "absent (nil) exposes EVERY tool registered in the registry"
+                         (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
+                                                       (end-turn-response "ok")])
+                               registry (builtin/new-builtin-registry)
+                               chart    (chart/statechart
+                                         {:initial :wrap}
+                                         (state {:id :wrap :initial :work}
+                                                (state {:id :work}
+                                                       (h/llm-conversation
+                                                        {:id        "all"
+                                                         :params-fn (fn [_ _]
+                                                                      {:system               "go"
+                                                    ;; :real-tools intentionally omitted
+                                                                       :allowed-events       [{:event :done :data-schema [:map]}]
+                                                                       :initial-user-message "go"})})
+                                                       (transition {:event :done :target :finished}))
+                                                (final {:id :finished})))
+                               t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
+                               _        (await-config! t :finished 3000)]
+                           (assertions
+                            "every builtin tool name made it into the request alongside the event tool"
+                            (last-request-tool-names backend)
+                            => #{"fs_read" "fs_write" "fs_edit" "fs_multi-edit" "fs_glob" "fs_grep"
+                                 "shell_run" "repl_eval" "event__done"})))
+
+               (behavior "an explicit selector vector is a whitelist"
+                         (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
+                                                       (end-turn-response "ok")])
+                               registry (builtin/new-builtin-registry)
+                               chart    (chart/statechart
+                                         {:initial :wrap}
+                                         (state {:id :wrap :initial :work}
+                                                (state {:id :work}
+                                                       (h/llm-conversation
+                                                        {:id        "subset"
+                                                         :params-fn (fn [_ _]
+                                                                      {:system               "go"
+                                                                       :real-tools           [:fs/read :fs/grep]
+                                                                       :allowed-events       [{:event :done :data-schema [:map]}]
+                                                                       :initial-user-message "go"})})
+                                                       (transition {:event :done :target :finished}))
+                                                (final {:id :finished})))
+                               t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
+                               _        (await-config! t :finished 3000)]
+                           (assertions
+                            "only the whitelisted real tools + the event tool"
+                            (last-request-tool-names backend)
+                            => #{"fs_read" "fs_grep" "event__done"}))))
+
+;; ---------------------------------------------------------------------------
 ;; #4: Bad input twice -> fatal error
 ;; ---------------------------------------------------------------------------
 

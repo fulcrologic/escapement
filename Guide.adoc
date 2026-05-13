@@ -456,9 +456,18 @@ makes `tell-llm` work).
   Optional string. The system prompt sent to the LLM.
 
 `:real-tools`::
-  Optional vector of keyword tool names that are looked up in the registry.
-  Their `tool->anthropic-tool-def` is included in the Anthropic `tools`
-  array. Missing tools throw at start.
+  Optional selector controlling which real tools this conversation sees.
++
+  * **Absent / `nil`** — expose EVERY tool currently in the registry. This
+    is the recommended default: the CLI's registry already contains the
+    eight built-ins plus anything self-registered by a required namespace
+    (see <<custom-tool>>).
+  * **Vector or set of keywords** — whitelist. Only the named tools are
+    exposed to the LLM. Unknown keywords throw at conversation start.
++
+  Tools the LLM never sees are still in the registry and still
+  dispatchable from chart-side scripts; they are just absent from the
+  Anthropic `tools` array.
 
 `:allowed-events`::
   Optional vector of `{:event <kw> :data-schema <malli> :description <str>}`
@@ -711,11 +720,33 @@ sit at Claude-Code-parity ergonomics for the LLM.
   Use `:shell/run` with `clj-nrepl-eval` for that (see the unit-test
   demo for an example).
 
+[[custom-tool]]
 === Registering a custom tool
+
+There are two registries in play:
+
+`escapement.tools.builtin/default-registry`::
+  A `defonce` singleton atom, seeded on namespace load with the eight
+  built-ins. The CLI uses this. Top-level `register!` calls in any
+  namespace that gets required before `runner/run!` are visible to the
+  chart — the standard Clojure side-effect-on-require pattern.
+
+`escapement.tools.builtin/new-builtin-registry`::
+  Returns a FRESH atom each call, pre-seeded with the eight built-ins.
+  Use this when you want isolation — tests, or a host process driving
+  multiple chart runs with disjoint tool sets.
+
+The natural way to expose a custom tool to a CLI-driven chart is to
+require its namespace from the chart and let that namespace self-register
+at load time:
 
 [source,clojure]
 ----
-(require '[escapement.tools.protocol :as tp])
+(ns my.app.tools
+  (:require
+   [babashka.http-client :as http]
+   [escapement.tools.builtin :as builtin]
+   [escapement.tools.protocol :as tp]))
 
 (defrecord HttpGetTool []
   tp/Tool
@@ -723,15 +754,93 @@ sit at Claude-Code-parity ergonomics for the LLM.
   (description  [_] "GET a URL and return the body as a string.")
   (input-schema [_] [:map {:closed true} [:url :string]])
   (invoke [_ {:keys [url]}]
-    (let [{:keys [status body]} (babashka.http-client/get url)]
+    (let [{:keys [status body]} (http/get url)]
       {:result body :is-error (not (and (>= status 200) (< status 300)))})))
 
-(def registry (tp/new-registry))
-(tp/register! registry (->HttpGetTool))
+;; Top-level: registers on namespace load. Idempotent because the
+;; registry is keyed by tool-name — re-loading the ns just rewrites the
+;; entry under :http/get.
+(tp/register! builtin/default-registry (->HttpGetTool))
 ----
 
-Then expose it to the LLM via `:real-tools [:http/get]` in your `params-fn`
-map.
+Then have your chart namespace require it:
+
+[source,clojure]
+----
+(ns my.chart
+  (:require
+   [com.fulcrologic.statecharts.chart :as chart]
+   [escapement.chart.helpers :as h]
+   [my.app.tools]))   ;; <-- require triggers registration
+----
+
+Now the chart's `params-fn` can name the tool in `:real-tools`:
+
+[source,clojure]
+----
+{:real-tools [:http/get :fs/read]
+ :allowed-events [{:event :done :data-schema [:map [:summary :string]]}]
+ ...}
+----
+
+The CLI just runs:
+
+[source,bash]
+----
+escapement run my.chart/agent
+----
+
+It loads the chart (`runner/load-chart` does `require` on its namespace),
+which transitively requires `my.app.tools`, which registers `:http/get`
+into the singleton. The CLI then hands that singleton to `runner/run!`.
+
+=== Explicit registration: the `--tools-ns` flag
+
+If you would rather wire tools at the entry point — for example because
+the chart cannot transitively require its tools, or you want an explicit
+manifest visible at the call site — define a single-arg function and pass
+its symbol with `--tools-ns`:
+
+[source,clojure]
+----
+(defn register-tools!
+  "Called by the CLI with the registry atom. Register everything; the
+   builtins are already in there."
+  [reg]
+  (tp/register! reg (->HttpGetTool))
+  ;; (other-ns/register! reg) ...
+  reg)
+----
+
+[source,bash]
+----
+escapement run my.chart/agent --tools-ns my.app.tools/register-tools!
+----
+
+=== Driving the chart yourself
+
+If you are NOT using the CLI — your own bb script or JVM entry point —
+choose your registry deliberately:
+
+[source,clojure]
+----
+(require '[escapement.tools.builtin :as builtin]
+         '[escapement.tools.protocol :as tp]
+         '[escapement.runner :as runner])
+
+;; Option A: share the global singleton (matches CLI behavior).
+(tp/register! builtin/default-registry (->HttpGetTool))
+
+;; Option B: isolated fresh registry (better for tests / parallel runs).
+(let [reg (builtin/new-builtin-registry)]
+  (tp/register! reg (->HttpGetTool))
+  (runner/run! {:chart           (runner/load-chart 'my.chart/agent)
+                :tool-registry   reg
+                :backend         my-backend
+                :session-id      :session/one
+                :transcript-path "out/transcript.jsonl"
+                :checkpoint-dir  "out/checkpoints"}))
+----
 
 [[transcript-runner-cli]]
 == Transcript, runner, CLI

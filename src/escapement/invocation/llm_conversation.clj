@@ -55,17 +55,33 @@
 ;; Tool definitions sent to the LLM
 ;; ---------------------------------------------------------------------------
 
-(defn- real-tool-defs
-  "Returns `[anthropic-tool-defs ^Map name->tool-kw]` for the given real-tool keyword list."
-  [registry real-tool-kws]
-  (reduce
-   (fn [[defs index] kw]
-     (if-let [tool (tp/lookup registry kw)]
-       (let [def (tp/tool->anthropic-tool-def tool)]
-         [(conj defs def) (assoc index (:name def) kw)])
-       (throw (ex-info (str "Unknown tool: " kw) {:tool kw}))))
-   [[] {}]
-   real-tool-kws))
+(defn- resolve-real-tools
+  "Decide which real tools this conversation sees.
+
+   `selector` may be:
+     * `nil` / absent     — expose every tool in the registry (default).
+     * a collection/set   — whitelist by keyword. Unknown keywords throw.
+
+   Returns `[anthropic-tool-defs ^Map name->tool-kw]`."
+  [registry selector]
+  (let [tools (cond
+                ;; Default: every tool in the registry. Sorted by tool-name
+                ;; for determinism (Anthropic doesn't care, but our transcripts
+                ;; and tests do).
+                (nil? selector)
+                (tp/all-tools registry)
+
+                :else
+                (mapv (fn [kw]
+                        (or (tp/lookup registry kw)
+                            (throw (ex-info (str "Unknown tool: " kw) {:tool kw}))))
+                      selector))]
+    (reduce
+     (fn [[defs index] tool]
+       (let [d (tp/tool->anthropic-tool-def tool)]
+         [(conj defs d) (assoc index (:name d) (tp/tool-name tool))]))
+     [[] {}]
+     tools)))
 
 (defn- event-tool-defs
   "Returns `[anthropic-tool-defs name->entry]` for `:allowed-events` declarations.
@@ -381,7 +397,7 @@
                               (reset! (:worker-state old) :dying))
           queue             (::sc/event-queue env)
           {:keys [real-tools allowed-events initial-user-message]} params
-          [real-defs name->tool-kw]   (real-tool-defs tool-registry (or real-tools []))
+          [real-defs name->tool-kw]   (resolve-real-tools tool-registry real-tools)
           [event-defs name->event]    (event-tool-defs (or allowed-events []))
           tool-defs                   (into [] (concat real-defs event-defs))
           initial-msgs                (if initial-user-message
