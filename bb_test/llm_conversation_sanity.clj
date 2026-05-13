@@ -8,11 +8,11 @@
    [com.fulcrologic.statecharts.chart :as chart]
    [com.fulcrologic.statecharts.elements :refer [state transition final]]
    [com.fulcrologic.statecharts.protocols :as sp]
-   [deep-cookie.chart.helpers :as h]
-   [deep-cookie.engine.env :as env]
-   [deep-cookie.invocation.llm-conversation :as llmc]
-   [deep-cookie.llm.protocol :as llm]
-   [deep-cookie.tools.protocol :as tp]))
+   [escapement.chart.helpers :as h]
+   [escapement.engine.env :as env]
+   [escapement.invocation.llm-conversation :as llmc]
+   [escapement.llm.protocol :as llm]
+   [escapement.tools.protocol :as tp]))
 
 (defrecord MockBackend [responses]
   llm/LLMBackend

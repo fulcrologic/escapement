@@ -6,7 +6,7 @@
    [com.fulcrologic.statecharts.chart :as chart]
    [com.fulcrologic.statecharts.elements :refer [state transition final]]
    [com.fulcrologic.statecharts.protocols :as sp]
-   [deep-cookie.engine.env :as env]))
+   [escapement.engine.env :as env]))
 
 (def chart-def
   (chart/statechart {:initial :work}

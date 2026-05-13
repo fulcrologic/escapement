@@ -2,13 +2,13 @@
   "Live smoke run for Milestone 7: drives the iterate coding-agent chart against
   the real z.ai (Anthropic-compat) backend.
 
-  Sets up a tmp dir under `/tmp/deep-cookie-m7-<uuid>/` with:
+  Sets up a tmp dir under `/tmp/escapement-m7-<uuid>/` with:
     * `spec.md`     — natural-language requirement (`square` returns x*x)
     * `target.clj`  — intentionally-buggy implementation `(defn square [x] (+ x x))`
     * test command  — `clojure -M -e ...` that loads target.clj and verifies
                       `(square 5) == 25` (returns non-zero on mismatch)
 
-  Then runs `deep-cookie.charts.iterate/agent` with `:max-iterations 3`. The
+  Then runs `escapement.charts.iterate/agent` with `:max-iterations 3`. The
   agent is expected to edit `target.clj` until the test passes, terminating
   with `:final-status :passed`.
 
@@ -20,10 +20,10 @@
    [clojure.string :as str]
    [com.fulcrologic.statecharts :as sc]
    [com.fulcrologic.statecharts.protocols :as sp]
-   [deep-cookie.charts.iterate :as it]
-   [deep-cookie.llm.api :as api]
-   [deep-cookie.runner :as runner]
-   [deep-cookie.tools.builtin :as builtin]))
+   [escapement.charts.iterate :as it]
+   [escapement.llm.api :as api]
+   [escapement.runner :as runner]
+   [escapement.tools.builtin :as builtin]))
 
 (def model "glm-4.6")
 (def base-url "https://api.z.ai/api/anthropic")
@@ -34,7 +34,7 @@
       (mapv #(json/parse-string % true) (doall (line-seq r))))))
 
 (defn- paths-for []
-  (let [root (str "/tmp/deep-cookie-m7-" (java.util.UUID/randomUUID))
+  (let [root (str "/tmp/escapement-m7-" (java.util.UUID/randomUUID))
         _    (.mkdirs (io/file root))]
     {:root           root
      :spec           (str root "/spec.md")

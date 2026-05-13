@@ -1,7 +1,7 @@
 (ns runner-sanity
   "Babashka sanity script for the runner + transcript + CLI plumbing.
 
-  Defines a trivial self-firing chart inline, runs it through `deep-cookie.runner/run!`,
+  Defines a trivial self-firing chart inline, runs it through `escapement.runner/run!`,
   and asserts:
     - a transcript JSONL file was produced
     - it has at least 3 lines
@@ -11,7 +11,7 @@
    [clojure.string :as str]
    [com.fulcrologic.statecharts.chart :as chart]
    [com.fulcrologic.statecharts.elements :refer [state transition final]]
-   [deep-cookie.runner :as runner]))
+   [escapement.runner :as runner]))
 
 (def chart-def
   (chart/statechart

@@ -3,8 +3,8 @@
   tool against a trivial input. Prints PASS on success."
   (:require
    [clojure.java.io :as io]
-   [deep-cookie.tools.builtin :as builtin]
-   [deep-cookie.tools.protocol :as tp]))
+   [escapement.tools.builtin :as builtin]
+   [escapement.tools.protocol :as tp]))
 
 (defn- fail! [msg]
   (println "FAIL:" msg)

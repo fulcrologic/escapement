@@ -3,7 +3,7 @@ target/
 .calva/
 transcripts/
 checkpoints/
-.deep-cookie/
+.escapement/
 .nrepl-port
 .nrepl-test-port
 .nrepl-dev-port

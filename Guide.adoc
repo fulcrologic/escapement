@@ -1,0 +1,945 @@
+= Escapement
+:toc: left
+:toclevels: 3
+:source-highlighter: rouge
+:icons: font
+
+_Escapement regulates LLM agents the way a watch escapement regulates a mainspring._
+
+A guide to authoring, running, and extending statechart-driven autonomous
+agents in this project.
+
+[[introduction]]
+== Introduction
+
+Escapement is a Clojure/Babashka library for building coding agents
+whose **control flow is a statechart**, not a free-form LLM loop. Workflows are
+authored as Fulcrologic Statecharts; an LLM conversation is bound to a
+(typically compound) state via the statechart library's invocation mechanism.
+While that state is active, a background worker thread holds a live LLM
+session, dispatches tool calls, and posts named events back to the chart's
+queue. The chart decides what happens next.
+
+Two kinds of tools are exposed to the LLM:
+
+* **Real tools** — actual side-effecting operations (read file, run shell,
+  eval Clojure). Calls are dispatched **inside the worker**; results are fed
+  back into the conversation. The chart never sees them.
+* **Event tools** — one synthetic tool per event the chart-author declares
+  `:allowed-events`. When the LLM calls one, the runner validates the
+  arguments against a Malli schema and posts the corresponding chart event
+  (with the arguments as event data) onto the parent session's queue. The
+  tool's "result" returned to the LLM is just an ack so the turn can continue.
+
+The chart only ever sees the high-level domain events its author exposed; it
+never sees `tool_use` blocks for real tools. This separation is the project's
+key idea:
+
+* Visibility — every LLM request, response, tool call, transition, and event
+  is a JSONL transcript entry. Full replay is possible.
+* Safety — the chart-author defines the LLM's vocabulary. The LLM can only
+  influence chart progression by calling event-tools the author exposed.
+* Reproducibility — chart logic is deterministic; only LLM choices are
+  non-deterministic, and those choices are tightly scoped.
+* Async by construction — the LLM runs on a worker thread, and each parallel
+  region has its own worker. Multiple events per turn (fan-out) is natural.
+* Resumability — working memory is checkpointed atomically (write-temp →
+  rename) after every event-processing pass. Resume reloads the configuration
+  and re-spawns invocations; processors are written to be idempotent on
+  re-entry.
+
+The runtime is **Babashka** for the agent process and CLI. Tests run on the
+JVM (kaocha) because the statechart library's `simple` and `testing`
+namespaces transitively pull `promesa`, which crashes under SCI. See
+<<known-limitations>> and `SPIKE_FINDINGS.md`.
+
+The dependency stack is small: `com.fulcrologic/statecharts 1.4.0-RC13`,
+`metosin/malli`, `cheshire`, `babashka.process`, `org.babashka/http-client`,
+and `com.fulcrologic/guardrails`.
+
+[[quickstart]]
+== Quickstart
+
+Clone, set an API key, and run the hello chart. The CLI auto-detects an LLM
+backend from `ANTHROPIC_API_KEY` or `ZAI_API_KEY`; no `--backend` flag is
+required.
+
+[source,bash]
+----
+git clone <this-repo>
+cd escapement
+
+# Either of these works; z.ai is cheaper for dev.
+export ZAI_API_KEY=...           # or
+export ANTHROPIC_API_KEY=...
+
+escapement run escapement.charts.hello/agent
+----
+
+Or, equivalently, before `bbin install`:
+
+[source,bash]
+----
+bb -m escapement.cli run escapement.charts.hello/agent
+----
+
+==== Manual configuration
+
+If you need to override the auto-detected backend (e.g. point at a different
+endpoint or use a non-default model), pass the flags explicitly:
+
+[source,bash]
+----
+escapement run escapement.charts.hello/agent \
+   --backend api \
+   --api-base-url https://api.z.ai/api/anthropic \
+   --api-key-env ZAI_API_KEY \
+   --model glm-4.6
+----
+
+Expected output:
+
+[source]
+----
+session         <uuid>
+transcript      .escapement/<uuid>/transcript.jsonl
+checkpoint-dir  .escapement/<uuid>/checkpoints
+final-config    [:run :finished]
+----
+
+The `.escapement/<session>/` directory contains:
+
+* `transcript.jsonl` — every LLM request, response, tool call, chart
+  transition, and checkpoint write, one JSON object per line.
+* `checkpoints/<session>.edn` — atomic working-memory snapshot written after
+  every event.
+
+To probe the build/runtime:
+
+[source,bash]
+----
+escapement info
+----
+
+To run the M7 iterative-coding smoke against a tmp directory:
+
+[source,bash]
+----
+bb bb_test/m7_live_iterate.clj
+----
+
+[[core-concepts]]
+== Core concepts
+
+The vocabulary used throughout this guide:
+
+Chart::
+  A Fulcrologic statechart value. Built with
+  `com.fulcrologic.statecharts.chart/statechart`. Composed of `state`,
+  `parallel`, `final`, `transition`, `script`, `on-entry`, and `invoke`
+  elements from `com.fulcrologic.statecharts.elements`. See the `statechart`
+  skill or the library docs for the algorithm; this guide assumes familiarity
+  with the basics.
+
+LLM-bound state::
+  A compound state whose body contains
+  `(invoke {:type :llm-conversation :id ... :params <fn>})`. While the state
+  is active, the runtime spawns a worker thread that holds a live LLM
+  conversation. When the chart leaves the state, the worker is interrupted
+  and the conversation dies. The authoring sugar is
+  <<llm-conversation-helper,`h/llm-conversation`>>.
+
+Real tool::
+  A tool the LLM may call to act on the world (e.g. `:fs/read`,
+  `:shell/run`). Implemented by `escapement.tools.protocol/Tool` and looked
+  up in a tool registry. Real-tool calls are dispatched inside the worker;
+  results loop back into the conversation. The chart never observes them.
+
+Event tool::
+  One synthetic tool per entry in the binding's `:allowed-events`. When the
+  LLM calls `event__<name>(<args>)`, the worker validates `<args>` against
+  the entry's `:data-schema` and posts a chart event named `<name>` with the
+  validated input as event data.
+
+Conversation lifecycle::
+  Starts on state entry (with `:initial-user-message` if provided).
+  Re-entered idempotently if the chart re-enters the bound state (the old
+  worker is interrupted and a new one is spawned). Dies on state exit. See
+  <<idioms-gotchas>> for what this implies for resume.
+
+Transcript::
+  A JSONL file written by `escapement.transcript`. Single-writer (one daemon
+  thread); other threads enqueue events through a `LinkedBlockingQueue`.
+  Lines are guaranteed intact and FIFO.
+
+Checkpoint::
+  EDN serialization of the chart's working memory, written via temp-file +
+  atomic rename after every event-processing pass. See
+  `src/escapement/engine/store.clj`.
+
+Resume::
+  Re-loading the latest checkpoint and continuing. The runner detects
+  `:resume?` plus an existing non-empty configuration and skips `start!`. The
+  library re-enters the saved configuration on the next event; invocation
+  processors re-spawn workers idempotently.
+
+[[authoring]]
+== Authoring a chart, step by step
+
+The four demo charts under `src/escapement/charts/` are arranged from
+simplest to most complex. Read them in order — together they cover every
+substantive pattern this library supports.
+
+[[hello-walkthrough]]
+=== Walkthrough: `hello.clj`
+
+Full source: `src/escapement/charts/hello.clj`.
+
+The chart binds an LLM conversation to a state, asks for a single
+`event__done` call, and transitions to a final state that assigns the
+greeting to the data model.
+
+The namespace pulls in `chart`, `data-model.operations` (for `ops/assign`),
+the standard element wrappers, and this project's authoring helpers:
+
+[source,clojure]
+----
+(:require
+ [com.fulcrologic.statecharts.chart :as chart]
+ [com.fulcrologic.statecharts.data-model.operations :as ops]
+ [com.fulcrologic.statecharts.elements :refer [state transition final script on-entry]]
+ [escapement.chart.helpers :as h])
+----
+
+The system prompt is just a string. The LLM is told to call `event__done`
+once with a `{"greeting": "..."}` payload:
+
+[source,clojure]
+----
+(def system-prompt
+  (str "When asked, call the `event__done` tool exactly once with `{\"greeting\":\"<a short hello "
+       "in any language>\"}`. Keep the greeting under 30 characters. After the tool call, end your turn. "
+       "Do not call any other tools."))
+----
+
+The chart itself:
+
+[source,clojure]
+----
+(def agent
+  (chart/statechart
+   {:initial :run}
+   (state {:id :run :initial :greeting}
+          (state {:id :greeting}
+                 (h/llm-conversation
+                  {:id        "hello"
+                   :params-fn (fn [_env _data]
+                                {:system               system-prompt
+                                 :real-tools           []
+                                 :allowed-events       [{:event       :done
+                                                         :data-schema [:map [:greeting :string]]}]
+                                 :initial-user-message "Say hello."
+                                 :max-tokens           120})})
+                 (transition {:event :done :target :finished}
+                             (script {:expr (fn [_env data]
+                                              [(ops/assign :greeting
+                                                           (get-in data [:_event :data :greeting]))])})))
+          (final {:id :finished}))))
+----
+
+Notes:
+
+* The outer `:run` state is required because a **top-level** `final` would
+  empty the configuration set on entry (see `SPIKE_FINDINGS.md`). The
+  convention throughout this project is to wrap the final in a compound
+  parent state so callers can observe completion.
+* `h/llm-conversation` (see <<llm-conversation-helper>>) expands to
+  `(invoke {:type :llm-conversation ...})` with `:autoforward? true` set so
+  `tell-llm` works.
+* `:params-fn` is `(fn [env data] params-map)`. It is called every time the
+  binding starts. It is the chart's chance to compute LLM parameters from
+  current data-model state.
+* `:allowed-events` declares the event vocabulary. Each entry is a map with
+  `:event` (chart event keyword) and `:data-schema` (Malli). The runtime
+  synthesizes the Anthropic tool definition (`event__done` here) and
+  validates the LLM's tool input against the schema before posting the
+  event.
+* The `:done` transition is **structural** (it leaves the bound state),
+  killing the conversation. The `script` action copies the event data into
+  the data model. `get-in data [:_event :data ...]` is the standard pattern
+  for reading the current event's payload inside a transition action — the
+  library exposes the triggering event under the `:_event` key of the
+  data-model snapshot passed to script `:expr`.
+
+=== Worked example: `scan.clj` — fan-out with a real tool
+
+Full source: `src/escapement/charts/scan.clj`.
+
+This chart adds one real tool (`:fs/read`) and demonstrates **fan-out**:
+the LLM is expected to fire multiple `:found-bug` events and one
+`:scan-complete`. Two ideas worth highlighting:
+
+[source,clojure]
+----
+:real-tools     [:fs/read]
+:allowed-events [{:event       :found-bug
+                  :data-schema [:map
+                                [:file :string]
+                                [:line :int]
+                                [:summary :string]]}
+                 {:event       :scan-complete
+                  :data-schema [:map [:total_findings :int]]}]
+----
+
+The chart never sees `:fs/read`. The LLM reads files, decides on findings,
+calls `event__found_bug` once per finding, then `event__scan_complete`.
+
+The trick is the internal transition for accumulating findings:
+
+[source,clojure]
+----
+(transition {:event :found-bug :type :internal}
+            (script {:expr (fn [_env data]
+                             [(ops/assign :findings
+                                          (conj (vec (:findings data))
+                                                (-> data :_event :data)))])}))
+----
+
+`:type :internal` tells the algorithm to **not leave** the source state.
+That matters here because leaving and re-entering `:scanning` would kill the
+LLM worker. With an internal transition, the binding stays alive across
+arbitrarily many `:found-bug` events. Only the terminal `:scan-complete`
+uses a normal (external) transition to `:finished`.
+
+=== Worked example: `parallel_demo.clj` — two LLMs at once
+
+Full source: `src/escapement/charts/parallel_demo.clj`.
+
+Two parallel regions, each with its own `:llm-conversation`. Region A is a
+translator; region B is a summarizer. The two workers run concurrently on
+different threads; tool-name collisions are impossible because event tool
+names encode the event keyword (`event__translated` vs `event__summarized`).
+
+[source,clojure]
+----
+(parallel {:id :work}
+  (state {:id :translator :initial :translating} ...)
+  (state {:id :summarizer :initial :summarizing} ...))
+
+;; Both regions reach their per-region final → parallel raises done.state.work.
+(transition {:event :done.state.work :target :finished})
+----
+
+`done.state.<id>` is raised by the library when all children of a
+`parallel` element have reached a final substate. The parent then
+transitions to its own final.
+
+=== Worked example: `iterate.clj` — multi-state coding loop
+
+Full source: `src/escapement/charts/iterate.clj`.
+
+The most ambitious demo. One long conversation is bound at the top of
+`:work`, exposing four event tools:
+
+[source,clojure]
+----
+:real-tools      [:fs/read :fs/edit :fs/write]
+:allowed-events  [{:event :spec-ready    :data-schema [:map [:summary :string]]}
+                  {:event :patch-applied :data-schema [:map [:rationale :string]]}
+                  {:event :retry         :data-schema [:map [:reasoning :string]]}
+                  {:event :give-up       :data-schema [:map [:reason :string]]}]
+----
+
+The chart progresses `:read-spec → :propose-patch → :run-tests → :reflect`
+with **all internal transitions** so the LLM's accumulated context survives
+the whole loop:
+
+[source,clojure]
+----
+(state {:id :read-spec}
+       (transition {:event :spec-ready :target :propose-patch :type :internal}))
+
+(state {:id :propose-patch}
+       (on-entry {}
+         (h/tell-llm {:expr (fn [_env data] (user-message-for-propose data))}))
+       (transition {:event :patch-applied :target :run-tests :type :internal}
+                   (script {:expr (fn [_env data]
+                                    [(ops/assign :iterations
+                                                 (inc (or (:iterations data) 0)))])})))
+----
+
+Two new ideas appear here:
+
+* **Test execution is NOT an LLM tool.** It is a chart-controlled `script`
+  action on `:run-tests` entry that dispatches `:shell/run` via the tool
+  registry directly and posts `:tests-pass` or `:tests-fail` back to itself.
+  This keeps test results out of the LLM's tool-loop and out of the
+  conversation context unless the chart decides to surface them.
+* **`h/tell-llm`** pushes a fresh user message into the live binding from
+  inside the chart (see <<tell-llm-helper>>). Used here on
+  `:propose-patch` entry to direct the LLM, and on `:reflect` entry to
+  surface the test output on failure.
+
+Read all four files together; they exercise every authoring pattern this
+project currently supports.
+
+[[invocation]]
+== The `:llm-conversation` invocation
+
+This is the core of the project. The processor is defined in
+`src/escapement/invocation/llm_conversation.clj`. Authors do not normally
+construct it directly; they use the helpers in
+`src/escapement/chart/helpers.clj`.
+
+[[llm-conversation-helper]]
+=== `h/llm-conversation`
+
+Defined in `src/escapement/chart/helpers.clj:21`. Expands to an `invoke`
+element of type `:llm-conversation` with `:autoforward? true` set.
+
+[source,clojure]
+----
+(h/llm-conversation
+ {:id        "scanner"      ; required; becomes the :invokeid
+  :params-fn (fn [env data] ; required; returns the params map below
+               { ... })
+  :autoforward? true})      ; optional; defaults to true
+----
+
+`:autoforward?` controls whether the library hands chart events back to the
+processor's `forward-event!`. You almost always want this true (it is what
+makes `tell-llm` work).
+
+=== The `params-fn` map
+
+`params-fn` returns a map consumed by the processor. The keys it understands:
+
+`:system`::
+  Optional string. The system prompt sent to the LLM.
+
+`:real-tools`::
+  Optional vector of keyword tool names that are looked up in the registry.
+  Their `tool->anthropic-tool-def` is included in the Anthropic `tools`
+  array. Missing tools throw at start.
+
+`:allowed-events`::
+  Optional vector of `{:event <kw> :data-schema <malli> :description <str>}`
+  maps. Each becomes a synthetic Anthropic tool named `event__<encoded>`
+  with `:input-schema` derived from `:data-schema`.
+
+`:initial-user-message`::
+  Optional string. If present, the worker starts in `:running` and sends
+  this as the first user turn. Otherwise it starts in `:awaiting-user` and
+  parks until a `:llm.user-message` event arrives via `tell-llm`.
+
+`:model`::
+  Optional string passed through to the backend. Default chosen by the
+  backend (`"claude-sonnet-4-5"` in the request builder if unset).
+
+`:max-tokens`::
+  Optional int; defaults to `4096` in the api backend's request builder.
+
+`:on-end-turn-event`::
+  Optional chart event keyword fired to the parent when the LLM returns
+  `:end_turn`. Defaults to `:llm.idle`. The chart can transition on this if
+  it cares about turn boundaries.
+
+`:on-error-event`::
+  Optional chart event keyword fired on backend errors or fatal tool
+  validation failures. Defaults to `:llm.error`. The chart can wire an
+  error path off this; if no transition handles it, the conversation just
+  dies and `runner` reports `:final-config` with the binding state still
+  active or with the chart having transitioned via timeouts.
+
+`:conversation/id`::
+  Optional opaque token. The `claude-p` backend uses it to track session
+  ids for `--resume` (prefix-continuation). The api backend ignores it.
+
+[[tell-llm-helper]]
+=== `h/tell-llm`
+
+Defined in `src/escapement/chart/helpers.clj:39`. Emits a `script` that
+posts a `:llm.user-message` event to the current session:
+
+[source,clojure]
+----
+(on-entry {}
+  (h/tell-llm {:expr (fn [env data] (str "Tests failed. Output:\n" (:last-test-output data)))}))
+----
+
+With `:autoforward? true` on the binding (the default), the library hands
+the event to the processor's `forward-event!`, which converts it into a new
+user message in the live conversation. The worker wakes up, appends the
+message, and runs another turn.
+
+IMPORTANT: `tell-llm` only works from **inside** the state that owns the
+binding (or a descendant). Outside, there is no live invocation to forward
+to, and the event is silently dropped.
+
+=== Internal vs external transitions
+
+If a transition's `:target` leaves the state that owns the binding (or
+omits `:type :internal` and the target is the same state), the library
+exits and re-enters the state, killing and re-spawning the worker. This is
+sometimes what you want (each iteration is a fresh conversation) and
+sometimes not (you want to keep the LLM's accumulated context).
+
+* `scan.clj` uses `:type :internal` on `:found-bug` so the binding survives
+  multiple findings.
+* `iterate.clj` uses `:type :internal` throughout `:work` so one
+  conversation drives the whole loop.
+
+=== Bad tool-use
+
+The processor validates every real-tool and event-tool input against its
+schema. On failure, the LLM gets a corrective `tool_result` with
+`is_error: true` and one retry. A second failure for the same tool-use id
+posts `:on-error-event` to the parent and the worker exits. See
+`handle-tool-use-block` in
+`src/escapement/invocation/llm_conversation.clj:144`.
+
+=== Event-tool name encoding
+
+The LLM-facing name for event `:foo-bar` is `event__foo_bar`. Qualified
+keywords are flattened: `:my.ns/foo-bar` becomes `event__my_ns_foo_bar`.
+Anthropic enforces alphanum/underscore in tool names, so any other character
+in the keyword is replaced by `_`. See `kw->anthropic-name` in
+`src/escapement/invocation/llm_conversation.clj:41`.
+
+[[backends]]
+== LLM backends
+
+The `LLMBackend` protocol is one method, `send-turn`. Defined in
+`src/escapement/llm/protocol.clj`. Three implementations ship.
+
+=== `escapement.llm.api` — Anthropic-compatible HTTP
+
+Defined in `src/escapement/llm/api.clj`. Near-passthrough to the Anthropic
+Messages API. Works against any service that speaks that wire format.
+
+[source,clojure]
+----
+(require '[escapement.llm.api :as api])
+
+;; Anthropic
+(api/new-backend {:base-url      "https://api.anthropic.com"
+                  :api-key       (System/getenv "ANTHROPIC_API_KEY")
+                  :default-model "claude-sonnet-4-5"})
+
+;; z.ai (Anthropic-compatible endpoint, cheap dev option)
+(api/new-backend {:base-url      "https://api.z.ai/api/anthropic"
+                  :api-key       (System/getenv "ZAI_API_KEY")
+                  :default-model "glm-4.6"})
+----
+
+The auth mode is auto-sniffed from the base URL: `z.ai` → `Authorization:
+Bearer <key>`; anything else → `x-api-key: <key>` plus `anthropic-version:
+2023-06-01`. Override with `:auth-mode :bearer` or `:auth-mode :x-api-key`.
+
+`cache_control` markers are passed through verbatim — both Anthropic and
+z.ai consume them natively.
+
+NOTE: z.ai does not currently return `cache_creation_input_tokens` and does
+not require the `anthropic-version` header. Both differences are tolerated
+silently by the request builder and the usage parser.
+
+=== `escapement.llm.claude-p` — out-of-process `claude -p`
+
+Defined in `src/escapement/llm/claude_p.clj`. Shells out to
+`claude -p --output-format json`. Uses your local `claude` CLI's
+Max-subscription credentials; no API key required.
+
+`claude -p` returns a flat `:result` string, not Anthropic content blocks.
+The adapter synthesizes a single `{:type :text :text result}` block. For
+multi-turn conversations the adapter keeps an atom mapping
+`:conversation/id` to `{:session-id ... :messages [...]}`. When a new
+request strictly extends the previously-sent prefix, the adapter passes
+`--resume <session-id>` with only the new tail. The response carries
+`{:backend-metadata {:via :resume ...}}` so you can tell from the
+transcript.
+
+WARNING: `claude -p` prompt mode does not expose Anthropic-style
+streaming tool-use. If `:tools` is non-empty the backend warns once and
+stringifies the tool definitions into the prompt as instructions. Real
+tool-use needs `--output-format stream-json`, which is not yet wired up.
+Prefer the `api` backend for any non-trivial chart.
+
+=== `escapement.llm.cache` — content-addressed disk cache
+
+Defined in `src/escapement/llm/cache.clj`. Wraps any `LLMBackend` and
+caches by SHA-256 over `(model, system, messages, tools)`. Opt-in via
+`ESCAPEMENT_LLM_CACHE=1` or by explicit construction. Useful for
+deterministic dev runs against expensive backends.
+
+[[tools]]
+== Tools
+
+The `Tool` protocol (`src/escapement/tools/protocol.clj:18`):
+
+[source,clojure]
+----
+(defprotocol Tool
+  (tool-name    [t])  ; keyword, e.g. :fs/read
+  (description  [t])  ; short string for the LLM
+  (input-schema [t])  ; Malli schema
+  (invoke       [t input]))  ; returns {:result <string> :is-error <bool>}
+----
+
+A registry is just an atom of `{tool-name → tool}`. Construct with
+`tp/new-registry` or seed all five builtins with
+`builtin/new-builtin-registry`. `tp/dispatch` validates the input against
+the tool's schema before invoking; validation failures are returned as
+`{:result <pretty error> :is-error true}` so the LLM gets a corrective
+`tool_result` rather than a thrown exception.
+
+`tp/tool->anthropic-tool-def` produces the JSON Schema that the LLM sees,
+using `malli.json-schema/transform`. Qualified keywords are flattened
+(`:fs/read` → `"fs_read"`).
+
+=== Built-in tools
+
+Defined in `src/escapement/tools/builtin.clj`. All five are available
+from both bb and JVM.
+
+`:fs/read`::
+  Read a UTF-8 text file. Input: `{:path <string>}`. Files larger than
+  200 KiB are truncated to the first 200 KiB with a marker.
+
+`:fs/write`::
+  Atomic UTF-8 write. Input: `{:path <string> :content <string>}`. Writes
+  via temp-file + `ATOMIC_MOVE`. Creates parent directories.
+
+`:fs/edit`::
+  Replace the unique occurrence of `old-string` with `new-string`. Input:
+  `{:path :string :old-string :string :new-string :string}`. Errors if
+  `old-string` matches zero or more than one location — this forces the
+  LLM to supply enough context for an unambiguous edit.
+
+`:shell/run`::
+  Run a shell command via `bash -lc`. Input: `{:command :string
+  :timeout-ms (? :int)}`. Default timeout 30s. Returns combined
+  stdout+stderr and the exit code; `is-error` is true on non-zero exit
+  or timeout.
+
+`:repl/eval`::
+  Evaluate Clojure code in a fresh sandboxed namespace. Input:
+  `{:code :string :timeout-ms (? :int)}`. Default timeout 5s. Returns
+  the `pr-str` of the result. Each call creates and removes a one-shot
+  `escapement.tools.eval.<nanotime>` namespace; thread-local `*ns*` is
+  used (not `in-ns`) so this works from worker threads.
+
+=== Registering a custom tool
+
+[source,clojure]
+----
+(require '[escapement.tools.protocol :as tp])
+
+(defrecord HttpGetTool []
+  tp/Tool
+  (tool-name    [_] :http/get)
+  (description  [_] "GET a URL and return the body as a string.")
+  (input-schema [_] [:map {:closed true} [:url :string]])
+  (invoke [_ {:keys [url]}]
+    (let [{:keys [status body]} (babashka.http-client/get url)]
+      {:result body :is-error (not (and (>= status 200) (< status 300)))})))
+
+(def registry (tp/new-registry))
+(tp/register! registry (->HttpGetTool))
+----
+
+Then expose it to the LLM via `:real-tools [:http/get]` in your `params-fn`
+map.
+
+[[transcript-runner-cli]]
+== Transcript, runner, CLI
+
+=== Transcript event vocabulary
+
+`src/escapement/transcript.clj` is the JSONL sink. Every transcript row
+has `:event`, `:ts`, `:seq`, plus event-specific `:data`. The events
+emitted across the codebase:
+
+* `:runner/started`, `:runner/start-config`, `:runner/resumed`,
+  `:runner/quiescent`, `:runner/tick`, `:runner/done`, `:runner/error`,
+  `:runner/aborted`, `:runner/event-processed`
+* `:checkpoint/written`
+* `:llm/start`, `:llm/request`, `:llm/response`, `:llm/error`,
+  `:llm/user-message`, `:llm/worker-exit`
+* `:transcript/serialize-error`
+
+The `api` backend emits its own `:llm/request` and `:llm/response` rows
+with the full Anthropic body / parsed response (so you can replay the wire
+exchange exactly).
+
+=== Inspecting with `jq`
+
+[source,bash]
+----
+# All LLM responses
+jq -c 'select(.event=="llm/response")' .escapement/<sid>/transcript.jsonl
+
+# Histogram of chart events processed
+jq -c 'select(.event=="runner/event-processed") | .data["event-name"]' \
+   .escapement/<sid>/transcript.jsonl | sort | uniq -c
+
+# All errors
+jq -c 'select(.event | endswith("error"))' .escapement/<sid>/transcript.jsonl
+
+# Checkpoint cadence
+jq -c 'select(.event=="checkpoint/written") | .seq' \
+   .escapement/<sid>/transcript.jsonl | wc -l
+----
+
+=== Runner
+
+`src/escapement/runner.clj` exposes `run!`. Required keys:
+`:chart`, `:session-id`, `:transcript-path`, `:checkpoint-dir`. Optional:
+`:backend`, `:tool-registry`, `:initial-data`, `:resume?`, `:trace?`,
+`:max-iterations` (default 100000), `:quiescent-sleep-ms` (default 50).
+
+The pump loop:
+
+1. Drain currently-deliverable events through the processor.
+2. After each event, save working memory to the checkpoint store.
+3. When the queue is empty, ask each `InvocationProcessor` how many live
+   workers it has. If zero, terminate. Otherwise sleep `:quiescent-sleep-ms`
+   and try again. This is what lets the chart park while the LLM is
+   thinking.
+
+=== CLI
+
+`src/escapement/cli.clj`. Two subcommands: `info` and `run`. The default
+work directory is `.escapement/<session>/`; override with `--work-dir`,
+`--transcript`, or `--checkpoint-dir`. `--resume` re-opens the latest
+checkpoint and skips `start!`. `--input <edn-file>` seeds the data model.
+
+[[idioms-gotchas]]
+== Idioms and gotchas
+
+* **`:type :internal` to keep the LLM alive.** Any transition out of (or
+  back into) a bound state kills and re-spawns the worker. If you want
+  the conversation to survive a hop, use `:type :internal`. Both
+  `scan.clj` and `iterate.clj` lean on this.
+
+* **`h/tell-llm` only works inside the bound state.** Outside, there is
+  no live invocation to forward to. The event is silently dropped.
+
+* **Parallel regions get their own workers.** No tool-name collision is
+  possible because event-tool names encode the chart event keyword. See
+  `parallel_demo.clj`.
+
+* **Top-level `final` empties the configuration.** Wrap finals in a
+  compound parent state (every demo chart does this). See
+  `SPIKE_FINDINGS.md` item 2.
+
+* **Resume restarts in-flight conversations from scratch.** When the chart
+  re-enters a bound state on resume, a fresh worker is spawned with a fresh
+  message history; the previous conversation does not survive a process
+  restart. This is idempotent for read tools like `:fs/read` but
+  **at-most-once cannot be guaranteed for side-effecting tools** like
+  `:fs/edit` or `:shell/run`. Charts that need durable side-effect tracking
+  must drive it themselves via the data model (e.g. `iterate.clj`
+  increments `:iterations` so retries respect the cap).
+
+* **The library passes the triggering event as `:_event`.** Inside a
+  transition `script`, `(get-in data [:_event :data ...])` is the standard
+  way to read the event payload.
+
+* **Daemon threads only.** All worker threads (`llm-conv-...`) and the
+  transcript writer are daemon threads. They do not prevent JVM/bb exit.
+
+[[testing]]
+== Testing
+
+Tests run on the JVM via kaocha. The bb runtime is not used because
+`com.fulcrologic.statecharts.testing` transitively requires `promesa`,
+which crashes under SCI (see `SPIKE_FINDINGS.md`).
+
+The harness is `escapement.engine.testing`. It replaces the library's
+testing helpers with a synchronous pump:
+
+[source,clojure]
+----
+(require '[escapement.engine.testing :as dct])
+
+(def t (-> (dct/new-testing-env {:statechart my-chart
+                                 :tool-registry my-registry}
+                                my-processor1 my-processor2)
+           (dct/start! initial-data)))
+
+(dct/drain! t)             ; pump until quiescent
+(dct/configuration t)      ; #{:run :finished}
+(dct/in? t :finished)
+(dct/data t)               ; current data-model contents
+(dct/run-events! t :foo {:name :bar :data {...}})
+----
+
+=== Mocking the LLM backend
+
+Implement `LLMBackend` with a script-driven queue of canned responses. The
+M7 iterate test
+(`test/escapement/charts/iterate_test.clj`) is a complete example:
+
+[source,clojure]
+----
+(defrecord MockBackend [responses call-log]
+  llm/LLMBackend
+  (send-turn [_ request]
+    (swap! call-log conj request)
+    (or (.pollFirst ^LinkedBlockingDeque responses)
+        (throw (ex-info "mock out of canned responses" {})))))
+
+(defn- tool-use [tool-uses]
+  {:stop-reason :tool_use
+   :content     (mapv (fn [{:keys [id name input]}]
+                        {:type :tool_use :id id :name name :input input})
+                      tool-uses)
+   :usage {} :model "mock"})
+
+(defn- end-turn []
+  {:stop-reason :end_turn :content [{:type :text :text "ok"}] :usage {} :model "mock"})
+----
+
+A test then queues up `(tool-use [...])` and `(end-turn)` responses in the
+order the chart should drive them, and asserts the chart reaches
+`:finished` with the expected data-model contents.
+
+=== Stubbing a tool
+
+Implement `Tool` with a queue of canned `{:result :is-error}` maps and
+register it over the builtin (the iterate test stubs `:shell/run` so tests
+do not actually run a shell):
+
+[source,clojure]
+----
+(defrecord StubShellTool [responses calls]
+  tp/Tool
+  (tool-name    [_] :shell/run)
+  (description  [_] "stub shell")
+  (input-schema [_] [:map [:command :string]])
+  (invoke [_ input]
+    (swap! calls conj input)
+    (let [r (.pollFirst ^LinkedBlockingDeque responses)]
+      (or r {:result "no canned response" :is-error true}))))
+
+(let [reg (builtin/new-builtin-registry)]
+  (tp/register! reg (stub-shell [{:result "ok" :is-error false}]))
+  ...)
+----
+
+=== Live smoke scripts
+
+The `bb_test/` directory contains scripts that exercise the system against
+real backends. `m6_live_smoke.clj` runs `hello`, `scan`, and
+`parallel_demo`; `m7_live_iterate.clj` runs the iterate chart against a
+tmp directory and reports pass/fail. These are not unit tests — they
+require network access and real credentials.
+
+[[project-layout]]
+== Project layout
+
+`src/escapement/engine/`::
+  Custom engine pieces — `queue` (in-process FIFO event queue), `store`
+  (atomic file-backed working-memory checkpoint), `exec` (lambda
+  `ExecutionModel`), `env` (assembles the `::sc/env` map), and `testing`
+  (JVM synchronous test harness). These replace
+  `com.fulcrologic.statecharts.simple`, which crashes under Babashka
+  because of a transitive `promesa`/SCI conflict.
+
+`src/escapement/llm/`::
+  `protocol` (the one-method `LLMBackend`), `types` (Malli schemas for
+  requests/responses/content-blocks/tool-defs), `claude_p`
+  (out-of-process `claude -p` adapter), `api` (Anthropic-compatible HTTP
+  backend, sniffing z.ai vs Anthropic auth modes), and `cache`
+  (content-addressed disk cache).
+
+`src/escapement/tools/`::
+  `protocol` (`Tool` + registry + `dispatch`) and `builtin` (the five
+  ship tools).
+
+`src/escapement/invocation/`::
+  `llm_conversation` — the `InvocationProcessor` that binds an LLM
+  conversation to a state. The heart of the project. About 450 lines.
+
+`src/escapement/chart/`::
+  `helpers` — authoring sugar (`llm-conversation`, `tell-llm`).
+
+`src/escapement/charts/`::
+  Demo charts: `hello`, `scan`, `parallel_demo`, `iterate`.
+
+`src/escapement/`::
+  `transcript` (single-writer JSONL sink), `runner` (top-level pump loop),
+  `cli` (bb/JVM entry).
+
+`test/`::
+  Unit tests (kaocha + fulcro-spec). Run from a JVM REPL.
+
+`bb_test/`::
+  Babashka-runnable scripts: sanity checks and live smoke runs.
+
+`spike/`::
+  Original spike scripts that proved the patterns under bb. Kept for
+  reference; not used at runtime.
+
+[[known-limitations]]
+== Known limitations and roadmap
+
+* **`claude -p` lacks real tool-use.** The current adapter stringifies tool
+  defs into the prompt and warns once. End-turn-only flows work; iterative
+  tool dispatch does not. Prefer the `api` backend for non-trivial charts.
+  Investigating `--output-format stream-json` is the path forward.
+
+* **Checkpoint-resume restarts in-flight conversations.** Re-entering a
+  bound state on resume spawns a fresh worker with an empty message
+  history. At-most-once cannot be guaranteed for side-effecting tools.
+
+* **OpenAI-compatible backend is deferred.** Only Anthropic-shape APIs
+  (Anthropic, z.ai) ship in v0.
+
+* **Sandboxing of third-party charts is deferred.** A chart can reference
+  arbitrary tools and arbitrary side-effects through `:script` and
+  `:on-entry`. There is currently no policy layer.
+
+* **TUI is deferred.** Inspection is JSONL + `jq`.
+
+* **LLM token budgets are per-turn, not per-session.** Long iterative
+  runs can accumulate context. Use `:max-tokens` in `params-fn` and prompt
+  for brevity. The `iterate` chart caps at 512.
+
+[[contributing]]
+== Contributing and running tests
+
+Tests run via REPL with kaocha. The project's REPL convention (see the
+`clojure-repl` skill in the user's global instructions) is to start an
+nREPL, connect, and evaluate `(k/run ...)`. The relevant aliases are in
+`deps.edn`: `:test` adds `test/`, `bb_test/`, fulcro-spec, kaocha, and the
+guardrails JVM properties; `:kaocha` invokes `kaocha.runner`.
+
+=== Adding a new chart
+
+1. Create `src/escapement/charts/my_thing.clj`. Pattern after the demos.
+2. Use `h/llm-conversation` for any LLM-bound state; wrap finals in a
+   compound parent.
+3. Add a unit test under `test/escapement/charts/my_thing_test.clj`
+   using a `MockBackend` and (where applicable) stub tools.
+4. Run via `escapement run escapement.charts.my-thing/agent`.
+
+=== Adding a new tool
+
+1. `defrecord` implementing `escapement.tools.protocol/Tool`.
+2. Provide a Malli `input-schema`; the runtime validates before `invoke`.
+3. Return `{:result <string> :is-error <bool>}`. Strings only — the LLM
+   sees a string.
+4. Register in the chart's tool registry via `tp/register!` (or seed a
+   custom registry).
+5. Add a unit test under `test/escapement/tools/`.
+
+=== Adding a new backend
+
+1. Implement `escapement.llm.protocol/LLMBackend`.
+2. Validate request and response with `escapement.llm.types` so chart
+   authors see consistent shapes regardless of backend.
+3. Add a `new-backend` constructor.
+4. Wire into the CLI's `make-backend` if it should be selectable via
+   `--backend`.
+

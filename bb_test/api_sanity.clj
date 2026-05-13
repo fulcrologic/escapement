@@ -3,9 +3,9 @@
 
    Skips with a friendly message if ZAI_API_KEY is unset."
   (:require
-   [deep-cookie.llm.api :as api]
-   [deep-cookie.llm.protocol :as proto]
-   [deep-cookie.llm.types :as types]))
+   [escapement.llm.api :as api]
+   [escapement.llm.protocol :as proto]
+   [escapement.llm.types :as types]))
 
 (defn -main [& _]
   (if-let [key (System/getenv "ZAI_API_KEY")]

@@ -1,5 +1,7 @@
 # Statechart-Driven Autonomous Coding Agent — Plan
 
+> Project renamed to Escapement on 2026-05-13; namespaces `escapement.*`. References to `deep-cookie` below are retained as historical record.
+
 ## Context
 
 Greenfield project at `/Users/tonykay/fulcrologic/statechart-agents/`. A coding agent whose **control flow is a statechart**, not a free-form LLM loop. An LLM conversation is bound to a (typically compound) chart state via the statechart library's invocation mechanism. While that state is active, the LLM is alive and can interact with the world through tools; when the chart leaves the state, the conversation is killed.

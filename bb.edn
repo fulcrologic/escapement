@@ -3,6 +3,7 @@
          com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
          metosin/malli               {:mvn/version "0.16.4"}
          cheshire/cheshire           {:mvn/version "5.13.0"}}
+ :bbin/bin {escapement {:main-opts ["-m" "escapement.cli"]}}
  :tasks {repl   {:override-builtin true
                  :doc  "Start a babashka nrepl on port 1667"
                  :requires ([babashka.nrepl.server :as s])

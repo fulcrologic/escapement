@@ -2,22 +2,22 @@
   "Live smoke runs for Milestone 6 against z.ai.
 
   Runs each of the three demo charts (`hello`, `scan`, `parallel-demo`)
-  through the real `deep-cookie.runner/run!` with the
-  `deep-cookie.llm.api/new-backend` pointed at z.ai. Skips cleanly with
+  through the real `escapement.runner/run!` with the
+  `escapement.llm.api/new-backend` pointed at z.ai. Skips cleanly with
   exit 0 if `ZAI_API_KEY` is not set.
 
-  Each run gets a fresh dir under `/tmp/deep-cookie-m6/<uuid>/` so the
+  Each run gets a fresh dir under `/tmp/escapement-m6/<uuid>/` so the
   script is safe to re-run."
   (:require
    [cheshire.core :as json]
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [deep-cookie.charts.hello :as hello]
-   [deep-cookie.charts.parallel-demo :as pd]
-   [deep-cookie.charts.scan :as scan]
-   [deep-cookie.llm.api :as api]
-   [deep-cookie.runner :as runner]
-   [deep-cookie.tools.builtin :as builtin]))
+   [escapement.charts.hello :as hello]
+   [escapement.charts.parallel-demo :as pd]
+   [escapement.charts.scan :as scan]
+   [escapement.llm.api :as api]
+   [escapement.runner :as runner]
+   [escapement.tools.builtin :as builtin]))
 
 (def model "glm-4.6")
 (def base-url "https://api.z.ai/api/anthropic")
@@ -28,7 +28,7 @@
       (mapv #(json/parse-string % true) (doall (line-seq r))))))
 
 (defn- paths-for [tag]
-  (let [root (str "/tmp/deep-cookie-m6/" (java.util.UUID/randomUUID))
+  (let [root (str "/tmp/escapement-m6/" (java.util.UUID/randomUUID))
         _    (.mkdirs (io/file root))]
     {:root           root
      :transcript     (str root "/" tag ".jsonl")
