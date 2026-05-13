@@ -42,7 +42,12 @@
                :tool_result (cond-> {"type"        "tool_result"
                                      "tool_use_id" (:tool_use_id blk)
                                      "content"     (:content blk)}
-                              (:is-error blk) (assoc "is_error" true)))]
+                              (:is-error blk) (assoc "is_error" true))
+               :thinking    (cond-> {"type"     "thinking"
+                                     "thinking" (:thinking blk)}
+                              (:signature blk) (assoc "signature" (:signature blk)))
+               :redacted_thinking {"type" "redacted_thinking"
+                                   "data" (:data blk)})]
     (cond-> base
       (:cache-control blk) (assoc "cache_control" (cc->wire (:cache-control blk))))))
 
@@ -67,18 +72,46 @@
     system-cc     [{"type" "text" "text" system "cache_control" (cc->wire system-cc)}]
     :else         system))
 
+(defn- thinking->wire [t]
+  (when t
+    (cond-> {"type" (name (:type t))}
+      (:budget-tokens t) (assoc "budget_tokens" (:budget-tokens t)))))
+
+(defn- tool-choice->wire [tc]
+  (cond
+    (nil? tc) nil
+    (keyword? tc) {"type" (name tc)}
+    (map? tc) (cond-> {"type" (name (:type tc))
+                       "name" (:name tc)}
+                (some? (:disable-parallel-tool-use tc))
+                (assoc "disable_parallel_tool_use" (boolean (:disable-parallel-tool-use tc))))))
+
+(defn- metadata->wire [m]
+  (when m
+    (cond-> {}
+      (:user-id m) (assoc "user_id" (:user-id m)))))
+
 (>defn request->anthropic-json
        "Pure translation from our Request map to the Anthropic Messages API request body
    (as a Clojure map with string keys, ready for JSON serialization)."
        [request]
        [:map => :map]
-       (let [{:keys [model system messages tools max-tokens system-cache-control]} request
+       (let [{:keys [model system messages tools max-tokens system-cache-control
+                     temperature top-p top-k stop-sequences
+                     thinking tool-choice metadata]} request
              sys (system->wire system system-cache-control)]
          (cond-> {"model"      model
                   "messages"   (mapv message->wire messages)
                   "max_tokens" (or max-tokens 4096)}
-           sys          (assoc "system" sys)
-           (seq tools)  (assoc "tools" (mapv tool->wire tools)))))
+           sys                      (assoc "system" sys)
+           (seq tools)              (assoc "tools" (mapv tool->wire tools))
+           (some? temperature)      (assoc "temperature" temperature)
+           (some? top-p)            (assoc "top_p" top-p)
+           (some? top-k)            (assoc "top_k" top-k)
+           (seq stop-sequences)     (assoc "stop_sequences" (vec stop-sequences))
+           thinking                 (assoc "thinking" (thinking->wire thinking))
+           (some? tool-choice)      (assoc "tool_choice" (tool-choice->wire tool-choice))
+           (seq metadata)           (assoc "metadata" (metadata->wire metadata)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Translation: Anthropic JSON -> our Response
@@ -89,6 +122,8 @@
     "max_tokens"    :max_tokens
     "tool_use"      :tool_use
     "stop_sequence" :stop_sequence
+    "pause_turn"    :pause_turn
+    "refusal"       :refusal
     :end_turn))
 
 (defn- wire->block [{:strs [type] :as blk}]
@@ -109,6 +144,11 @@
                            :content     (let [c (get blk "content")]
                                           (if (string? c) c (json/generate-string c)))}
                     (get blk "is_error") (assoc :is-error true))
+    "thinking"    (cond-> {:type     :thinking
+                           :thinking (get blk "thinking")}
+                    (get blk "signature") (assoc :signature (get blk "signature")))
+    "redacted_thinking" {:type :redacted_thinking
+                         :data (get blk "data")}
     ;; Unknown block type — preserve as text marker
     {:type :text :text (str "[unknown block: " type "]")}))
 

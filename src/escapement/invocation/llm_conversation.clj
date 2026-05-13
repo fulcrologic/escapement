@@ -145,13 +145,41 @@
   {:role :user :content [{:type :text :text text}]})
 
 (defn- build-request
-  [{:keys [system messages tools model max-tokens conv-id]}]
+  "Assemble a `escapement.llm.types/Request` map. Caller may supply any of the
+   common Anthropic Messages-API knobs and they will be passed through to the
+   backend; missing keys are simply not put on the wire.
+
+   Recognized keys (all optional unless noted):
+
+     * `:system` — system prompt string
+     * `:messages` — required; the running conversation
+     * `:tools` — vector of tool definitions
+     * `:model` — model id string (e.g. `\"claude-opus-4-7\"`)
+     * `:max-tokens` — int; default 4096 at the backend if absent
+     * `:temperature` — number in (0,1]
+     * `:top-p` — number in (0,1]
+     * `:top-k` — pos-int
+     * `:stop-sequences` — vector of strings
+     * `:thinking` — `{:type :enabled :budget-tokens N}` to turn on
+                     extended thinking. Requires `:max-tokens` > `N`.
+     * `:tool-choice` — `:auto` | `:any` | `:none` | `{:type :tool :name \"...\"}`
+     * `:metadata` — `{:user-id \"...\"}`
+     * `:conv-id` — claude-p `--resume` correlation id (string/keyword/uuid)"
+  [{:keys [system messages tools model max-tokens conv-id
+           temperature top-p top-k stop-sequences thinking tool-choice metadata]}]
   (cond-> {:model    (or model "claude-sonnet-4-5")
            :messages messages
            :tools    tools}
-    system        (assoc :system system)
-    max-tokens    (assoc :max-tokens max-tokens)
-    conv-id       (assoc :conversation/id conv-id)))
+    system               (assoc :system system)
+    max-tokens           (assoc :max-tokens max-tokens)
+    (some? temperature)  (assoc :temperature temperature)
+    (some? top-p)        (assoc :top-p top-p)
+    (some? top-k)        (assoc :top-k top-k)
+    (seq stop-sequences) (assoc :stop-sequences (vec stop-sequences))
+    thinking             (assoc :thinking thinking)
+    (some? tool-choice)  (assoc :tool-choice tool-choice)
+    (seq metadata)       (assoc :metadata metadata)
+    conv-id              (assoc :conversation/id conv-id)))
 
 ;; ---------------------------------------------------------------------------
 ;; Worker loop
@@ -255,12 +283,19 @@
                 :else (recur)))
 
             (= :running s)
-            (let [request (build-request {:system     (:system params)
-                                          :messages   @messages-atom
-                                          :tools      tool-defs
-                                          :model      (:model params)
-                                          :max-tokens (:max-tokens params)
-                                          :conv-id    (:conversation/id params)})
+            (let [request (build-request {:system         (:system params)
+                                          :messages       @messages-atom
+                                          :tools          tool-defs
+                                          :model          (:model params)
+                                          :max-tokens     (:max-tokens params)
+                                          :temperature    (:temperature params)
+                                          :top-p          (:top-p params)
+                                          :top-k          (:top-k params)
+                                          :stop-sequences (:stop-sequences params)
+                                          :thinking       (:thinking params)
+                                          :tool-choice    (:tool-choice params)
+                                          :metadata       (:metadata params)
+                                          :conv-id        (:conversation/id params)})
                   _       (transcript! transcript-fn {:event :llm/request :ts (now-ms)
                                                       :data  {:n-messages (count (:messages request))}})
                   response (try

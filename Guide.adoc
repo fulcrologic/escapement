@@ -480,11 +480,61 @@ makes `tell-llm` work).
   parks until a `:llm.user-message` event arrives via `tell-llm`.
 
 `:model`::
-  Optional string passed through to the backend. Default chosen by the
-  backend (`"claude-sonnet-4-5"` in the request builder if unset).
+  Optional string passed through to the backend. Examples:
+  `"claude-opus-4-7"`, `"claude-sonnet-4-6"`, `"claude-haiku-4-5"`,
+  `"glm-4.6"` (when targeting the z.ai compat endpoint). If absent, the
+  backend's `:default-model` is used (and if that's also unset,
+  `"claude-sonnet-4-5"`). Per-state selection is the point: one chart
+  state can drive Opus for hard reasoning, the next Sonnet for routine
+  edits, the next Haiku for cheap fan-out.
 
 `:max-tokens`::
   Optional int; defaults to `4096` in the api backend's request builder.
+  Required to be strictly greater than `:thinking`'s `:budget-tokens`
+  when extended thinking is enabled.
+
+`:temperature`::
+  Optional number in `(0, 1]`. Use values near zero for deterministic
+  tool-calling work, higher for creative generation. Don't combine with
+  `:thinking` — Anthropic ignores temperature when extended thinking is on.
+
+`:top-p` / `:top-k`::
+  Optional sampling parameters passed straight through. Most charts won't
+  need them; reach for `:temperature` first.
+
+`:stop-sequences`::
+  Optional vector of strings. The model halts as soon as any of them
+  appears in its output (the matching sequence is excluded from the
+  result). Useful for inline output formats.
+
+`:thinking`::
+  Optional map enabling Anthropic's extended-thinking mode for THIS
+  state's worker:
++
+[source,clojure]
+----
+{:type :enabled :budget-tokens 4096}
+----
++
+The model emits one or more `:thinking` (and possibly `:redacted_thinking`)
+content blocks before its normal text/tool_use blocks. They are recorded
+in the message history so the model can build on them across turns; the
+chart never sees them — they pass through transparently. Set
+`:budget-tokens` low enough to leave room within `:max-tokens` for the
+actual answer.
+
+`:tool-choice`::
+  Optional. Forces the model's hand on tool selection:
++
+* `:auto` (Anthropic default) — model decides whether to call a tool.
+* `:any` — model MUST call some tool this turn.
+* `:none` — model is forbidden from calling tools (text-only).
+* `{:type :tool :name "fs_read"}` — model MUST call the named tool.
+  Optional `:disable-parallel-tool-use true` forbids parallel calls.
+
+`:metadata`::
+  Optional `{:user-id "..."}`. Surfaces in Anthropic's audit/abuse
+  tracking. Use a stable, non-PII identifier (e.g. a hash).
 
 `:on-end-turn-event`::
   Optional chart event keyword fired to the parent when the LLM returns

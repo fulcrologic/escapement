@@ -101,6 +101,92 @@
                   "Wire form does not leak the internal dash-keyword"
                   (contains? (get-in wire ["tools" 0]) "input-schema") => false)))
 
+(specification "request->anthropic-json — extended options"
+               (component "sampling parameters and stop sequences land on the wire as snake_case"
+                          (let [req  (assoc sample-request
+                                            :temperature    0.4
+                                            :top-p          0.9
+                                            :top-k          40
+                                            :stop-sequences ["STOP" "<END>"])
+                                wire (api/request->anthropic-json req)]
+                            (assertions
+                             "temperature"     (get wire "temperature")     => 0.4
+                             "top_p"           (get wire "top_p")           => 0.9
+                             "top_k"           (get wire "top_k")           => 40
+                             "stop_sequences"  (get wire "stop_sequences")  => ["STOP" "<END>"])))
+
+               (component "extended thinking shows up as a wire object with budget_tokens"
+                          (let [req  (assoc sample-request
+                                            :max-tokens 8000
+                                            :thinking   {:type :enabled :budget-tokens 4096})
+                                wire (api/request->anthropic-json req)]
+                            (assertions
+                             "thinking wire shape"
+                             (get wire "thinking")
+                             => {"type" "enabled" "budget_tokens" 4096})))
+
+               (component "tool-choice short forms become tagged wire objects"
+                          (let [wire-any  (api/request->anthropic-json (assoc sample-request :tool-choice :any))
+                                wire-auto (api/request->anthropic-json (assoc sample-request :tool-choice :auto))
+                                wire-none (api/request->anthropic-json (assoc sample-request :tool-choice :none))]
+                            (assertions
+                             "any"  (get wire-any  "tool_choice") => {"type" "any"}
+                             "auto" (get wire-auto "tool_choice") => {"type" "auto"}
+                             "none" (get wire-none "tool_choice") => {"type" "none"})))
+
+               (component "tool-choice with a named tool"
+                          (let [wire (api/request->anthropic-json
+                                      (assoc sample-request :tool-choice {:type :tool :name "get_weather"
+                                                                          :disable-parallel-tool-use true}))]
+                            (assertions
+                             "tool_choice"
+                             (get wire "tool_choice")
+                             => {"type" "tool" "name" "get_weather" "disable_parallel_tool_use" true})))
+
+               (component "metadata user-id is renamed to snake_case"
+                          (let [wire (api/request->anthropic-json
+                                      (assoc sample-request :metadata {:user-id "alice-42"}))]
+                            (assertions
+                             "metadata.user_id"  (get-in wire ["metadata" "user_id"]) => "alice-42")))
+
+               (component "thinking response block round-trips"
+                          (let [parsed {"stop_reason" "end_turn"
+                                        "model"       "claude-opus-4-7"
+                                        "usage"       {"input_tokens" 10 "output_tokens" 20}
+                                        "content"     [{"type" "thinking" "thinking" "step by step..."
+                                                        "signature" "sig-abc"}
+                                                       {"type" "text"     "text"     "final answer"}]}
+                                resp   (api/anthropic-json->response parsed "claude-opus-4-7")
+                                [thnk txt] (:content resp)]
+                            (assertions
+                             "thinking block parsed"
+                             thnk => {:type :thinking :thinking "step by step..." :signature "sig-abc"}
+                             "text block follows"
+                             txt  => {:type :text :text "final answer"})))
+
+               (component "redacted_thinking response block round-trips"
+                          (let [parsed {"stop_reason" "end_turn"
+                                        "model"       "claude-opus-4-7"
+                                        "usage"       {"input_tokens" 1 "output_tokens" 1}
+                                        "content"     [{"type" "redacted_thinking" "data" "ENC123"}
+                                                       {"type" "text" "text" "ok"}]}
+                                resp   (api/anthropic-json->response parsed "claude-opus-4-7")]
+                            (assertions
+                             "redacted_thinking parsed"
+                             (first (:content resp))
+                             => {:type :redacted_thinking :data "ENC123"})))
+
+               (component "new stop reasons :pause_turn and :refusal are recognized"
+                          (let [pause (api/anthropic-json->response
+                                       {"stop_reason" "pause_turn" "model" "m" "usage" {} "content" []}
+                                       "m")
+                                refusal (api/anthropic-json->response
+                                         {"stop_reason" "refusal" "model" "m" "usage" {} "content" []}
+                                         "m")]
+                            (assertions
+                             ":pause_turn"  (:stop-reason pause)   => :pause_turn
+                             ":refusal"     (:stop-reason refusal) => :refusal))))
+
 (specification "auth-headers"
                (assertions
                 "explicit :bearer uses Authorization header"

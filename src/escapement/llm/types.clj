@@ -43,11 +43,30 @@
    [:content :string]
    [:is-error {:optional true} :boolean]])
 
+(def ThinkingBlock
+  "Anthropic extended-thinking content block. Present on assistant responses
+   when `:thinking` was enabled on the request. `:signature` is the opaque
+   token the API requires you to echo back if you want to continue the same
+   thinking thread on a subsequent turn."
+  [:map {:closed false}
+   [:type [:= :thinking]]
+   [:thinking :string]
+   [:signature {:optional true} :string]])
+
+(def RedactedThinkingBlock
+  "Some thinking is server-redacted; the block carries an opaque `:data`
+   token to round-trip but no plain text."
+  [:map {:closed false}
+   [:type [:= :redacted_thinking]]
+   [:data :string]])
+
 (def ContentBlock
   [:multi {:dispatch :type}
    [:text TextBlock]
    [:tool_use ToolUseBlock]
-   [:tool_result ToolResultBlock]])
+   [:tool_result ToolResultBlock]
+   [:thinking ThinkingBlock]
+   [:redacted_thinking RedactedThinkingBlock]])
 
 (def Role [:enum :user :assistant])
 
@@ -64,6 +83,29 @@
    [:input-schema :map]
    [:cache-control {:optional true} CacheControl]])
 
+(def Thinking
+  "Extended-thinking control. Anthropic requires `:budget-tokens` and
+   `:max-tokens` (on the Request) to be set together; `:budget-tokens` must
+   be strictly less than `:max-tokens`."
+  [:map {:closed true}
+   [:type [:enum :enabled :disabled]]
+   [:budget-tokens {:optional true} [:int {:min 1024}]]])
+
+(def ToolChoice
+  "Anthropic tool_choice. Three short forms plus a named-tool form."
+  [:or
+   [:enum :auto :any :none]
+   [:map {:closed true}
+    [:type [:= :tool]]
+    [:name :string]
+    [:disable-parallel-tool-use {:optional true} :boolean]]])
+
+(def Metadata
+  "Optional metadata passed to Anthropic. Currently only `:user-id` is
+   honored on the wire (mapped to `\"user_id\"`)."
+  [:map
+   [:user-id {:optional true} :string]])
+
 (def Request
   [:map
    [:model :string]
@@ -72,10 +114,29 @@
    [:tools {:optional true} [:maybe [:vector Tool]]]
    [:max-tokens {:optional true} [:int {:min 1}]]
    [:system-cache-control {:optional true} CacheControl]
+   ;; Sampling parameters (Anthropic accepts 0 < temperature <= 1; top-p in
+   ;; (0, 1]; top-k a positive int). We don't constrain ranges in the schema
+   ;; — let the model server reject out-of-range values, since they change.
+   [:temperature    {:optional true} number?]
+   [:top-p          {:optional true} number?]
+   [:top-k          {:optional true} pos-int?]
+   [:stop-sequences {:optional true} [:vector :string]]
+   ;; Extended thinking. When :type is :enabled, :budget-tokens is required
+   ;; AND :max-tokens on the Request must be > :budget-tokens.
+   [:thinking       {:optional true} Thinking]
+   ;; Tool-choice forcing.
+   [:tool-choice    {:optional true} ToolChoice]
+   ;; Optional audit/metadata.
+   [:metadata       {:optional true} Metadata]
    ;; Extension key used by claude-p backend to track --resume mapping.
    [:conversation/id {:optional true} [:or :string :keyword :uuid]]])
 
-(def StopReason [:enum :end_turn :max_tokens :tool_use :stop_sequence])
+(def StopReason
+  "Including newer Anthropic stop reasons:
+     * `:pause_turn`  — server-side pause; client should send another request
+                       with the same conversation state to continue.
+     * `:refusal`     — model refused to respond."
+  [:enum :end_turn :max_tokens :tool_use :stop_sequence :pause_turn :refusal])
 
 (def Usage
   [:map
