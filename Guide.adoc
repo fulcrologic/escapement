@@ -383,6 +383,44 @@ Two new ideas appear here:
 Read all four files together; they exercise every authoring pattern this
 project currently supports.
 
+A larger end-to-end demo lives under `demos/unit_test/` (a port of the
+pi `unit_test` extension): seven phase prompts on disk, a parallel
+REPL-manager region that supplies an nREPL port to the refine state via
+shared data + one coordination event, and `:covers`-sealed test output.
+See `demos/unit_test/README.md` for run instructions and architecture.
+
+[[prompts]]
+== File-based prompts
+
+For non-trivial agents the inline `(str ...)` style of `hello.clj` and
+`iterate.clj` rapidly becomes painful — prompts can be many KiB and they
+typically need a few interpolated parameters. The
+`escapement.prompts` namespace is the project's lightweight answer:
+
+[source,clojure]
+----
+(require '[escapement.prompts :as p])
+
+(p/render-file "demos/unit_test/prompts/behaviors.md"
+               {:FILE     "src/myapp/core.clj"
+                :FUNCTION "do-thing"})
+----
+
+Rules:
+
+* Tokens are `{{IDENT}}` where `IDENT` matches `[A-Z][A-Z0-9_]*`.
+* The substitution map is keyed by keyword, symbol, or string. Values
+  are coerced via `str`.
+* Any unresolved token in the template throws `ex-info` listing every
+  missing name. Prompts must not ship with literal placeholders.
+* No dependencies — `slurp` plus `clojure.string`, bb-safe.
+
+The unit-test demo wires this into a small per-phase template registry
+(`demos/unit_test/prompts.clj`) so each chart state's `params-fn` just
+calls `(prompts/render-phase :write data)`. That keeps phase prompts
+authoring-ergonomic on disk while the chart code stays focused on
+control flow.
+
 [[invocation]]
 == The `:llm-conversation` invocation
 
@@ -598,22 +636,64 @@ using `malli.json-schema/transform`. Qualified keywords are flattened
 
 === Built-in tools
 
-Defined in `src/escapement/tools/builtin.clj`. All five are available
-from both bb and JVM.
+Defined in `src/escapement/tools/builtin.clj`. All eight are available
+from both bb and JVM. The filesystem and search tools are designed to
+sit at Claude-Code-parity ergonomics for the LLM.
 
 `:fs/read`::
-  Read a UTF-8 text file. Input: `{:path <string>}`. Files larger than
-  200 KiB are truncated to the first 200 KiB with a marker.
+  Read a UTF-8 text file. Input: `{:path :string
+  :offset (? pos-int?) :limit (? pos-int?)}`. Output is `cat -n` style:
+  6-digit right-padded 1-based line numbers, a tab, then content. Default
+  read window is 2000 lines from the top; `offset`/`limit` page through
+  larger files. When more lines remain past the window the result ends
+  with a `... [N more lines; read with :offset M]` notice telling the
+  model exactly how to fetch the next chunk. Files larger than 200 KiB
+  are byte-truncated up front before line-numbering.
 
 `:fs/write`::
-  Atomic UTF-8 write. Input: `{:path <string> :content <string>}`. Writes
+  Atomic UTF-8 write. Input: `{:path :string :content :string}`. Writes
   via temp-file + `ATOMIC_MOVE`. Creates parent directories.
 
 `:fs/edit`::
-  Replace the unique occurrence of `old-string` with `new-string`. Input:
-  `{:path :string :old-string :string :new-string :string}`. Errors if
-  `old-string` matches zero or more than one location — this forces the
-  LLM to supply enough context for an unambiguous edit.
+  String-replacement edit. Input: `{:path :string :old-string :string
+  :new-string :string :replace-all (? :boolean)}`. By default
+  `old-string` must occur exactly once — the LLM is forced to supply
+  enough context for an unambiguous edit. Pass `replace-all true` to
+  replace every occurrence (the response then reports the count).
+  Indentation in `old-string` must match the file byte-for-byte. The
+  result reports replacement count; identical `old-string`/`new-string`
+  is rejected rather than written as a no-op.
+
+`:fs/multi-edit`::
+  Atomic sequence of string-replacement edits to one file. Input:
+  `{:path :string :edits [{:old-string :string :new-string :string
+  :replace-all (? :boolean)} ...]}`. Edits are applied in order to the
+  in-memory content; the file is written only if ALL edits succeed.
+  Later edits can operate on the output of earlier ones. On failure
+  the response identifies the failing edit index (`edit #N of M`) and
+  the file is unchanged.
+
+`:fs/glob`::
+  Find files matching a glob pattern (e.g. `**/*.cljc`). Input:
+  `{:pattern :string :cwd (? :string) :limit (? pos-int?) :by-mtime?
+  (? :boolean)}`. Walks `cwd` (default `.`) recursively using
+  `java.nio.file.PathMatcher`. Matches `**/*.foo` against both root and
+  nested files (Java's stock `**` only matches nested — we also try the
+  suffix without the leading `**/` so behavior matches
+  ripgrep/fd/minimatch). Sorted most-recently-modified first by default;
+  pass `by-mtime?` false for lexicographic. Capped at `limit` (default
+  200) with an overflow notice. Returns absolute paths, one per line.
+
+`:fs/grep`::
+  Regex search across files. Input: `{:pattern :string :path (? :string)
+  :glob (? :string) :output-mode (? :enum) :ignore-case (? :boolean)
+  :context (? :int) :limit (? pos-int?)}`. Prefers `rg` (ripgrep) when
+  available on PATH; falls back to `grep -rE`. `output-mode` is one of
+  `"files-with-matches"` (default), `"content"` (numbered match lines
+  with optional `:context` lines around each hit), or `"count"`. `glob`
+  filters file names (`*.clj`). 20-second timeout; non-match returns
+  the `[no matches]` sentinel; rg/grep exit 2 surfaces as `is-error`
+  with stderr trimmed.
 
 `:shell/run`::
   Run a shell command via `bash -lc`. Input: `{:command :string
@@ -626,7 +706,10 @@ from both bb and JVM.
   `{:code :string :timeout-ms (? :int)}`. Default timeout 5s. Returns
   the `pr-str` of the result. Each call creates and removes a one-shot
   `escapement.tools.eval.<nanotime>` namespace; thread-local `*ns*` is
-  used (not `in-ns`) so this works from worker threads.
+  used (not `in-ns`) so this works from worker threads. This is a
+  *sandboxed* evaluator — it does NOT talk to a live project nREPL.
+  Use `:shell/run` with `clj-nrepl-eval` for that (see the unit-test
+  demo for an example).
 
 === Registering a custom tool
 
@@ -854,8 +937,9 @@ require network access and real credentials.
   (content-addressed disk cache).
 
 `src/escapement/tools/`::
-  `protocol` (`Tool` + registry + `dispatch`) and `builtin` (the five
-  ship tools).
+  `protocol` (`Tool` + registry + `dispatch`) and `builtin` (the eight
+  ship tools — `:fs/read`, `:fs/write`, `:fs/edit`, `:fs/multi-edit`,
+  `:fs/glob`, `:fs/grep`, `:shell/run`, `:repl/eval`).
 
 `src/escapement/invocation/`::
   `llm_conversation` — the `InvocationProcessor` that binds an LLM
@@ -869,7 +953,18 @@ require network access and real credentials.
 
 `src/escapement/`::
   `transcript` (single-writer JSONL sink), `runner` (top-level pump loop),
-  `cli` (bb/JVM entry).
+  `cli` (bb/JVM entry), `prompts` (file-based prompt loading with
+  `{{VAR}}` substitution).
+
+`demos/`::
+  Larger, multi-state worked examples that live outside `src/` because
+  they bring their own non-Clojure artifacts (prompt markdown, sample
+  input EDN, READMEs). The current resident is `demos/unit_test/` — a
+  parallel chart that drives an LLM through behaviors → abstraction →
+  (write|gap-analysis) → (critique|patch) → refine to author and seal
+  `fulcro-spec` tests for a target function, with a sibling REPL-manager
+  region that establishes a project nREPL via shared `:nrepl-port` data
+  + a single `:repl/available` event.
 
 `test/`::
   Unit tests (kaocha + fulcro-spec). Run from a JVM REPL.
