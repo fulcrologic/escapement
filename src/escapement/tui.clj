@@ -58,6 +58,18 @@
 (defn- esc [s] (str CSI s))
 (def ^:private clear-screen-s (str (esc "2J") (esc "H")))
 (def ^:private clear-eol-s    (esc "K"))
+;; Alternate screen buffer — full-screen TUI convention. Entering switches the
+;; terminal to a fresh blank screen; leaving restores the prior contents (so
+;; the user's shell scrollback isn't polluted with our paint).
+(def ^:private alt-screen-on-s  (esc "?1049h"))
+(def ^:private alt-screen-off-s (esc "?1049l"))
+;; Synchronized Output (Mode 2026). When the terminal supports it, any writes
+;; between BSU/ESU are buffered and rendered atomically — true per-frame double
+;; buffering. Supported by iTerm2 (recent), kitty, wezterm, foot, ghostty,
+;; contour. Apple Terminal does NOT support it; we detect at startup.
+(def ^:private sync-output-begin-s (esc "?2026h"))
+(def ^:private sync-output-end-s   (esc "?2026l"))
+(def ^:private sync-output-query-s (esc "?2026$p"))
 (def ^:private hide-cursor-s  (esc "?25l"))
 (def ^:private show-cursor-s  (esc "?25h"))
 (def ^:private reverse-on-s   (esc "7m"))
@@ -118,7 +130,11 @@
             session-id     ;; promise/atom
             queue          ;; promise/atom: the runner's event queue
             chart-sym
-            session-short])
+            session-short
+            cursor-shown?  ;; atom bool — tracks last-emitted state, so we only
+                           ;; emit hide/show ANSI on actual transitions
+            sync-output?   ;; atom bool — terminal supports Mode 2026 atomic frames
+            ])
 
 ;; ---------------------------------------------------------------------------
 ;; Rendering
@@ -149,7 +165,13 @@
       ;; No full-screen clear per frame — that's the source of the flicker.
       ;; Each row is rewritten with clear-eol, and we explicitly blank any
       ;; rows in the scrollback region that don't have content this frame.
-      (.append buf hide-cursor-s)
+      ;; Cursor visibility is only toggled when it actually needs to change
+      ;; (cursor-shown? tracks the last-emitted state).
+      (let [want-cursor? (boolean (and modal (#{:text :confirm} (:kind modal))))
+            shown?       @(:cursor-shown? h)]
+        (when (not= want-cursor? shown?)
+          (.append buf (if want-cursor? show-cursor-s hide-cursor-s))
+          (reset! (:cursor-shown? h) want-cursor?)))
       (.append buf (move-to-s 1 1))
       (.append buf (truncate header term-w))
       (.append buf clear-eol-s)
@@ -225,11 +247,11 @@
       (.append buf (move-to-s term-h 1))
       (.append buf (truncate help term-w))
       (.append buf clear-eol-s)
-      ;; Show cursor only when a text/confirm modal is active.
-      (if (and modal (#{:text :confirm} (:kind modal)))
-        (.append buf show-cursor-s)
-        (.append buf hide-cursor-s))
-      (emit! (str buf))
+      ;; If the terminal supports Mode 2026, wrap the whole frame in BSU/ESU
+      ;; so the writes apply atomically — true per-frame double-buffering.
+      (if @(:sync-output? h)
+        (emit! (str sync-output-begin-s buf sync-output-end-s))
+        (emit! (str buf)))
       nil)))
 
 ;; ---------------------------------------------------------------------------
@@ -361,12 +383,43 @@
 
       nil)))
 
+(defn- detect-sync-output!
+  "Issue a DECRQM query for Mode 2026 and try to read the response. Returns
+   true if the terminal indicates support (response values 1-4), false on
+   timeout or an indication of no support. Must run AFTER raw mode is entered
+   AND BEFORE the main input loop starts consuming bytes from the reader."
+  [^Reader rdr]
+  (try
+    (emit! sync-output-query-s)
+    ;; Drain up to ~120 ms looking for `\e[?2026;<n>$y`. Some terminals never
+    ;; reply at all — that's the timeout path, return false.
+    (let [deadline (+ (System/currentTimeMillis) 120)
+          sb       (StringBuilder.)]
+      (loop []
+        (cond
+          (or (>= (System/currentTimeMillis) deadline) (>= (.length sb) 32))
+          nil
+
+          (.ready rdr)
+          (do (.append sb (char (.read rdr))) (recur))
+
+          :else
+          (do (Thread/sleep 5) (recur))))
+      (let [s (.toString sb)]
+        (if-let [[_ n] (re-find #"\[\?2026;(\d+)\$y" s)]
+          (boolean (#{"1" "2" "3" "4"} n))
+          false)))
+    (catch Throwable _ false)))
+
 (defn- input-loop!
-  [{:keys [terminal raw-mode? state] :as h}]
+  [{:keys [terminal raw-mode? state sync-output?] :as h}]
   (try
     (.enterRawMode ^Terminal terminal)
     (reset! raw-mode? true)
     (let [rdr ^Reader (.reader ^Terminal terminal)]
+      (reset! sync-output? (detect-sync-output! rdr))
+      ;; A render after detection so the first 2026-wrapped frame appears.
+      (render-frame! h)
       (loop []
         (let [k (read-key rdr)]
           (cond
@@ -422,7 +475,7 @@
   [{:keys [chart-sym session-short]}]
   (if-not (interactive-terminal?)
     (->TuiHandle false (atom {}) (Object.) nil (atom false) nil (atom nil) (atom nil)
-                 (str chart-sym) (str session-short))
+                 (str chart-sym) (str session-short) (atom false) (atom false))
     (let [terminal (-> (TerminalBuilder/builder)
                        (.system true)
                        (.build))
@@ -434,11 +487,15 @@
                           :term-w         (.getWidth terminal)})
           h        (->TuiHandle true state (Object.) terminal (atom false) nil
                                 (atom nil) (atom nil)
-                                (str chart-sym) (str session-short))
+                                (str chart-sym) (str session-short)
+                                (atom false) (atom false))
           t        (Thread. ^Runnable (fn [] (input-loop! h)) "tui-input")
           _        (.setDaemon t true)
           h        (assoc h :input-thread t)]
-      (emit! (str hide-cursor-s clear-screen-s))
+      ;; Enter alt screen buffer; user's prior terminal contents are preserved
+      ;; and restored on stop!. Clear once and hide cursor (cursor stays hidden
+      ;; unless a text/confirm modal is open).
+      (emit! (str alt-screen-on-s clear-screen-s hide-cursor-s))
       (render-frame! h)
       (.start t)
       h)))
@@ -511,7 +568,10 @@
         (when-let [^Terminal term (:terminal h)]
           (.close term)))
       (catch Throwable _ nil))
-    (emit! (str reset-attrs-s show-cursor-s "\n")))
+    ;; Leave alt screen (restores prior terminal contents), reset attributes,
+    ;; show the cursor. Newline at the end keeps the next shell prompt on its
+    ;; own line.
+    (emit! (str reset-attrs-s show-cursor-s alt-screen-off-s)))
   h)
 
 ;; ---------------------------------------------------------------------------
