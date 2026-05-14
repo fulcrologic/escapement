@@ -315,21 +315,41 @@
   (keyword (str "error.llm." (name reason))))
 
 (defn- candidate-models
-  "Decide the ordered list of models to try for the next turn. Honors
-   `:models` (preferred ordered vector) and falls back to `[(:model params)]`.
-   Filters out anything marked `:down` in `model-status`. Always returns a
-   non-empty seq — when every candidate is already down, returns the original
-   ordered list anyway so the caller can record one final failure rather
-   than silently skipping."
+  "Decide the ordered list of models to try for the next turn.
+
+   Resolution order:
+     1. `params :models`    — explicit ordered preference (no auto-substitution)
+     2. `params :model`     — explicit single pick (no fallback)
+     3. `default-models`    — processor-level auto-detected fallback list. When
+                              `params :intelligence` is set, the list is filtered
+                              to entries whose `escapement.llm.models/intelligence`
+                              rating is ≥ that floor. If the filter empties the
+                              list, the unfiltered default-models is used so the
+                              conversation still runs (the gap is surfaced as an
+                              `:llm/intelligence-filter-empty` transcript event
+                              by the caller).
+     4. `[nil]`             — let the backend pick its own default.
+
+   Cases 1 and 2 are honored verbatim: when the user names a model, we never
+   silently switch.
+
+   Always filters out anything marked `:down` in `model-status` AFTER the
+   resolution above; `nil` (case 4) is preserved unconditionally."
   [params default-models model-status]
-  (let [requested (cond
+  (let [min-iq    (:intelligence params)
+        floor-ok? (fn [m]
+                    (or (nil? min-iq)
+                        (when-let [iq (models/intelligence m)] (>= iq (long min-iq)))))
+        defaults  (if (and min-iq (seq default-models))
+                    (let [filtered (filterv floor-ok? default-models)]
+                      (if (seq filtered) filtered default-models))
+                    default-models)
+        requested (cond
                     (seq (:models params)) (vec (:models params))
                     (:model params)        [(:model params)]
-                    (seq default-models)   (vec default-models)
+                    (seq defaults)         (vec defaults)
                     :else                  [nil])
         status    @model-status
-        ;; nil is a legitimate "let backend pick its default" — never mark or
-        ;; filter it.
         live      (filterv (fn [m] (or (nil? m) (not= :down (get status m)))) requested)]
     (if (seq live) live requested)))
 
@@ -360,7 +380,19 @@
                               :error.llm.backend. `attempts` is a vector of
                               `{:model :error}` pairs (oldest first)."
   [{:keys [backend transcript-fn worker-state model-status default-models]} params messages tools]
-  (let [candidates (candidate-models params default-models model-status)]
+  (let [min-iq        (:intelligence params)
+        eligible?     (fn [m] (or (nil? min-iq)
+                                  (when-let [iq (models/intelligence m)] (>= iq (long min-iq)))))
+        auto-fallback? (and (not (seq (:models params)))
+                            (nil? (:model params)))
+        _              (when (and auto-fallback? min-iq (seq default-models)
+                                  (not-any? eligible? default-models))
+                         (transcript! transcript-fn
+                                      {:event :llm/intelligence-filter-empty
+                                       :ts    (now-ms)
+                                       :data  {:floor          min-iq
+                                               :default-models (vec default-models)}}))
+        candidates    (candidate-models params default-models model-status)]
     (loop [[m & more] candidates
            attempts   []]
       (let [request  (build-request

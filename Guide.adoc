@@ -86,6 +86,33 @@ Or, equivalently, before `bbin install`:
 bb -m escapement.cli run escapement.charts.hello/agent
 ----
 
+==== Multi-backend auto-fallback
+
+When more than one credential is configured, Escapement wires a
+multi-dispatch backend AND builds a preference-ordered list of model
+ids (one per credential, in the precedence order above). At conversation
+time, if a model errors out (HTTP 429, network blip, parse error, etc.)
+the InvocationProcessor marks it `:down` for the rest of the process
+and tries the next candidate. `:error.llm.backend` is only fired once
+every candidate has failed. Each fallback is logged as
+`[llm/model-down] <model> — <message>  next=[...]`, and every
+`[llm/req]` / `[llm/resp]` line now shows the model in use, so the
+TUI/log stream makes the switch visible.
+
+Two ways for a chart to influence the auto-fallback list:
+
+* `:model "..."` or `:models [...]` on the `:llm-conversation` node —
+  explicit pick(s). When set, the auto-list is *not* consulted; only
+  your strings are tried (with the same `:down`-marking fallback when
+  you give a multi-element list).
+* `:intelligence N` (1–10) on the `:llm-conversation` node —
+  filters the auto-list to models whose rating (see
+  `escapement.llm.models/intelligence`) is `>= N`. Useful when a
+  state genuinely requires a strong model. If your configured
+  credentials only provide weaker models the filter is dropped and an
+  `:llm/intelligence-filter-empty` warning is emitted to the
+  transcript.
+
 ==== Manual configuration
 
 If you need to override the auto-detected backend (e.g. point at a different
@@ -485,11 +512,33 @@ makes `tell-llm` work).
 `:model`::
   Optional string passed through to the backend. Examples:
   `"claude-opus-4-7"`, `"claude-sonnet-4-6"`, `"claude-haiku-4-5"`,
-  `"glm-4.6"` (when targeting the z.ai compat endpoint). If absent, the
-  backend's `:default-model` is used (and if that's also unset,
-  `"claude-sonnet-4-5"`). Per-state selection is the point: one chart
-  state can drive Opus for hard reasoning, the next Sonnet for routine
-  edits, the next Haiku for cheap fan-out.
+  `"glm-4.6"` (when targeting the z.ai compat endpoint). When set,
+  Escapement uses *exactly this model* — auto-fallback across other
+  configured backends is disabled for this state (your explicit pick
+  is honored). If absent, the auto-fallback list kicks in (see
+  `:models` and `:intelligence` below). Per-state selection is the
+  point: one chart state can drive Opus for hard reasoning, the next
+  Sonnet for routine edits, the next Haiku for cheap fan-out.
+
+`:models`::
+  Optional ordered vector of model id strings. Tried in order; on a
+  backend failure (HTTP 429, network error, etc.) the next candidate
+  is tried and the failing one is marked `:down` for the rest of the
+  process so later turns and later invocations skip it. As with
+  `:model`, an explicit list disables the auto-detected default
+  fallback list — only the strings you name are tried.
+
+`:intelligence`::
+  Optional integer (1–10). Only meaningful when neither `:model` nor
+  `:models` is set, i.e. when the conversation is using the
+  auto-detected fallback list. With `:intelligence N` the auto-list is
+  filtered to models whose intelligence rating (see
+  `escapement.llm.models`) is `>= N`. Use this to say "this state
+  needs at least Sonnet-class reasoning; if you only have a cheap
+  model wired up, complain rather than silently downgrade." If the
+  filter removes every candidate, the unfiltered list is used as a
+  best-effort fallback and an `:llm/intelligence-filter-empty`
+  warning is emitted to the transcript so you can spot the gap.
 
 `:max-tokens`::
   Optional int; defaults to **8192** in the api backend's request builder.
@@ -594,7 +643,11 @@ for the full explanation and when caching is wasted effort.
 NOTE: Error reporting now follows SCXML's `:error.x.y` convention. The
 processor fires one of:
 +
-* `:error.llm.backend` — HTTP / parse / unexpected backend throw.
+* `:error.llm.backend` — HTTP / parse / unexpected backend throw. Fired
+  only after EVERY candidate model has been tried (see `:models` /
+  `:intelligence`). The event data carries `:attempts`, a vector of
+  `{:model :error}` entries (oldest first) so the chart can see which
+  models were tried and what each one failed with.
 * `:error.llm.tool-validation` — tool input failed schema after one retry.
 * `:error.llm.unexpected-stop` — `:max_tokens` / `:stop_sequence` /
   `:refusal` stop reason.

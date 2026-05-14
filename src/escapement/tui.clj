@@ -106,12 +106,24 @@
     :runner/done             (str "[runner] done final=" (:final-config data))
     :runner/aborted          (str "[runner] aborted " (:reason data))
     :runner/error            (str "[runner] ERROR " (truncate (:message data) 200))
-    :llm/request             (str "[llm/req] n-messages=" (:n-messages data))
-    :llm/response            (str "[llm/resp] stop=" (:stop-reason data)
+    :llm/request             (str "[llm/req] "
+                                  (when-let [m (:model data)] (str "model=" m " "))
+                                  "n-messages=" (:n-messages data))
+    :llm/response            (str "[llm/resp] "
+                                  (when-let [m (:model data)] (str "model=" m " "))
+                                  "stop=" (:stop-reason data)
                                   " tokens=in:" (get-in data [:usage :input-tokens] "?")
                                   "/out:" (get-in data [:usage :output-tokens] "?"))
     :llm/context-warning     (str "[llm/warn] context " (long (* 100 (:used-frac data 0))) "%")
     :llm/error               (str "[llm/err] " (truncate (:message data) 200))
+    :llm/model-down          (str "[llm/model-down] " (or (:model data) "<default>")
+                                  " — " (truncate (:message data) 120)
+                                  (when (seq (:remaining data))
+                                    (str "  next=" (pr-str (:remaining data)))))
+    :llm/intelligence-filter-empty
+    (str "[llm/warn] :intelligence " (:floor data)
+         " has no eligible models in defaults " (pr-str (:default-models data))
+         "; falling back to full default list")
     :human-input/start       (str "[human] prompt kind=" (:kind data))
     :human-input/answer      (str "[human] answer kind=" (:kind data))
     :human-input/cancelled   "[human] cancelled"

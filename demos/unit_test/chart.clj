@@ -31,16 +31,16 @@
     * `:nrepl-port`      — optional; if supplied, the repl-mgr skips discovery
                           and LLM startup entirely."
   (:require
-   [clojure.java.io :as io]
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.data-model.operations :as ops]
-   [com.fulcrologic.statecharts.elements :refer [state parallel transition final script on-entry]]
-   [com.fulcrologic.statecharts.protocols :as sp]
-   [escapement.chart.helpers :as h]
-   [escapement.tools.protocol :as tp]
-   [unit-test.prompts :as p]))
+    [clojure.java.io :as io]
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
+    [com.fulcrologic.statecharts.elements :refer [final on-entry parallel script state transition]]
+    [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.chart.helpers :as h]
+    [escapement.tools.protocol :as tp]
+    [unit-test.prompts :as p]))
 
 ;; ---------------------------------------------------------------------------
 ;; Derivation helpers (pure)
@@ -53,8 +53,8 @@
   [path]
   (let [stripped (reduce (fn [acc pfx]
                            (if (str/starts-with? acc pfx) (subs acc (count pfx)) acc))
-                         path
-                         ["src/main/" "src/test/" "src/" "test/"])
+                   path
+                   ["src/main/" "src/test/" "src/" "test/"])
         no-ext   (str/replace stripped #"\.clj[cs]?$" "")]
     (-> no-ext (str/replace "/" ".") (str/replace "_" "-"))))
 
@@ -65,13 +65,13 @@
   (cond
     (str/starts-with? source-path "src/main/")
     (-> source-path
-        (str/replace-first #"^src/main/" "src/test/")
-        (str/replace #"(\.clj[cs]?)$" "_spec$1"))
+      (str/replace-first #"^src/main/" "src/test/")
+      (str/replace #"(\.clj[cs]?)$" "_spec$1"))
 
     (str/starts-with? source-path "src/")
     (-> source-path
-        (str/replace-first #"^src/" "test/")
-        (str/replace #"(\.clj[cs]?)$" "_test$1"))
+      (str/replace-first #"^src/" "test/")
+      (str/replace #"(\.clj[cs]?)$" "_test$1"))
 
     :else (str/replace source-path #"(\.clj[cs]?)$" "_test$1")))
 
@@ -84,10 +84,10 @@
   "Filesystem-safe slug for a function name (handles `!`, `?`, `/`, etc.)."
   [fn-name]
   (-> fn-name
-      (str/replace "!" "_BANG_")
-      (str/replace "?" "_QMARK_")
-      (str/replace "/" "_SLASH_")
-      (str/replace #"[^A-Za-z0-9_.-]" "_")))
+    (str/replace "!" "_BANG_")
+    (str/replace "?" "_QMARK_")
+    (str/replace "/" "_SLASH_")
+    (str/replace #"[^A-Za-z0-9_.-]" "_")))
 
 (defn default-work-dir
   "Compute a default work-dir for `source-ns` and `function`."
@@ -114,17 +114,17 @@
         work-dir  (or (:work-dir data) (default-work-dir src-ns fn-name))
         _         (.mkdirs (io/file work-dir))
         existing? (.exists (io/file test-file))]
-    [(ops/assign :source-path        src-abs)
-     (ops/assign :source-namespace   src-ns)
-     (ops/assign :test-file          test-file)
-     (ops/assign :test-namespace     test-ns)
-     (ops/assign :work-dir           work-dir)
-     (ops/assign :project-dir        project)
-     (ops/assign :behaviors-file     (str work-dir "/behaviors.md"))
+    [(ops/assign :source-path src-abs)
+     (ops/assign :source-namespace src-ns)
+     (ops/assign :test-file test-file)
+     (ops/assign :test-namespace test-ns)
+     (ops/assign :work-dir work-dir)
+     (ops/assign :project-dir project)
+     (ops/assign :behaviors-file (str work-dir "/behaviors.md"))
      (ops/assign :mock-strategy-file (str work-dir "/abstraction.md"))
-     (ops/assign :gap-analysis-file  (str work-dir "/gap-analysis.md"))
-     (ops/assign :max-iterations     (or (:max-iterations data) 10))
-     (ops/assign :existing?          existing?)]))
+     (ops/assign :gap-analysis-file (str work-dir "/gap-analysis.md"))
+     (ops/assign :max-iterations (or (:max-iterations data) 10))
+     (ops/assign :existing? existing?)]))
 
 ;; ---------------------------------------------------------------------------
 ;; Per-phase params builders
@@ -138,8 +138,8 @@
    :real-tools           [:fs/read :fs/write]
    :allowed-events       [done-event]
    :initial-user-message (str "Begin the `" (name phase)
-                              "` phase for `" (:function data)
-                              "` in `" (:source-path data) "`. Follow the instructions exactly.")
+                           "` phase for `" (:function data)
+                           "` in `" (:source-path data) "`. Follow the instructions exactly.")
    :max-tokens           4096})
 
 (defn- mutation-params [phase data]
@@ -147,7 +147,7 @@
    :real-tools           [:fs/read :fs/write :fs/edit]
    :allowed-events       [done-event]
    :initial-user-message (str "Begin the `" (name phase) "` phase. The test file is `"
-                              (:test-file data) "`. Follow the instructions exactly.")
+                           (:test-file data) "`. Follow the instructions exactly.")
    :max-tokens           8192})
 
 (defn- refine-params [data]
@@ -160,8 +160,8 @@
                           {:event       :refine/give-up
                            :data-schema [:map [:reason :string]]}]
    :initial-user-message (str "Refine the tests in `" (:test-file data)
-                              "` for `" (:function data) "` until they pass and seal `:covers`."
-                              " REPL port: " (:nrepl-port data) ".")
+                           "` for `" (:function data) "` until they pass and seal `:covers`."
+                           " REPL port: " (:nrepl-port data) ".")
    :max-tokens           16384})
 
 (defn- repl-mgr-params [data]
@@ -172,8 +172,8 @@
                           {:event       :repl/failed
                            :data-schema [:map [:reason :string]]}]
    :initial-user-message (str "Establish a TEST-mode nREPL for the project at `"
-                              (:project-dir data)
-                              "`. Follow the procedure exactly.")
+                           (:project-dir data)
+                           "`. Follow the procedure exactly.")
    :max-tokens           4096})
 
 ;; ---------------------------------------------------------------------------
@@ -192,9 +192,9 @@
     (some (fn [line]
             (when-let [[_ port kind dir] (re-find discover-line-re line)]
               (when (and (not= "shadow" kind)
-                         (= target (-> dir str/trim io/file .getAbsolutePath)))
+                      (= target (-> dir str/trim io/file .getAbsolutePath)))
                 (Integer/parseInt port))))
-          (str/split-lines output))))
+      (str/split-lines output))))
 
 (defn- post-self-event!
   "Send `event` (with optional `data`) back to the current chart session."
@@ -217,28 +217,28 @@
         On hit, fire `:repl/found`; on miss, fire `:repl/need-llm`."
   []
   (script
-   {:expr
-    (fn [env data]
-      (let [pre-port (:nrepl-port data)]
-        (cond
-          (some? pre-port)
-          (do (post-self-event! env :repl/found {:port pre-port})
-              nil)
+    {:expr
+     (fn [env data]
+       (let [pre-port (:nrepl-port data)]
+         (cond
+           (some? pre-port)
+           (do (post-self-event! env :repl/found {:port pre-port})
+               nil)
 
-          :else
-          (let [registry (or (:escapement/tool-registry env)
-                             (get-in env [:escapement/engine :tool-registry]))
-                {:keys [result is-error]}
-                (if registry
-                  (tp/dispatch registry :shell/run
-                               {:command "clj-nrepl-eval --discover-ports"})
-                  {:result "" :is-error true})
-                port (when-not is-error
-                       (parse-discover-output (or result "") (:project-dir data)))]
-            (if port
-              (post-self-event! env :repl/found {:port port})
-              (post-self-event! env :repl/need-llm {}))
-            nil))))}))
+           :else
+           (let [registry (or (:escapement/tool-registry env)
+                            (get-in env [:escapement/engine :tool-registry]))
+                 {:keys [result is-error]}
+                 (if registry
+                   (tp/dispatch registry :shell/run
+                     {:command "clj-nrepl-eval --discover-ports"})
+                   {:result "" :is-error true})
+                 port     (when-not is-error
+                            (parse-discover-output (or result "") (:project-dir data)))]
+             (if port
+               (post-self-event! env :repl/found {:port port})
+               (post-self-event! env :repl/need-llm {}))
+             nil))))}))
 
 ;; ---------------------------------------------------------------------------
 ;; Chart
@@ -246,147 +246,147 @@
 
 (def agent
   (chart/statechart
-   {:initial :run}
+    {:initial :run}
 
-   (state {:id :run :initial :init}
+    (state {:id :run :initial :init}
 
-          ;; Compute derived fields first, then enter the parallel work block.
-          (state {:id :init}
-                 (on-entry {} (script {:expr init-derivations}))
-                 (transition {:target :work}))
+      ;; Compute derived fields first, then enter the parallel work block.
+      (state {:id :init}
+        (on-entry {} (script {:expr init-derivations}))
+        (transition {:target :work}))
 
-          (parallel {:id :work}
+      (parallel {:id :work}
 
-                    ;; =====================================================
-                    ;; Region A: the main pipeline
-                    ;; =====================================================
-                    (state {:id :pipeline :initial :behaviors}
+        ;; =====================================================
+        ;; Region A: the main pipeline
+        ;; =====================================================
+        (state {:id :pipeline :initial :behaviors}
 
-                           (state {:id :behaviors}
-                                  (h/llm-conversation
-                                   {:id        "behaviors"
-                                    :params-fn (fn [_env data] (analysis-params :behaviors data))})
-                                  (transition {:event :phase/done :target :abstraction}))
+          (state {:id :behaviors}
+            (h/llm-conversation
+              {:id        "behaviors"
+               :params-fn (fn [_env data] (analysis-params :behaviors data))})
+            (transition {:event :phase/done :target :abstraction}))
 
-                           (state {:id :abstraction}
-                                  (h/llm-conversation
-                                   {:id        "abstraction"
-                                    :params-fn (fn [_env data] (analysis-params :abstraction data))})
-                                  (transition {:event :phase/done :target :choose-path}))
+          (state {:id :abstraction}
+            (h/llm-conversation
+              {:id        "abstraction"
+               :params-fn (fn [_env data] (analysis-params :abstraction data))})
+            (transition {:event :phase/done :target :choose-path}))
 
-                           (state {:id :choose-path}
-                                  (transition {:target :gap-analysis
-                                               :cond   (fn [_env data] (boolean (:existing? data)))})
-                                  (transition {:target :write}))
+          (state {:id :choose-path}
+            (transition {:target :gap-analysis
+                         :cond   (fn [_env data] (boolean (:existing? data)))})
+            (transition {:target :write}))
 
-                           ;; NEW path
-                           (state {:id :write}
-                                  (h/llm-conversation
-                                   {:id        "write"
-                                    :params-fn (fn [_env data] (mutation-params :write data))})
-                                  (transition {:event :phase/done :target :critique}))
+          ;; NEW path
+          (state {:id :write}
+            (h/llm-conversation
+              {:id        "write"
+               :params-fn (fn [_env data] (mutation-params :write data))})
+            (transition {:event :phase/done :target :critique}))
 
-                           (state {:id :critique}
-                                  (h/llm-conversation
-                                   {:id        "critique"
-                                    :params-fn (fn [_env data] (mutation-params :critique data))})
-                                  (transition {:event :phase/done :target :await-repl}))
+          (state {:id :critique}
+            (h/llm-conversation
+              {:id        "critique"
+               :params-fn (fn [_env data] (mutation-params :critique data))})
+            (transition {:event :phase/done :target :await-repl}))
 
-                           ;; EXISTING path
-                           (state {:id :gap-analysis}
-                                  (h/llm-conversation
-                                   {:id        "gap-analysis"
-                                    :params-fn (fn [_env data] (analysis-params :gap-analysis data))})
-                                  (transition {:event :phase/done :target :patch}))
+          ;; EXISTING path
+          (state {:id :gap-analysis}
+            (h/llm-conversation
+              {:id        "gap-analysis"
+               :params-fn (fn [_env data] (analysis-params :gap-analysis data))})
+            (transition {:event :phase/done :target :patch}))
 
-                           (state {:id :patch}
-                                  (h/llm-conversation
-                                   {:id        "patch"
-                                    :params-fn (fn [_env data] (mutation-params :patch data))})
-                                  (transition {:event :phase/done :target :await-repl}))
+          (state {:id :patch}
+            (h/llm-conversation
+              {:id        "patch"
+               :params-fn (fn [_env data] (mutation-params :patch data))})
+            (transition {:event :phase/done :target :await-repl}))
 
-                           ;; Wait for the REPL manager region to publish a port.
-                           ;; Eventless transition fires immediately if `:nrepl-port`
-                           ;; is already set by the time we arrive; otherwise we
-                           ;; transition on the `:repl/available` event.
-                           (state {:id :await-repl}
-                                  ;; If the manager region already published the port
-                                  ;; before we got here, self-post the event so we
-                                  ;; transition immediately rather than wait forever.
-                                  (on-entry {}
-                                            (script {:expr (fn [env data]
-                                                             (when (:nrepl-port data)
-                                                               (post-self-event! env :repl/available
-                                                                                 {:port (:nrepl-port data)}))
-                                                             nil)}))
-                                  (transition {:event :repl/available :target :refine})
-                                  (transition {:event :repl/aborted :target :pipeline-failed}))
+          ;; Wait for the REPL manager region to publish a port.
+          ;; Eventless transition fires immediately if `:nrepl-port`
+          ;; is already set by the time we arrive; otherwise we
+          ;; transition on the `:repl/available` event.
+          (state {:id :await-repl}
+            ;; If the manager region already published the port
+            ;; before we got here, self-post the event so we
+            ;; transition immediately rather than wait forever.
+            (on-entry {}
+              (script {:expr (fn [env data]
+                               (when (:nrepl-port data)
+                                 (post-self-event! env :repl/available
+                                   {:port (:nrepl-port data)}))
+                               nil)}))
+            (transition {:event :repl/available :target :refine})
+            (transition {:event :repl/aborted :target :pipeline-failed}))
 
-                           (state {:id :refine}
-                                  (h/llm-conversation
-                                   {:id        "refine"
-                                    :params-fn (fn [_env data] (refine-params data))})
-                                  (transition {:event :refine/sealed :target :pipeline-done}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign :final-status :sealed)
-                                                                (ops/assign :covers-signature
-                                                                            (get-in data [:_event :data :signature]))])}))
-                                  (transition {:event :refine/give-up :target :pipeline-done}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign :final-status :gave-up)
-                                                                (ops/assign :give-up-reason
-                                                                            (get-in data [:_event :data :reason]))])})))
+          (state {:id :refine}
+            (h/llm-conversation
+              {:id        "refine"
+               :params-fn (fn [_env data] (refine-params data))})
+            (transition {:event :refine/sealed :target :pipeline-done}
+              (script {:expr (fn [_env data]
+                               [(ops/assign :final-status :sealed)
+                                (ops/assign :covers-signature
+                                  (get-in data [:_event :data :signature]))])}))
+            (transition {:event :refine/give-up :target :pipeline-done}
+              (script {:expr (fn [_env data]
+                               [(ops/assign :final-status :gave-up)
+                                (ops/assign :give-up-reason
+                                  (get-in data [:_event :data :reason]))])})))
 
-                           (final {:id :pipeline-done})
-                           (final {:id :pipeline-failed}
-                                  (on-entry {}
-                                            (script {:expr (fn [_env _]
-                                                             [(ops/assign :final-status :repl-unavailable)])}))))
+          (final {:id :pipeline-done})
+          (final {:id :pipeline-failed}
+            (on-entry {}
+              (script {:expr (fn [_env _]
+                               [(ops/assign :final-status :repl-unavailable)])}))))
 
-                    ;; =====================================================
-                    ;; Region B: the REPL manager
-                    ;; =====================================================
-                    (state {:id :repl-mgr :initial :discovering}
+        ;; =====================================================
+        ;; Region B: the REPL manager
+        ;; =====================================================
+        (state {:id :repl-mgr :initial :discovering}
 
-                           (state {:id :discovering}
-                                  (on-entry {} (discover-action))
-                                  (transition {:event :repl/found :target :repl-ready}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign :nrepl-port
-                                                                            (get-in data [:_event :data :port]))
-                                                                (ops/assign :repl-status :discovered)])}))
-                                  (transition {:event :repl/need-llm :target :inspecting}))
+          (state {:id :discovering}
+            (on-entry {} (discover-action))
+            (transition {:event :repl/found :target :repl-ready}
+              (script {:expr (fn [_env data]
+                               [(ops/assign :nrepl-port
+                                  (get-in data [:_event :data :port]))
+                                (ops/assign :repl-status :discovered)])}))
+            (transition {:event :repl/need-llm :target :inspecting}))
 
-                           (state {:id :inspecting}
-                                  (h/llm-conversation
-                                   {:id        "repl-mgr"
-                                    :params-fn (fn [_env data] (repl-mgr-params data))})
-                                  (transition {:event :repl/ready-evt :target :repl-ready}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign :nrepl-port
-                                                                            (get-in data [:_event :data :port]))
-                                                                (ops/assign :repl-status :started)])}))
-                                  (transition {:event :repl/failed :target :repl-aborted}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign :repl-status :failed)
-                                                                (ops/assign :repl-failure-reason
-                                                                            (get-in data [:_event :data :reason]))])})))
+          (state {:id :inspecting}
+            (h/llm-conversation
+              {:id        "repl-mgr"
+               :params-fn (fn [_env data] (repl-mgr-params data))})
+            (transition {:event :repl/ready-evt :target :repl-ready}
+              (script {:expr (fn [_env data]
+                               [(ops/assign :nrepl-port
+                                  (get-in data [:_event :data :port]))
+                                (ops/assign :repl-status :started)])}))
+            (transition {:event :repl/failed :target :repl-aborted}
+              (script {:expr (fn [_env data]
+                               [(ops/assign :repl-status :failed)
+                                (ops/assign :repl-failure-reason
+                                  (get-in data [:_event :data :reason]))])})))
 
-                           ;; Final states. On entry, broadcast :repl/available
-                           ;; (or :repl/aborted) so the pipeline region can move on.
-                           (final {:id :repl-ready}
-                                  (on-entry {}
-                                            (script {:expr (fn [env data]
-                                                             (post-self-event! env :repl/available
-                                                                               {:port (:nrepl-port data)})
-                                                             nil)})))
-                           (final {:id :repl-aborted}
-                                  (on-entry {}
-                                            (script {:expr (fn [env _data]
-                                                             (post-self-event! env :repl/aborted {})
-                                                             nil)})))))
+          ;; Final states. On entry, broadcast :repl/available
+          ;; (or :repl/aborted) so the pipeline region can move on.
+          (final {:id :repl-ready}
+            (on-entry {}
+              (script {:expr (fn [env data]
+                               (post-self-event! env :repl/available
+                                 {:port (:nrepl-port data)})
+                               nil)})))
+          (final {:id :repl-aborted}
+            (on-entry {}
+              (script {:expr (fn [env _data]
+                               (post-self-event! env :repl/aborted {})
+                               nil)})))))
 
-          ;; Both regions in final → parallel raises done.state.work.
-          (transition {:event :done.state.work :target :finished})
+      ;; Both regions in final → parallel raises done.state.work.
+      (transition {:event :done.state.work :target :finished})
 
-          (final {:id :finished}))))
+      (final {:id :finished}))))
