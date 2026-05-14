@@ -1384,6 +1384,34 @@ Platform API backend).
 * Stateless: `store: false`. The full conversation is re-sent on every
   turn (no server-side caching across turns beyond reasoning summaries).
 
+=== `escapement.llm.multi` — multi-backend dispatcher
+
+Routes each request to a sub-backend based on the requested `:model`. A
+chart that asks for `claude-sonnet-4-6` in one state and `gpt-5.2-codex`
+in the next will reach Anthropic and the codex subscription endpoint
+respectively, with no caller changes.
+
+[source,clojure]
+----
+(require '[escapement.llm.api          :as anthropic]
+         '[escapement.llm.openai-codex :as codex]
+         '[escapement.llm.multi        :as multi])
+
+(def backend
+  (multi/new-backend
+    {:routes          [[#"^claude-" (anthropic/new-backend {...})]
+                       [#"^gpt-5"   (codex/new-backend {})]]
+     :default-backend (anthropic/new-backend {...})}))
+----
+
+Matchers may be a regex, a set of exact-match strings, or a predicate
+`(fn [model-string] boolean)`. Routes are tried in order; first match
+wins. If no route matches, `:default-backend` handles the request, or an
+`ex-info` is thrown when no default is configured.
+
+The CLI assembles this dispatcher automatically when more than one
+credential is available — see <<cli>> for the default route table.
+
 === `escapement.llm.cache` — content-addressed disk cache
 
 Defined in `src/escapement/llm/cache.clj`. Wraps any `LLMBackend` and
@@ -1675,9 +1703,17 @@ The pump loop:
    and try again. This is what lets the chart park while the LLM is
    thinking.
 
+[[cli]]
 === CLI
 
-`src/escapement/cli.clj`. Two subcommands: `info` and `run`.
+`src/escapement/cli.clj`. Subcommands:
+
+* `run <chart-sym>` — execute a chart (the everyday command).
+* `info` — print environment + the auto-detected LLM backend layout.
+* `login codex` / `logout codex` — OAuth flow for the
+  `escapement.llm.openai-codex` backend; opens a browser, stores
+  credentials in `~/.escapement/openai-auth.json` (mode 0600). One-time;
+  the saved token auto-refreshes.
 
 Output paths:
 
@@ -1697,10 +1733,27 @@ Initial data:
 
 LLM backend selection:
 
-* `--backend (api|openai|codex)` — explicit. Without it, the CLI
-  auto-detects from `ANTHROPIC_API_KEY` / `ZAI_API_KEY` / `OPENAI_API_KEY` /
-  `OPENROUTER_API_KEY` in that precedence order, then falls back to a
-  saved codex OAuth token (`~/.escapement/openai-auth.json`) if present.
+* `--backend (api|openai|codex)` — explicit single backend.
+* Without `--backend`, the CLI scans available credentials and
+  auto-assembles a backend:
++
+[options="header"]
+|===
+| Credential               | Sub-backend kind | Default route
+| `ANTHROPIC_API_KEY`      | `api` (Anthropic) | `+#"^claude-"+`
+| Saved codex OAuth token  | `openai-codex`    | `+#"^gpt-5"+`
+| `OPENAI_API_KEY`         | `openai`          | `+#"^gpt-"+`
+| `OPENROUTER_API_KEY`     | `openai` (router) | `+#".+/.+"+`
+| `ZAI_API_KEY`            | `api` (z.ai)      | `+#"^glm-"+`
+|===
++
+With a single credential the bare sub-backend is used. With two or more,
+a `escapement.llm.multi` dispatcher is built so that a per-state
+`:model` keyword in `params-fn` automatically reaches the right
+provider. The first available credential (in the table's preference
+order) becomes the default backend when no route matches. Run
+`escapement info` to see exactly what would be built for the current
+environment.
 * `--model`, `--api-base-url`, `--api-key-env` override the auto-detected
   values.
 
@@ -1709,6 +1762,9 @@ Display:
 * `--tui` forces the persistent TUI on (requires a TTY).
 * `--no-tui` forces it off (useful in CI, or to fall back to stdin prompts
   for `:human-input` invocations).
+* `--debug` enables the inspector overlay (press `?` to open) and pauses
+  before the first event when `:debug :auto-pause?` is true in
+  `.escapement.edn`. Forces the TUI on; cannot combine with `--no-tui`.
 * By default the TUI is on for charts marked `^{:interactive? true}` and off
   otherwise. See <<human-interaction>>.
 
@@ -1909,18 +1965,14 @@ require network access and real credentials.
   bound state on resume spawns a fresh worker with an empty message
   history. At-most-once cannot be guaranteed for side-effecting tools.
 
-* **OpenAI-compatible backend is deferred.** Only Anthropic-shape APIs
-  (Anthropic, z.ai) ship in v0.
-
 * **Sandboxing of third-party charts is deferred.** A chart can reference
   arbitrary tools and arbitrary side-effects through `:script` and
   `:on-entry`. There is currently no policy layer.
 
-* **TUI is deferred.** Inspection is JSONL + `jq`.
-
 * **LLM token budgets are per-turn, not per-session.** Long iterative
-  runs can accumulate context. Use `:max-tokens` in `params-fn` and prompt
-  for brevity. The `iterate` chart caps at 512.
+  runs accumulate context. Use `:max-tokens` in `params-fn`, prompt for
+  brevity, and watch the `:context-used-frac` field on
+  `:llm/response` transcript events (see <<context-tracking>>).
 
 [[contributing]]
 == Contributing and running tests
