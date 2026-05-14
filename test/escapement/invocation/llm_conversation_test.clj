@@ -397,7 +397,7 @@
 ;; #4: Bad input twice -> fatal error
 ;; ---------------------------------------------------------------------------
 
-(specification "bad input twice on same tool_use_id triggers :llm.error"
+(specification "bad input twice on same tool_use_id triggers :error.llm.tool-validation"
                (let [;; The LLM keeps producing bad input (different ids each time mimicking re-tries).
                      backend (mock-backend
                               [(tool-use-response [{:id "x1" :name "event__pick" :input {}}])
@@ -413,7 +413,7 @@
                                                             {:allowed-events       [{:event       :pick
                                                                                      :data-schema [:map [:choice :string]]}]
                                                              :initial-user-message "pick one"})})
-                                             (transition {:event :llm.error :target :failed}
+                                             (transition {:event :error.llm.tool-validation :target :failed}
                                                          (script {:expr (fn [_ d]
                                                                           (reset! err-seen (:_event d))
                                                                           nil)})))
@@ -423,8 +423,8 @@
                  (assertions
                   "chart reaches :failed"
                   (dct/in? t :failed) => true
-                  "error event carries :reason :tool-validation-failed"
-                  (get-in @err-seen [:data :reason]) => :tool-validation-failed)))
+                  "error event carries :reason :tool-validation"
+                  (get-in @err-seen [:data :reason]) => :tool-validation)))
 
 ;; ---------------------------------------------------------------------------
 ;; #5: Bad-then-good single retry recovery
@@ -568,3 +568,64 @@
                        (some (fn [b] (and (= :text (:type b))
                                           (= "tell me more" (:text b))))))
                   => true)))
+
+;; ---------------------------------------------------------------------------
+;; #8: Per-invocation budgets — :max-turns and :max-conversation-duration-ms
+;; ---------------------------------------------------------------------------
+
+(specification ":max-turns budget fires :error.llm.max-turns"
+  ;; The model keeps emitting tool_use forever (infinite loop). Without a
+  ;; budget the worker would never stop; :max-turns 3 makes it self-cancel.
+  (let [;; A fake event-tool that always passes validation so the loop keeps
+        ;; running through tool dispatch.
+        always-tool (tool-use-response
+                     [{:id "u1" :name "event__noop" :input {:x 1}}])
+        backend (mock-backend [always-tool always-tool always-tool always-tool])
+        err-seen (atom nil)
+        chart    (chart/statechart
+                  {:initial :wrap}
+                  (state {:id :wrap :initial :work}
+                    (state {:id :work}
+                      (h/llm-conversation
+                       {:id        "p"
+                        :params-fn (fn [_ _]
+                                     {:max-turns            3
+                                      :allowed-events       [{:event :noop
+                                                              :data-schema [:map [:x :int]]}]
+                                      :initial-user-message "go"})})
+                      ;; Catch-all per-family.
+                      (transition {:event :error.llm.* :target :failed}
+                        (script {:expr (fn [_ d] (reset! err-seen (:_event d)) nil)})))
+                    (final {:id :failed})))
+        t        (new-llm-test-env {:statechart chart :backend backend})
+        t        (await-config! t :failed 3000)]
+    (assertions
+      "chart reached :failed"
+      (dct/in? t :failed) => true
+      "error event was :error.llm.max-turns"
+      (some-> @err-seen :name) => :error.llm.max-turns
+      "carries the :limit"
+      (get-in @err-seen [:data :limit]) => 3)))
+
+(specification ":on-end-turn-event data now carries :text and :from"
+  (let [backend (mock-backend [(end-turn-response "the answer is 42")])
+        seen    (atom nil)
+        chart   (chart/statechart
+                 {:initial :wrap}
+                 (state {:id :wrap :initial :work}
+                   (state {:id :work}
+                     (h/llm-conversation
+                      {:id        "advisor"
+                       :params-fn (fn [_ _] {:initial-user-message "go"})})
+                     (transition {:event :llm.idle :target :done}
+                       (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
+                   (final {:id :done})))
+        t       (new-llm-test-env {:statechart chart :backend backend})
+        t       (await-config! t :done 3000)]
+    (assertions
+      "chart reached :done"
+      (dct/in? t :done) => true
+      ":on-end-turn-event data has the assistant's final text"
+      (get-in @seen [:data :text]) => "the answer is 42"
+      "and the speaker's invokeid"
+      (get-in @seen [:data :from]) => "advisor")))

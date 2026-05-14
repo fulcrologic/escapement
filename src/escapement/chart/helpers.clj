@@ -55,7 +55,7 @@
         :answer-schema    optional Malli schema validating the answer
         :on-answer-event  default :human.answer
         :on-cancel-event  default :human.cancelled
-        :on-error-event   default :human.error
+        ;; Errors fire SCXML canonical :error.human.<reason> events.
         :render           required for :custom; (fn [env data] answer)"
   [{:keys [id params-fn]}]
   (assert id "human-input requires :id")
@@ -168,7 +168,7 @@
                          {:expr (fn [_ _]
                                   "User declined to choose; please proceed with your best judgement.")}))
                        (elt/transition
-                        {:event :human.error :target converse-id}
+                        {:event :error.human.* :target converse-id}
                         (tell-llm
                          {:expr (fn [_ _]
                                   "Question prompt errored; please proceed without that input.")})))
@@ -191,7 +191,7 @@
                          {:expr (fn [_ _]
                                   "User declined to answer; please proceed without that input.")}))
                        (elt/transition
-                        {:event :human.error :target converse-id}
+                        {:event :error.human.* :target converse-id}
                         (tell-llm
                          {:expr (fn [_ _]
                                   "Question prompt errored; please proceed without that input.")})))])))

@@ -4,7 +4,15 @@
   On state entry a worker thread is spawned that asks the user a question through
   an injected `HumanRenderer`. When the user answers, the worker posts
   `:on-answer-event` to the parent session with `{:answer <value>}` and dies. On
-  cancel or error it posts `:on-cancel-event` / `:on-error-event` instead.
+  cancel it posts `:on-cancel-event`. On a real failure it fires an
+  SCXML-style canonical error event:
+
+    :error.human.invalid-answer  — answer failed `:answer-schema`
+    :error.human.renderer        — renderer threw / terminal failure
+    :error.human.worker-exception — uncaught throwable in the worker
+
+  Chart authors typically use `(transition {:event :error.human.* :target ...})`
+  to catch any human-side failure with a single line.
 
   The processor is renderer-agnostic. Two real renderers ship with escapement:
 
@@ -21,8 +29,11 @@
      :answer-schema    optional Malli schema for the answer
      :on-answer-event  default :human.answer
      :on-cancel-event  default :human.cancelled
-     :on-error-event   default :human.error
-     :render           (fn [env data] answer)        ; required for :custom}"
+     :render           (fn [env data] answer)        ; required for :custom
+
+   Errors fire canonical `:error.human.<reason>` events (see ns docstring);
+   chart authors transition on `:error.human.*` rather than configuring an
+   `:on-error-event`.}"
   (:require
    [clojure.string :as str]
    [com.fulcrologic.statecharts :as sc]
@@ -164,13 +175,20 @@
     (throw (ex-info (str "Unsupported :human-input :kind " kind)
                     {:kind kind}))))
 
+(defn- error-event
+  "SCXML-style canonical error event for the human-input invocation."
+  [reason]
+  (keyword (str "error.human." (name reason))))
+
 (defn- run-worker!
   [{:keys [renderer worker-state params parent-ctx transcript-fn data]}]
-  (let [{:keys [kind on-answer-event on-cancel-event on-error-event answer-schema]
+  (let [{:keys [kind on-answer-event on-cancel-event answer-schema]
          :or   {on-answer-event :human.answer
-                on-cancel-event :human.cancelled
-                on-error-event  :human.error}} params
-        env (:env parent-ctx)]
+                on-cancel-event :human.cancelled}} params
+        env         (:env parent-ctx)
+        post-error! (fn [reason data]
+                      (post-event-to-parent! parent-ctx (error-event reason)
+                                             (assoc data :reason reason)))]
     (try
       (transcript! transcript-fn
                    {:event :human-input/start
@@ -200,10 +218,8 @@
                            {:event :human-input/validation-failed
                             :ts    (now-ms)
                             :data  {:errors err}})
-              (post-event-to-parent! parent-ctx on-error-event
-                                     {:reason :answer-validation-failed
-                                      :errors err
-                                      :answer answer}))
+              (post-error! :invalid-answer
+                           {:errors err :answer answer}))
 
             :else
             (do
@@ -230,9 +246,7 @@
                           :ts    (now-ms)
                           :data  {:message (.getMessage t)}})
             (try
-              (post-event-to-parent! parent-ctx on-error-event
-                                     {:reason  :worker-exception
-                                      :message (.getMessage t)})
+              (post-error! :worker-exception {:message (.getMessage t)})
               (catch Throwable _ nil)))))
       (finally
         (reset! worker-state :dying)))))

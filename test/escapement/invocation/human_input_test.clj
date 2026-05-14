@@ -49,7 +49,7 @@
 
 (defn- ask-chart
   "Build a 3-state chart that invokes :human-input in :ask, captures the answer
-  into :captured on :human.answer, and ends in :done. On :human.error or
+  into :captured on :human.answer, and ends in :done. On :error.human.* or
   :human.cancelled it transitions to :errored."
   [params-fn]
   (chart/statechart
@@ -62,7 +62,7 @@
                                               [(ops/assign :captured
                                                            (get-in data [:_event :data :answer]))])}))
                  (transition {:event :human.cancelled :target :errored})
-                 (transition {:event :human.error     :target :errored}))
+                 (transition {:event :error.human.*   :target :errored}))
           (final {:id :done})
           (final {:id :errored}))))
 
@@ -108,7 +108,7 @@
                   (dct/in? t :done)        => true
                   (:captured (dct/data t)) => true)))
 
-(specification "schema validation routes to :human.error"
+(specification "schema validation routes to :error.human.invalid-answer"
   ;; Stub returns a number when schema demands a non-empty string.
                (let [r (stub {:text ""})
                      c (ask-chart (fn [_ _] {:kind          :text
@@ -116,7 +116,7 @@
                                              :answer-schema [:string {:min 1}]}))
                      t (await-config! (new-env-with-renderer c r) :errored 2000)]
                  (assertions
-                  "validation failure posts :human.error → :errored"
+                  "validation failure posts :error.human.invalid-answer → :errored"
                   (dct/in? t :errored) => true)))
 
 (specification ":custom kind"

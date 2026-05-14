@@ -11,7 +11,7 @@
   * Event-tool `tool_use` blocks are validated against the declared `:data-schema`. On
     success the corresponding chart event is posted to the parent session (with the tool
     input as event data) and a synthetic `tool_result` `\"ok\"` is appended. On failure the
-    LLM gets one corrective retry; a second failure aborts with `:on-error-event`.
+    LLM gets one corrective retry; a second failure aborts with `:error.llm.tool-validation`.
 
   When the assistant returns `:end_turn`, the worker fires `:on-end-turn-event` to the
   parent and parks until either `:llm.user-message` arrives via `forward-event!` (continues
@@ -297,15 +297,183 @@
           {:result-block {:type :tool_result :tool_use_id id
                           :content (str "Unknown tool: " name) :is-error true}})))))
 
+(defn- error-event
+  "Compose the SCXML-style error event name from a `:reason` keyword.
+   `:reason :backend` → `:error.llm.backend`."
+  [reason]
+  (keyword (str "error.llm." (name reason))))
+
+(defn- handle-running-turn!
+  "Issue one LLM round-trip and process its response. Returns one of:
+     :continue        — call `recur` in the outer loop
+     :error-and-die   — error already posted; outer loop should `recur` (which
+                        then hits the :dying branch)
+     :idle            — :end_turn fired; outer loop should `recur` and park
+                        in :awaiting-user."
+  [{:keys [backend tool-registry transcript-fn
+           name->tool-kw name->event-entry tool-defs
+           worker-state messages-atom retry-counts
+           params parent-ctx]}
+   post-error! on-end-turn-event]
+  (let [request (build-request
+                 {:system               (:system params)
+                  :messages             @messages-atom
+                  :tools                tool-defs
+                  :model                (:model params)
+                  :max-tokens           (:max-tokens params)
+                  :temperature          (:temperature params)
+                  :top-p                (:top-p params)
+                  :top-k                (:top-k params)
+                  :stop-sequences       (:stop-sequences params)
+                  :thinking             (:thinking params)
+                  :tool-choice          (:tool-choice params)
+                  :metadata             (:metadata params)
+                  :system-cache-control (:system-cache-control params)
+                  :tools-cache-control  (:tools-cache-control params)
+                  :auto-cache?          (get params :auto-cache? true)
+                  :conv-id              (:conversation/id params)})
+        _        (transcript! transcript-fn
+                              {:event :llm/request :ts (now-ms)
+                               :data  {:n-messages (count (:messages request))}})
+        response (try
+                   (llm/send-turn backend request)
+                   (catch Throwable t
+                     {:_throw t}))]
+    (cond
+      ;; Clean shutdown: chart left the state and our thread was interrupted
+      ;; mid-HTTP. Not an error — exit quietly.
+      (and (:_throw response)
+           (or (instance? InterruptedException (:_throw response))
+               (instance? InterruptedException (ex-cause (:_throw response)))
+               (= :dying @worker-state)))
+      (do
+        (transcript! transcript-fn
+                     {:event :llm/worker-exit :ts (now-ms)
+                      :data  {:reason :interrupted-mid-turn}})
+        (reset! worker-state :dying)
+        :error-and-die)
+
+      (:_throw response)
+      (let [^Throwable t (:_throw response)
+            message (or (.getMessage t)
+                        (some-> (ex-cause t) .getMessage)
+                        (.toString t))
+            details {:message message
+                     :class   (-> t class .getName)
+                     :ex-data (when-let [d (ex-data t)]
+                                (try (pr-str d)
+                                     (catch Throwable _ "<unprintable>")))
+                     :stack   (->> (.getStackTrace t)
+                                   (take 6)
+                                   (mapv #(str (.getClassName ^StackTraceElement %)
+                                               "." (.getMethodName ^StackTraceElement %)
+                                               "(" (.getFileName ^StackTraceElement %)
+                                               ":" (.getLineNumber ^StackTraceElement %) ")")))}]
+        (transcript! transcript-fn {:event :llm/error :ts (now-ms)
+                                    :data  (assoc details :reason :backend)})
+        (post-error! :backend (select-keys details [:message :class]))
+        (reset! worker-state :dying)
+        :error-and-die)
+
+      :else
+      (let [{:keys [stop-reason content usage model]} response
+            ctx-window    (some-> model models/context-window)
+            input-tokens  (:input-tokens usage)
+            ctx-used-frac (when (and ctx-window input-tokens (pos? ctx-window))
+                            (/ (double input-tokens) (double ctx-window)))]
+        (transcript! transcript-fn
+                     {:event :llm/response
+                      :ts    (now-ms)
+                      :data  (cond-> {:stop-reason stop-reason
+                                      :n-blocks    (count content)
+                                      :usage       (or usage {})}
+                               model         (assoc :model model)
+                               ctx-window    (assoc :context-window ctx-window)
+                               ctx-used-frac (assoc :context-used-frac
+                                                    (Double/parseDouble (format "%.3f" ctx-used-frac))))})
+        (when (and ctx-used-frac (>= ctx-used-frac 0.8))
+          (transcript! transcript-fn
+                       {:event :llm/context-warning
+                        :ts    (now-ms)
+                        :data  {:input-tokens   input-tokens
+                                :context-window ctx-window
+                                :used-frac      ctx-used-frac
+                                :model          model}}))
+        (swap! messages-atom conj (assistant-message content))
+        (case stop-reason
+          :end_turn
+          (do
+            ;; Carry the assistant's final text + invokeid so chart authors
+            ;; can route the answer back to another invocation (advisor /
+            ;; team pattern). Backward compatible: data was previously {}.
+            (let [final-text (->> content
+                                  (filter #(= :text (:type %)))
+                                  (map :text)
+                                  (apply str))]
+              (post-event-to-parent! parent-ctx on-end-turn-event
+                                     {:text final-text
+                                      :from (:invokeid parent-ctx)}))
+            (transition-state! worker-state :awaiting-user)
+            :idle)
+
+          :tool_use
+          (let [tool-use-blocks (find-tool-uses content)
+                results         (atom [])
+                fatal           (atom nil)]
+            (doseq [b tool-use-blocks
+                    :while (nil? @fatal)]
+              (let [{:keys [result-block fatal? error-data]}
+                    (handle-tool-use-block
+                     {:tool-registry     tool-registry
+                      :name->tool-kw     name->tool-kw
+                      :name->event-entry name->event-entry
+                      :retry-counts      retry-counts}
+                     parent-ctx b)]
+                (swap! results conj result-block)
+                (when fatal? (reset! fatal error-data))))
+            (swap! messages-atom conj (user-tool-results-message @results))
+            (if-let [err @fatal]
+              (do
+                (post-error! :tool-validation err)
+                (reset! worker-state :dying)
+                :error-and-die)
+              :continue))
+
+          ;; max_tokens / stop_sequence / pause_turn / refusal — anything else.
+          (do
+            (post-error! :unexpected-stop {:stop-reason stop-reason})
+            (reset! worker-state :dying)
+            :error-and-die))))))
+
 (defn- run-worker!
   "Worker loop. Reads from `worker-state` atom and `user-msg-queue` for new user messages.
-   Drives the LLM via `backend`, dispatches tools, posts events back to parent."
+   Drives the LLM via `backend`, dispatches tools, posts events back to parent.
+
+   Per-invocation budgets:
+     :max-turns                    — maximum total LLM round-trips before the
+                                     worker self-cancels with :error.llm.max-turns.
+     :max-conversation-duration-ms — wall-clock budget (in ms) from worker
+                                     start to a clean :end_turn. Self-cancels
+                                     with :error.llm.timeout when exceeded.
+
+   Error events follow SCXML convention `:error.llm.<reason>`:
+     :error.llm.backend          — backend call threw (HTTP / parse / etc.)
+     :error.llm.tool-validation  — tool/event-tool input failed schema twice
+     :error.llm.unexpected-stop  — stop_reason other than :end_turn / :tool_use
+     :error.llm.max-turns        — :max-turns budget exceeded
+     :error.llm.timeout          — :max-conversation-duration-ms exceeded
+     :error.llm.worker-exception — uncaught throwable in the worker loop"
   [{:keys [backend tool-registry transcript-fn
            name->tool-kw name->event-entry tool-defs
            worker-state messages-atom user-msg-queue retry-counts
            params parent-ctx] :as ctx}]
-  (let [{:keys [on-error-event on-end-turn-event]
-         :or   {on-error-event :llm.error on-end-turn-event :llm.idle}} params]
+  (let [{:keys [on-end-turn-event max-turns max-conversation-duration-ms]
+         :or   {on-end-turn-event :llm.idle}} params
+        started-at  (now-ms)
+        turn-count  (atom 0)
+        post-error! (fn [reason data]
+                      (post-event-to-parent! parent-ctx (error-event reason)
+                                             (assoc data :reason reason)))]
     (try
       (loop []
         (let [s @worker-state]
@@ -327,132 +495,40 @@
                 :else (recur)))
 
             (= :running s)
-            (let [request (build-request {:system               (:system params)
-                                          :messages             @messages-atom
-                                          :tools                tool-defs
-                                          :model                (:model params)
-                                          :max-tokens           (:max-tokens params)
-                                          :temperature          (:temperature params)
-                                          :top-p                (:top-p params)
-                                          :top-k                (:top-k params)
-                                          :stop-sequences       (:stop-sequences params)
-                                          :thinking             (:thinking params)
-                                          :tool-choice          (:tool-choice params)
-                                          :metadata             (:metadata params)
-                                          :system-cache-control (:system-cache-control params)
-                                          :tools-cache-control  (:tools-cache-control params)
-                                          :auto-cache?          (get params :auto-cache? true)
-                                          :conv-id              (:conversation/id params)})
-                  _       (transcript! transcript-fn {:event :llm/request :ts (now-ms)
-                                                      :data  {:n-messages (count (:messages request))}})
-                  response (try
-                             (llm/send-turn backend request)
-                             (catch Throwable t
-                               {:_throw t}))]
-              (cond
-                ;; Clean shutdown: the chart left this state and our thread was
-                ;; interrupted mid-HTTP. Not an error — exit quietly.
-                (and (:_throw response)
-                     (or (instance? InterruptedException (:_throw response))
-                         (instance? InterruptedException (ex-cause (:_throw response)))
-                         (= :dying @worker-state)))
-                (do
-                  (transcript! transcript-fn {:event :llm/worker-exit :ts (now-ms)
-                                              :data  {:reason :interrupted-mid-turn}})
-                  (reset! worker-state :dying)
-                  (recur))
+            (cond
+              ;; Budget checks BEFORE issuing the next call. Fire the canonical
+              ;; error and die — chart authors transition on :error.llm.*.
+              (and max-turns (>= @turn-count (long max-turns)))
+              (do
+                (transcript! transcript-fn
+                             {:event :llm/error :ts (now-ms)
+                              :data  {:reason :max-turns :limit max-turns}})
+                (post-error! :max-turns {:limit max-turns :turns @turn-count})
+                (reset! worker-state :dying)
+                (recur))
 
-                (:_throw response)
-                (let [^Throwable t (:_throw response)
-                      message (or (.getMessage t)
-                                  (some-> (ex-cause t) .getMessage)
-                                  (.toString t))
-                      details {:reason     :backend-threw
-                               :message    message
-                               :class      (-> t class .getName)
-                               :ex-data    (when-let [d (ex-data t)]
-                                             (try (pr-str d)
-                                                  (catch Throwable _ "<unprintable>")))
-                               :stack      (->> (.getStackTrace t)
-                                                (take 6)
-                                                (mapv #(str (.getClassName ^StackTraceElement %)
-                                                            "." (.getMethodName ^StackTraceElement %)
-                                                            "(" (.getFileName ^StackTraceElement %)
-                                                            ":" (.getLineNumber ^StackTraceElement %) ")")))}]
-                  (transcript! transcript-fn {:event :llm/error :ts (now-ms) :data details})
-                  (post-event-to-parent! parent-ctx on-error-event
-                                         (select-keys details [:reason :message :class]))
-                  (reset! worker-state :dying)
-                  (recur))
+              (and max-conversation-duration-ms
+                   (>= (- (now-ms) started-at) (long max-conversation-duration-ms)))
+              (let [elapsed (- (now-ms) started-at)]
+                (transcript! transcript-fn
+                             {:event :llm/error :ts (now-ms)
+                              :data  {:reason :timeout
+                                      :elapsed-ms elapsed
+                                      :limit-ms max-conversation-duration-ms}})
+                (post-error! :timeout {:elapsed-ms elapsed
+                                       :limit-ms   max-conversation-duration-ms})
+                (reset! worker-state :dying)
+                (recur))
 
-                :else
-                (let [{:keys [stop-reason content usage model]} response
-                      ;; Compute context-utilization hint when we know the model.
-                      ctx-window     (some-> model models/context-window)
-                      input-tokens   (:input-tokens usage)
-                      ctx-used-frac  (when (and ctx-window input-tokens (pos? ctx-window))
-                                       (/ (double input-tokens) (double ctx-window)))]
-                  (transcript! transcript-fn
-                               {:event :llm/response
-                                :ts    (now-ms)
-                                :data  (cond-> {:stop-reason stop-reason
-                                                :n-blocks    (count content)
-                                                :usage       (or usage {})}
-                                         model         (assoc :model model)
-                                         ctx-window    (assoc :context-window ctx-window)
-                                         ctx-used-frac (assoc :context-used-frac
-                                                              (Double/parseDouble (format "%.3f" ctx-used-frac))))})
-                  ;; Soft warning when context approaches the model's ceiling.
-                  ;; This is a transcript-level signal — chart-side scripts can
-                  ;; also call `escapement.llm.models/approaching-limit?` themselves.
-                  (when (and ctx-used-frac (>= ctx-used-frac 0.8))
-                    (transcript! transcript-fn
-                                 {:event :llm/context-warning
-                                  :ts    (now-ms)
-                                  :data  {:input-tokens   input-tokens
-                                          :context-window ctx-window
-                                          :used-frac      ctx-used-frac
-                                          :model          model}}))
-                  (swap! messages-atom conj (assistant-message content))
-                  (case stop-reason
-                    :end_turn
-                    (do
-                      (post-event-to-parent! parent-ctx on-end-turn-event {})
-                      ;; CAS: if stop arrived during end_turn, keep :dying.
-                      (transition-state! worker-state :awaiting-user)
-                      (recur))
-
-                    :tool_use
-                    (let [tool-use-blocks (find-tool-uses content)
-                          results         (atom [])
-                          fatal           (atom nil)]
-                      (doseq [b tool-use-blocks
-                              :while (nil? @fatal)]
-                        (let [{:keys [result-block fatal? error-data]}
-                              (handle-tool-use-block
-                               {:tool-registry     tool-registry
-                                :name->tool-kw     name->tool-kw
-                                :name->event-entry name->event-entry
-                                :retry-counts      retry-counts}
-                               parent-ctx b)]
-                          (swap! results conj result-block)
-                          (when fatal? (reset! fatal error-data))))
-                      ;; Append a single user message containing all tool_result blocks.
-                      (swap! messages-atom conj (user-tool-results-message @results))
-                      (if-let [err @fatal]
-                        (do
-                          (post-event-to-parent! parent-ctx on-error-event err)
-                          (reset! worker-state :dying)
-                          (recur))
-                        (recur)))
-
-                    ;; Other stop reasons (max_tokens, stop_sequence)
-                    (do
-                      (post-event-to-parent! parent-ctx on-error-event
-                                             {:reason :unexpected-stop
-                                              :stop-reason stop-reason})
-                      (reset! worker-state :dying)
-                      (recur))))))
+              :else
+              (do
+                (swap! turn-count inc)
+                (case (handle-running-turn! ctx post-error! on-end-turn-event)
+                  ;; All three outcomes just re-enter the loop; the inner
+                  ;; helper already mutated worker-state and posted events.
+                  :continue      (recur)
+                  :idle          (recur)
+                  :error-and-die (recur))))
 
             :else
             (recur))))
@@ -463,9 +539,7 @@
                                     :data  {:reason :exception
                                             :message (.getMessage t)}})
         (try
-          (post-event-to-parent! parent-ctx on-error-event
-                                 {:reason :worker-exception
-                                  :message (.getMessage t)})
+          (post-error! :worker-exception {:message (.getMessage t)})
           (catch Throwable _ nil))))))
 
 ;; ---------------------------------------------------------------------------
