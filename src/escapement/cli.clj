@@ -132,52 +132,6 @@
    (or base {})
    raw-params))
 
-(defn- autodetect-api-opts
-  "Inspect environment variables and return a map suitable for the `:api`
-   backend constructor, or nil if no key is available.
-
-   ANTHROPIC_API_KEY takes precedence over ZAI_API_KEY (Anthropic is canonical;
-   z.ai is a compat endpoint)."
-  []
-  (let [anthropic  (System/getenv "ANTHROPIC_API_KEY")
-        zai        (System/getenv "ZAI_API_KEY")
-        openai     (System/getenv "OPENAI_API_KEY")
-        openrouter (System/getenv "OPENROUTER_API_KEY")]
-    (cond
-      (and anthropic (not (str/blank? anthropic)))
-      {:source        "ANTHROPIC_API_KEY"
-       :backend-kind  :api
-       :api-key       anthropic
-       :base-url      "https://api.anthropic.com"
-       :default-model "claude-sonnet-4-6"
-       :auth-mode     :x-api-key}
-
-      (and zai (not (str/blank? zai)))
-      {:source        "ZAI_API_KEY"
-       :backend-kind  :api
-       :api-key       zai
-       :base-url      "https://api.z.ai/api/anthropic"
-       :default-model "glm-4.6"
-       :auth-mode     :bearer}
-
-      (and openai (not (str/blank? openai)))
-      {:source        "OPENAI_API_KEY"
-       :backend-kind  :openai
-       :api-key       openai
-       :base-url      "https://api.openai.com/v1"
-       :default-model (or (System/getenv "OPENAI_MODEL") "gpt-4o-mini")}
-
-      (and openrouter (not (str/blank? openrouter)))
-      ;; OpenRouter is OpenAI-shaped; route it through the openai backend.
-      ;; Default to a free/cheap model unless OPENROUTER_MODEL overrides.
-      {:source        "OPENROUTER_API_KEY"
-       :backend-kind  :openai
-       :api-key       openrouter
-       :base-url      "https://openrouter.ai/api/v1"
-       :default-model (or (System/getenv "OPENROUTER_MODEL") "openai/gpt-4o-mini")}
-
-      :else nil)))
-
 (defn- build-api-backend [opts]
   (require 'escapement.llm.api)
   (let [ctor (resolve 'escapement.llm.api/new-backend)]
@@ -195,6 +149,94 @@
   (let [ctor (resolve 'escapement.llm.openai-codex/new-backend)]
     (assert ctor "escapement.llm.openai-codex/new-backend not found")
     (ctor opts)))
+
+(defn- build-multi-backend [opts]
+  (require 'escapement.llm.multi)
+  (let [ctor (resolve 'escapement.llm.multi/new-backend)]
+    (assert ctor "escapement.llm.multi/new-backend not found")
+    (ctor opts)))
+
+(defn- detect-available-credentials
+  "Returns a vector of available credential descriptors (one per env var or
+   OAuth token present). Order is the preference order used for the default
+   backend when assembling a multi-dispatch."
+  []
+  (let [anthropic  (System/getenv "ANTHROPIC_API_KEY")
+        zai        (System/getenv "ZAI_API_KEY")
+        openai     (System/getenv "OPENAI_API_KEY")
+        openrouter (System/getenv "OPENROUTER_API_KEY")
+        codex-auth (try
+                     (require 'escapement.llm.openai-codex.auth)
+                     (when-let [load! (resolve 'escapement.llm.openai-codex.auth/load-auth!)]
+                       (load!))
+                     (catch Throwable _ nil))]
+    (cond-> []
+      (and anthropic (not (str/blank? anthropic)))
+      (conj {:kind :anthropic :source "ANTHROPIC_API_KEY"
+             :api-key anthropic :base-url "https://api.anthropic.com"
+             :default-model "claude-sonnet-4-6" :auth-mode :x-api-key
+             :route #"^claude-"})
+
+      codex-auth
+      (conj {:kind :codex :source "saved OAuth token"
+             :default-model "gpt-5.1-codex"
+             :route #"^gpt-5"})
+
+      (and openai (not (str/blank? openai)))
+      (conj {:kind :openai :source "OPENAI_API_KEY"
+             :api-key openai :base-url "https://api.openai.com/v1"
+             :default-model (or (System/getenv "OPENAI_MODEL") "gpt-4o-mini")
+             :route #"^gpt-"})
+
+      (and openrouter (not (str/blank? openrouter)))
+      (conj {:kind :openrouter :source "OPENROUTER_API_KEY"
+             :api-key openrouter :base-url "https://openrouter.ai/api/v1"
+             :default-model (or (System/getenv "OPENROUTER_MODEL") "openai/gpt-4o-mini")
+             :route #".+/.+"})
+
+      (and zai (not (str/blank? zai)))
+      (conj {:kind :zai :source "ZAI_API_KEY"
+             :api-key zai :base-url "https://api.z.ai/api/anthropic"
+             :default-model "glm-4.6" :auth-mode :bearer
+             :route #"^glm-"}))))
+
+(defn- build-credential-backend
+  "Instantiate the sub-backend for one credential descriptor."
+  [{:keys [kind] :as c}]
+  (case kind
+    :anthropic  (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
+    :zai        (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
+    :openai     (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
+    :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
+    :codex      (build-codex-backend {:default-model (:default-model c)})))
+
+(defn- build-default-multi-backend!
+  "Scan all available credentials and assemble a multi-dispatch backend. If only
+   one credential is available, return that bare backend (no wrapping). Returns
+   nil if nothing is available."
+  [{:keys [model]}]
+  (let [creds (detect-available-credentials)]
+    (cond
+      (empty? creds) nil
+
+      (= 1 (count creds))
+      (let [c (first creds)]
+        (binding [*out* *err*]
+          (println (str "[cli] auto-detected LLM backend: " (name (:kind c))
+                        " (" (:source c) ", model " (or model (:default-model c)) ")")))
+        (build-credential-backend (cond-> c model (assoc :default-model model))))
+
+      :else
+      (let [built  (mapv (fn [c] [c (build-credential-backend c)]) creds)
+            routes (mapv (fn [[c b]] [(:route c) b]) built)
+            default-backend (second (first built))]
+        (binding [*out* *err*]
+          (println (str "[cli] auto-detected multi-backend dispatcher; routes by model prefix:"))
+          (doseq [[c _] built]
+            (println (str "[cli]   " (pr-str (:route c)) " → " (name (:kind c))
+                          " (" (:source c) ", default model " (:default-model c) ")")))
+          (println (str "[cli]   default backend → " (name (:kind (ffirst built))))))
+        (build-multi-backend {:routes routes :default-backend default-backend})))))
 
 (defn- make-backend
   "Construct an LLM backend.
@@ -223,28 +265,8 @@
                              model (assoc :default-model model)))
 
       (die! (str "Unknown backend: " backend)))
-    ;; No --backend: try env auto-detect first, then codex OAuth token.
-    (if-let [auto (autodetect-api-opts)]
-      (do
-        (binding [*out* *err*]
-          (println (str "[cli] auto-detected LLM backend from " (:source auto)
-                        " (" (:base-url auto) ", model " (:default-model auto) ")")))
-        (let [kind (:backend-kind auto)
-              opts (-> auto
-                       (dissoc :source :backend-kind)
-                       (cond-> model (assoc :default-model model)))]
-          (case kind
-            :openai (build-openai-backend opts)
-            (build-api-backend opts))))
-      ;; Check for saved codex OAuth credentials.
-      (when (try
-              (require 'escapement.llm.openai-codex.auth)
-              (let [load-auth! (resolve 'escapement.llm.openai-codex.auth/load-auth!)]
-                (some? (load-auth!)))
-              (catch Throwable _ false))
-        (binding [*out* *err*]
-          (println "[cli] auto-detected LLM backend: codex (saved OAuth token)"))
-        (build-codex-backend (cond-> {} model (assoc :default-model model)))))))
+    ;; No --backend: build a multi-dispatch from all available credentials.
+    (build-default-multi-backend! {:model model})))
 
 (defn- codex-auth-file
   "Returns the path to the saved OpenAI OAuth token file, or nil if the auth
@@ -275,8 +297,7 @@
    `:type :llm-conversation` message."
   [opts]
   (and (nil? (:backend opts))
-       (nil? (autodetect-api-opts))
-       (nil? (codex-auth-info))))
+       (empty? (detect-available-credentials))))
 
 (defn- cmd-info [_args]
   (println "escapement" version)
@@ -300,6 +321,25 @@
     (println "  codex OAuth       : " (or codex-info "not logged in"))
     (when auth-file
       (println "  codex auth file   : " auth-file)))
+  (let [creds (detect-available-credentials)]
+    (println)
+    (cond
+      (empty? creds)
+      (println "Auto-detect: no LLM backend would be selected (no credentials).")
+
+      (= 1 (count creds))
+      (let [c (first creds)]
+        (println (str "Auto-detect: single backend `" (name (:kind c))
+                      "` (default model " (:default-model c) ").")))
+
+      :else
+      (do
+        (println "Auto-detect: multi-backend dispatcher with routes:")
+        (doseq [c creds]
+          (println (str "  " (pr-str (:route c)) " → " (name (:kind c))
+                        " (default model " (:default-model c) ")")))
+        (println (str "  default backend → " (name (:kind (first creds)))
+                      " (used when :model doesn't match any route)")))))
   (System/exit 0))
 
 (defn- decide-tui
