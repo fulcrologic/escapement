@@ -47,7 +47,7 @@
                 "returns nil for a valid response"
                 (types/validate-response valid-response) => nil
                 "accepts backend-metadata"
-                (types/validate-response (assoc valid-response :backend-metadata {:backend :claude-p})) => nil
+                (types/validate-response (assoc valid-response :backend-metadata {:backend :openai-codex})) => nil
                 "rejects unknown stop-reason"
                 (some? (types/validate-response (assoc valid-response :stop-reason :nope))) => true
                 "rejects missing :model"

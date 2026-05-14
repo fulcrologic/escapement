@@ -587,8 +587,9 @@ for the full explanation and when caching is wasted effort.
   (that bounds individual HTTP calls).
 
 `:conversation/id`::
-  Optional opaque token. The `claude-p` backend uses it to track session
-  ids for `--resume` (prefix-continuation). The api backend ignores it.
+  Optional opaque token used by the `openai-codex` backend as a prompt
+  cache key (passed as `conversation_id` + `session_id` headers). The
+  `api` backend ignores it.
 
 NOTE: Error reporting now follows SCXML's `:error.x.y` convention. The
 processor fires one of:
@@ -1299,26 +1300,89 @@ CLI auto-detect: `OPENAI_API_KEY` routes to the OpenAI base URL,
 endpoint. `OPENAI_MODEL` / `OPENROUTER_MODEL` env vars override the default
 model strings.
 
-=== `escapement.llm.claude-p` — out-of-process `claude -p`
+=== `escapement.llm.openai-codex` — ChatGPT subscription via OAuth
 
-Defined in `src/escapement/llm/claude_p.clj`. Shells out to
-`claude -p --output-format json`. Uses your local `claude` CLI's
-Max-subscription credentials; no API key required.
+Defined in `src/escapement/llm/openai_codex.clj` (entry point) and the
+`openai_codex/` sub-package. Routes to
+`https://chatgpt.com/backend-api/codex/responses` using an OAuth 2.0 +
+PKCE token bound to a ChatGPT Plus, Pro, Business, or Enterprise account.
+No OpenAI API key is required; billing is against your subscription's
+per-tier message limits.
 
-`claude -p` returns a flat `:result` string, not Anthropic content blocks.
-The adapter synthesizes a single `{:type :text :text result}` block. For
-multi-turn conversations the adapter keeps an atom mapping
-`:conversation/id` to `{:session-id ... :messages [...]}`. When a new
-request strictly extends the previously-sent prefix, the adapter passes
-`--resume <session-id>` with only the new tail. The response carries
-`{:backend-metadata {:via :resume ...}}` so you can tell from the
-transcript.
+==== Constructor
 
-WARNING: `claude -p` prompt mode does not expose Anthropic-style
-streaming tool-use. If `:tools` is non-empty the backend warns once and
-stringifies the tool definitions into the prompt as instructions. Real
-tool-use needs `--output-format stream-json`, which is not yet wired up.
-Prefer the `api` backend for any non-trivial chart.
+[source,clojure]
+----
+(require '[escapement.llm.openai-codex :as codex])
+(codex/new-backend {:default-model "gpt-5.1-codex"})
+----
+
+==== Authentication
+
+[source,bash]
+----
+escapement login codex   # one-time, opens browser for ChatGPT OAuth
+escapement logout codex  # remove cached credentials
+----
+
+Credentials are saved to `~/.escapement/openai-auth.json` (mode 0600).
+The backend refreshes the token automatically when it is within 60 seconds
+of expiry.
+
+==== Available models
+
+* `gpt-5.2-codex` — latest flagship Codex model (supports `xhigh` reasoning)
+* `gpt-5.2` — GPT-5.2 general purpose
+* `gpt-5.1-codex` — standard Codex model *(default)*
+* `gpt-5.1-codex-max` — extended context Codex variant
+* `gpt-5.1-codex-mini` — lighter Codex variant (lower quota cost)
+* `codex-mini-latest` — legacy mini alias
+* `gpt-5.1` — GPT-5.1 general purpose
+
+Anthropic-style model names (`claude-opus-4-7`, `claude-sonnet-4-6`) are
+silently mapped to `gpt-5.2-codex`; `claude-haiku-4-5` maps to
+`gpt-5.1-codex-mini`.
+
+==== Reasoning effort
+
+Pass a `:reasoning` key in the params map (value overrides the default):
+
+[source,clojure]
+----
+{:reasoning {:effort "high" :summary "auto"}}
+----
+
+Valid effort values: `none` (gpt-5.1/gpt-5.2 general only), `low`,
+`medium` (default), `high`, `xhigh` (gpt-5.2/codex-max only).
+
+==== Subscription billing
+
+IMPORTANT: This backend authenticates against `chatgpt.com/backend-api`
+using an OAuth token bound to your ChatGPT Plus, Pro, Business, or
+Enterprise subscription. Usage counts against your subscription's per-tier
+message limits (Plus is approximately 30-150 messages per 5-hour window as
+of May 2026; see your ChatGPT plan for current quotas). It does NOT bill
+the OpenAI API meter.
+
+**This path is for personal development use with your own subscription.**
+It is not sanctioned by OpenAI for redistribution or multi-user services.
+If you need multi-user or production deployment, use a pay-per-token
+backend (the `api` backend above for Anthropic, or a future OpenAI
+Platform API backend).
+
+==== Limitations vs `api` backend
+
+* `:max-tokens` is silently ignored (not accepted by the ChatGPT backend).
+* `:temperature`, `:top-p`, `:top-k`, `:stop-sequences`, `:tool-choice`
+  are silently ignored (reasoning models do not accept them).
+* Extended-thinking is replaced by the reasoning effort knob (`:reasoning`
+  key described above).
+* `cache_control` markers are no-ops; a debug log line is emitted when
+  they are present.
+* Only GPT-5.x reasoning models are available; there is no cheap
+  Haiku-equivalent.
+* Stateless: `store: false`. The full conversation is re-sent on every
+  turn (no server-side caching across turns beyond reasoning summaries).
 
 === `escapement.llm.cache` — content-addressed disk cache
 
@@ -1633,9 +1697,10 @@ Initial data:
 
 LLM backend selection:
 
-* `--backend (api|openai|claude-p)` — explicit. Without it, the CLI
+* `--backend (api|openai|codex)` — explicit. Without it, the CLI
   auto-detects from `ANTHROPIC_API_KEY` / `ZAI_API_KEY` / `OPENAI_API_KEY` /
-  `OPENROUTER_API_KEY` in that precedence order.
+  `OPENROUTER_API_KEY` in that precedence order, then falls back to a
+  saved codex OAuth token (`~/.escapement/openai-auth.json`) if present.
 * `--model`, `--api-base-url`, `--api-key-env` override the auto-detected
   values.
 
@@ -1788,9 +1853,9 @@ require network access and real credentials.
 
 `src/escapement/llm/`::
   `protocol` (the one-method `LLMBackend`), `types` (Malli schemas for
-  requests/responses/content-blocks/tool-defs), `claude_p`
-  (out-of-process `claude -p` adapter), `api` (Anthropic-compatible HTTP
-  backend, sniffing z.ai vs Anthropic auth modes), and `cache`
+  requests/responses/content-blocks/tool-defs), `api` (Anthropic-compatible
+  HTTP backend, sniffing z.ai vs Anthropic auth modes), `openai_codex`
+  (ChatGPT Plus/Pro subscription backend via OAuth 2.0 + PKCE), and `cache`
   (content-addressed disk cache).
 
 `src/escapement/tools/`::
@@ -1836,10 +1901,9 @@ require network access and real credentials.
 [[known-limitations]]
 == Known limitations and roadmap
 
-* **`claude -p` lacks real tool-use.** The current adapter stringifies tool
-  defs into the prompt and warns once. End-turn-only flows work; iterative
-  tool dispatch does not. Prefer the `api` backend for non-trivial charts.
-  Investigating `--output-format stream-json` is the path forward.
+* **OpenAI Codex backend is reverse-engineered against the ChatGPT CLI
+  auth flow.** OpenAI may change the protocol or revoke this path without
+  notice. Use the `api` backend for production work.
 
 * **Checkpoint-resume restarts in-flight conversations.** Re-entering a
   bound state on resume spawns a fresh worker with an empty message

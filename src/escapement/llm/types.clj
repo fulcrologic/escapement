@@ -10,7 +10,7 @@
    - `Tool`     : :name, :description, :input-schema (a JSON Schema map)
 
    Backends honoring native cache_control (API) will pass markers through.
-   Backends that don't (`claude-p`) ignore them but the schema accepts them so calling code is portable."
+   Backends that don't (openai-codex) ignore them but the schema accepts them so calling code is portable."
   (:require
    [com.fulcrologic.guardrails.malli.core :refer [>defn => ?]]
    [malli.core :as m]
@@ -128,7 +128,7 @@
    [:tool-choice    {:optional true} ToolChoice]
    ;; Optional audit/metadata.
    [:metadata       {:optional true} Metadata]
-   ;; Extension key used by claude-p backend to track --resume mapping.
+   ;; Extension key for conversation tracking / prompt cache key.
    [:conversation/id {:optional true} [:or :string :keyword :uuid]]])
 
 (def StopReason

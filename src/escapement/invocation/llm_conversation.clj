@@ -177,7 +177,7 @@
      * `:tools-cache-control` — Same shape; applies to the LAST entry in
        `:tools` so the prefix-through-end of `tools` is cached. Defaulted
        to `{:type :ephemeral}` via `:auto-cache?`; pass `false` to disable.
-     * `:conv-id` — claude-p `--resume` correlation id (string/keyword/uuid)"
+     * `:conv-id` — conversation correlation id; used as prompt cache key by openai-codex (string/keyword/uuid)"
   [{:keys [system messages tools model max-tokens conv-id
            temperature top-p top-k stop-sequences thinking tool-choice metadata
            system-cache-control tools-cache-control auto-cache?]

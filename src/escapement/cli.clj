@@ -16,7 +16,7 @@
         --transcript <path>     Transcript path; default <work-dir>/<session>/transcript.jsonl
         --checkpoint-dir <dir>  Checkpoint dir; default <work-dir>/<session>/checkpoints
         --resume                Resume from saved working memory.
-        --backend (claude-p|api)  LLM backend (optional; only needed for LLM charts).
+        --backend (api|codex|openai)  LLM backend (optional; only needed for LLM charts).
         --model <name>          Model name.
         --api-base-url <url>    API base URL.
         --api-key-env <name>    Env-var name holding the API key.
@@ -190,6 +190,12 @@
     (assert ctor "escapement.llm.openai/new-backend not found")
     (ctor opts)))
 
+(defn- build-codex-backend [opts]
+  (require 'escapement.llm.openai-codex)
+  (let [ctor (resolve 'escapement.llm.openai-codex/new-backend)]
+    (assert ctor "escapement.llm.openai-codex/new-backend not found")
+    (ctor opts)))
+
 (defn- make-backend
   "Construct an LLM backend.
 
@@ -200,12 +206,6 @@
   [{:keys [backend model api-base-url api-key-env]}]
   (if backend
     (case backend
-      "claude-p"
-      (do (require 'escapement.llm.claude-p)
-          (let [ctor (resolve 'escapement.llm.claude-p/new-backend)]
-            (assert ctor "escapement.llm.claude-p/new-backend not found")
-            (ctor (cond-> {} model (assoc :model model)))))
-
       "api"
       (build-api-backend (cond-> {}
                            model        (assoc :model model)
@@ -218,19 +218,54 @@
                               api-key-env (assoc :api-key (System/getenv api-key-env))
                               (not api-key-env) (assoc :api-key (System/getenv "OPENAI_API_KEY"))))
 
+      "codex"
+      (build-codex-backend (cond-> {}
+                             model (assoc :default-model model)))
+
       (die! (str "Unknown backend: " backend)))
-    ;; No --backend: try env auto-detect.
-    (when-let [auto (autodetect-api-opts)]
-      (binding [*out* *err*]
-        (println (str "[cli] auto-detected LLM backend from " (:source auto)
-                      " (" (:base-url auto) ", model " (:default-model auto) ")")))
-      (let [kind (:backend-kind auto)
-            opts (-> auto
-                     (dissoc :source :backend-kind)
-                     (cond-> model (assoc :default-model model)))]
-        (case kind
-          :openai (build-openai-backend opts)
-          (build-api-backend opts))))))
+    ;; No --backend: try env auto-detect first, then codex OAuth token.
+    (if-let [auto (autodetect-api-opts)]
+      (do
+        (binding [*out* *err*]
+          (println (str "[cli] auto-detected LLM backend from " (:source auto)
+                        " (" (:base-url auto) ", model " (:default-model auto) ")")))
+        (let [kind (:backend-kind auto)
+              opts (-> auto
+                       (dissoc :source :backend-kind)
+                       (cond-> model (assoc :default-model model)))]
+          (case kind
+            :openai (build-openai-backend opts)
+            (build-api-backend opts))))
+      ;; Check for saved codex OAuth credentials.
+      (when (try
+              (require 'escapement.llm.openai-codex.auth)
+              (let [load-auth! (resolve 'escapement.llm.openai-codex.auth/load-auth!)]
+                (some? (load-auth!)))
+              (catch Throwable _ false))
+        (binding [*out* *err*]
+          (println "[cli] auto-detected LLM backend: codex (saved OAuth token)"))
+        (build-codex-backend (cond-> {} model (assoc :default-model model)))))))
+
+(defn- codex-auth-file
+  "Returns the path to the saved OpenAI OAuth token file, or nil if the auth
+   namespace is unavailable."
+  []
+  (try
+    (require 'escapement.llm.openai-codex.auth)
+    @(resolve 'escapement.llm.openai-codex.auth/AUTH-FILE)
+    (catch Throwable _ nil)))
+
+(defn- codex-auth-info
+  "Returns a display string about saved codex credentials, or nil if absent."
+  []
+  (try
+    (require 'escapement.llm.openai-codex.auth)
+    (let [load!   (resolve 'escapement.llm.openai-codex.auth/load-auth!)
+          auth    (load!)]
+      (when auth
+        (str "present  account=" (:account-id auth)
+             "  expires=" (java.util.Date. ^long (:expires-at auth 0)))))
+    (catch Throwable _ nil)))
 
 (defn- needs-llm?
   "Heuristic: does this chart require an LLM backend? We treat any chart loaded
@@ -240,7 +275,8 @@
    `:type :llm-conversation` message."
   [opts]
   (and (nil? (:backend opts))
-       (nil? (autodetect-api-opts))))
+       (nil? (autodetect-api-opts))
+       (nil? (codex-auth-info))))
 
 (defn- cmd-info [_args]
   (println "escapement" version)
@@ -249,6 +285,21 @@
   (when-let [bb (System/getProperty "babashka.version")]
     (println "babashka" bb))
   (println "cwd" (System/getProperty "user.dir"))
+  (println)
+  (println "LLM backends:")
+  (let [anthropic  (System/getenv "ANTHROPIC_API_KEY")
+        zai        (System/getenv "ZAI_API_KEY")
+        openai     (System/getenv "OPENAI_API_KEY")
+        openrouter (System/getenv "OPENROUTER_API_KEY")]
+    (println "  ANTHROPIC_API_KEY : " (if (seq anthropic) "set" "not set"))
+    (println "  ZAI_API_KEY       : " (if (seq zai) "set" "not set"))
+    (println "  OPENAI_API_KEY    : " (if (seq openai) "set" "not set"))
+    (println "  OPENROUTER_API_KEY: " (if (seq openrouter) "set" "not set")))
+  (let [codex-info (codex-auth-info)
+        auth-file  (codex-auth-file)]
+    (println "  codex OAuth       : " (or codex-info "not logged in"))
+    (when auth-file
+      (println "  codex auth file   : " auth-file)))
   (System/exit 0))
 
 (defn- decide-tui
@@ -300,8 +351,11 @@
                        (merge-params base (:param opts)))
         _         (when (needs-llm? opts)
                     (die! (str "Error: no LLM backend configured.\n"
-                               "Set ANTHROPIC_API_KEY or ZAI_API_KEY, or pass --backend explicitly.\n"
-                               "See: escapement info --backends   (or:  Guide.adoc, \"LLM backends\")")
+                               "Options:\n"
+                               "  1. Set ANTHROPIC_API_KEY (Anthropic API)\n"
+                               "  2. Set ZAI_API_KEY (z.ai Anthropic-compatible endpoint)\n"
+                               "  3. Pass --backend codex  (ChatGPT Plus/Pro subscription; run 'escapement login codex' first)\n"
+                               "See: escapement info   (or:  Guide.adoc, \"LLM backends\")")
                           1))
         backend (make-backend opts)
         ;; Load the chart FIRST. Its require-graph may include namespaces
@@ -400,10 +454,30 @@
           (println "[cli] chart run failed:" (.getMessage t)))
         (System/exit 1)))))
 
+(defn- cmd-login [args]
+  (let [[provider & _rest] args]
+    (case provider
+      "codex"
+      (do (require 'escapement.llm.openai-codex.cli)
+          ((resolve 'escapement.llm.openai-codex.cli/login!) _rest))
+      nil (die! "Usage: escapement login <provider>  (currently: codex)")
+      (die! (str "Unknown login provider: " provider)))))
+
+(defn- cmd-logout [args]
+  (let [[provider & _rest] args]
+    (case provider
+      "codex"
+      (do (require 'escapement.llm.openai-codex.cli)
+          ((resolve 'escapement.llm.openai-codex.cli/logout!) _rest))
+      nil (die! "Usage: escapement logout <provider>  (currently: codex)")
+      (die! (str "Unknown logout provider: " provider)))))
+
 (defn -main [& args]
   (let [[sub & rest-args] args]
     (case sub
-      "info" (cmd-info rest-args)
-      "run"  (cmd-run rest-args)
-      nil    (die! "Usage: bb -m escapement.cli (run <chart-sym>|info)")
+      "info"   (cmd-info rest-args)
+      "run"    (cmd-run rest-args)
+      "login"  (cmd-login rest-args)
+      "logout" (cmd-logout rest-args)
+      nil      (die! "Usage: bb -m escapement.cli (run <chart-sym>|info|login codex|logout codex)")
       (die! (str "Unknown subcommand: " sub)))))
