@@ -61,7 +61,8 @@ and `com.fulcrologic/guardrails`.
 == Quickstart
 
 Clone, set an API key, and run the hello chart. The CLI auto-detects an LLM
-backend from `ANTHROPIC_API_KEY` or `ZAI_API_KEY`; no `--backend` flag is
+backend from any one of `ANTHROPIC_API_KEY`, `ZAI_API_KEY`, `OPENAI_API_KEY`,
+or `OPENROUTER_API_KEY` (precedence in that order); no `--backend` flag is
 required.
 
 [source,bash]
@@ -69,9 +70,11 @@ required.
 git clone <this-repo>
 cd escapement
 
-# Either of these works; z.ai is cheaper for dev.
-export ZAI_API_KEY=...           # or
-export ANTHROPIC_API_KEY=...
+# Any one of these works; z.ai and OpenRouter are cheap for dev.
+export ANTHROPIC_API_KEY=...        # claude-sonnet-4-6 by default
+export ZAI_API_KEY=...              # glm-4.6 (Anthropic-compat endpoint)
+export OPENAI_API_KEY=...           # gpt-4o-mini default; OPENAI_MODEL overrides
+export OPENROUTER_API_KEY=...       # openai/gpt-4o-mini default; OPENROUTER_MODEL overrides
 
 escapement run escapement.charts.hello/agent
 ----
@@ -564,19 +567,44 @@ for the full explanation and when caching is wasted effort.
 
 `:on-end-turn-event`::
   Optional chart event keyword fired to the parent when the LLM returns
-  `:end_turn`. Defaults to `:llm.idle`. The chart can transition on this if
-  it cares about turn boundaries.
+  `:end_turn`. Defaults to `:llm.idle`. The event data carries
+  `{:text "<final assistant text>" :from "<invokeid>"}` so chart-authors
+  can route the assistant's output to another invocation (see
+  <<multi-agent>>) or to a file via `capture-llm-output`.
 
-`:on-error-event`::
-  Optional chart event keyword fired on backend errors or fatal tool
-  validation failures. Defaults to `:llm.error`. The chart can wire an
-  error path off this; if no transition handles it, the conversation just
-  dies and `runner` reports `:final-config` with the binding state still
-  active or with the chart having transitioned via timeouts.
+`:max-turns`::
+  Optional positive integer. Hard cap on the number of LLM round-trips for
+  this invocation. When exceeded the worker self-cancels with
+  `:error.llm.max-turns {:limit N :turns N}` and dies. Use this to bound
+  runaway tool-call loops (especially useful for advisor / sub-agent
+  invocations where the chart owns the supervisor).
+
+`:max-conversation-duration-ms`::
+  Optional positive integer. Wall-clock budget from worker start to a clean
+  `:end_turn`. When exceeded fires `:error.llm.timeout
+  {:elapsed-ms M :limit-ms N}` and dies. Catches "slow grinding progress
+  that won't terminate." Doesn't replace `:http-timeout-ms` on the backend
+  (that bounds individual HTTP calls).
 
 `:conversation/id`::
   Optional opaque token. The `claude-p` backend uses it to track session
   ids for `--resume` (prefix-continuation). The api backend ignores it.
+
+NOTE: Error reporting now follows SCXML's `:error.x.y` convention. The
+processor fires one of:
++
+* `:error.llm.backend` — HTTP / parse / unexpected backend throw.
+* `:error.llm.tool-validation` — tool input failed schema after one retry.
+* `:error.llm.unexpected-stop` — `:max_tokens` / `:stop_sequence` /
+  `:refusal` stop reason.
+* `:error.llm.max-turns` — `:max-turns` budget exceeded.
+* `:error.llm.timeout` — `:max-conversation-duration-ms` exceeded.
+* `:error.llm.worker-exception` — uncaught throwable in the worker.
++
+Chart-authors catch the family with `(transition {:event :error.llm.*
+:target :recover})` or pin to a specific cause. The old
+`:on-error-event` option has been removed; the canonical event is always
+fired.
 
 [[tell-llm-helper]]
 === `h/tell-llm`
@@ -599,6 +627,11 @@ IMPORTANT: `tell-llm` only works from **inside** the state that owns the
 binding (or a descendant). Outside, there is no live invocation to forward
 to, and the event is silently dropped.
 
+When multiple `:llm-conversation` invocations are live concurrently (typical
+in parallel regions / multi-agent charts), `tell-llm` broadcasts to ALL of
+them. Use `h/tell-other-llm` (see <<multi-agent>>) when you want to target a
+specific conversation by its `invokeid`.
+
 === Internal vs external transitions
 
 If a transition's `:target` leaves the state that owns the binding (or
@@ -617,9 +650,9 @@ sometimes not (you want to keep the LLM's accumulated context).
 The processor validates every real-tool and event-tool input against its
 schema. On failure, the LLM gets a corrective `tool_result` with
 `is_error: true` and one retry. A second failure for the same tool-use id
-posts `:on-error-event` to the parent and the worker exits. See
+fires `:error.llm.tool-validation` to the parent and the worker exits. See
 `handle-tool-use-block` in
-`src/escapement/invocation/llm_conversation.clj:144`.
+`src/escapement/invocation/llm_conversation.clj`.
 
 === Event-tool name encoding
 
@@ -863,14 +896,14 @@ When a response completes, Anthropic returns `stop_reason`:
   worker dispatches the tools, appends results, and immediately POSTs
   the next request. Chart-side scripts don't see this.
 * `:max_tokens` — the response was truncated at the cap. The worker
-  treats this as `:unexpected-stop` and fires `:on-error-event`
-  (default `:llm.error`). The chart can either transition to an error
-  path or just let the binding die. Treat this as a "bump `:max-tokens`
-  for this state" signal.
+  fires `:error.llm.unexpected-stop {:stop-reason :max_tokens}`. The
+  chart can either transition to an error path or just let the binding
+  die. Treat this as a "bump `:max-tokens` for this state" signal.
 * `:stop_sequence`, `:pause_turn`, `:refusal` — same as `:max_tokens`:
-  fired as `:unexpected-stop`. Charts that opt into `:stop-sequences`
-  can wire a real transition on `:llm.error` and inspect the event data
-  for the cause.
+  fired as `:error.llm.unexpected-stop` with `:stop-reason` set to the
+  specific cause. Charts that opt into `:stop-sequences` (or care about
+  refusals) wire a transition on `:error.llm.unexpected-stop` and
+  inspect `:_event :data :stop-reason`.
 
 ==== Default and recommended values
 
@@ -913,16 +946,272 @@ prefixes to drive that down; see `escapement.llm.cache` and the
 
 The current worker has no automatic continuation for
 `stop_reason="max_tokens"`. You can build one chart-side: catch
-`:llm.error`, inspect `:_event` for `:reason :unexpected-stop` +
-`:stop-reason :max_tokens`, send a follow-up via `h/tell-llm` ("continue
-your previous response"), and let the model pick up. That's a chart
-decision, not a library default.
+`:error.llm.unexpected-stop`, inspect `:_event :data :stop-reason`, send a
+follow-up via `h/tell-llm` ("continue your previous response"), and let
+the model pick up. That's a chart decision, not a library default.
+
+[[human-interaction]]
+== Human interaction and the TUI
+
+A chart can ask the human for input via the `:human-input` invocation. The
+chart-author declares what to ask (free text, single-select pick, etc.); a
+pluggable `HumanRenderer` decides how. Production wiring uses the
+persistent TUI; tests inject a `StubRenderer` that returns scripted
+answers.
+
+=== The `:human-input` invocation
+
+Defined in `src/escapement/invocation/human_input.clj`. Spawned on state
+entry; posts `:human.answer {:answer <value>}` to the parent session when
+the user responds, then dies.
+
+Authoring sugar lives in `escapement.chart.helpers`:
+
+[source,clojure]
+----
+(state {:id :ask-name}
+  (h/human-input
+    {:id "ask"
+     :params-fn (fn [_env _data]
+                  {:kind          :text
+                   :prompt        "What's your name?"
+                   :answer-schema [:string {:min 1}]})})
+  (transition {:event :human.answer :target :greet}
+              (script {:expr (fn [_ d]
+                               [(ops/assign :name
+                                            (get-in d [:_event :data :answer]))])})))
+----
+
+Supported `:kind` values:
+
+* `:text` — free-text line. Returns a string.
+* `:select` — single pick from `:options [{:label … :value …}]`. Returns
+  the chosen `:value`.
+* `:multi-select` — same shape, returns a vector of `:value`s.
+* `:confirm` — y/n with `:default`. Returns boolean.
+* `:progress` — non-blocking progress indicator (driven by forwarded
+  `:human.progress` events; v1 just no-ops to `:answer :done`).
+* `:custom` — call `(:render params)` with `[env data]` and return its value.
+
+Events the chart receives:
+
+* `:human.answer {:answer <value>}` on success.
+* `:human.cancelled {}` on user-cancel (Esc on a modal).
+* `:error.human.invalid-answer {:errors … :answer …}` when an
+  `:answer-schema` rejects the user's input.
+* `:error.human.worker-exception {:message …}` on a renderer throwable.
+
+Catch error families with `(transition {:event :error.human.* :target
+:recover})`.
+
+=== `with-llm-questions` — LLM-asks-human pattern
+
+For the common case where you want an LLM to be able to consult the human
+mid-conversation (e.g. design decisions, free-text clarifications), the
+`(h/with-llm-questions {...})` helper produces a compound state bundling:
+
+* an `llm-conversation` invocation on the bubble's parent state (so the
+  conversation survives the human-input detour);
+* a `:converse` child state where the user's `:exit-transitions` fire;
+* two ask states (`:ask-choice`, `:ask-text`) that pop the corresponding
+  `human-input` modal;
+* automatic `tell-llm` of the human's answer back to the live LLM,
+  prefixed with `"User chose: "` or `"User said: "`.
+
+Two event-tools are injected into the LLM's `:allowed-events`:
+
+* `event__question_ask_choice {:question :string :options [...]}` —
+  prompts a `:select` modal.
+* `event__question_ask_text {:question :string}` — prompts a `:text` modal.
+
+[source,clojure]
+----
+(state {:id :run :initial :work}
+  (h/with-llm-questions
+    {:id        :work
+     :params-fn (fn [_ _]
+                  {:system "..."
+                   :real-tools [:fs/read :fs/write]
+                   :initial-user-message "go"})
+     :exit-transitions
+     [(transition {:event :done :target :finished})]})
+  (final {:id :finished}))
+----
+
+Requires an interactive chart (see <<interactive-marker>>) — without a
+`HumanRenderer` the ask states stall.
+
+[[interactive-marker]]
+=== Interactive chart marker
+
+Chart authors declare a chart as interactive via Clojure var metadata:
+
+[source,clojure]
+----
+(def ^{:interactive? true} agent (chart/statechart …))
+----
+
+The CLI reads this on `load-chart-with-meta` and:
+
+* Refuses to start an interactive chart without a TTY, unless `--no-tui`
+  was passed (in which case the stdin fallback renderer is used).
+* Enables the persistent TUI by default when a TTY is available.
+* Wires up `escapement.tui/->renderer` as the `HumanRenderer`, so modals
+  pop in the TUI's bottom region.
+
+Non-interactive charts still get a stdin renderer for any `:human-input`
+states they happen to invoke (fail-soft default), but the TUI itself stays
+off unless `--tui` is explicit.
+
+=== The TUI
+
+`src/escapement/tui.clj`. JLine-backed persistent display, on a single
+input thread, with a modal-state machine and an in-memory line buffer.
+Layout:
+
+----
+┌──────────────────────────────────────────────────────────────┐
+│ escapement · <chart-sym> · <session-short>                  │
+├──────────────────────────────────────────────────────────────┤
+│ states: [:run :ask-name]                                     │  ← live config
+│ [runner] started …                                           │
+│ [llm/req] n-messages=3                                       │
+│ [llm/resp] stop=tool_use tokens=in:100/out:17                │
+│ [tool] name=event__done input={greeting "Hola!"}             │
+│ [chart] event=:done config=[:run :finished]                  │
+├──────────────────────────────────────────────────────────────┤
+│ ▸ What's your name? alice                                    │  ← modal
+└──────────────────────────────────────────────────────────────┘
+ Esc=interrupt   Ctrl-C=quit   PgUp/PgDn=scroll
+----
+
+Wiring:
+
+* Status line shows the current chart configuration. Driven by
+  `:runner/start-config` and `:runner/event-processed` transcript events.
+* Scrollback buffer holds the last ~2000 transcript lines (PgUp/PgDn to
+  navigate, Home/End to jump). Consecutive duplicate lines collapse into
+  `… (xN)`. `:runner/tick`, `:runner/quiescent`, and `:checkpoint/written`
+  are suppressed from scrollback (still in JSONL).
+* `Esc` (when no modal is open) posts `:ui.interrupt` to the chart's
+  session — the chart decides what to do with it (e.g. transition to a
+  `:cancelled` state). With a modal open, `Esc` cancels just the modal.
+* `Ctrl-C` posts `:ui.quit` and tears down the TUI.
+
+Atomic frames are used when the terminal advertises Mode 2026
+(Synchronized Output) — detected at startup via DECRQM. iTerm2 (recent),
+kitty, wezterm, foot, ghostty, and contour qualify; Apple Terminal does
+not and falls back to per-frame writes (still flicker-light, just not
+guaranteed atomic). On exit the alt-screen buffer is left, restoring your
+shell scrollback exactly as it was before.
+
+[[multi-agent]]
+== Multi-agent / team patterns
+
+Multiple `:llm-conversation` invocations can run concurrently (typically
+under parallel regions, or as siblings of one parent state). The library
+provides three primitives for routing between them.
+
+=== `:target` routing on `:llm.user-message`
+
+`tell-llm` posts a `:llm.user-message` to the chart's session; with
+autoforward enabled, EVERY live `:llm-conversation` invocation's
+`forward-event!` receives it. With a `:target <invokeid>` in the event
+data, only the matching invocation accepts. Comparison normalizes
+keyword and string invokeids transparently via
+`escapement.invocation.llm-conversation/->id-str`, so `:id :researcher`
+and `:id "researcher"` are interchangeable.
+
+=== `h/tell-other-llm`
+
+Sugar for the targeted case:
+
+[source,clojure]
+----
+(h/tell-other-llm
+  {:target "advisor"                  ; or a fn (fn [env data] invokeid)
+   :expr   (fn [env data]
+             (str "Lead's plan:\n" (:plan data) "\n\nDoes this hold up?"))})
+----
+
+Use this when the chart-author knows statically which conversation
+receives the message. Plain `tell-llm` continues to broadcast.
+
+=== `:on-end-turn-event` payload
+
+Every `:end_turn` now fires the configured `:on-end-turn-event` (default
+`:llm.idle`) with `{:text "<final assistant text>" :from "<invokeid>"}`
+in the data. That's the wire for routing one LLM's output to another:
+catch the event, inspect `:from`, format `:text` into a follow-up prompt,
+`tell-other-llm` it elsewhere.
+
+=== File-backed artifact helpers
+
+For agent pipelines that produce text artifacts to be embedded in later
+prompts, three helpers in `escapement.chart.helpers` write to and read
+from `<session-dir>/artifacts/<name>`:
+
+`(h/capture-llm-output)` / `(h/capture-llm-output {:as "x.md"})`::
+  Returns a script. Used in a transition reacting to `:llm.idle`. Writes
+  `:_event :data :text` to `<session-dir>/artifacts/<name>` atomically
+  (temp + rename). Default `:as` is the producing invokeid (`:from`).
+  Logs `:artifact/captured {:name N :bytes B}` to the transcript.
+
+`(h/render-template tmpl env)` / `(h/render-template tmpl env extras)`::
+  Pure-ish substitution. Mustache-light `{{name}}` tokens are resolved
+  against `<session-dir>/artifacts/<name>`. `{{output}}` is reserved for
+  in-flight text passed via `extras` (used by `forward-llm-output`).
+  **Throws** `ex-info {:reason :missing-artifact ...}` on any unresolved
+  token — fail-fast so a typoed prompt doesn't ship malformed text to the
+  LLM.
+
+`(h/forward-llm-output {:to :template :as :capture?})`::
+  Capture + format + targeted `tell-other-llm` in one step. Writes a file
+  (unless `:capture? false`), renders the template with `{{output}}`
+  bound to the just-arrived text, then sends a `:llm.user-message`
+  targeted at `:to`.
+
+[source,clojure]
+----
+;; Five-state agent pipeline (researcher → writer → editor)
+(state {:id :researching}
+  (h/llm-conversation
+    {:id "researcher"
+     :params-fn (fn [_ _] {:initial-user-message "Research X"})})
+  (transition {:event :llm.idle :target :writing}
+    (h/capture-llm-output)))                ; → artifacts/researcher
+
+(state {:id :writing}
+  (h/llm-conversation
+    {:id "writer"
+     :params-fn (fn [env _]
+                  {:initial-user-message
+                   (h/render-template
+                    "Research:\n\n{{researcher}}\n\nWrite a draft."
+                    env)})})
+  (transition {:event :llm.idle :target :editing}
+    (h/capture-llm-output)))                ; → artifacts/writer
+
+(state {:id :editing}
+  (h/llm-conversation
+    {:id "editor"
+     :params-fn (fn [env _]
+                  {:initial-user-message
+                   (h/render-template
+                    "Draft:\n\n{{writer}}\n\nPolish for clarity."
+                    env)})})
+  (transition {:event :llm.idle :target :done}
+    (h/capture-llm-output)))                ; → artifacts/editor
+----
+
+Latest write wins. Keep history by picking versioned filenames
+(`(str "draft-" iteration ".md")`).
 
 [[backends]]
 == LLM backends
 
 The `LLMBackend` protocol is one method, `send-turn`. Defined in
-`src/escapement/llm/protocol.clj`. Three implementations ship.
+`src/escapement/llm/protocol.clj`. Four implementations ship.
 
 === `escapement.llm.api` — Anthropic-compatible HTTP
 
@@ -954,6 +1243,61 @@ z.ai consume them natively.
 NOTE: z.ai does not currently return `cache_creation_input_tokens` and does
 not require the `anthropic-version` header. Both differences are tolerated
 silently by the request builder and the usage parser.
+
+z.ai's published GLM family (current as of authoring) is tracked in
+`escapement.llm.models`: `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`,
+`glm-4.7-flashx`, `glm-4.7-flash`, `glm-4.6` (200K context), and the
+`glm-4.5*` and `glm-4-32b-0414-128k` family (128K). Pass any of them as
+`:default-model` or per-state `:model`.
+
+=== `escapement.llm.openai` — OpenAI Chat Completions / OpenRouter
+
+Defined in `src/escapement/llm/openai.clj`. Sibling of the Anthropic
+backend. Accepts the same internal `Request` map and translates to the
+OpenAI Chat Completions wire format. Works against any OpenAI-compatible
+endpoint: OpenAI itself, OpenRouter (multi-provider broker), local
+llama.cpp / vLLM servers, Codex-style coding models served via OpenAI
+shape, etc.
+
+[source,clojure]
+----
+(require '[escapement.llm.openai :as openai])
+
+;; OpenAI
+(openai/new-backend {:base-url      "https://api.openai.com/v1"
+                     :api-key       (System/getenv "OPENAI_API_KEY")
+                     :default-model "gpt-4o-mini"})
+
+;; OpenRouter (set Referer/Title headers when publishing usage)
+(openai/new-backend {:base-url      "https://openrouter.ai/api/v1"
+                     :api-key       (System/getenv "OPENROUTER_API_KEY")
+                     :default-model "openai/gpt-4o-mini"
+                     :extra-headers {"HTTP-Referer" "https://example.com"
+                                     "X-Title"      "my-app"}})
+----
+
+Translation rules:
+
+* Our `:system` becomes the leading `role: "system"` message.
+* Assistant `:tool_use` blocks fold into `tool_calls`; assistant text and
+  tool-calls live on a single OpenAI message.
+* Each `:tool_result` user-block fans out into its own
+  `role: "tool"` message (OpenAI does not batch tool results like Anthropic
+  does). `:is-error` is surfaced inline as a `[error]` prefix (OpenAI has no
+  native flag for it).
+* `:thinking`, `:redacted_thinking`, and all `cache_control` markers are
+  silently dropped (OpenAI's prefix cache is implicit and not addressable).
+* `:max-tokens` flips to `max_completion_tokens` for newer models
+  (`gpt-5*`, `gpt-4.1*`, `o*`) and stays as `max_tokens` for legacy
+  (`gpt-3.5*`, `gpt-4-*`, `gpt-4o*`).
+* OpenAI's `usage.prompt_tokens_details.cached_tokens` is surfaced as
+  `:cache-read-input-tokens` for transcript parity with the Anthropic
+  backend.
+
+CLI auto-detect: `OPENAI_API_KEY` routes to the OpenAI base URL,
+`OPENROUTER_API_KEY` routes through the OpenAI backend at OpenRouter's
+endpoint. `OPENAI_MODEL` / `OPENROUTER_MODEL` env vars override the default
+model strings.
 
 === `escapement.llm.claude-p` — out-of-process `claude -p`
 
@@ -1221,7 +1565,11 @@ emitted across the codebase:
   `:runner/aborted`, `:runner/event-processed`
 * `:checkpoint/written`
 * `:llm/start`, `:llm/request`, `:llm/response`, `:llm/error`,
-  `:llm/user-message`, `:llm/worker-exit`
+  `:llm/user-message`, `:llm/worker-exit`, `:llm/context-warning`
+* `:human-input/start`, `:human-input/answer`, `:human-input/cancelled`,
+  `:human-input/error`, `:human-input/interrupted`,
+  `:human-input/validation-failed`
+* `:artifact/captured` (with `:name` and `:bytes`)
 * `:transcript/serialize-error`
 
 The `api` backend emits its own `:llm/request` and `:llm/response` rows
@@ -1265,10 +1613,45 @@ The pump loop:
 
 === CLI
 
-`src/escapement/cli.clj`. Two subcommands: `info` and `run`. The default
-work directory is `.escapement/<session>/`; override with `--work-dir`,
-`--transcript`, or `--checkpoint-dir`. `--resume` re-opens the latest
-checkpoint and skips `start!`. `--input <edn-file>` seeds the data model.
+`src/escapement/cli.clj`. Two subcommands: `info` and `run`.
+
+Output paths:
+
+* Default work directory is `.escapement/<session>/`; override with
+  `--work-dir`, `--transcript`, or `--checkpoint-dir`. Artifacts produced by
+  `capture-llm-output` / `forward-llm-output` land under
+  `<session>/artifacts/` (see <<multi-agent>>).
+* `--resume` re-opens the latest checkpoint and skips `start!`.
+
+Initial data:
+
+* `--input <edn-file>` reads an EDN map and seeds the chart's data model.
+* `--param key=value` is a repeatable one-shot override that's merged on top
+  of `--input`. Values are EDN-read with a friendly-to-strings fallback so
+  bare words like `--param name=alice` produce strings (not symbols).
+  Numbers, keywords, booleans, and collections parse natively.
+
+LLM backend selection:
+
+* `--backend (api|openai|claude-p)` — explicit. Without it, the CLI
+  auto-detects from `ANTHROPIC_API_KEY` / `ZAI_API_KEY` / `OPENAI_API_KEY` /
+  `OPENROUTER_API_KEY` in that precedence order.
+* `--model`, `--api-base-url`, `--api-key-env` override the auto-detected
+  values.
+
+Display:
+
+* `--tui` forces the persistent TUI on (requires a TTY).
+* `--no-tui` forces it off (useful in CI, or to fall back to stdin prompts
+  for `:human-input` invocations).
+* By default the TUI is on for charts marked `^{:interactive? true}` and off
+  otherwise. See <<human-interaction>>.
+
+Other:
+
+* `--tools-ns my.ns/register-tools!` invokes a registration fn over the
+  builtin registry.
+* `--trace` emits per-tick transcript events.
 
 [[idioms-gotchas]]
 == Idioms and gotchas
