@@ -314,6 +314,103 @@
   [reason]
   (keyword (str "error.llm." (name reason))))
 
+(defn- candidate-models
+  "Decide the ordered list of models to try for the next turn. Honors
+   `:models` (preferred ordered vector) and falls back to `[(:model params)]`.
+   Filters out anything marked `:down` in `model-status`. Always returns a
+   non-empty seq — when every candidate is already down, returns the original
+   ordered list anyway so the caller can record one final failure rather
+   than silently skipping."
+  [params model-status]
+  (let [requested (cond
+                    (seq (:models params)) (vec (:models params))
+                    :else                  [(:model params)])
+        status    @model-status
+        ;; nil is a legitimate "let backend pick its default" — never mark or
+        ;; filter it.
+        live      (filterv (fn [m] (or (nil? m) (not= :down (get status m)))) requested)]
+    (if (seq live) live requested)))
+
+(defn- throwable->details [^Throwable t]
+  (let [message (or (.getMessage t)
+                    (some-> (ex-cause t) .getMessage)
+                    (.toString t))]
+    {:message message
+     :class   (-> t class .getName)
+     :ex-data (when-let [d (ex-data t)]
+                (try (pr-str d)
+                     (catch Throwable _ "<unprintable>")))
+     :stack   (->> (.getStackTrace t)
+                   (take 6)
+                   (mapv #(str (.getClassName ^StackTraceElement %)
+                               "." (.getMethodName ^StackTraceElement %)
+                               "(" (.getFileName ^StackTraceElement %)
+                               ":" (.getLineNumber ^StackTraceElement %) ")")))}))
+
+(defn- try-models!
+  "Issue the LLM call, falling back across `:models` in order. On every
+   backend throw we mark that model `:down` in the shared `model-status`
+   atom and try the next candidate. Returns one of:
+
+     {:ok response}         — successful turn
+     {:interrupted t}       — worker is dying / thread was interrupted
+     {:exhausted attempts}  — every candidate failed; caller should post
+                              :error.llm.backend. `attempts` is a vector of
+                              `{:model :error}` pairs (oldest first)."
+  [{:keys [backend transcript-fn worker-state model-status]} params messages tools]
+  (let [candidates (candidate-models params model-status)]
+    (loop [[m & more] candidates
+           attempts   []]
+      (let [request  (build-request
+                      {:system               (:system params)
+                       :messages             messages
+                       :tools                tools
+                       :model                m
+                       :max-tokens           (:max-tokens params)
+                       :temperature          (:temperature params)
+                       :top-p                (:top-p params)
+                       :top-k                (:top-k params)
+                       :stop-sequences       (:stop-sequences params)
+                       :thinking             (:thinking params)
+                       :tool-choice          (:tool-choice params)
+                       :metadata             (:metadata params)
+                       :system-cache-control (:system-cache-control params)
+                       :tools-cache-control  (:tools-cache-control params)
+                       :auto-cache?          (get params :auto-cache? true)
+                       :conv-id              (:conversation/id params)})
+            _        (transcript! transcript-fn
+                                  {:event :llm/request :ts (now-ms)
+                                   :data  (cond-> {:n-messages (count (:messages request))}
+                                            m (assoc :model m))})
+            response (try (llm/send-turn backend request)
+                          (catch Throwable t {:_throw t}))]
+        (cond
+          (and (:_throw response)
+               (or (instance? InterruptedException (:_throw response))
+                   (instance? InterruptedException (ex-cause (:_throw response)))
+                   (= :dying @worker-state)))
+          {:interrupted (:_throw response)}
+
+          (:_throw response)
+          (let [^Throwable t (:_throw response)
+                details      (throwable->details t)
+                ;; Only mark a real model id down. nil (backend's default
+                ;; pick) is not a routable identifier.
+                _            (when m (swap! model-status assoc m :down))
+                _            (transcript! transcript-fn
+                                          {:event :llm/model-down :ts (now-ms)
+                                           :data  {:model m
+                                                   :message (:message details)
+                                                   :remaining (vec more)}})
+                attempts'    (conj attempts {:model m :error (select-keys details [:message :class])})]
+            (if (seq more)
+              (recur more attempts')
+              {:exhausted attempts'
+               :last-throwable t}))
+
+          :else
+          {:ok response :model-used m})))))
+
 (defn- handle-running-turn!
   "Issue one LLM round-trip and process its response. Returns one of:
      :continue        — call `recur` in the outer loop
@@ -321,42 +418,14 @@
                         then hits the :dying branch)
      :idle            — :end_turn fired; outer loop should `recur` and park
                         in :awaiting-user."
-  [{:keys [backend tool-registry transcript-fn
+  [{:keys [tool-registry transcript-fn
            name->tool-kw name->event-entry tool-defs
            worker-state messages-atom retry-counts
-           params parent-ctx]}
+           params parent-ctx] :as ctx}
    post-error! on-end-turn-event]
-  (let [request (build-request
-                 {:system               (:system params)
-                  :messages             @messages-atom
-                  :tools                tool-defs
-                  :model                (:model params)
-                  :max-tokens           (:max-tokens params)
-                  :temperature          (:temperature params)
-                  :top-p                (:top-p params)
-                  :top-k                (:top-k params)
-                  :stop-sequences       (:stop-sequences params)
-                  :thinking             (:thinking params)
-                  :tool-choice          (:tool-choice params)
-                  :metadata             (:metadata params)
-                  :system-cache-control (:system-cache-control params)
-                  :tools-cache-control  (:tools-cache-control params)
-                  :auto-cache?          (get params :auto-cache? true)
-                  :conv-id              (:conversation/id params)})
-        _        (transcript! transcript-fn
-                              {:event :llm/request :ts (now-ms)
-                               :data  {:n-messages (count (:messages request))}})
-        response (try
-                   (llm/send-turn backend request)
-                   (catch Throwable t
-                     {:_throw t}))]
+  (let [outcome (try-models! ctx params @messages-atom tool-defs)]
     (cond
-      ;; Clean shutdown: chart left the state and our thread was interrupted
-      ;; mid-HTTP. Not an error — exit quietly.
-      (and (:_throw response)
-           (or (instance? InterruptedException (:_throw response))
-               (instance? InterruptedException (ex-cause (:_throw response)))
-               (= :dying @worker-state)))
+      (:interrupted outcome)
       (do
         (transcript! transcript-fn
                      {:event :llm/worker-exit :ts (now-ms)
@@ -364,30 +433,22 @@
         (reset! worker-state :dying)
         :error-and-die)
 
-      (:_throw response)
-      (let [^Throwable t (:_throw response)
-            message (or (.getMessage t)
-                        (some-> (ex-cause t) .getMessage)
-                        (.toString t))
-            details {:message message
-                     :class   (-> t class .getName)
-                     :ex-data (when-let [d (ex-data t)]
-                                (try (pr-str d)
-                                     (catch Throwable _ "<unprintable>")))
-                     :stack   (->> (.getStackTrace t)
-                                   (take 6)
-                                   (mapv #(str (.getClassName ^StackTraceElement %)
-                                               "." (.getMethodName ^StackTraceElement %)
-                                               "(" (.getFileName ^StackTraceElement %)
-                                               ":" (.getLineNumber ^StackTraceElement %) ")")))}]
+      (:exhausted outcome)
+      (let [attempts (:exhausted outcome)
+            last-t   ^Throwable (:last-throwable outcome)
+            details  (throwable->details last-t)]
         (transcript! transcript-fn {:event :llm/error :ts (now-ms)
-                                    :data  (assoc details :reason :backend)})
-        (post-error! :backend (select-keys details [:message :class]))
+                                    :data  (assoc details
+                                                  :reason   :backend
+                                                  :attempts attempts)})
+        (post-error! :backend (-> (select-keys details [:message :class])
+                                  (assoc :attempts attempts)))
         (reset! worker-state :dying)
         :error-and-die)
 
       :else
-      (let [{:keys [stop-reason content usage model]} response
+      (let [response (:ok outcome)
+            {:keys [stop-reason content usage model]} response
             ctx-window    (some-> model models/context-window)
             input-tokens  (:input-tokens usage)
             ctx-used-frac (when (and ctx-window input-tokens (pos? ctx-window))
@@ -567,7 +628,7 @@
       (when-let [^Thread t (:thread entry)] (.interrupt t))
       (catch Throwable _ nil))))
 
-(defrecord LlmConversationProcessor [backend tool-registry transcript-fn workers]
+(defrecord LlmConversationProcessor [backend tool-registry transcript-fn workers model-status]
   sp/InvocationProcessor
   (supports-invocation-type? [_ typ]
     (= typ :llm-conversation))
@@ -610,6 +671,7 @@
                                        :messages-atom      messages-atom
                                        :user-msg-queue     user-msg-queue
                                        :retry-counts       retry-counts
+                                       :model-status       model-status
                                        :params             params
                                        :parent-ctx         parent-ctx}
           runnable                    (fn [] (run-worker! ctx))
@@ -677,7 +739,7 @@
   [{:keys [backend tool-registry transcript-fn]}]
   (assert backend "backend is required")
   (assert tool-registry "tool-registry is required")
-  (->LlmConversationProcessor backend tool-registry (or transcript-fn (fn [_] nil)) (atom {})))
+  (->LlmConversationProcessor backend tool-registry (or transcript-fn (fn [_] nil)) (atom {}) (atom {})))
 
 (>defn active-worker-count
        "Returns the number of workers whose state is not `:dying`. Used by the runner
