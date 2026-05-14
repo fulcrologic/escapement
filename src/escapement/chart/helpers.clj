@@ -36,6 +36,33 @@
                :auto-forward? autoforward?
                :params        params-fn}))
 
+(defn human-input
+  "Returns an `invoke` element of type `:human-input`.
+
+   When the state owning this invocation is entered, the human-input processor
+   spawns a worker that prompts the user via the active `HumanRenderer` (TUI
+   modal when a TUI is running, stdin fallback otherwise). The worker posts
+   `:human.answer {:answer …}` (or `:on-answer-event`) to the chart's session
+   when the user responds, then dies.
+
+   `opts`:
+    * `:id` (required) — invoke id.
+    * `:params-fn` (required) — `(fn [env data] params-map)`. params-map keys:
+        :kind             :text | :select | :multi-select | :confirm | :progress | :custom
+        :prompt           string shown to the user
+        :options          [{:label … :value …}]  ; :select / :multi-select
+        :answer-schema    optional Malli schema validating the answer
+        :on-answer-event  default :human.answer
+        :on-cancel-event  default :human.cancelled
+        :on-error-event   default :human.error
+        :render           required for :custom; (fn [env data] answer)"
+  [{:keys [id params-fn]}]
+  (assert id "human-input requires :id")
+  (assert (fn? params-fn) "human-input requires :params-fn")
+  (elt/invoke {:type   :human-input
+               :id     id
+               :params params-fn}))
+
 (defn tell-llm
   "Returns a `script` element that, when executed, posts a `:llm.user-message`
    event into the current session (the chart's session). When the chart has a

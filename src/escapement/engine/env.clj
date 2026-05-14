@@ -12,6 +12,7 @@
    [escapement.engine.exec :as exec]
    [escapement.engine.queue :as queue]
    [escapement.engine.store :as store]
+   [escapement.invocation.human-input :as human-input]
    [escapement.invocation.llm-conversation :as llm-conv]))
 
 (defn new-env
@@ -24,7 +25,7 @@
     * `:queue` (optional) - event queue; defaults to a fresh in-process queue
     * `:store` (optional) - working-memory store; defaults to a file-backed store at `:checkpoint-dir`"
   [{:keys [checkpoint-dir invocation-processors registry queue store
-           llm-backend tool-registry transcript-fn]
+           llm-backend tool-registry transcript-fn human-renderer]
     :or   {invocation-processors []}}]
   (let [registry  (or registry (lmr/new-registry))
         queue     (or queue (queue/new-queue))
@@ -36,7 +37,11 @@
                                               :tool-registry tool-registry
                                               :transcript-fn transcript-fn})]
                     [])
-        all-procs (into [] (concat invocation-processors llm-procs))]
+        hi-procs  (if human-renderer
+                    [(human-input/new-processor {:renderer      human-renderer
+                                                 :transcript-fn transcript-fn})]
+                    [])
+        all-procs (into [] (concat invocation-processors llm-procs hi-procs))]
     (cond-> {::sc/statechart-registry   registry
              ::sc/data-model            dm
              ::sc/event-queue           queue

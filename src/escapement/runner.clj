@@ -10,6 +10,7 @@
    [com.fulcrologic.statecharts :as sc]
    [com.fulcrologic.statecharts.protocols :as sp]
    [escapement.engine.env :as engine-env]
+   [escapement.invocation.human-input :as human-input]
    [escapement.invocation.llm-conversation :as llm-conv]
    [escapement.transcript :as transcript]))
 
@@ -27,6 +28,19 @@
         (throw (ex-info (str "Could not resolve chart: " chart-sym) {:chart-sym chart-sym})))
       (deref v))))
 
+(defn load-chart-with-meta
+  "Like `load-chart` but returns `[chart-value var-meta]` so callers (e.g. the
+   CLI) can read `^{:interactive? true}` and similar markers without redoing
+   the resolve."
+  [chart-sym]
+  (assert (qualified-symbol? chart-sym) "chart-sym must be qualified")
+  (let [ns-sym (symbol (namespace chart-sym))]
+    (require ns-sym)
+    (let [v (resolve chart-sym)]
+      (when-not v
+        (throw (ex-info (str "Could not resolve chart: " chart-sym) {:chart-sym chart-sym})))
+      [(deref v) (or (meta v) {})])))
+
 (defn- count-live-invocations
   "Sum live worker counts across all `InvocationProcessor`s in the env that support it."
   [env]
@@ -36,6 +50,9 @@
        ;; Our LLM conversation processor — uses the public accessor.
        (instance? escapement.invocation.llm_conversation.LlmConversationProcessor proc)
        (+ n (llm-conv/active-worker-count proc))
+
+       (instance? escapement.invocation.human_input.HumanInputProcessor proc)
+       (+ n (human-input/active-worker-count proc))
 
        ;; Generic fallback: any processor that exposes a `:workers` atom of map entries
        ;; whose vals have a `:worker-state` atom (e.g. test stand-ins) is honored.
@@ -99,7 +116,8 @@
                                                 but live invocations exist"
        [{:keys [chart chart-id session-id transcript-path checkpoint-dir
                 backend tool-registry initial-data resume? trace?
-                max-iterations quiescent-sleep-ms]
+                max-iterations quiescent-sleep-ms human-renderer
+                on-env-ready transcript-tap]
          :or   {chart-id          ::chart
                 resume?           false
                 trace?            false
@@ -111,15 +129,27 @@
        (assert transcript-path "transcript-path is required")
        (assert checkpoint-dir "checkpoint-dir is required")
        (let [sink          (transcript/open-transcript {:path transcript-path :append? false})
-             transcript-fn (transcript/make-transcript-fn sink)
+             jsonl-fn      (transcript/make-transcript-fn sink)
+             transcript-fn (if transcript-tap
+                             (fn [ev]
+                               (jsonl-fn ev)
+                               (try (transcript-tap ev) (catch Throwable _ nil)))
+                             jsonl-fn)
              env           (engine-env/new-env {:checkpoint-dir checkpoint-dir
                                                 :llm-backend    backend
                                                 :tool-registry  tool-registry
+                                                :human-renderer human-renderer
                                                 :transcript-fn  transcript-fn})
              registry      (::sc/statechart-registry env)
              store         (::sc/working-memory-store env)
              processor     (::sc/processor env)]
          (sp/register-statechart! registry chart-id chart)
+         ;; Hook for callers (e.g. CLI's TUI) that need the queue/env at the
+         ;; moment env is built but the chart hasn't started yet. Errors in
+         ;; the callback are caught so they don't take down the runner.
+         (when on-env-ready
+           (try (on-env-ready env)
+                (catch Throwable _ nil)))
          (transcript-fn {:event :runner/started
                          :data  {:session-id (str session-id)
                                  :chart-id   (str chart-id)

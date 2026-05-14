@@ -5,7 +5,10 @@
          metosin/malli               {:mvn/version "0.16.4"}
          cheshire/cheshire           {:mvn/version "5.13.0"}
          babashka/process            {:mvn/version "0.5.22"}
-         org.babashka/http-client    {:mvn/version "0.4.22"}}
+         org.babashka/http-client    {:mvn/version "0.4.22"}
+         ;; Bundled with babashka; declared explicitly so the TUI namespace
+         ;; loads under plain JVM Clojure (tests, dev REPL).
+         org.jline/jline-terminal    {:mvn/version "3.27.1"}}
  :aliases
  {:demos {:extra-paths ["demos"]}
   :dev  {:extra-paths ["dev" "spike" "demos"]
