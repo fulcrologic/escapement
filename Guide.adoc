@@ -301,6 +301,49 @@ Notes:
   library exposes the triggering event under the `:_event` key of the
   data-model snapshot passed to script `:expr`.
 
+=== Three shapes of `:llm-conversation`
+
+A single `:llm-conversation` invocation is just a live worker bound to a
+chart state. The shape it takes is set entirely by which event-tools the
+chart declares and how it reacts to them. Three common shapes, all
+first-class and all built from the same machinery:
+
+Concentrated query::
+  A short conversation that decides one transition or produces one
+  structured payload. Usually one `:initial-user-message`, zero or one
+  event-tools, and the chart transitions out on `:llm.idle` (whose data
+  carries the final assistant text). Useful for routing, classification,
+  summarization, structured-output extraction, or "ask the model which
+  of these branches to take." The conversation typically lives for a
+  handful of round-trips and then the chart moves on.
+
+Explore / agent state::
+  The LLM is given real tools (file read/edit, shell, search, …) and
+  runs autonomously for as many `tool_use → tool_result` rounds as the
+  task needs — easily into the hundreds for a large refactor or audit.
+  The chart declares a small set of *coarse* event-tools for milestones
+  it actually branches on (`:patch-applied`, `:report-ready`,
+  `:give-up`) and sits on the state until one fires. The chart never
+  sees individual tool calls; that is the point.
+
+Long turn with clarifying questions::
+  Same shape as the agent state, plus an event-tool such as
+  `event__question` that the LLM can call when it needs input it
+  doesn't have. The chart routes that question elsewhere — to another
+  `:llm-conversation` that decides how to answer, to a human-input
+  node, to a stored FAQ — and posts the answer back into the original
+  conversation via <<tell-llm-helper,`h/tell-llm`>>. The autonomous
+  worker keeps running with its full context intact; from its point of
+  view it asked a question and got an answer.
+
+These are blends of one knob — *what event-tools you declare* — not
+different invocation types. A chart can have all three shapes in
+different states (or in parallel regions) at the same time. See
+<<tokens-and-turns>> for the mechanics that make long runs work
+(separate `:max-tokens` budget per round-trip, prompt caching across
+turns) and the `:max-turns` / `:max-conversation-duration-ms` options
+below for the worst-case guards.
+
 === Worked example: `scan.clj` — fan-out with a real tool
 
 Full source: `src/escapement/charts/scan.clj`.
@@ -622,18 +665,20 @@ for the full explanation and when caching is wasted effort.
   <<multi-agent>>) or to a file via `capture-llm-output`.
 
 `:max-turns`::
-  Optional positive integer. Hard cap on the number of LLM round-trips for
-  this invocation. When exceeded the worker self-cancels with
-  `:error.llm.max-turns {:limit N :turns N}` and dies. Use this to bound
-  runaway tool-call loops (especially useful for advisor / sub-agent
-  invocations where the chart owns the supervisor).
+  Optional positive integer. Caps the number of LLM round-trips for this
+  invocation. Size it for the shape of work the state is doing — a
+  concentrated-query state may want a small cap (5–10) while an
+  autonomous explore/agent state may legitimately want a large value or
+  none at all. When exceeded the worker self-cancels with
+  `:error.llm.max-turns {:limit N :turns N}` and dies.
 
 `:max-conversation-duration-ms`::
   Optional positive integer. Wall-clock budget from worker start to a clean
-  `:end_turn`. When exceeded fires `:error.llm.timeout
-  {:elapsed-ms M :limit-ms N}` and dies. Catches "slow grinding progress
-  that won't terminate." Doesn't replace `:http-timeout-ms` on the backend
-  (that bounds individual HTTP calls).
+  `:end_turn`. Like `:max-turns`, scale it to the state's shape; an
+  autonomous refactor / exploration state may want a long ceiling or
+  none. When exceeded fires `:error.llm.timeout
+  {:elapsed-ms M :limit-ms N}` and dies. Doesn't replace `:http-timeout-ms`
+  on the backend (that bounds individual HTTP calls).
 
 `:conversation/id`::
   Optional opaque token used by the `openai-codex` backend as a prompt
