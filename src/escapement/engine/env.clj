@@ -25,7 +25,7 @@
     * `:queue` (optional) - event queue; defaults to a fresh in-process queue
     * `:store` (optional) - working-memory store; defaults to a file-backed store at `:checkpoint-dir`"
   [{:keys [checkpoint-dir invocation-processors registry queue store
-           llm-backend tool-registry transcript-fn human-renderer
+           llm-backend llm-default-models tool-registry transcript-fn human-renderer
            session-dir]
     :or   {invocation-processors []}}]
   (let [registry  (or registry (lmr/new-registry))
@@ -34,9 +34,10 @@
         dm        (wmdm/new-flat-model)
         exec      (exec/new-execution-model dm queue)
         llm-procs (if (and llm-backend tool-registry)
-                    [(llm-conv/new-processor {:backend       llm-backend
-                                              :tool-registry tool-registry
-                                              :transcript-fn transcript-fn})]
+                    [(llm-conv/new-processor {:backend        llm-backend
+                                              :tool-registry  tool-registry
+                                              :transcript-fn  transcript-fn
+                                              :default-models llm-default-models})]
                     [])
         hi-procs  (if human-renderer
                     [(human-input/new-processor {:renderer      human-renderer

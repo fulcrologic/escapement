@@ -171,7 +171,7 @@
                                                without the debugger stealing
                                                focus."
        [{:keys [chart chart-id session-id transcript-path checkpoint-dir
-                session-dir backend tool-registry initial-data resume? trace?
+                session-dir backend backend-default-models tool-registry initial-data resume? trace?
                 max-iterations quiescent-sleep-ms human-renderer
                 on-env-ready transcript-tap
                 debug-controller human-input-active?]
@@ -192,12 +192,13 @@
                                (jsonl-fn ev)
                                (try (transcript-tap ev) (catch Throwable _ nil)))
                              jsonl-fn)
-             env           (engine-env/new-env {:checkpoint-dir checkpoint-dir
-                                                :session-dir    session-dir
-                                                :llm-backend    backend
-                                                :tool-registry  tool-registry
-                                                :human-renderer human-renderer
-                                                :transcript-fn  transcript-fn})
+             env           (engine-env/new-env {:checkpoint-dir     checkpoint-dir
+                                                :session-dir        session-dir
+                                                :llm-backend        backend
+                                                :llm-default-models backend-default-models
+                                                :tool-registry      tool-registry
+                                                :human-renderer     human-renderer
+                                                :transcript-fn      transcript-fn})
              registry      (::sc/statechart-registry env)
              store         (::sc/working-memory-store env)
              processor     (::sc/processor env)]

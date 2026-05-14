@@ -321,10 +321,12 @@
    non-empty seq — when every candidate is already down, returns the original
    ordered list anyway so the caller can record one final failure rather
    than silently skipping."
-  [params model-status]
+  [params default-models model-status]
   (let [requested (cond
                     (seq (:models params)) (vec (:models params))
-                    :else                  [(:model params)])
+                    (:model params)        [(:model params)]
+                    (seq default-models)   (vec default-models)
+                    :else                  [nil])
         status    @model-status
         ;; nil is a legitimate "let backend pick its default" — never mark or
         ;; filter it.
@@ -357,8 +359,8 @@
      {:exhausted attempts}  — every candidate failed; caller should post
                               :error.llm.backend. `attempts` is a vector of
                               `{:model :error}` pairs (oldest first)."
-  [{:keys [backend transcript-fn worker-state model-status]} params messages tools]
-  (let [candidates (candidate-models params model-status)]
+  [{:keys [backend transcript-fn worker-state model-status default-models]} params messages tools]
+  (let [candidates (candidate-models params default-models model-status)]
     (loop [[m & more] candidates
            attempts   []]
       (let [request  (build-request
@@ -628,7 +630,7 @@
       (when-let [^Thread t (:thread entry)] (.interrupt t))
       (catch Throwable _ nil))))
 
-(defrecord LlmConversationProcessor [backend tool-registry transcript-fn workers model-status]
+(defrecord LlmConversationProcessor [backend tool-registry transcript-fn workers model-status default-models]
   sp/InvocationProcessor
   (supports-invocation-type? [_ typ]
     (= typ :llm-conversation))
@@ -672,6 +674,7 @@
                                        :user-msg-queue     user-msg-queue
                                        :retry-counts       retry-counts
                                        :model-status       model-status
+                                       :default-models     default-models
                                        :params             params
                                        :parent-ctx         parent-ctx}
           runnable                    (fn [] (run-worker! ctx))
@@ -735,11 +738,15 @@
   `opts`:
    * `:backend` (required) — an `LLMBackend` instance
    * `:tool-registry` (required) — a `Tool` registry atom (from `tools.protocol/new-registry`)
-   * `:transcript-fn` (optional) — `(fn [event-map] ...)` for observability; default no-op"
-  [{:keys [backend tool-registry transcript-fn]}]
+   * `:transcript-fn` (optional) — `(fn [event-map] ...)` for observability; default no-op
+   * `:default-models` (optional) — ordered vector of model id strings to try
+     when a chart's invocation params don't specify `:model`/`:models`. Used
+     for cross-backend fallback when only some credentials are healthy."
+  [{:keys [backend tool-registry transcript-fn default-models]}]
   (assert backend "backend is required")
   (assert tool-registry "tool-registry is required")
-  (->LlmConversationProcessor backend tool-registry (or transcript-fn (fn [_] nil)) (atom {}) (atom {})))
+  (->LlmConversationProcessor backend tool-registry (or transcript-fn (fn [_] nil))
+                              (atom {}) (atom {}) (vec default-models)))
 
 (>defn active-worker-count
        "Returns the number of workers whose state is not `:dying`. Used by the runner

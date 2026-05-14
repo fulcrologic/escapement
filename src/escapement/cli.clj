@@ -213,18 +213,24 @@
 (defn- build-default-multi-backend!
   "Scan all available credentials and assemble a multi-dispatch backend. If only
    one credential is available, return that bare backend (no wrapping). Returns
-   nil if nothing is available."
+   nil if nothing is available.
+
+   Returns `{:backend B :default-models [model-id ...]}` — `:default-models`
+   is the preference-ordered list used by the llm-conversation processor when
+   a chart doesn't pin `:model`. Each credential contributes one entry."
   [{:keys [model]}]
   (let [creds (detect-available-credentials)]
     (cond
       (empty? creds) nil
 
       (= 1 (count creds))
-      (let [c (first creds)]
+      (let [c (first creds)
+            chosen-model (or model (:default-model c))]
         (binding [*out* *err*]
           (println (str "[cli] auto-detected LLM backend: " (name (:kind c))
-                        " (" (:source c) ", model " (or model (:default-model c)) ")")))
-        (build-credential-backend (cond-> c model (assoc :default-model model))))
+                        " (" (:source c) ", model " chosen-model ")")))
+        {:backend        (build-credential-backend (cond-> c model (assoc :default-model model)))
+         :default-models [chosen-model]})
 
       :else
       (let [built  (mapv (fn [c] [c (build-credential-backend c)]) creds)
@@ -236,33 +242,41 @@
             (println (str "[cli]   " (pr-str (:route c)) " → " (name (:kind c))
                           " (" (:source c) ", default model " (:default-model c) ")")))
           (println (str "[cli]   default backend → " (name (:kind (ffirst built))))))
-        (build-multi-backend {:routes routes :default-backend default-backend})))))
+        {:backend        (build-multi-backend {:routes routes :default-backend default-backend})
+         :default-models (mapv (fn [[c _]] (:default-model c)) built)}))))
 
 (defn- make-backend
   "Construct an LLM backend.
 
+   Returns `{:backend B :default-models [model-id ...]}` — `:default-models`
+   gives the cross-credential fallback preference list when charts don't pin
+   `:model`. For explicit `--backend X`, the list has at most one entry.
+   Returns nil when no backend is available.
+
    If `--backend` is explicitly provided, honor it. Otherwise auto-detect from
-   environment variables (ANTHROPIC_API_KEY or ZAI_API_KEY) and construct an
-   `:api` backend. If neither is set and no `--backend` was given, return nil
-   (charts that don't need an LLM are still fine)."
+   environment variables and construct a multi-dispatch backend."
   [{:keys [backend model api-base-url api-key-env]}]
   (if backend
     (case backend
       "api"
-      (build-api-backend (cond-> {}
-                           model        (assoc :model model)
-                           api-base-url (assoc :base-url api-base-url)
-                           api-key-env  (assoc :api-key (System/getenv api-key-env))))
+      {:backend        (build-api-backend (cond-> {}
+                                            model        (assoc :model model)
+                                            api-base-url (assoc :base-url api-base-url)
+                                            api-key-env  (assoc :api-key (System/getenv api-key-env))))
+       :default-models (when model [model])}
 
       "openai"
-      (build-openai-backend (cond-> {:base-url      (or api-base-url "https://api.openai.com/v1")
-                                     :default-model (or model "gpt-4o-mini")}
-                              api-key-env (assoc :api-key (System/getenv api-key-env))
-                              (not api-key-env) (assoc :api-key (System/getenv "OPENAI_API_KEY"))))
+      (let [m (or model "gpt-4o-mini")]
+        {:backend        (build-openai-backend (cond-> {:base-url      (or api-base-url "https://api.openai.com/v1")
+                                                        :default-model m}
+                                                 api-key-env (assoc :api-key (System/getenv api-key-env))
+                                                 (not api-key-env) (assoc :api-key (System/getenv "OPENAI_API_KEY"))))
+         :default-models [m]})
 
       "codex"
-      (build-codex-backend (cond-> {}
-                             model (assoc :default-model model)))
+      {:backend        (build-codex-backend (cond-> {}
+                                              model (assoc :default-model model)))
+       :default-models (when model [model])}
 
       (die! (str "Unknown backend: " backend)))
     ;; No --backend: build a multi-dispatch from all available credentials.
@@ -397,7 +411,9 @@
                                "  3. Pass --backend codex  (ChatGPT Plus/Pro subscription; run 'escapement login codex' first)\n"
                                "See: escapement info   (or:  Guide.adoc, \"LLM backends\")")
                           1))
-        backend (make-backend opts)
+        backend-info  (make-backend opts)
+        backend       (:backend backend-info)
+        backend-default-models (:default-models backend-info)
         ;; Load the chart FIRST. Its require-graph may include namespaces
         ;; whose top-level forms call
         ;; `(tp/register! escapement.tools.builtin/default-registry ...)`.
@@ -460,6 +476,7 @@
                          :checkpoint-dir  checkpoint-dir
                          :session-dir     session-dir
                          :backend         backend
+                         :backend-default-models backend-default-models
                          :tool-registry   tool-registry
                          :human-renderer  human-renderer
                          :initial-data    initial-data
