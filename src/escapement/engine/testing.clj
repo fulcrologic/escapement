@@ -22,12 +22,18 @@
     * `invocation-processors` (varargs) — instances of `InvocationProcessor` to install.
 
   Returns a map `{:env, :session-id, :chart-id}` for use with the rest of this harness."
-  [{:keys [statechart session-id checkpoint-dir tool-registry]} & invocation-processors]
-  (let [sid     (or session-id :dcch.test/session)
-        chart-id ::chart
-        env     (env/new-env (cond-> {:checkpoint-dir        (or checkpoint-dir (tmp-dir))
-                                      :invocation-processors (vec invocation-processors)}
-                               tool-registry (assoc :tool-registry tool-registry)))]
+  [{:keys [statechart session-id checkpoint-dir tool-registry session-dir]}
+   & invocation-processors]
+  (let [sid       (or session-id :dcch.test/session)
+        chart-id  ::chart
+        ;; Default session-dir = a sibling of checkpoint-dir, so artifacts and
+        ;; checkpoints share one tmp tree per test run.
+        ckpt-dir  (or checkpoint-dir (tmp-dir))
+        sess-dir  (or session-dir ckpt-dir)
+        env       (env/new-env (cond-> {:checkpoint-dir        ckpt-dir
+                                        :session-dir           sess-dir
+                                        :invocation-processors (vec invocation-processors)}
+                                 tool-registry (assoc :tool-registry tool-registry)))]
     (sp/register-statechart! (::sc/statechart-registry env) chart-id statechart)
     {:env env :session-id sid :chart-id chart-id}))
 

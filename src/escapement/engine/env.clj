@@ -25,7 +25,8 @@
     * `:queue` (optional) - event queue; defaults to a fresh in-process queue
     * `:store` (optional) - working-memory store; defaults to a file-backed store at `:checkpoint-dir`"
   [{:keys [checkpoint-dir invocation-processors registry queue store
-           llm-backend tool-registry transcript-fn human-renderer]
+           llm-backend tool-registry transcript-fn human-renderer
+           session-dir]
     :or   {invocation-processors []}}]
   (let [registry  (or registry (lmr/new-registry))
         queue     (or queue (queue/new-queue))
@@ -49,4 +50,5 @@
              ::sc/processor             (alg/new-processor)
              ::sc/invocation-processors all-procs
              ::sc/execution-model       exec}
-      tool-registry (assoc :escapement/tool-registry tool-registry))))
+      tool-registry (assoc :escapement/tool-registry tool-registry)
+      session-dir   (assoc :escapement/session-dir session-dir))))

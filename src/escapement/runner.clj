@@ -115,7 +115,7 @@
          * `:quiescent-sleep-ms` (default 50) — how long to sleep when queue is empty
                                                 but live invocations exist"
        [{:keys [chart chart-id session-id transcript-path checkpoint-dir
-                backend tool-registry initial-data resume? trace?
+                session-dir backend tool-registry initial-data resume? trace?
                 max-iterations quiescent-sleep-ms human-renderer
                 on-env-ready transcript-tap]
          :or   {chart-id          ::chart
@@ -136,6 +136,7 @@
                                (try (transcript-tap ev) (catch Throwable _ nil)))
                              jsonl-fn)
              env           (engine-env/new-env {:checkpoint-dir checkpoint-dir
+                                                :session-dir    session-dir
                                                 :llm-backend    backend
                                                 :tool-registry  tool-registry
                                                 :human-renderer human-renderer

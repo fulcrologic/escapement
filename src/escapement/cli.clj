@@ -340,6 +340,7 @@
                          :session-id      session-kw
                          :transcript-path transcript
                          :checkpoint-dir  checkpoint-dir
+                         :session-dir     session-dir
                          :backend         backend
                          :tool-registry   tool-registry
                          :human-renderer  human-renderer

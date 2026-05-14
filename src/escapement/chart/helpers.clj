@@ -13,11 +13,16 @@
   IMPORTANT: `tell-llm` must execute inside the state that owns the binding (or a
   descendant thereof); the invocation only exists while that state is active."
   (:require
+   [clojure.java.io :as io]
+   [clojure.string :as str]
    [com.fulcrologic.statecharts :as sc]
    [com.fulcrologic.statecharts.data-model.operations :as ops]
    [com.fulcrologic.statecharts.elements :as elt]
    [com.fulcrologic.statecharts.environment :as env-ns]
-   [com.fulcrologic.statecharts.protocols :as sp]))
+   [com.fulcrologic.statecharts.protocols :as sp])
+  (:import
+   (java.nio.file Files Paths StandardCopyOption)
+   (java.nio.file.attribute FileAttribute)))
 
 (defn llm-conversation
   "Returns an `invoke` element of type `:llm-conversation`.
@@ -251,3 +256,159 @@
                          :event             :llm.user-message
                          :data              {:text text :target target}})
               nil))}))
+
+;; ===========================================================================
+;; Artifact helpers — file-backed LLM outputs
+;;
+;; Conventions:
+;;   - One directory per session: `<session-dir>/artifacts/`.
+;;   - Each artifact is a single file. Name includes any extension the
+;;     chart-author wants (default = the producing invokeid, no extension).
+;;   - Writes are atomic via temp + rename so concurrent reads never see a
+;;     partial file.
+;;   - Latest write wins. To keep history, pick versioned names yourself
+;;     (e.g. `(str "draft-" iteration ".md")`).
+;; ===========================================================================
+
+(defn- session-dir
+  "Pull the session dir out of an SCXML env. Throws if missing — required for
+   any artifact-related operation."
+  [env]
+  (or (:escapement/session-dir env)
+      (throw (ex-info "No :escapement/session-dir on env — set :session-dir on (runner/run! …)"
+                      {:reason :missing-session-dir}))))
+
+(defn- artifact-path
+  "Absolute filesystem path for an artifact named `name` in `env`'s session."
+  [env name]
+  (str (session-dir env) "/artifacts/" name))
+
+(defn- atomic-write!
+  "Write `s` to `path`, durably and atomically. Creates parent dirs."
+  [^String path ^String s]
+  (let [target (Paths/get path (into-array String []))
+        parent (.getParent target)
+        _      (when parent
+                 (Files/createDirectories parent (into-array FileAttribute [])))
+        tmp    (Files/createTempFile parent ".artifact-" ".tmp"
+                                     (into-array FileAttribute []))]
+    (Files/writeString tmp s (into-array java.nio.file.OpenOption []))
+    (Files/move tmp target
+                (into-array java.nio.file.CopyOption
+                            [StandardCopyOption/ATOMIC_MOVE
+                             StandardCopyOption/REPLACE_EXISTING]))))
+
+(defn- read-artifact!
+  "Read the artifact named `name` in `env`'s session. Throws ex-info with
+   {:reason :missing-artifact :name name :path path} if the file isn't there."
+  [env name]
+  (let [path (artifact-path env name)
+        f    (io/file path)]
+    (when-not (.exists f)
+      (throw (ex-info (str "Missing artifact: " name)
+                      {:reason :missing-artifact :name name :path path})))
+    (slurp f)))
+
+(defn capture-llm-output
+  "Returns a `script` element. When executed inside a transition on
+   `:llm.idle` (or any event whose data carries `:text` and `:from`), writes
+   the LLM's final assistant text to `<session-dir>/artifacts/<name>`.
+
+   `opts` (all optional):
+    * `:as`     — filename. Default `(:from data-of-event)`, i.e. the invokeid
+                  of the LLM that finished. Pass `\"report.md\"` etc. for
+                  explicit names with extensions."
+  ([] (capture-llm-output {}))
+  ([{:keys [as] :as _opts}]
+   (elt/script
+    {:expr
+     (fn [env data]
+       (let [text (or (get-in data [:_event :data :text]) "")
+             from (get-in data [:_event :data :from])
+             name (or as from)]
+         (when-not name
+           (throw (ex-info "capture-llm-output: no :as and no :from in event data"
+                           {:reason :missing-artifact-name})))
+         (atomic-write! (artifact-path env name) text)
+         ;; Surface for the TUI + transcript JSONL.
+         (when-let [tfn (:escapement/transcript-fn env)]
+           (try (tfn {:event :artifact/captured
+                      :data  {:name name :bytes (count text)}})
+                (catch Throwable _ nil)))
+         nil))})))
+
+(def ^:private mustache-pattern
+  #"\{\{\s*([A-Za-z0-9_./\-]+)\s*\}\}")
+
+(defn- resolve-token
+  "Resolve a single template token. `:output` is reserved for the in-flight
+   assistant text passed via `extras`; any other token names an artifact
+   file. Throws ex-info on misses so chart-authors catch typos at the call
+   site rather than send garbage to the LLM."
+  [env extras token]
+  (cond
+    (= "output" token)
+    (or (:output extras)
+        (throw (ex-info "Template uses {{output}} but no :output in scope"
+                        {:reason :missing-template-key :key "output"})))
+
+    :else
+    (read-artifact! env token)))
+
+(defn render-template
+  "Substitute `{{name}}` tokens in `template` with file-backed artifacts from
+   `<session-dir>/artifacts/<name>`. Throws on any missing token (fail-fast
+   so a half-populated session doesn't silently produce a malformed prompt).
+
+   `{{output}}` is reserved for the in-flight assistant text and resolves
+   only when callers pass `:output` in `extras`.
+
+   Use this in `params-fn` (where `env` is available) to compose initial
+   user messages or system prompts from prior agents' outputs."
+  ([template env]
+   (render-template template env nil))
+  ([template env extras]
+   (str/replace template mustache-pattern
+                (fn [[_ token]]
+                  (resolve-token env extras token)))))
+
+(defn forward-llm-output
+  "Returns a `script` element that captures the in-flight LLM output to a
+   file (unless `:capture? false`), then sends a formatted `:llm.user-message`
+   targeted at another conversation.
+
+   `{{output}}` in the template resolves to the in-flight text; all other
+   `{{name}}` tokens resolve to artifacts.
+
+   `opts`:
+    * `:to`        (required) — destination invokeid string.
+    * `:template`  (required) — string with `{{output}}` and/or `{{name}}` slots.
+    * `:as`        — filename for the captured artifact; default
+                     `(:from event-data)`.
+    * `:capture?`  — default true. Set to false to forward without writing
+                     a file (e.g. you only want the prompt routed)."
+  [{:keys [to template as capture?]
+    :or   {capture? true}}]
+  (assert to "forward-llm-output requires :to")
+  (assert (string? template) "forward-llm-output requires a string :template")
+  (elt/script
+   {:expr
+    (fn [env data]
+      (let [text    (or (get-in data [:_event :data :text]) "")
+            from    (get-in data [:_event :data :from])
+            name    (or as from)
+            queue   (::sc/event-queue env)
+            sid     (env-ns/session-id env)]
+        (when (and capture? name)
+          (atomic-write! (artifact-path env name) text)
+          (when-let [tfn (:escapement/transcript-fn env)]
+            (try (tfn {:event :artifact/captured
+                       :data  {:name name :bytes (count text)}})
+                 (catch Throwable _ nil))))
+        (let [rendered (render-template template env {:output text})]
+          (sp/send! queue env
+                    {:target            sid
+                     :source-session-id sid
+                     :event             :llm.user-message
+                     :data              {:text rendered :target to}}))
+        nil))}))

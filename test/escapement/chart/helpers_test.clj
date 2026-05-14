@@ -116,3 +116,97 @@
                                        (map :text)
                                        (clojure.string/join ""))]
                     (.contains ^String text "User chose")) => true)))
+
+;; ---------------------------------------------------------------------------
+;; Artifact helpers — capture-llm-output, render-template, forward-llm-output
+;; ---------------------------------------------------------------------------
+
+(specification "render-template substitutes file-backed artifacts"
+  (let [tmp (str (java.nio.file.Files/createTempDirectory
+                  "art-test" (into-array java.nio.file.attribute.FileAttribute [])))
+        env {:escapement/session-dir tmp}]
+    ;; Seed two artifact files.
+    (clojure.java.io/make-parents (str tmp "/artifacts/x"))
+    (spit (str tmp "/artifacts/research") "research-text")
+    (spit (str tmp "/artifacts/draft.md") "## the draft\n")
+    (assertions
+      "simple substitution"
+      (h/render-template "Findings: {{research}}" env)
+      => "Findings: research-text"
+      "filenames with extensions"
+      (h/render-template "Draft:\n{{draft.md}}\n--end" env)
+      => "Draft:\n## the draft\n\n--end"
+      "{{output}} resolves from extras only"
+      (h/render-template "Said: {{output}}" env {:output "hello"})
+      => "Said: hello")))
+
+(specification "render-template throws on missing artifact"
+  (let [tmp (str (java.nio.file.Files/createTempDirectory
+                  "art-test" (into-array java.nio.file.attribute.FileAttribute [])))
+        env {:escapement/session-dir tmp}]
+    (assertions
+      "missing artifact is a fail-fast ex-info"
+      (try
+        (h/render-template "{{nope}}" env)
+        :did-not-throw
+        (catch clojure.lang.ExceptionInfo e
+          (:reason (ex-data e))))
+      => :missing-artifact
+
+      "{{output}} without :output in extras also fails"
+      (try
+        (h/render-template "{{output}}" env)
+        :did-not-throw
+        (catch clojure.lang.ExceptionInfo e
+          (:reason (ex-data e))))
+      => :missing-template-key)))
+
+(specification "capture-llm-output writes the assistant text to a file"
+  (let [end-text "the answer is 42"
+        backend  (mock-backend [(end-turn end-text)])
+        chart    (chart/statechart
+                  {:initial :run}
+                  (state {:id :run :initial :work}
+                    (state {:id :work}
+                      (h/llm-conversation
+                       {:id        "researcher"
+                        :params-fn (fn [_ _] {:initial-user-message "go"})})
+                      (transition {:event :llm.idle :target :done}
+                        (h/capture-llm-output)))
+                    (final {:id :done})))
+        llm-proc (escapement.invocation.llm-conversation/new-processor
+                  {:backend backend :tool-registry (escapement.tools.protocol/new-registry)})
+        t        (-> (escapement.engine.testing/new-testing-env {:statechart chart} llm-proc)
+                     (escapement.engine.testing/start!))
+        t        (await-state! t :done 3000)
+        sess-dir (:escapement/session-dir (:env t))
+        path     (str sess-dir "/artifacts/researcher")]
+    (assertions
+      "chart reached :done"
+      (escapement.engine.testing/in? t :done) => true
+      "artifact file exists at <session-dir>/artifacts/<from>"
+      (.exists (clojure.java.io/file path)) => true
+      "contents are the assistant's final text"
+      (slurp path) => end-text)))
+
+(specification "capture-llm-output with explicit :as filename"
+  (let [backend  (mock-backend [(end-turn "draft v1")])
+        chart    (chart/statechart
+                  {:initial :run}
+                  (state {:id :run :initial :work}
+                    (state {:id :work}
+                      (h/llm-conversation
+                       {:id        "writer"
+                        :params-fn (fn [_ _] {:initial-user-message "go"})})
+                      (transition {:event :llm.idle :target :done}
+                        (h/capture-llm-output {:as "draft.md"})))
+                    (final {:id :done})))
+        llm-proc (escapement.invocation.llm-conversation/new-processor
+                  {:backend backend :tool-registry (escapement.tools.protocol/new-registry)})
+        t        (-> (escapement.engine.testing/new-testing-env {:statechart chart} llm-proc)
+                     (escapement.engine.testing/start!))
+        t        (await-state! t :done 3000)
+        sess-dir (:escapement/session-dir (:env t))]
+    (assertions
+      "artifact lands under the requested name (with extension)"
+      (slurp (str sess-dir "/artifacts/draft.md")) => "draft v1")))
