@@ -105,13 +105,13 @@
        "Opens `url` in the system default browser. Best-effort; prints a manual URL on failure."
        [url]
        [:string => :nil]
-       (let [os      (str/lower-case (System/getProperty "os.name"))
-             cmd     (cond
-                       (str/includes? os "mac")  ["open" url]
-                       (str/includes? os "win")  ["cmd" "/c" "start" url]
-                       :else                     ["xdg-open" url])]
+       (let [os  (str/lower-case (System/getProperty "os.name"))
+             cmd (cond
+                   (str/includes? os "mac")  ["open" url]
+                   (str/includes? os "win")  ["cmd" "/c" "start" url]
+                   :else                     ["xdg-open" url])]
          (try
-           (process/shell {:out :inherit :err :inherit} (first cmd) (rest cmd))
+           (apply process/shell {:out :inherit :err :inherit} cmd)
            (catch Throwable _
              (binding [*out* *err*]
                (println "Open this URL in your browser:" url)))))
