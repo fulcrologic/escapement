@@ -11,10 +11,12 @@
                                            :usage       {:input-tokens 100 :output-tokens 17}}})
                 => "[llm/resp] stop=:tool_use tokens=in:100/out:17"
 
-                "runner/event-processed surfaces config-after"
+                "runner/event-processed surfaces config-before → config-after"
                 (tui/format-event {:event :runner/event-processed
-                                   :data  {:event-name :done :config-after [:run :finished]}})
-                => "[chart] event=:done config=[:run :finished]"
+                                   :data  {:event-name    :done
+                                           :config-before [:run :working]
+                                           :config-after  [:run :finished]}})
+                => "[chart] :done  [:run :working] → [:run :finished]"
 
                 "human-input/start shows kind"
                 (tui/format-event {:event :human-input/start :data {:kind :text}})

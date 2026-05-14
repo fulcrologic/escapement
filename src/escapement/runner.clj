@@ -9,6 +9,7 @@
    [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
    [com.fulcrologic.statecharts :as sc]
    [com.fulcrologic.statecharts.protocols :as sp]
+   [escapement.debug.controller :as dbg]
    [escapement.engine.env :as engine-env]
    [escapement.invocation.human-input :as human-input]
    [escapement.invocation.llm-conversation :as llm-conv]
@@ -68,10 +69,45 @@
    0
    (::sc/invocation-processors env)))
 
+(defn- external-event?
+  "An event lacks `::sc/source-session-id` only when it was injected from
+   outside the chart (CLI, TUI, fixtures). Internal raises always carry it
+   (set in `engine.queue/send!`)."
+  [event]
+  (nil? (::sc/source-session-id event)))
+
+(defn- maybe-pause!
+  "Honors the debug `controller` (if any) before processing `event`. Two
+   gates apply:
+
+   * `pause-on-next-external?` — flips the controller to `:paused` if `event`
+     came from outside the chart.
+   * `:paused` mode — emits `:debug/awaiting-step` and parks the runner
+     thread until the TUI calls `step!` or `continue!`.
+
+   Skips entirely when `controller` is nil or when a `human-input-active?`
+   thunk returns true (so the chart can answer prompts without the debugger
+   stealing focus)."
+  [{:keys [controller transcript-fn human-input-active?]} event]
+  (when (and controller
+             (not (and human-input-active? (human-input-active?))))
+    (dbg/maybe-arm-from-external! controller (when (external-event? event)
+                                               {:external? true}))
+    (when (dbg/paused? controller)
+      (transcript-fn {:event :debug/awaiting-step
+                      :data  {:event-name (:name event)
+                              :external?  (external-event? event)}})
+      (dbg/await-release! controller))
+    (when (pos? (:step-budget @controller))
+      (dbg/consume-step-budget! controller))))
+
 (defn- drain-once!
   "Drain currently-deliverable events for `session-id` through the processor exactly once,
-   checkpointing after each event. Returns true if at least one event was processed."
-  [{:keys [env session-id transcript-fn]}]
+   checkpointing after each event. Returns true if at least one event was processed.
+
+   When `:controller` is supplied, each event is gated through the debug
+   pause/step controller (see `maybe-pause!`)."
+  [{:keys [env session-id transcript-fn controller human-input-active?]}]
   (let [queue       (::sc/event-queue env)
         store       (::sc/working-memory-store env)
         processor   (::sc/processor env)
@@ -79,13 +115,23 @@
     (sp/receive-events!
      queue env
      (fn [_ event]
+       (maybe-pause! {:controller          controller
+                      :transcript-fn       transcript-fn
+                      :human-input-active? human-input-active?}
+                     event)
        (reset! progressed? true)
-       (let [wmem  (sp/get-working-memory store env session-id)
-             wmem' (sp/process-event! processor env wmem event)]
+       (let [ts            (System/currentTimeMillis)
+             wmem          (sp/get-working-memory store env session-id)
+             config-before (vec (::sc/configuration wmem #{}))
+             wmem'         (sp/process-event! processor env wmem event)
+             config-after  (vec (::sc/configuration wmem' #{}))]
          (sp/save-working-memory! store env session-id wmem')
          (transcript-fn {:event :runner/event-processed
-                         :data  {:event-name   (:name event)
-                                 :config-after (vec (::sc/configuration wmem' #{}))}})
+                         :ts    ts
+                         :data  {:event-name    (:name event)
+                                 :config-before config-before
+                                 :config-after  config-after
+                                 :event-data    (:data event)}})
          (transcript-fn {:event :checkpoint/written
                          :data  {:session-id (str session-id)}})))
      {:session-id session-id})
@@ -113,11 +159,22 @@
          * `:trace?` (default false) — write `:runner/tick` events on every loop turn
          * `:max-iterations` (default 100000) — safety bound on the pump loop
          * `:quiescent-sleep-ms` (default 50) — how long to sleep when queue is empty
-                                                but live invocations exist"
+                                                but live invocations exist
+         * `:debug-controller` (optional) — `escapement.debug.controller`
+                                            atom; when supplied, every event
+                                            is gated through pause/step
+                                            before being processed.
+         * `:human-input-active?` (optional) — zero-arg predicate; when it
+                                               returns true the debug gate
+                                               yields so the chart can
+                                               answer a human-input prompt
+                                               without the debugger stealing
+                                               focus."
        [{:keys [chart chart-id session-id transcript-path checkpoint-dir
                 session-dir backend tool-registry initial-data resume? trace?
                 max-iterations quiescent-sleep-ms human-renderer
-                on-env-ready transcript-tap]
+                on-env-ready transcript-tap
+                debug-controller human-input-active?]
          :or   {chart-id          ::chart
                 resume?           false
                 trace?            false
@@ -182,7 +239,9 @@
                :else
                (let [progressed? (drain-once! {:env env
                                                :session-id session-id
-                                               :transcript-fn transcript-fn})]
+                                               :transcript-fn transcript-fn
+                                               :controller debug-controller
+                                               :human-input-active? human-input-active?})]
                  (if progressed?
                    (recur (dec i))
                    (let [live (count-live-invocations env)]

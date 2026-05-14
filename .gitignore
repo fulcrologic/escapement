@@ -13,3 +13,4 @@ checkpoints/
 escapement.iml
 target/
 transcripts/
+.claude/worktrees

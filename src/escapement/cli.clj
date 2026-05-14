@@ -29,6 +29,12 @@
         --tui                   Force-enable the persistent TUI display.
         --no-tui                Force-disable the TUI (overrides --tui and
                                 ^{:interactive? true} chart metadata).
+        --debug                 Enable debug mode: forces the TUI on (even
+                                for non-interactive charts), enables the
+                                inspector overlay (`?` to open), and — when
+                                `:debug :auto-pause?` is true in
+                                `.escapement.edn` (default true) — pauses
+                                before the very first event so you can step.
 
     info              — Print version + environment info.
 
@@ -38,6 +44,8 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [com.fulcrologic.statecharts :as sc]
+   [escapement.config :as config]
+   [escapement.debug.controller :as dbg]
    [escapement.invocation.human-input :as human-input]
    [escapement.runner :as runner]
    [escapement.transcript :as transcript]
@@ -246,14 +254,19 @@
 (defn- decide-tui
   "Resolve TUI on/off from flags + chart metadata + tty.
 
-   --no-tui wins outright. --tui forces on (and errors with no TTY). Otherwise
-   `^{:interactive? true}` on the chart var defaults to on; else off."
+   --no-tui wins outright. --debug or --tui forces on (and errors with no
+   TTY). Otherwise `^{:interactive? true}` on the chart var defaults to on;
+   else off. `--debug` and `--no-tui` together is rejected."
   [opts chart-meta]
   (let [no-tui?  (boolean (:no-tui opts))
         tui?     (boolean (:tui opts))
+        debug?   (boolean (:debug opts))
+        _        (when (and no-tui? debug?)
+                   (die! "--debug requires the TUI; do not combine with --no-tui."))
         interactive? (boolean (:interactive? chart-meta))
         want?    (cond
                    no-tui? false
+                   debug?  true
                    tui?    true
                    :else   interactive?)]
     (cond
@@ -270,7 +283,7 @@
 
 (defn- cmd-run [args]
   (let [{:keys [positional opts]}
-        (parse-args args #{:resume :trace :tui :no-tui} #{:param})
+        (parse-args args #{:resume :trace :tui :no-tui :debug} #{:param})
         chart-arg (first positional)
         _         (when-not chart-arg
                     (die! "Usage: run <chart-sym> [flags]"))
@@ -298,10 +311,21 @@
         ;; visible to `runner/run!` below.
         [chart chart-meta] (runner/load-chart-with-meta chart-sym)
         use-tui?       (decide-tui opts chart-meta)
+        debug?         (boolean (:debug opts))
+        debug-cfg      (when debug? (config/load-config))
+        debug-controller (when debug?
+                           (dbg/new-controller
+                            {:initial-pause? (boolean
+                                              (get-in debug-cfg
+                                                      [:debug :auto-pause?]
+                                                      true))}))
         session-short  (apply str (take 8 session))
         tui-handle     (when use-tui?
-                         (tui/start! {:chart-sym     chart-sym
-                                      :session-short session-short}))
+                         (tui/start! (cond-> {:chart-sym     chart-sym
+                                              :session-short session-short}
+                                       debug? (assoc :debug?           true
+                                                     :debug-controller debug-controller
+                                                     :debug-config     debug-cfg))))
         human-renderer (cond
                          tui-handle              (tui/->renderer tui-handle)
                          (:interactive? chart-meta) (human-input/stdin-renderer)
@@ -349,12 +373,21 @@
                          :trace?          (boolean (:trace opts))
                          :transcript-tap  (when tui-handle
                                             (fn [ev] (tui/event! tui-handle ev)))
+                         :debug-controller debug-controller
+                         :human-input-active? (when tui-handle
+                                                (fn [] (tui/human-input-active? tui-handle)))
                          :on-env-ready    (when tui-handle
                                             (fn [env]
                                               (tui/attach-session!
                                                tui-handle
                                                session-kw
-                                               (::sc/event-queue env))))})]
+                                               (::sc/event-queue env))
+                                              (tui/attach-env! tui-handle env chart)))})]
+        ;; In debug mode, hold the TUI open after the chart finishes so the
+        ;; user can keep browsing the inspector (artifacts, history, viz).
+        ;; Ctrl-C from the input thread breaks await-quit!.
+        (when (and tui-handle debug?)
+          (tui/await-quit! tui-handle))
         (when tui-handle (tui/stop! tui-handle))
         (println "session         " session)
         (println "transcript      " transcript)
