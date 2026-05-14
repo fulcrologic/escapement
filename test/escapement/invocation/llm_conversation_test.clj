@@ -685,3 +685,42 @@
                                   (filter #(= :text (:type %)))
                                   (map :text))]
                     (boolean (some #{"for advisor only"} msgs))) => true)))
+
+;; ---------------------------------------------------------------------------
+;; #10: Invocation ids may be keywords; routing and :from normalize to string
+;; ---------------------------------------------------------------------------
+
+(specification "keyword :id is accepted and normalized to string in routing/from"
+  ;; Chart-author writes :id :researcher (keyword). The :on-end-turn-event
+  ;; :from field should be the string "researcher", and a :target keyword
+  ;; in tell-other-llm should still match.
+  (let [backend (mock-backend [(end-turn-response "ok")])
+        seen    (atom nil)
+        chart   (chart/statechart
+                  {:initial :wrap}
+                  (state {:id :wrap :initial :work}
+                    (state {:id :work}
+                      (h/llm-conversation
+                        {:id        :researcher          ;; <-- keyword
+                         :params-fn (fn [_ _] {:initial-user-message "go"})})
+                      (transition {:event :llm.idle :target :done}
+                        (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
+                    (final {:id :done})))
+        t       (new-llm-test-env {:statechart chart :backend backend})
+        t       (await-config! t :done 3000)]
+    (assertions
+      "chart finished"
+      (dct/in? t :done) => true
+      ":from is the canonical string form"
+      (get-in @seen [:data :from]) => "researcher")))
+
+(specification "->id-str normalizes keywords and strings"
+  (assertions
+    "keyword loses the colon"
+    (escapement.invocation.llm-conversation/->id-str :foo) => "foo"
+    "namespaced keyword keeps just the name"
+    (escapement.invocation.llm-conversation/->id-str :a/foo) => "foo"
+    "string passes through"
+    (escapement.invocation.llm-conversation/->id-str "foo") => "foo"
+    "nil stays nil"
+    (escapement.invocation.llm-conversation/->id-str nil) => nil))

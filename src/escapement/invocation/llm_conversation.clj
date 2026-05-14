@@ -297,6 +297,17 @@
           {:result-block {:type :tool_result :tool_use_id id
                           :content (str "Unknown tool: " name) :is-error true}})))))
 
+(defn ->id-str
+  "Normalize an invokeid to its canonical string form. Chart-authors may write
+   `:id :researcher` (keyword) or `:id \"researcher\"` (string); both should
+   compare equal everywhere we touch them (target routing, :from labels,
+   artifact filenames). Public so chart-author helpers can normalize too."
+  [x]
+  (cond
+    (keyword? x) (name x)
+    (nil? x)     nil
+    :else        (str x)))
+
 (defn- error-event
   "Compose the SCXML-style error event name from a `:reason` keyword.
    `:reason :backend` → `:error.llm.backend`."
@@ -412,7 +423,7 @@
                                   (apply str))]
               (post-event-to-parent! parent-ctx on-end-turn-event
                                      {:text final-text
-                                      :from (:invokeid parent-ctx)}))
+                                      :from (->id-str (:invokeid parent-ctx))}))
             (transition-state! worker-state :awaiting-user)
             :idle)
 
@@ -639,9 +650,11 @@
           ;; Target filter: when :target is present in the event data, only the
           ;; invocation whose invokeid matches receives the message. Without a
           ;; :target, ALL llm-conversation invocations get it (today's behavior
-          ;; — backward-compatible default).
+          ;; — backward-compatible default). Comparison is on the canonical
+          ;; string form so keyword/string ids match transparently.
           target            (:target ev-data)
-          accept?           (or (nil? target) (= target invokeid))]
+          accept?           (or (nil? target)
+                                (= (->id-str target) (->id-str invokeid)))]
       (when (and entry accept? (= :llm.user-message ev-name))
         (let [text (:text ev-data)]
           (when (string? text)

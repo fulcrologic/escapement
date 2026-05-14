@@ -19,7 +19,8 @@
    [com.fulcrologic.statecharts.data-model.operations :as ops]
    [com.fulcrologic.statecharts.elements :as elt]
    [com.fulcrologic.statecharts.environment :as env-ns]
-   [com.fulcrologic.statecharts.protocols :as sp])
+   [com.fulcrologic.statecharts.protocols :as sp]
+   [escapement.invocation.llm-conversation :as llmc])
   (:import
    (java.nio.file Files Paths StandardCopyOption)
    (java.nio.file.attribute FileAttribute)))
@@ -246,15 +247,16 @@
   (assert (fn? expr) "tell-other-llm requires :expr")
   (elt/script
    {:expr (fn [env data]
-            (let [text   (expr env data)
-                  target (if (fn? target) (target env data) target)
-                  queue  (::sc/event-queue env)
-                  sid    (env-ns/session-id env)]
+            (let [text    (expr env data)
+                  target  (if (fn? target) (target env data) target)
+                  target' (llmc/->id-str target)
+                  queue   (::sc/event-queue env)
+                  sid     (env-ns/session-id env)]
               (sp/send! queue env
                         {:target            sid
                          :source-session-id sid
                          :event             :llm.user-message
-                         :data              {:text text :target target}})
+                         :data              {:text text :target target'}})
               nil))}))
 
 ;; ===========================================================================
@@ -324,8 +326,8 @@
     {:expr
      (fn [env data]
        (let [text (or (get-in data [:_event :data :text]) "")
-             from (get-in data [:_event :data :from])
-             name (or as from)]
+             from (llmc/->id-str (get-in data [:_event :data :from]))
+             name (llmc/->id-str (or as from))]
          (when-not name
            (throw (ex-info "capture-llm-output: no :as and no :from in event data"
                            {:reason :missing-artifact-name})))
@@ -394,21 +396,22 @@
   (elt/script
    {:expr
     (fn [env data]
-      (let [text    (or (get-in data [:_event :data :text]) "")
-            from    (get-in data [:_event :data :from])
-            name    (or as from)
-            queue   (::sc/event-queue env)
-            sid     (env-ns/session-id env)]
-        (when (and capture? name)
-          (atomic-write! (artifact-path env name) text)
+      (let [text     (or (get-in data [:_event :data :text]) "")
+            from     (llmc/->id-str (get-in data [:_event :data :from]))
+            art-name (llmc/->id-str (or as from))
+            to'      (llmc/->id-str to)
+            queue    (::sc/event-queue env)
+            sid      (env-ns/session-id env)]
+        (when (and capture? art-name)
+          (atomic-write! (artifact-path env art-name) text)
           (when-let [tfn (:escapement/transcript-fn env)]
             (try (tfn {:event :artifact/captured
-                       :data  {:name name :bytes (count text)}})
+                       :data  {:name art-name :bytes (count text)}})
                  (catch Throwable _ nil))))
         (let [rendered (render-template template env {:output text})]
           (sp/send! queue env
                     {:target            sid
                      :source-session-id sid
                      :event             :llm.user-message
-                     :data              {:text rendered :target to}}))
+                     :data              {:text rendered :target to'}}))
         nil))}))
