@@ -576,56 +576,112 @@
 (specification ":max-turns budget fires :error.llm.max-turns"
   ;; The model keeps emitting tool_use forever (infinite loop). Without a
   ;; budget the worker would never stop; :max-turns 3 makes it self-cancel.
-  (let [;; A fake event-tool that always passes validation so the loop keeps
+               (let [;; A fake event-tool that always passes validation so the loop keeps
         ;; running through tool dispatch.
-        always-tool (tool-use-response
-                     [{:id "u1" :name "event__noop" :input {:x 1}}])
-        backend (mock-backend [always-tool always-tool always-tool always-tool])
-        err-seen (atom nil)
-        chart    (chart/statechart
-                  {:initial :wrap}
-                  (state {:id :wrap :initial :work}
-                    (state {:id :work}
-                      (h/llm-conversation
-                       {:id        "p"
-                        :params-fn (fn [_ _]
-                                     {:max-turns            3
-                                      :allowed-events       [{:event :noop
-                                                              :data-schema [:map [:x :int]]}]
-                                      :initial-user-message "go"})})
+                     always-tool (tool-use-response
+                                  [{:id "u1" :name "event__noop" :input {:x 1}}])
+                     backend (mock-backend [always-tool always-tool always-tool always-tool])
+                     err-seen (atom nil)
+                     chart    (chart/statechart
+                               {:initial :wrap}
+                               (state {:id :wrap :initial :work}
+                                      (state {:id :work}
+                                             (h/llm-conversation
+                                              {:id        "p"
+                                               :params-fn (fn [_ _]
+                                                            {:max-turns            3
+                                                             :allowed-events       [{:event :noop
+                                                                                     :data-schema [:map [:x :int]]}]
+                                                             :initial-user-message "go"})})
                       ;; Catch-all per-family.
-                      (transition {:event :error.llm.* :target :failed}
-                        (script {:expr (fn [_ d] (reset! err-seen (:_event d)) nil)})))
-                    (final {:id :failed})))
-        t        (new-llm-test-env {:statechart chart :backend backend})
-        t        (await-config! t :failed 3000)]
-    (assertions
-      "chart reached :failed"
-      (dct/in? t :failed) => true
-      "error event was :error.llm.max-turns"
-      (some-> @err-seen :name) => :error.llm.max-turns
-      "carries the :limit"
-      (get-in @err-seen [:data :limit]) => 3)))
+                                             (transition {:event :error.llm.* :target :failed}
+                                                         (script {:expr (fn [_ d] (reset! err-seen (:_event d)) nil)})))
+                                      (final {:id :failed})))
+                     t        (new-llm-test-env {:statechart chart :backend backend})
+                     t        (await-config! t :failed 3000)]
+                 (assertions
+                  "chart reached :failed"
+                  (dct/in? t :failed) => true
+                  "error event was :error.llm.max-turns"
+                  (some-> @err-seen :name) => :error.llm.max-turns
+                  "carries the :limit"
+                  (get-in @err-seen [:data :limit]) => 3)))
 
 (specification ":on-end-turn-event data now carries :text and :from"
-  (let [backend (mock-backend [(end-turn-response "the answer is 42")])
-        seen    (atom nil)
-        chart   (chart/statechart
-                 {:initial :wrap}
-                 (state {:id :wrap :initial :work}
-                   (state {:id :work}
-                     (h/llm-conversation
-                      {:id        "advisor"
-                       :params-fn (fn [_ _] {:initial-user-message "go"})})
-                     (transition {:event :llm.idle :target :done}
-                       (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
-                   (final {:id :done})))
-        t       (new-llm-test-env {:statechart chart :backend backend})
-        t       (await-config! t :done 3000)]
-    (assertions
-      "chart reached :done"
-      (dct/in? t :done) => true
-      ":on-end-turn-event data has the assistant's final text"
-      (get-in @seen [:data :text]) => "the answer is 42"
-      "and the speaker's invokeid"
-      (get-in @seen [:data :from]) => "advisor")))
+               (let [backend (mock-backend [(end-turn-response "the answer is 42")])
+                     seen    (atom nil)
+                     chart   (chart/statechart
+                              {:initial :wrap}
+                              (state {:id :wrap :initial :work}
+                                     (state {:id :work}
+                                            (h/llm-conversation
+                                             {:id        "advisor"
+                                              :params-fn (fn [_ _] {:initial-user-message "go"})})
+                                            (transition {:event :llm.idle :target :done}
+                                                        (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
+                                     (final {:id :done})))
+                     t       (new-llm-test-env {:statechart chart :backend backend})
+                     t       (await-config! t :done 3000)]
+                 (assertions
+                  "chart reached :done"
+                  (dct/in? t :done) => true
+                  ":on-end-turn-event data has the assistant's final text"
+                  (get-in @seen [:data :text]) => "the answer is 42"
+                  "and the speaker's invokeid"
+                  (get-in @seen [:data :from]) => "advisor")))
+
+;; ---------------------------------------------------------------------------
+;; #9: :target routing for :llm.user-message (multi-LLM team pattern)
+;; ---------------------------------------------------------------------------
+
+(specification ":llm.user-message with :target reaches only the matching invocation"
+  ;; Two LLM invocations live concurrently under one parent state. After the
+  ;; initial turns settle, send a targeted user-message to "advisor"; assert
+  ;; that ONLY advisor sees turn 2 (its backend was called a second time).
+               (let [main-backend    (mock-backend [(end-turn-response "main idle")])
+                     advisor-backend (mock-backend [(end-turn-response "first")
+                                                    (end-turn-response "second")])
+        ;; Selector backend routes per-conversation via the :model field —
+        ;; charts use it as a per-invocation tag so we don't need two processors.
+                     selector  (reify llm/LLMBackend
+                                 (send-turn [_ request]
+                                   (case (:model request)
+                                     "main"    (llm/send-turn main-backend request)
+                                     "advisor" (llm/send-turn advisor-backend request))))
+                     chart     (chart/statechart
+                                {:initial :work}
+                                (state {:id :work}
+                                       (h/llm-conversation
+                                        {:id        "main"
+                                         :params-fn (fn [_ _]
+                                                      {:model "main" :initial-user-message "hello-main"})})
+                                       (h/llm-conversation
+                                        {:id        "advisor"
+                                         :params-fn (fn [_ _]
+                                                      {:model "advisor" :initial-user-message "hello-advisor"})})))
+                     proc      (llmc/new-processor {:backend       selector
+                                                    :tool-registry (tp/new-registry)})
+                     t         (-> (dct/new-testing-env {:statechart chart} proc)
+                                   (dct/start!))]
+    ;; Wait for both initial turns and the workers to reach :awaiting-user.
+                 (Thread/sleep 250)
+                 (dct/drain! t)
+                 (let [queue (::sc/event-queue (:env t))
+                       sid   (:session-id t)]
+                   (sp/send! queue (:env t)
+                             {:target sid :source-session-id sid
+                              :event  :llm.user-message
+                              :data   {:text "for advisor only" :target "advisor"}}))
+                 (Thread/sleep 250)
+                 (dct/drain! t)
+                 (assertions
+                  "main backend was called exactly once (initial turn only)"
+                  (count @(:call-log main-backend)) => 1
+                  "advisor backend was called twice (initial + targeted user-message)"
+                  (count @(:call-log advisor-backend)) => 2
+                  "advisor's second-turn messages include the targeted text"
+                  (let [msgs (->> @(:call-log advisor-backend) second :messages
+                                  (mapcat :content)
+                                  (filter #(= :text (:type %)))
+                                  (map :text))]
+                    (boolean (some #{"for advisor only"} msgs))) => true)))

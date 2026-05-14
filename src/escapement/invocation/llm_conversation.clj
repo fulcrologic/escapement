@@ -635,8 +635,14 @@
                               (keyword? event) event
                               (map? event)     (or (:event event) (:name event))
                               :else            nil)
-          ev-data           (when (map? event) (:data event))]
-      (when (and entry (= :llm.user-message ev-name))
+          ev-data           (when (map? event) (:data event))
+          ;; Target filter: when :target is present in the event data, only the
+          ;; invocation whose invokeid matches receives the message. Without a
+          ;; :target, ALL llm-conversation invocations get it (today's behavior
+          ;; — backward-compatible default).
+          target            (:target ev-data)
+          accept?           (or (nil? target) (= target invokeid))]
+      (when (and entry accept? (= :llm.user-message ev-name))
         (let [text (:text ev-data)]
           (when (string? text)
             ;; Just enqueue; the worker's :awaiting-user branch will pick it up,

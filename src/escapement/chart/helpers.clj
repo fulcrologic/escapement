@@ -198,9 +198,13 @@
 
 (defn tell-llm
   "Returns a `script` element that, when executed, posts a `:llm.user-message`
-   event into the current session (the chart's session). When the chart has a
-   live `:llm-conversation` invocation with `:autoforward? true`, this message
-   is forwarded into the LLM as a new user turn.
+   event into the current session (the chart's session). When the chart has
+   one or more live `:llm-conversation` invocations with `:autoforward? true`,
+   each invocation's `forward-event!` receives the event.
+
+   Without `:target`, EVERY live conversation accepts the message. With
+   `:target`, only the conversation whose `invokeid` matches accepts — use
+   `tell-other-llm` for that case.
 
    `opts`:
     * `:expr` (required) — `(fn [env data] text-string)` returning the user text."
@@ -216,4 +220,34 @@
                          :source-session-id sid
                          :event             :llm.user-message
                          :data              {:text text}})
+              nil))}))
+
+(defn tell-other-llm
+  "Like `tell-llm` but targets a specific conversation by its `invokeid`. The
+   underlying `:llm.user-message` event carries `{:text … :target <invokeid>}`;
+   only the matching `:llm-conversation` invocation's `forward-event!`
+   accepts it.
+
+   Use this for the team / advisor pattern, where one LLM's response should
+   be routed to a specific peer conversation rather than broadcast.
+
+   `opts`:
+    * `:target` (required) — invokeid string of the destination conversation.
+                             May also be a function `(fn [env data] invokeid)`
+                             so the target can be computed from chart state.
+    * `:expr`   (required) — `(fn [env data] text-string)`."
+  [{:keys [target expr]}]
+  (assert target "tell-other-llm requires :target")
+  (assert (fn? expr) "tell-other-llm requires :expr")
+  (elt/script
+   {:expr (fn [env data]
+            (let [text   (expr env data)
+                  target (if (fn? target) (target env data) target)
+                  queue  (::sc/event-queue env)
+                  sid    (env-ns/session-id env)]
+              (sp/send! queue env
+                        {:target            sid
+                         :source-session-id sid
+                         :event             :llm.user-message
+                         :data              {:text text :target target}})
               nil))}))
