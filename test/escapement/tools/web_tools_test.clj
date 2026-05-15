@@ -20,6 +20,39 @@
 (defn- env-fn [m]
   (fn [k] (get m k)))
 
+(defn- tool-names [tools]
+  (into #{} (map tp/tool-name) tools))
+
+;; ---------------------------------------------------------------------------
+;; builtin-tools: conditional :web/search registration
+;; ---------------------------------------------------------------------------
+
+(specification "builtin-tools registers :web/search only when GEMINI_API_KEY is set"
+               (component "without GEMINI_API_KEY: :web/search is absent, :web/fetch is present"
+                          (with-redefs [builtin/env (env-fn {})]
+                            (let [names (tool-names (builtin/builtin-tools))]
+                              (assertions
+                               ":web/search absent" (contains? names :web/search) => false
+                               ":web/fetch present" (contains? names :web/fetch)  => true
+                               "core tools still present"
+                               (every? names [:fs/read :fs/write :shell/run :repl/eval]) => true))))
+
+               (component "with GEMINI_API_KEY: :web/search is registered"
+                          (with-redefs [builtin/env (env-fn {"GEMINI_API_KEY" "test-key"})]
+                            (let [names (tool-names (builtin/builtin-tools))]
+                              (assertions
+                               ":web/search present" (contains? names :web/search) => true
+                               ":web/fetch present"  (contains? names :web/fetch)  => true))))
+
+               (component "new-builtin-registry honors the same env gating"
+                          (with-redefs [builtin/env (env-fn {})]
+                            (let [reg (builtin/new-builtin-registry)]
+                              (assertions
+                               "no :web/search in registry"
+                               (contains? @reg :web/search) => false
+                               ":web/fetch in registry"
+                               (contains? @reg :web/fetch) => true)))))
+
 ;; ---------------------------------------------------------------------------
 ;; :web/search
 ;; ---------------------------------------------------------------------------
@@ -39,7 +72,10 @@
         "groundingChunkIndices" [1 2]}]}}]})
 
 (specification ":web/search"
-               (let [reg (builtin/new-builtin-registry)]
+               ;; Build the registry with env stubbed so :web/search is present
+               ;; regardless of whether the test host has GEMINI_API_KEY in env.
+               (let [reg (with-redefs [builtin/env (env-fn {"GEMINI_API_KEY" "test-key"})]
+                           (builtin/new-builtin-registry))]
                  (component "missing GEMINI_API_KEY is reported as a non-throwing error"
                             (with-redefs [builtin/env             (env-fn {})
                                           builtin/http-post-json  (fn [& _] (throw (ex-info "should not be called" {})))]

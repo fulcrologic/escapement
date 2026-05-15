@@ -809,24 +809,30 @@
 ;; ---------------------------------------------------------------------------
 
 (>defn builtin-tools
-       "Return a vector of the built-in tool instances."
+       "Return a vector of the built-in tool instances.
+
+       `:web/search` is conditionally included only when `GEMINI_API_KEY` is set
+       in the environment, so the LLM doesn't see (and waste a turn calling) a
+       search tool that can't reach a backend. `:web/fetch` is always included —
+       it has no credential requirement."
        []
        [=> [:sequential any?]]
-       [(->FsReadTool)
-        (->FsWriteTool)
-        (->FsEditTool)
-        (->FsMultiEditTool)
-        (->FsGlobTool)
-        (->FsGrepTool)
-        (->ShellRunTool)
-        (->ReplEvalTool)
-        (->WebSearchTool)
-        (->WebFetchTool)])
+       (cond-> [(->FsReadTool)
+                (->FsWriteTool)
+                (->FsEditTool)
+                (->FsMultiEditTool)
+                (->FsGlobTool)
+                (->FsGrepTool)
+                (->ShellRunTool)
+                (->ReplEvalTool)
+                (->WebFetchTool)]
+         (env "GEMINI_API_KEY") (conj (->WebSearchTool))))
 
 (>defn new-builtin-registry
-       "Return a FRESH registry populated with the ten built-in tools. Use
-        this when you want isolation — most commonly in tests, or when a host
-        process drives multiple chart runs that need disjoint tool sets."
+       "Return a FRESH registry populated with the built-in tools (nine or ten,
+        depending on whether `GEMINI_API_KEY` is set — see `builtin-tools`).
+        Use this when you want isolation — most commonly in tests, or when a
+        host process drives multiple chart runs that need disjoint tool sets."
        []
        [=> any?]
        (tp/new-registry (builtin-tools)))
@@ -835,7 +841,8 @@
   host that calls `(default-registry)`. Process-global: top-level
   `(tp/register! escapement.tools.builtin/default-registry ...)` calls in
   any namespace that is loaded before `runner/run!` will be visible to the
-  chart. Seeded with the ten built-ins on namespace load.
+  chart. Seeded with the built-ins on namespace load (`:web/search` is
+  included only when `GEMINI_API_KEY` is set in the environment at load time).
 
   This is the Clojure-idiomatic registration pattern: require your tool
   namespace from the chart and it self-registers — no CLI flag needed.

@@ -1053,10 +1053,17 @@ the model pick up. That's a chart decision, not a library default.
 == Web tools: `:web/search` and `:web/fetch`
 
 Two built-in tools give the LLM first-class web access without dragging full
-HTML into the context window. They are registered in `default-registry`
-alongside the filesystem and shell tools, so any chart that does not pass an
-explicit `:real-tools` whitelist already has them; opt in explicitly with
-`:real-tools [:web/search :web/fetch]` when you do whitelist.
+HTML into the context window. `:web/fetch` is always registered in
+`default-registry`; `:web/search` is registered **only when `GEMINI_API_KEY`
+is set in the environment at namespace-load time**, so a chart running
+without a key never advertises a search tool the LLM would only discover by
+calling it and failing. Opt in explicitly via `:real-tools [:web/search
+:web/fetch]` when you whitelist.
+
+NOTE: The `:web/search` record still defends itself with a
+`"GEMINI_API_KEY not set"` error result if someone constructs and registers
+it manually after the namespace has loaded — but the recommended path is to
+set the env var before the JVM/bb process starts.
 
 === `:web/search`
 
