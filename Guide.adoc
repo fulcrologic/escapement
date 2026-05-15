@@ -1267,7 +1267,7 @@ The CLI reads this on `load-chart-with-meta` and:
 
 Non-interactive charts still get a stdin renderer for any `:human-input`
 states they happen to invoke (fail-soft default), but the TUI itself stays
-off unless `--tui` is explicit.
+off unless `--debug` is passed (which forces it on).
 
 === The TUI
 
@@ -1967,14 +1967,76 @@ environment.
 
 Display:
 
-* `--tui` forces the persistent TUI on (requires a TTY).
-* `--no-tui` forces it off (useful in CI, or to fall back to stdin prompts
-  for `:human-input` invocations).
-* `--debug` enables the inspector overlay (press `?` to open) and pauses
-  before the first event when `:debug :auto-pause?` is true in
-  `.escapement.edn`. Forces the TUI on; cannot combine with `--no-tui`.
-* By default the TUI is on for charts marked `^{:interactive? true}` and off
-  otherwise. See <<human-interaction>>.
+* `--debug` forces the TUI on (requires a TTY) and starts paused so you
+  can step or press `c` to continue. This is the canonical way to watch
+  a non-interactive chart's conversation traffic.
+* `--no-tui` forces the TUI off (useful in CI, or to fall back to stdin
+  prompts for `:human-input` invocations).
+* Charts marked `^{:interactive? true}` auto-open the TUI when a TTY is
+  available. Other charts stay headless unless `--debug` is passed.
+* The main scrollback is a **unified, interleaved feed** of LLM
+  conversations and chart state-transitions. Every line follows
+  `HH:MM:SS [<source>] <glyph> <one-line summary>`, truncated to fit a
+  single terminal row:
++
+[options="header"]
+|===
+| Source tag       | Meaning                                  | Color
+| `[<invokeid>]`   | one of the chart's `:llm-conversation` invocations (e.g. `[writer]`, `[critic]`). Namespace prefixes are stripped and the tag is capped at ~10 chars. | round-robin from cyan, magenta, yellow, green, blue, bright-red
+| `[chart]`        | a `:runner/event-processed` state-transition | dim grey
+| `[human]`        | a `:human-input` prompt or answer        | bright white
+| `[error]`        | `:llm/error`, `:llm/model-down`, `:runner/error` | red
+| `[debug]`        | runner lifecycle / pause banners         | dim
+|===
++
+Glyphs by event kind:
++
+[options="header"]
+|===
+| Glyph | Meaning
+| `▸`   | user message into an LLM
+| `◂`   | assistant text block
+| `…`   | assistant `thinking` block
+| `⚙`   | assistant `tool_use` block (with truncated input)
+| `↩`   | tool_result returning to the LLM
+| `?`   | human-input prompt rendered
+| `!`   | human-input answer captured
+| `✓`   | assistant turn ended (`stop_reason = end_turn`)
+| `⚠`   | error (LLM, model-down, runner abort, validation)
+| `·`   | informational / chart transition / generic
+|===
++
+Colors fall back cleanly under `TERM=dumb` (no ANSI is emitted).
+* **Drilldown.** The scrollback has a selection cursor: `j`/`k` (or
+  Up/Down) move it, `g`/`G` jump to top/bottom, `Home`/`End` are aliased.
+  `PgUp`/`PgDn` still scroll a page. Press `Enter` on a highlighted line
+  to open the **full untruncated event** in the pager (assistant text,
+  tool input as edn, tool-result content, prompt + answer, etc.).
+* The inspector overlay (press `?`) keeps three views:
+  `[1]Invocations`, `[2]Chart`, `[3]Status`. The previous
+  `[4]Conversation` tab was removed — conversation events are now in the
+  main scrollback. `Enter` on an invocation in `[1]` drills into its
+  artifacts.
+* **Modal coexistence.** When a `:human-input` modal is up, the modal no
+  longer consumes every keystroke. `?` pops the inspector OVER the
+  modal, `PgUp`/`PgDn` still scroll, and the modal stays parked on the
+  bottom row. Press `Esc` to close the inspector, then answer the modal
+  normally. The modal promise is not resolved until the user types an
+  answer.
+* `--debug` adds the pause/step controller (`s`=step, `c`=continue,
+  `p`=pause, `P`=arm pause on next external event) and pauses before the
+  first event when `:debug :auto-pause?` is true in `.escapement.edn`.
+  Forces the TUI on; cannot combine with `--no-tui`.
+* Transcript events `:llm/request`, `:llm/response`, `:llm/tool-result`,
+  `:llm/user-message`, `:human-input/start`, and `:human-input/answer`
+  carry full content for the scrollback drilldown. Per-block
+  text/thinking/tool-result payloads are capped at ~8 KB in the
+  transcript (with a `…(truncated)` marker); the live conversation
+  buffer sent to the LLM is never truncated. Set `:record-answer? false`
+  on a `:human-input` invocation's params to omit the answer from the
+  transcript.
+* `--no-tui` forces it off (useful in CI, or to fall back to stdin
+  prompts for `:human-input` invocations).
 
 Other:
 

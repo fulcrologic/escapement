@@ -193,7 +193,8 @@
       (transcript! transcript-fn
                    {:event :human-input/start
                     :ts    (now-ms)
-                    :data  {:kind kind :invokeid (:invokeid parent-ctx)}})
+                    :data  (cond-> {:kind kind :invokeid (:invokeid parent-ctx)}
+                             (:prompt params) (assoc :prompt (:prompt params)))})
       (cond
         (= :dying @worker-state)
         (transcript! transcript-fn {:event :human-input/cancelled :ts (now-ms) :data {}})
@@ -226,7 +227,10 @@
               (transcript! transcript-fn
                            {:event :human-input/answer
                             :ts    (now-ms)
-                            :data  {:kind kind}})
+                            :data  (cond-> {:kind     kind
+                                            :invokeid (:invokeid parent-ctx)}
+                                     (get params :record-answer? true)
+                                     (assoc :answer answer))})
               (post-event-to-parent! parent-ctx on-answer-event {:answer answer})))))
       (catch InterruptedException _
         (transcript! transcript-fn {:event :human-input/interrupted :ts (now-ms) :data {}}))
