@@ -26,8 +26,7 @@
                                 fns), so one --tools-ns is enough per run.
                                 e.g. --tools-ns my.app.tools/register-tools!
         --trace                 Emit per-tick transcript events.
-        --tui                   Force-enable the persistent TUI display.
-        --no-tui                Force-disable the TUI (overrides --tui and
+        --no-tui                Force-disable the TUI (overrides
                                 ^{:interactive? true} chart metadata).
         --debug                 Enable debug mode: forces the TUI on (even
                                 for non-interactive charts), enables the
@@ -359,12 +358,11 @@
 (defn- decide-tui
   "Resolve TUI on/off from flags + chart metadata + tty.
 
-   --no-tui wins outright. --debug or --tui forces on (and errors with no
+   --no-tui wins outright. --debug forces on (and errors with no
    TTY). Otherwise `^{:interactive? true}` on the chart var defaults to on;
    else off. `--debug` and `--no-tui` together is rejected."
   [opts chart-meta]
   (let [no-tui?  (boolean (:no-tui opts))
-        tui?     (boolean (:tui opts))
         debug?   (boolean (:debug opts))
         _        (when (and no-tui? debug?)
                    (die! "--debug requires the TUI; do not combine with --no-tui."))
@@ -372,7 +370,6 @@
         want?    (cond
                    no-tui? false
                    debug?  true
-                   tui?    true
                    :else   interactive?)]
     (cond
       no-tui?
@@ -388,7 +385,7 @@
 
 (defn- cmd-run [args]
   (let [{:keys [positional opts]}
-        (parse-args args #{:resume :trace :tui :no-tui :debug} #{:param})
+        (parse-args args #{:resume :trace :no-tui :debug} #{:param})
         chart-arg (first positional)
         _         (when-not chart-arg
                     (die! "Usage: run <chart-sym> [flags]"))

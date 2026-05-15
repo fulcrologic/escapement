@@ -115,6 +115,51 @@
 (defn- transcript! [transcript-fn ev]
   (try (transcript-fn ev) (catch Throwable _ nil)))
 
+(def ^:const transcript-block-cap
+  "Per-content-block byte cap for transcript events (text/thinking/tool-result
+   strings). Larger payloads are truncated with a marker so JSONL stays sane;
+   full content remains available to the LLM in the live conversation buffer."
+  8192)
+
+(def ^:const transcript-truncate-marker "…(truncated)")
+
+(defn- truncate-for-transcript
+  "Truncate `s` at `transcript-block-cap` bytes (utf-8 approximated as char
+   count), appending a marker on overflow. Returns nil/short strings unchanged."
+  [s]
+  (let [s (when (some? s) (str s))]
+    (cond
+      (nil? s) nil
+      (<= (count s) transcript-block-cap) s
+      :else (str (subs s 0 transcript-block-cap) transcript-truncate-marker))))
+
+(defn- ->transcript-content-block
+  "Coerce one assistant content block into a transcript-safe map. Text and
+   thinking strings are capped; tool_use carries `:id :name :input`."
+  [b]
+  (case (:type b)
+    :text     {:type :text     :text (truncate-for-transcript (:text b))}
+    :thinking {:type :thinking :thinking (truncate-for-transcript (:thinking b))}
+    :tool_use {:type :tool_use :id (:id b) :name (:name b) :input (:input b)}
+    {:type (:type b)}))
+
+(defn- trailing-user-blocks
+  "Return the content blocks of the trailing user message in `messages`, or
+   `[]` if the last message isn't a user turn. Each block's content text is
+   truncated for transcript-safety."
+  [messages]
+  (let [last-msg (peek (vec messages))]
+    (if (= :user (:role last-msg))
+      (mapv (fn [b]
+              (case (:type b)
+                :text        {:type :text :text (truncate-for-transcript (:text b))}
+                :tool_result {:type :tool_result :tool_use_id (:tool_use_id b)
+                              :is-error (boolean (:is-error b))
+                              :content  (truncate-for-transcript (:content b))}
+                {:type (:type b)}))
+            (or (:content last-msg) []))
+      [])))
+
 (defn- post-event-to-parent!
   "Send a chart event back to the parent session."
   [{:keys [env queue parent-session-id invokeid]} event data]
@@ -238,10 +283,21 @@
 
    `parent-ctx` is the worker's context (env/queue/parent-session-id/invokeid).
    `state*` holds the per-tool_use_id retry counters."
-  [{:keys [tool-registry name->tool-kw name->event-entry retry-counts]
+  [{:keys [tool-registry name->tool-kw name->event-entry retry-counts transcript-fn]
     :as   ctx} parent-ctx block]
   (let [{:keys [id name input]} block
-        retries (get @retry-counts id 0)]
+        retries (get @retry-counts id 0)
+        post-tool-result!
+        (fn [tool-label is-error result-content]
+          (when transcript-fn
+            (transcript! transcript-fn
+                         {:event :llm/tool-result :ts (now-ms)
+                          :data  {:tool_use_id     id
+                                  :tool            tool-label
+                                  :input           input
+                                  :is-error        (boolean is-error)
+                                  :content-preview (truncate-for-transcript result-content)
+                                  :invokeid        (:invokeid parent-ctx)}})))]
     (cond
       ;; Real tool
       (contains? name->tool-kw name)
@@ -249,20 +305,24 @@
             {:keys [result is-error]} (tp/dispatch tool-registry tool-kw (or input {}))]
         ;; `tp/dispatch` validates; treat validation failures as bad-tool-use for retry semantics.
         (if (and is-error (str/includes? (or result "") "failed validation"))
-          (if (>= retries 1)
-            {:fatal?     true
-             :error-data {:reason :tool-validation-failed
-                          :tool   tool-kw
-                          :errors result
-                          :tool_use_id id}
-             :result-block {:type :tool_result :tool_use_id id
-                            :content result :is-error true}}
-            (do
-              (swap! retry-counts assoc id (inc retries))
-              {:result-block {:type :tool_result :tool_use_id id
-                              :content result :is-error true}}))
-          {:result-block {:type :tool_result :tool_use_id id
-                          :content (or result "") :is-error (boolean is-error)}}))
+          (do
+            (post-tool-result! tool-kw true result)
+            (if (>= retries 1)
+              {:fatal?     true
+               :error-data {:reason :tool-validation-failed
+                            :tool   tool-kw
+                            :errors result
+                            :tool_use_id id}
+               :result-block {:type :tool_result :tool_use_id id
+                              :content result :is-error true}}
+              (do
+                (swap! retry-counts assoc id (inc retries))
+                {:result-block {:type :tool_result :tool_use_id id
+                                :content result :is-error true}})))
+          (do
+            (post-tool-result! tool-kw is-error (or result ""))
+            {:result-block {:type :tool_result :tool_use_id id
+                            :content (or result "") :is-error (boolean is-error)}})))
 
       ;; Event tool
       (contains? name->event-entry name)
@@ -271,8 +331,10 @@
         (if (m/validate schema (or input {}))
           (do
             (post-event-to-parent! parent-ctx event (or input {}))
+            (post-tool-result! event false "ok")
             {:result-block {:type :tool_result :tool_use_id id :content "ok"}})
           (let [err (humanize-malli-errors schema input)]
+            (post-tool-result! event true err)
             (if (>= retries 1)
               {:fatal?     true
                :error-data {:reason :tool-validation-failed
@@ -287,15 +349,17 @@
                                 :content err :is-error true}})))))
 
       :else
-      (if (>= retries 1)
-        {:fatal?     true
-         :error-data {:reason :unknown-tool :tool name :tool_use_id id}
-         :result-block {:type :tool_result :tool_use_id id
-                        :content (str "Unknown tool: " name) :is-error true}}
-        (do
-          (swap! retry-counts assoc id (inc retries))
-          {:result-block {:type :tool_result :tool_use_id id
-                          :content (str "Unknown tool: " name) :is-error true}})))))
+      (let [msg (str "Unknown tool: " name)]
+        (post-tool-result! name true msg)
+        (if (>= retries 1)
+          {:fatal?     true
+           :error-data {:reason :unknown-tool :tool name :tool_use_id id}
+           :result-block {:type :tool_result :tool_use_id id
+                          :content msg :is-error true}}
+          (do
+            (swap! retry-counts assoc id (inc retries))
+            {:result-block {:type :tool_result :tool_use_id id
+                            :content msg :is-error true}}))))))
 
 (defn ->id-str
   "Normalize an invokeid to its canonical string form. Chart-authors may write
@@ -379,7 +443,7 @@
      {:exhausted attempts}  — every candidate failed; caller should post
                               :error.llm.backend. `attempts` is a vector of
                               `{:model :error}` pairs (oldest first)."
-  [{:keys [backend transcript-fn worker-state model-status default-models]} params messages tools]
+  [{:keys [backend transcript-fn worker-state model-status default-models parent-ctx]} params messages tools]
   (let [min-iq        (:intelligence params)
         eligible?     (fn [m] (or (nil? min-iq)
                                   (when-let [iq (models/intelligence m)] (>= iq (long min-iq)))))
@@ -414,7 +478,10 @@
                        :conv-id              (:conversation/id params)})
             _        (transcript! transcript-fn
                                   {:event :llm/request :ts (now-ms)
-                                   :data  (cond-> {:n-messages (count (:messages request))}
+                                   :data  (cond-> {:n-messages (count (:messages request))
+                                                   :user-blocks (trailing-user-blocks messages)
+                                                   :system-preview (truncate-for-transcript (:system params))
+                                                   :invokeid (:invokeid parent-ctx)}
                                             m (assoc :model m))})
             response (try (llm/send-turn backend request)
                           (catch Throwable t {:_throw t}))]
@@ -492,7 +559,9 @@
                       :ts    (now-ms)
                       :data  (cond-> {:stop-reason stop-reason
                                       :n-blocks    (count content)
-                                      :usage       (or usage {})}
+                                      :usage       (or usage {})
+                                      :content     (mapv ->transcript-content-block content)
+                                      :invokeid    (:invokeid parent-ctx)}
                                model         (assoc :model model)
                                ctx-window    (assoc :context-window ctx-window)
                                ctx-used-frac (assoc :context-used-frac
@@ -533,7 +602,8 @@
                      {:tool-registry     tool-registry
                       :name->tool-kw     name->tool-kw
                       :name->event-entry name->event-entry
-                      :retry-counts      retry-counts}
+                      :retry-counts      retry-counts
+                      :transcript-fn     transcript-fn}
                      parent-ctx b)]
                 (swap! results conj result-block)
                 (when fatal? (reset! fatal error-data))))
@@ -595,7 +665,8 @@
                 (do
                   (swap! messages-atom conj (text-user-message msg))
                   (transition-state! worker-state :running)
-                  (transcript! transcript-fn {:event :llm/user-message :ts (now-ms) :data {:text msg}})
+                  (transcript! transcript-fn {:event :llm/user-message :ts (now-ms)
+                                              :data {:text msg :invokeid (:invokeid parent-ctx)}})
                   (recur))
                 (= :dying @worker-state) (recur)
                 :else (recur)))
