@@ -58,6 +58,10 @@ The CLI auto-detects a backend from those env vars in the order above; pass `--b
 Output goes under `.escapement/<session>/{transcript.jsonl,checkpoints/}`.
 Expected `final-config`: `[:run :finished]`.
 
+### Project configuration
+
+Drop an optional `.escapement.edn` at the root of any project to pin its layout once. Keys: `:source-paths` (extra classpath roots for chart utility namespaces), `:deps` (runtime Maven/git coordinates resolved via `babashka.deps/add-deps`), `:tools-ns` (registration fn symbol or vector), `:work-dir` (default transcript/checkpoint location), `:default-chart` (used when `escapement run` is invoked without a chart symbol). Escapement walks up from the current directory to find the file, so invocation is location-independent. See the *Project configuration* section of [`Guide.adoc`](Guide.adoc) for the full schema and precedence rules.
+
 ## See [`Guide.adoc`](Guide.adoc) for the full guide
 
 The guide covers:
