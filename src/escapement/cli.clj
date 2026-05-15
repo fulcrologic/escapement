@@ -629,12 +629,54 @@
       nil (die! "Usage: escapement logout <provider>  (currently: codex)")
       (die! (str "Unknown logout provider: " provider)))))
 
+(def ^:private help-text
+  "escapement — run a statechart-driven LLM agent.
+
+Subcommands:
+  run <chart-sym>   Load and execute a chart. See flags below.
+  info              Print version + environment info.
+  login codex       OAuth login for the codex backend.
+  logout codex      Remove saved codex credentials.
+  help              Show this help.
+
+Common `run` flags:
+  --input <edn-file>            Initial data (EDN map).
+  --param key=value             One-shot initial-data entry. Repeatable.
+                                Values EDN-read; bare words → strings.
+  --session <id>                Session id; default a random UUID.
+  --work-dir <path>             Per-session output parent; default .escapement
+  --transcript <path>           Transcript path.
+  --checkpoint-dir <dir>        Checkpoint dir.
+  --resume                      Resume from saved working memory.
+  --backend (api|codex|openai)  LLM backend (only needed for LLM charts).
+  --model <name>                Model name.
+  --api-base-url <url>          API base URL.
+  --api-key-env <name>          Env-var name holding the API key.
+  --tools-ns <sym[,sym…]>       Registration fns; repeatable.
+  --source-paths <p[:p…]>       Extra classpath roots.
+  --deps <edn>                  Inline EDN deps merged on top of .escapement.edn.
+  --trace                       Emit per-tick transcript events.
+  --no-tui                      Force-disable the TUI (overrides ^:interactive?).
+  --debug                       Force the TUI on, enable inspector (`?`), and
+                                pause before the first event so you can step.
+                                Press `c` to continue. Recommended for watching
+                                a non-interactive chart.
+
+Exit codes: 0 success, 1 chart error, 2 usage error.")
+
+(defn- print-help! []
+  (println help-text)
+  (System/exit 0))
+
 (defn -main [& args]
   (let [[sub & rest-args] args]
     (case sub
-      "info"   (cmd-info rest-args)
-      "run"    (cmd-run rest-args)
-      "login"  (cmd-login rest-args)
-      "logout" (cmd-logout rest-args)
-      nil      (die! "Usage: bb -m escapement.cli (run <chart-sym>|info|login codex|logout codex)")
-      (die! (str "Unknown subcommand: " sub)))))
+      "info"        (cmd-info rest-args)
+      "run"         (cmd-run rest-args)
+      "login"       (cmd-login rest-args)
+      "logout"      (cmd-logout rest-args)
+      "help"        (print-help!)
+      "--help"      (print-help!)
+      "-h"          (print-help!)
+      nil           (print-help!)
+      (die! (str "Unknown subcommand: " sub "\nRun `escapement help` for usage.")))))

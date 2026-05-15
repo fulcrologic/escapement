@@ -17,7 +17,7 @@ A statechart-driven autonomous coding agent in Clojure/Babashka.
 - Parallel regions get **independent workers**. Fan-out is natural.
 - **JSONL transcript** of every LLM request, response, tool call, transition, and checkpoint. Full replay possible.
 - **Atomic checkpointing** of working memory after every event for crash-resume.
-- Backends: Anthropic Messages API, **OpenAI Chat Completions / OpenRouter**, z.ai's GLM family (Anthropic-compat), and the local `claude -p` CLI.
+- Backends: Anthropic Messages API, **OpenAI Chat Completions / OpenRouter**, and z.ai's GLM family (Anthropic-compat).
 - Runs under **Babashka**; tests run on the JVM with kaocha.
 
 ## Install
@@ -53,7 +53,8 @@ escapement run escapement.charts.hello/agent
 The CLI auto-detects a backend from those env vars in the order above; pass `--backend` explicitly to override. Useful run-time flags:
 
 - `--param key=value` — seed initial-data entries (repeatable; merges over `--input <edn-file>`).
-- `--tui` / `--no-tui` — force the persistent TUI on or off. Charts marked `^{:interactive? true}` enable it by default; everything else stays headless unless you pass `--tui`.
+- `--debug` — force the persistent TUI on (paused at first event so you can step or press `c` to continue). This is the recommended way to watch a non-interactive chart's LLM conversations stream by in real time.
+- `--no-tui` — force the TUI off (useful in CI; `:human-input` prompts fall back to stdin). Charts marked `^{:interactive? true}` open the TUI by default when a TTY is present.
 
 Output goes under `.escapement/<session>/{transcript.jsonl,checkpoints/}`.
 Expected `final-config`: `[:run :finished]`.
@@ -73,10 +74,10 @@ The guide covers:
 - **The `:llm-conversation` invocation** — every `params-fn` key (incl. `:max-turns` / `:max-conversation-duration-ms`), `h/llm-conversation` / `h/tell-llm` / `h/tell-other-llm`, SCXML-canonical `:error.llm.*` events, internal-vs-external transitions, bad-tool-use retry, event-tool naming
 - **Human interaction and the TUI** — `:human-input` invocation kinds, `human-input` chart helper, `with-llm-questions` for LLM-asks-human, the persistent TUI, `^{:interactive? true}` chart marker
 - **Multi-agent / team patterns** — `:target`-routed messages, parallel-region advisors, `tell-other-llm`, file-backed artifact helpers (`capture-llm-output` / `render-template` / `forward-llm-output`)
-- **LLM backends** — Anthropic + z.ai + OpenAI/OpenRouter configuration, `claude -p` adapter and its limits, the caching wrapper
+- **LLM backends** — Anthropic + z.ai + OpenAI/OpenRouter configuration, the caching wrapper
 - **File-based prompts** — `escapement.prompts` and the `{{VAR}}` substitution model (distinct from artifact templates)
 - **Tools** — `Tool` protocol, the eight built-ins (fs read/write/edit/multi-edit/glob/grep + shell + repl), how to register a custom tool
-- **Transcript, runner, CLI** — event vocabulary, `jq` recipes, `--resume` / `--param` / `--tui` / `--no-tui`, work-dir layout
+- **Transcript, runner, CLI** — event vocabulary, `jq` recipes, `--resume` / `--param` / `--debug` / `--no-tui`, work-dir layout
 - **Idioms and gotchas** — `:type :internal`, `tell-llm` mid-binding, parallel regions, the top-level-`final` trap, resume side-effect caveat
 - **Testing** — the JVM-only harness, mocking `LLMBackend`, stubbing tools, stub `HumanRenderer`, live smoke scripts
 - **Project layout** — one paragraph per top-level directory
