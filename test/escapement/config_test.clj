@@ -98,3 +98,92 @@
                               (assertions
                                "tolerates a broken user file by treating it as empty"
                                (get-in cfg [:debug :auto-pause?]) => true)))))
+
+(specification "find-project-config — walk-up discovery"
+               (component "finds .escapement.edn at start dir"
+                          (let [root (tmp-dir)]
+                            (spit (io/file root ".escapement.edn") (pr-str {}))
+                            (assertions
+                             "returns the file at root"
+                             (.getPath (config/find-project-config root))
+                             => (.getPath (io/file root ".escapement.edn")))))
+
+               (component "walks up parents until found"
+                          (let [root (tmp-dir)
+                                sub  (io/file root "a" "b")]
+                            (.mkdirs sub)
+                            (spit (io/file root ".escapement.edn") (pr-str {}))
+                            (assertions
+                             "finds the parent's config"
+                             (.getPath (config/find-project-config (.getPath sub)))
+                             => (.getPath (io/file root ".escapement.edn")))))
+
+               (component "returns nil when no file exists in tree"
+                          (let [root (tmp-dir)]
+                            (assertions
+                             "no config found"
+                             (config/find-project-config root) => nil))))
+
+(specification "load-project-config — schema + normalization"
+               (component "valid config with all keys"
+                          (let [root (tmp-dir)]
+                            (spit (io/file root ".escapement.edn")
+                                  (pr-str {:source-paths ["src" "charts"]
+                                           :deps         {'hiccup/hiccup {:mvn/version "2.0.0-RC3"}}
+                                           :tools-ns     'my.app/register
+                                           :work-dir     "transcripts"
+                                           :default-chart 'my.app.charts.hello/agent}))
+                            (let [{:keys [config root path]} (config/load-project-config root)]
+                              (assertions
+                               "tools-ns scalar is normalized to vector"
+                               (:tools-ns config) => '[my.app/register]
+                               "source-paths preserved"
+                               (:source-paths config) => ["src" "charts"]
+                               "root is the parent dir of the config file"
+                               (.getPath ^java.io.File root) => (.getParent ^java.io.File path)))))
+
+               (component "tools-ns vector form is preserved"
+                          (let [root (tmp-dir)]
+                            (spit (io/file root ".escapement.edn")
+                                  (pr-str {:tools-ns '[a/b c/d]}))
+                            (assertions
+                             "vector passes through"
+                             (:tools-ns (:config (config/load-project-config root)))
+                             => '[a/b c/d])))
+
+               (component "missing file returns nil"
+                          (assertions
+                           "nil result for empty tree"
+                           (config/load-project-config (tmp-dir)) => nil))
+
+               (component "malformed schema throws"
+                          (let [root (tmp-dir)]
+                            (spit (io/file root ".escapement.edn")
+                                  (pr-str {:source-paths "not-a-vector"}))
+                            (assertions
+                             "ex-info with humanized errors"
+                             (try (config/load-project-config root) :ok
+                                  (catch clojure.lang.ExceptionInfo e
+                                    (-> (ex-data e) :errors some?)))
+                             => true)))
+
+               (component "unknown keys rejected (closed schema)"
+                          (let [root (tmp-dir)]
+                            (spit (io/file root ".escapement.edn")
+                                  (pr-str {:source-paths ["src"] :nope true}))
+                            (assertions
+                             "throws on unknown key"
+                             (try (config/load-project-config root) :ok
+                                  (catch clojure.lang.ExceptionInfo _ :err))
+                             => :err))))
+
+(specification "resolve-path"
+               (let [root (tmp-dir)]
+                 (assertions
+                  "relative path resolves against root"
+                  (.getPath (config/resolve-path root "charts"))
+                  => (.getPath (io/file root "charts"))
+
+                  "absolute path passes through"
+                  (.getPath (config/resolve-path root "/tmp/abs"))
+                  => "/tmp/abs")))

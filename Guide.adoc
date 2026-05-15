@@ -1760,6 +1760,9 @@ emitted across the codebase:
   `:human-input/error`, `:human-input/interrupted`,
   `:human-input/validation-failed`
 * `:artifact/captured` (with `:name` and `:bytes`)
+* `:cli/config-loaded` (`:path`, `:keys`), `:cli/deps-added` (`:coords`) —
+  emitted as a prelude before `:runner/started` when an `.escapement.edn`
+  is discovered or runtime deps are resolved.
 * `:transcript/serialize-error`
 
 The `api` backend emits its own `:llm/request` and `:llm/response` rows
@@ -1869,8 +1872,60 @@ Display:
 Other:
 
 * `--tools-ns my.ns/register-tools!` invokes a registration fn over the
-  builtin registry.
+  builtin registry. Accepts a comma-separated list and can be passed
+  multiple times; entries accumulate.
+* `--source-paths a:b:c` prepends classpath roots before chart load.
+* `--deps '{lib/x {:mvn/version "1.0.0"}}'` resolves additional runtime
+  Maven/git coordinates via `babashka.deps/add-deps` before chart load.
 * `--trace` emits per-tick transcript events.
+
+[[project-config]]
+=== Project configuration (`.escapement.edn`)
+
+A project can pin its layout once in a single `.escapement.edn` file at
+its root. Escapement walks up from the current working directory (git
+style) looking for the file; the directory containing it becomes the
+**config root**, and all relative paths in the file resolve against
+that root — so `escapement run …` works the same from any subdirectory.
+
+Schema (validated with Malli on load; unknown keys are rejected):
+
+[source,clojure]
+----
+{:source-paths  ["ai/agents"]                 ;; classpath roots, prepended
+ :deps          {hiccup/hiccup
+                 {:mvn/version "2.0.0-RC3"}}  ;; runtime deps via add-deps
+ :tools-ns      [my.app/register-tools]       ;; symbol or vector of symbols
+ :work-dir      "ai/agents/transcripts"       ;; default --work-dir
+ :default-chart my.app.charts.hello/agent}    ;; used when no chart given
+----
+
+Startup order (matters because each step may require what the previous
+one made visible):
+
+. Discover and validate `.escapement.edn`.
+. Layer CLI flags over config over defaults.
+. `add-deps` for `:deps` (Maven/git coords).
+. `add-classpath` for `:source-paths`.
+. `require` every `:tools-ns` and, if the symbol resolves to a function,
+  invoke it with the builtin tool registry atom.
+. Resolve the chart symbol — CLI argument wins, else `:default-chart`.
+
+Precedence is `CLI flag > .escapement.edn > built-in default`. CLI
+`:deps` is merged on top of config `:deps` (CLI wins per coordinate);
+CLI `:source-paths` is prepended to config `:source-paths`; CLI
+`:tools-ns` entries are appended to config entries. CLI-supplied paths
+resolve against `cwd`; config-supplied paths resolve against the config
+root. There is no environment-variable layer.
+
+When a config file is found, the transcript opens with a
+`:cli/config-loaded` event recording the file path and the keys present.
+If runtime deps were resolved, a `:cli/deps-added` event follows.
+
+A missing `.escapement.edn` is silent; defaults apply. A malformed file
+fails fast with a humanized Malli error pointing at the offending key.
+
+See also: <<add-chart,Adding a new chart>>.
 
 [[idioms-gotchas]]
 == Idioms and gotchas
@@ -2081,6 +2136,7 @@ nREPL, connect, and evaluate `(k/run ...)`. The relevant aliases are in
 `deps.edn`: `:test` adds `test/`, `bb_test/`, fulcro-spec, kaocha, and the
 guardrails JVM properties; `:kaocha` invokes `kaocha.runner`.
 
+[[add-chart]]
 === Adding a new chart
 
 1. Create `src/escapement/charts/my_thing.clj`. Pattern after the demos.
@@ -2089,6 +2145,11 @@ guardrails JVM properties; `:kaocha` invokes `kaocha.runner`.
 3. Add a unit test under `test/escapement/charts/my_thing_test.clj`
    using a `MockBackend` and (where applicable) stub tools.
 4. Run via `escapement run escapement.charts.my-thing/agent`.
+
+For host projects that want to keep charts and chart utility namespaces
+outside the Escapement source tree, add an `.escapement.edn` at the
+project root with `:source-paths` (and optionally `:default-chart`) —
+see <<project-config>>.
 
 === Adding a new tool
 

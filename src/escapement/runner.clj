@@ -173,7 +173,7 @@
        [{:keys [chart chart-id session-id transcript-path checkpoint-dir
                 session-dir backend backend-default-models tool-registry initial-data resume? trace?
                 max-iterations quiescent-sleep-ms human-renderer
-                on-env-ready transcript-tap
+                on-env-ready transcript-tap prelude-events
                 debug-controller human-input-active?]
          :or   {chart-id          ::chart
                 resume?           false
@@ -209,6 +209,8 @@
          (when on-env-ready
            (try (on-env-ready env)
                 (catch Throwable _ nil)))
+         (doseq [ev prelude-events]
+           (transcript-fn ev))
          (transcript-fn {:event :runner/started
                          :data  {:session-id (str session-id)
                                  :chart-id   (str chart-id)

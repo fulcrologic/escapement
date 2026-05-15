@@ -20,11 +20,18 @@
         --model <name>          Model name.
         --api-base-url <url>    API base URL.
         --api-key-env <name>    Env-var name holding the API key.
-        --tools-ns <sym>        Qualified symbol of a registration fn called with the
-                                builtin registry atom. The fn can register any number
-                                of additional tools (or compose other registration
-                                fns), so one --tools-ns is enough per run.
+        --tools-ns <sym[,sym…]> Comma-separated qualified symbols of registration
+                                fns called with the builtin registry atom. Each fn
+                                can register any number of additional tools.
+                                Repeatable; values accumulate.
                                 e.g. --tools-ns my.app.tools/register-tools!
+        --source-paths <p[:p…]> Colon-separated extra classpath roots, prepended
+                                via babashka.classpath/add-classpath. CLI-supplied
+                                paths resolve against cwd; config-supplied paths
+                                resolve against the config root.
+        --deps <edn>            Inline EDN map of additional runtime deps merged on
+                                top of `.escapement.edn` :deps. Same coordinate
+                                shape as deps.edn's :deps map.
         --trace                 Emit per-tick transcript events.
         --tui                   Force-enable the persistent TUI display.
         --no-tui                Force-disable the TUI (overrides --tui and
@@ -386,17 +393,128 @@
 
       :else want?)))
 
+(defn parse-source-paths [s] (when s (remove str/blank? (str/split s #":"))))
+
+(defn parse-tools-ns-flag
+  "`--tools-ns` accumulates a vector of raw strings (multi-flag). Each
+   string may itself be comma-separated. Returns a vector of qualified
+   symbols, dying on any malformed entry."
+  [raw]
+  (let [strs (mapcat #(str/split % #",") raw)
+        strs (remove str/blank? strs)]
+    (mapv (fn [s]
+            (let [sym (try (symbol s) (catch Throwable _ (die! (str "Invalid --tools-ns symbol: " s))))]
+              (when-not (qualified-symbol? sym)
+                (die! (str "--tools-ns must be qualified (namespace/name), got: " s)))
+              sym))
+          strs)))
+
+(defn parse-deps-flag [s]
+  (when s
+    (let [v (try (edn/read-string s)
+                 (catch Throwable t
+                   (die! (str "--deps must be EDN: " (.getMessage t)))))]
+      (when-not (map? v) (die! "--deps must be an EDN map of {sym coord}"))
+      v)))
+
+(defn- apply-deps!
+  "Call babashka.deps/add-deps with the given coordinate map. Errors are
+   re-thrown wrapped so the user sees which coordinate failed."
+  [deps-map]
+  (when (seq deps-map)
+    (try
+      (require 'babashka.deps)
+      ((resolve 'babashka.deps/add-deps) {:deps deps-map})
+      (catch Throwable t
+        (die! (str "Failed to resolve runtime :deps " (pr-str deps-map) ": "
+                   (.getMessage t)) 1)))))
+
+(defn- apply-classpath!
+  "Prepend each path (a File) to the classpath via babashka.classpath."
+  [paths]
+  (when (seq paths)
+    (require 'babashka.classpath)
+    (let [add (resolve 'babashka.classpath/add-classpath)]
+      (doseq [^java.io.File p paths]
+        (add (.getAbsolutePath p))))))
+
+(defn- require-tools-nses!
+  "For each qualified symbol: require its namespace and, if it resolves
+   to a fn, invoke it with `registry`."
+  [syms registry]
+  (doseq [sym syms]
+    (let [ns-sym (symbol (namespace sym))]
+      (try (require ns-sym)
+           (catch Throwable t
+             (die! (str "Could not require tools-ns " ns-sym ": " (.getMessage t)) 1)))
+      (if-let [v (resolve sym)]
+        (let [val (deref v)]
+          (when (fn? val) (val registry)))
+        (die! (str "Could not resolve tools-ns symbol: " sym) 1)))))
+
+(defn effective-opts
+  "Pure helper for layering CLI flags over project config. Returns the
+   resolved subset that drives run-time wiring. CLI > config > default.
+
+   `cli-opts`: parsed `--flag` map from the command line.
+   `project-cfg`: parsed `.escapement.edn` map (may be nil).
+   `config-root`: java.io.File of the dir containing `.escapement.edn` (may be nil).
+
+   Why: kept side-effect-free so precedence rules are unit-testable."
+  [cli-opts project-cfg config-root]
+  (let [cli-sps (mapv #(io/file %) (parse-source-paths (:source-paths cli-opts)))
+        cfg-sps (mapv #(config/resolve-path config-root %) (:source-paths project-cfg))
+        cli-deps (parse-deps-flag (:deps cli-opts))
+        cli-tools (parse-tools-ns-flag (:tools-ns cli-opts))
+        cfg-tools (or (:tools-ns project-cfg) [])
+        work-dir (cond
+                   (:work-dir cli-opts) (:work-dir cli-opts)
+                   (and config-root (:work-dir project-cfg))
+                   (.getAbsolutePath (config/resolve-path config-root (:work-dir project-cfg)))
+                   :else ".escapement")]
+    {:source-paths (vec (concat cli-sps cfg-sps))
+     :deps         (merge (:deps project-cfg) cli-deps)
+     :tools-ns     (vec (concat cfg-tools cli-tools))
+     :work-dir     work-dir
+     :default-chart (:default-chart project-cfg)}))
+
 (defn- cmd-run [args]
   (let [{:keys [positional opts]}
-        (parse-args args #{:resume :trace :tui :no-tui :debug} #{:param})
+        (parse-args args #{:resume :trace :tui :no-tui :debug} #{:param :tools-ns})
+        project-cfg-info (try (config/load-project-config)
+                              (catch clojure.lang.ExceptionInfo e
+                                (die! (str (.getMessage e) "\n"
+                                           (pr-str (:errors (ex-data e)))) 2)))
+        project-cfg      (:config project-cfg-info)
+        config-root      (:root project-cfg-info)
         chart-arg (first positional)
-        _         (when-not chart-arg
-                    (die! "Usage: run <chart-sym> [flags]"))
-        chart-sym (symbol chart-arg)
-        _         (when-not (qualified-symbol? chart-sym)
-                    (die! (str "Chart symbol must be qualified, got: " chart-arg)))
+        chart-sym (cond
+                    chart-arg
+                    (let [s (symbol chart-arg)]
+                      (when-not (qualified-symbol? s)
+                        (die! (str "Chart symbol must be qualified, got: " chart-arg)))
+                      s)
+                    (:default-chart project-cfg)
+                    (:default-chart project-cfg)
+                    :else
+                    (die! "Usage: run <chart-sym> [flags]  (or set :default-chart in .escapement.edn)"))
+        eff              (effective-opts opts project-cfg config-root)
+        work-dir         (:work-dir eff)
+        all-source-paths (:source-paths eff)
+        merged-deps      (:deps eff)
+        all-tools-ns     (:tools-ns eff)
+        prelude-events   (cond-> []
+                           project-cfg-info
+                           (conj {:event :cli/config-loaded
+                                  :data  {:path (.getPath ^java.io.File (:path project-cfg-info))
+                                          :keys (vec (keys project-cfg))}})
+                           (seq merged-deps)
+                           (conj {:event :cli/deps-added
+                                  :data  {:coords (into {} (map (fn [[k v]] [(str k) (pr-str v)]))
+                                                        merged-deps)}}))
+        _                (apply-deps! merged-deps)
+        _                (apply-classpath! all-source-paths)
         session   (or (:session opts) (str (java.util.UUID/randomUUID)))
-        work-dir  (or (:work-dir opts) ".escapement")
         session-dir (str work-dir "/" session)
         transcript (or (:transcript opts) (str session-dir "/transcript.jsonl"))
         checkpoint-dir (or (:checkpoint-dir opts) (str session-dir "/checkpoints"))
@@ -449,23 +567,7 @@
                         (let [reg-var (resolve 'escapement.tools.builtin/default-registry)
                               _       (assert reg-var "escapement.tools.builtin/default-registry not found")
                               reg     (deref reg-var)]
-                          ;; --tools-ns is an explicit hook for cases where the
-                          ;; chart can't transitively require the tools, or you
-                          ;; want declarative wiring at the entry point.
-                          (when-let [sym-str (:tools-ns opts)]
-                            (let [sym (try (symbol sym-str)
-                                           (catch Throwable _
-                                             (die! (str "Invalid --tools-ns symbol: " sym-str))))
-                                  _   (when-not (qualified-symbol? sym)
-                                        (die! (str "--tools-ns must be qualified (namespace/name), got: " sym-str)))
-                                  ns-sym (symbol (namespace sym))]
-                              (try (require ns-sym)
-                                   (catch Throwable t
-                                     (die! (str "Could not require --tools-ns namespace "
-                                                ns-sym ": " (.getMessage t)) 1)))
-                              (if-let [v (resolve sym)]
-                                ((deref v) reg)
-                                (die! (str "Could not resolve --tools-ns: " sym) 1))))
+                          (require-tools-nses! all-tools-ns reg)
                           reg))]
     (try
       (let [session-kw (keyword "session" session)
@@ -482,6 +584,7 @@
                          :initial-data    initial-data
                          :resume?         (boolean (:resume opts))
                          :trace?          (boolean (:trace opts))
+                         :prelude-events  prelude-events
                          :transcript-tap  (when tui-handle
                                             (fn [ev] (tui/event! tui-handle ev)))
                          :debug-controller debug-controller
