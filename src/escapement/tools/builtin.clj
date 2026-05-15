@@ -1,21 +1,26 @@
 (ns escapement.tools.builtin
   "Built-in tools usable from both bb and JVM:
   `:fs/read`, `:fs/write`, `:fs/edit`, `:fs/multi-edit`, `:fs/glob`, `:fs/grep`,
-  `:shell/run`, `:repl/eval`.
+  `:shell/run`, `:repl/eval`, `:web/search`, `:web/fetch`.
 
   Each tool is a `defrecord` implementing `escapement.tools.protocol/Tool`. Inputs are
   validated by `dispatch` before `invoke` is called; the bodies here can therefore assume
   shape correctness and only need to defend against runtime conditions (missing files,
   ambiguous edits, non-zero exit codes, eval errors)."
   (:require
+   [babashka.http-client :as http]
    [babashka.process :as bp]
+   [cheshire.core :as json]
    [clojure.java.io :as io]
+   [clojure.pprint :as pprint]
    [clojure.string :as str]
    [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
    [escapement.tools.protocol :as tp])
   (:import
+   (java.io InputStream)
    (java.nio.charset StandardCharsets)
    (java.nio.file CopyOption Files FileSystems FileVisitOption LinkOption Path StandardCopyOption)
+   (java.util UUID)
    (java.util.concurrent TimeoutException TimeUnit)))
 
 (def ^:const max-read-bytes
@@ -542,26 +547,292 @@
            :is-error true})))))
 
 ;; ---------------------------------------------------------------------------
+;; :web/search  (Gemini google_search grounding)
+;; ---------------------------------------------------------------------------
+
+(def ^:private web-search-schema
+  [:map {:closed true}
+   [:query :string]
+   [:max-results {:optional true} [:int {:min 1 :max 10}]]])
+
+(def ^:const default-web-search-max-results 5)
+(def ^:const default-gemini-search-model "gemini-2.5-flash")
+
+(defn- gemini-search-url [model api-key]
+  (str "https://generativelanguage.googleapis.com/v1beta/models/"
+       model ":generateContent?key=" api-key))
+
+(defn- parse-gemini-search-response
+  "Parse a Gemini generateContent response with google_search grounding into
+   a vector of `{:title :url :snippet}` maps. Pairs each grounding-support
+   (which carries the snippet) with the first grounding-chunk it references."
+  [resp]
+  (let [candidate    (-> resp (get "candidates") first)
+        gm           (get candidate "groundingMetadata")
+        chunks       (vec (get gm "groundingChunks"))
+        supports     (vec (get gm "groundingSupports"))
+        chunk->info  (fn [i]
+                       (when-let [c (get chunks i)]
+                         (let [w (get c "web")]
+                           {:title (get w "title")
+                            :url   (get w "uri")})))
+        ;; Build snippet per chunk by joining all supports whose
+        ;; groundingChunkIndices include that chunk.
+        chunk->snip  (reduce
+                      (fn [m support]
+                        (let [snip (get-in support ["segment" "text"])
+                              idxs (get support "groundingChunkIndices")]
+                          (reduce (fn [m i]
+                                    (update m i (fn [existing]
+                                                  (cond
+                                                    (nil? existing) snip
+                                                    (str/includes? existing snip) existing
+                                                    :else (str existing " " snip)))))
+                                  m idxs)))
+                      {}
+                      supports)]
+    (vec
+     (keep-indexed
+      (fn [i _]
+        (when-let [info (chunk->info i)]
+          (assoc info :snippet (or (get chunk->snip i) ""))))
+      chunks))))
+
+(defn- http-post-json
+  "Indirection so tests can `with-redefs` a fake response."
+  [url body-string timeout-ms]
+  (http/post url
+             {:headers {"Content-Type" "application/json"}
+              :body    body-string
+              :timeout timeout-ms
+              :throw   false}))
+
+(defn- env
+  "Env-var lookup wrapped so tests can stub. Returns nil for blank/missing."
+  [k]
+  (let [v (System/getenv k)]
+    (when-not (str/blank? v) v)))
+
+(defrecord WebSearchTool []
+  tp/Tool
+  (tool-name    [_] :web/search)
+  (description  [_]
+    (str "Web search via Google Search grounding (Gemini API). Returns up to "
+         "`max-results` (default " default-web-search-max-results ", max 10) "
+         "results as EDN: a vector of `{:title :url :snippet}`. Requires "
+         "GEMINI_API_KEY in the environment. The model can be overridden via "
+         "GEMINI_SEARCH_MODEL (default `" default-gemini-search-model "`)."))
+  (input-schema [_] web-search-schema)
+  (invoke [_ {:keys [query max-results]}]
+    (let [api-key (env "GEMINI_API_KEY")
+          model   (or (env "GEMINI_SEARCH_MODEL") default-gemini-search-model)
+          cap     (long (or max-results default-web-search-max-results))]
+      (cond
+        (str/blank? api-key)
+        {:result "GEMINI_API_KEY not set" :is-error true}
+
+        :else
+        (try
+          (let [req-body {"contents" [{"role" "user"
+                                       "parts" [{"text" query}]}]
+                          "tools"    [{"google_search" {}}]}
+                {:keys [status body]} (http-post-json
+                                       (gemini-search-url model api-key)
+                                       (json/generate-string req-body)
+                                       30000)]
+            (if-not (and (>= status 200) (< status 300))
+              {:result (str "Gemini search HTTP " status ": "
+                            (if (string? body) body (pr-str body)))
+               :is-error true}
+              (let [parsed (json/parse-string body)
+                    hits   (parse-gemini-search-response parsed)
+                    kept   (vec (take cap hits))]
+                {:result   (with-out-str (pprint/pprint kept))
+                 :is-error false})))
+          (catch Throwable t
+            {:result (str "web/search failed: " (.getMessage t)) :is-error true}))))))
+
+;; ---------------------------------------------------------------------------
+;; :web/fetch
+;; ---------------------------------------------------------------------------
+
+(def ^:private web-fetch-schema
+  [:map {:closed true}
+   [:url :string]
+   [:max-bytes {:optional true} [:int {:min 1024 :max 50000000}]]
+   [:timeout-ms {:optional true} [:int {:min 100 :max 120000}]]])
+
+(def ^:const default-fetch-max-bytes 5000000)
+(def ^:const default-fetch-timeout-ms 30000)
+
+(defn- guess-extension
+  "Best-effort file extension from Content-Type (without the leading dot,
+   so returned value already starts with a `.` or is the empty string)."
+  [content-type]
+  (let [ct (some-> content-type (str/split #";") first str/trim str/lower-case)]
+    (case ct
+      "text/html"                ".html"
+      "application/xhtml+xml"    ".html"
+      "text/plain"               ".txt"
+      "text/markdown"            ".md"
+      "application/json"         ".json"
+      "application/xml"          ".xml"
+      "text/xml"                 ".xml"
+      "application/pdf"          ".pdf"
+      "text/css"                 ".css"
+      "text/csv"                 ".csv"
+      "application/javascript"   ".js"
+      "text/javascript"          ".js"
+      "")))
+
+(defn- fetch-temp-dir []
+  (let [d (io/file (System/getProperty "java.io.tmpdir") "escapement-fetch")]
+    (.mkdirs d)
+    d))
+
+(defn- copy-stream-capped!
+  "Copy `in` to `out` up to `max-bytes`. Returns `{:bytes <n> :truncated <bool>}`.
+   When the cap is reached, the remaining input is discarded."
+  [^InputStream in out ^long max-bytes]
+  (let [buf  (byte-array 8192)]
+    (loop [total 0]
+      (let [remaining (- max-bytes total)]
+        (if (<= remaining 0)
+          ;; Drain to see if more was available — flags truncation.
+          (let [extra (.read in buf 0 (alength buf))]
+            {:bytes total :truncated (pos? extra)})
+          (let [to-read (min (alength buf) remaining)
+                n       (.read in buf 0 to-read)]
+            (if (neg? n)
+              {:bytes total :truncated false}
+              (do (.write out buf 0 n)
+                  (recur (+ total n))))))))))
+
+(defn- title-from-html [^String s]
+  (when s
+    (when-let [m (re-find #"(?is)<title[^>]*>(.*?)</title>" s)]
+      (some-> (second m) str/trim
+              (str/replace #"\s+" " ")
+              (#(when-not (str/blank? %) %))))))
+
+(defn- http-get-stream
+  "Indirection so tests can stub. Returns the babashka.http-client response
+   with `:body` as an InputStream."
+  [url timeout-ms]
+  (http/get url
+            {:timeout         timeout-ms
+             :as              :stream
+             :throw           false
+             :follow-redirects :always}))
+
+(defrecord WebFetchTool []
+  tp/Tool
+  (tool-name    [_] :web/fetch)
+  (description  [_]
+    (str "HTTP GET a URL, streaming the body to a temp file under "
+         "${java.io.tmpdir}/escapement-fetch/. Returns EDN metadata "
+         "(`:url :final-url :status :content-type :bytes :saved-to :title "
+         ":preview :truncated`). Truncates at `max-bytes` (default "
+         default-fetch-max-bytes ") without erroring; non-2xx and "
+         "network/timeout failures are errors. Use this with `:fs/grep` "
+         "and `:fs/read` (or `:shell/run` for pandoc/html2text) to read "
+         "slices off disk rather than dumping the whole body into context."))
+  (input-schema [_] web-fetch-schema)
+  (invoke [_ {:keys [url max-bytes timeout-ms]}]
+    (let [cap     (long (or max-bytes default-fetch-max-bytes))
+          to     (long (or timeout-ms default-fetch-timeout-ms))]
+      (try
+        (let [resp     (http-get-stream url to)
+              status   (:status resp)
+              headers  (:headers resp)
+              body     (:body resp)
+              hget     (fn [k]
+                         (or (get headers k)
+                             (get headers (str/lower-case k))))
+              ct       (or (hget "content-type") (hget "Content-Type"))
+              final-url (or (some-> resp :uri str)
+                            (hget "x-final-url")
+                            url)]
+          (cond
+            (nil? status)
+            {:result (str "web/fetch: no response status for " url) :is-error true}
+
+            (not (and (>= status 200) (< status 300)))
+            (do
+              (when (instance? InputStream body) (try (.close ^InputStream body) (catch Throwable _ nil)))
+              {:result (str "web/fetch HTTP " status " for " url) :is-error true})
+
+            :else
+            (let [tdir   (fetch-temp-dir)
+                  ext    (guess-extension ct)
+                  fname  (str (UUID/randomUUID) ext)
+                  out-f  (io/file tdir fname)
+                  {:keys [bytes truncated]}
+                  (with-open [in  (if (instance? InputStream body)
+                                    ^InputStream body
+                                    (io/input-stream body))
+                              out (io/output-stream out-f)]
+                    (copy-stream-capped! in out cap))
+                  ;; preview: up to 500 chars of the saved file, decoded as UTF-8
+                  preview (try
+                            (with-open [r (io/reader out-f :encoding "UTF-8")]
+                              (let [buf (char-array 500)
+                                    n   (.read r buf 0 500)]
+                                (when (pos? n) (String. buf 0 n))))
+                            (catch Throwable _ nil))
+                  html?  (and ct (str/starts-with? (str/lower-case ct) "text/html"))
+                  ;; For title detection, scan a slightly larger window if needed
+                  title-src (when html?
+                              (try
+                                (with-open [r (io/reader out-f :encoding "UTF-8")]
+                                  (let [buf (char-array 8192)
+                                        n   (.read r buf 0 8192)]
+                                    (when (pos? n) (String. buf 0 n))))
+                                (catch Throwable _ nil)))
+                  title   (when html? (title-from-html title-src))
+                  out-map {:url          url
+                           :final-url    final-url
+                           :status       status
+                           :content-type ct
+                           :bytes        bytes
+                           :saved-to     (.getCanonicalPath out-f)
+                           :title        title
+                           :preview      preview
+                           :truncated    truncated}]
+              {:result   (with-out-str (pprint/pprint out-map))
+               :is-error false})))
+        (catch Throwable t
+          {:result (str "web/fetch failed: " (.getMessage t)) :is-error true})))))
+
+;; ---------------------------------------------------------------------------
 ;; Public assembly
 ;; ---------------------------------------------------------------------------
 
 (>defn builtin-tools
-       "Return a vector of the built-in tool instances."
+       "Return a vector of the built-in tool instances.
+
+       `:web/search` is conditionally included only when `GEMINI_API_KEY` is set
+       in the environment, so the LLM doesn't see (and waste a turn calling) a
+       search tool that can't reach a backend. `:web/fetch` is always included —
+       it has no credential requirement."
        []
        [=> [:sequential any?]]
-       [(->FsReadTool)
-        (->FsWriteTool)
-        (->FsEditTool)
-        (->FsMultiEditTool)
-        (->FsGlobTool)
-        (->FsGrepTool)
-        (->ShellRunTool)
-        (->ReplEvalTool)])
+       (cond-> [(->FsReadTool)
+                (->FsWriteTool)
+                (->FsEditTool)
+                (->FsMultiEditTool)
+                (->FsGlobTool)
+                (->FsGrepTool)
+                (->ShellRunTool)
+                (->ReplEvalTool)
+                (->WebFetchTool)]
+         (env "GEMINI_API_KEY") (conj (->WebSearchTool))))
 
 (>defn new-builtin-registry
-       "Return a FRESH registry populated with the eight built-in tools. Use
-        this when you want isolation — most commonly in tests, or when a host
-        process drives multiple chart runs that need disjoint tool sets."
+       "Return a FRESH registry populated with the built-in tools (nine or ten,
+        depending on whether `GEMINI_API_KEY` is set — see `builtin-tools`).
+        Use this when you want isolation — most commonly in tests, or when a
+        host process drives multiple chart runs that need disjoint tool sets."
        []
        [=> any?]
        (tp/new-registry (builtin-tools)))
@@ -570,7 +841,8 @@
   host that calls `(default-registry)`. Process-global: top-level
   `(tp/register! escapement.tools.builtin/default-registry ...)` calls in
   any namespace that is loaded before `runner/run!` will be visible to the
-  chart. Seeded with the eight built-ins on namespace load.
+  chart. Seeded with the built-ins on namespace load (`:web/search` is
+  included only when `GEMINI_API_KEY` is set in the environment at load time).
 
   This is the Clojure-idiomatic registration pattern: require your tool
   namespace from the chart and it self-registers — no CLI flag needed.
