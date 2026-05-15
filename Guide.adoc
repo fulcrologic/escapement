@@ -1049,6 +1049,106 @@ The current worker has no automatic continuation for
 follow-up via `h/tell-llm` ("continue your previous response"), and let
 the model pick up. That's a chart decision, not a library default.
 
+[[web-tools]]
+== Web tools: `:web/search` and `:web/fetch`
+
+Two built-in tools give the LLM first-class web access without dragging full
+HTML into the context window. They are registered in `default-registry`
+alongside the filesystem and shell tools, so any chart that does not pass an
+explicit `:real-tools` whitelist already has them; opt in explicitly with
+`:real-tools [:web/search :web/fetch]` when you do whitelist.
+
+=== `:web/search`
+
+Google Search grounding via the Gemini API. Returns up to `max-results`
+(default 5, max 10) results as an EDN vector of `{:title :url :snippet}`.
+
+Input schema::
++
+[source,clojure]
+----
+{:query       "string, required"
+ :max-results "int 1..10, optional, default 5"}
+----
+
+Configuration::
+* `GEMINI_API_KEY` — required. Get one at https://aistudio.google.com/apikey.
+  If missing, the tool returns `{:is-error true :result "GEMINI_API_KEY not set"}`
+  — it never throws.
+* `GEMINI_SEARCH_MODEL` — optional model override. Default `gemini-2.5-flash`
+  (grounding-eligible, free tier).
+
+Result shape (example)::
++
+[source,clojure]
+----
+[{:title "Clojure Guides"
+  :url   "https://clojure.org/guides"
+  :snippet "Clojure is great for data."}
+ ...]
+----
+
+=== `:web/fetch`
+
+HTTP `GET` a URL, streaming the body to a temp file at
+`${java.io.tmpdir}/escapement-fetch/<uuid><ext>`. The result is small EDN
+metadata plus a short raw preview — the **full body lives on disk**, not in
+the LLM's context.
+
+Input schema::
++
+[source,clojure]
+----
+{:url        "string, required"
+ :max-bytes  "int 1024..50_000_000, optional, default 5_000_000"
+ :timeout-ms "int 100..120_000, optional, default 30_000"}
+----
+
+Result map::
++
+[source,clojure]
+----
+{:url          "https://..."
+ :final-url    "https://..."         ; after redirects
+ :status       200
+ :content-type "text/html; charset=utf-8"
+ :bytes        412334
+ :saved-to     "/tmp/escapement-fetch/abc.html"
+ :title        "..."                 ; nil unless HTML
+ :preview      "first ~500 chars of body, raw"
+ :truncated    false}
+----
+
+`:is-error` is true only for network failure, timeout, or non-2xx status. A
+body that exceeds `:max-bytes` is **not** an error — it is truncated on
+disk and `:truncated true` is set in the result.
+
+=== Recipe: search → fetch → read slices off disk
+
+The intended flow keeps context small:
+
+. `:web/search` returns a few snippets + URLs. Most questions are answered here.
+. When a snippet isn't enough, `:web/fetch` saves the chosen URL to disk and
+  returns metadata + a tiny preview.
+. The LLM then composes existing tools to read only what it needs:
++
+[source,clojure]
+----
+;; grep for the section you care about
+{:tool :fs/grep   :pattern "deprecation"   :path "/tmp/escapement-fetch/abc.html"
+                  :output-mode "content"   :context 3}
+
+;; read a numbered window of the file
+{:tool :fs/read   :path "/tmp/escapement-fetch/abc.html"
+                  :offset 1200 :limit 80}
+
+;; convert HTML to clean text via shell if pandoc/html2text is available
+{:tool :shell/run :command "pandoc -f html -t plain /tmp/escapement-fetch/abc.html | head -200"}
+----
+
+Sandboxing the fetch (Docker, sandbox-exec, firejail) is an operator concern
+— the tool itself does no isolation.
+
 [[human-interaction]]
 == Human interaction and the TUI
 
