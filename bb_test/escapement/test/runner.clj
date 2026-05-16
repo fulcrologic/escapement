@@ -7,27 +7,39 @@
    [clojure.string :as str]
    [clojure.test :as t]))
 
-(defn- path->ns [^java.io.File f]
-  (let [rel (-> (.getPath f) (str/replace-first #"^test/" ""))]
+(defn- path->ns [^java.io.File f root]
+  (let [pfx (str root "/")
+        rel (-> (.getPath f) (str/replace-first (re-pattern (str "^" pfx)) ""))]
     (-> rel
         (str/replace #"\.cljc?$" "")
         (str/replace "/" ".")
         (str/replace "_" "-")
         symbol)))
 
-(defn- test-files []
-  (->> (fs/glob "test" "**/*_test.{clj,cljc}")
+(defn- test-files [root]
+  (->> (fs/glob root "**/*_test.{clj,cljc}")
        (map fs/file)
        (sort-by #(.getPath %))))
 
-(defn run!
-  ([] (run! nil))
-  ([_opts]
-   (let [files (test-files)
-         nses  (mapv path->ns files)]
-     (println (str "Loading " (count nses) " test namespaces…"))
+(defn- discover [paths]
+  (mapcat (fn [root]
+            (map #(vector root %) (test-files root)))
+          paths))
+
+(defn run-paths!
+  "Run every *_test.{clj,cljc} under each root in `:paths`."
+  ([] (run-paths! {:paths ["test"]}))
+  ([{:keys [paths] :or {paths ["test"]}}]
+   (let [pairs (discover paths)
+         nses  (mapv (fn [[root f]] (path->ns f root)) pairs)]
+     (println (str "Loading " (count nses) " test namespaces from " (vec paths) "…"))
      (doseq [n nses]
        (require n))
      (let [{:keys [fail error]} (apply t/run-tests nses)
            bad (+ (or fail 0) (or error 0))]
        (System/exit (if (zero? bad) 0 1))))))
+
+(defn run!
+  "Default entry: discover and run everything under `test/`."
+  ([] (run! nil))
+  ([_opts] (run-paths! {:paths ["test"]})))

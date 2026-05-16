@@ -2167,7 +2167,7 @@ M7 iterate test
   llm/LLMBackend
   (send-turn [_ request]
     (swap! call-log conj request)
-    (or (.pollFirst ^LinkedBlockingDeque responses)
+    (or (ts/pop-first! responses)
         (throw (ex-info "mock out of canned responses" {})))))
 
 (defn- tool-use [tool-uses]
@@ -2200,13 +2200,100 @@ do not actually run a shell):
   (input-schema [_] [:map [:command :string]])
   (invoke [_ input]
     (swap! calls conj input)
-    (let [r (.pollFirst ^LinkedBlockingDeque responses)]
-      (or r {:result "no canned response" :is-error true}))))
+    (or (ts/pop-first! responses)
+        {:result "no canned response" :is-error true})))
 
 (let [reg (builtin/new-builtin-registry)]
   (tp/register! reg (stub-shell [{:result "ok" :is-error false}]))
   ...)
 ----
+
+[[chart-segment-testing]]
+=== Testing segments of a large chart
+
+Every chart node — `state`, `parallel`, `transition`, `script`,
+`on-entry`, `invoke` — is a plain Clojure map produced by the element
+constructors in `com.fulcrologic.statecharts.elements`. `chart/statechart`
+just rolls them up into a registered chart value. So nothing prevents
+extracting one (or several) states into top-level `def`s, dropping them
+into the production chart unchanged, AND reusing the same vars inside
+minimal *shim* charts whose only job is to drive that segment through
+the testing harness.
+
+This is how you write integration tests for a large chart without
+booting the whole thing. The shim chart wraps the segment with the
+minimum parent state + finals required for its transition targets to
+resolve; the mocked `LLMBackend` scripts only the turns that segment
+issues; the real engine, real invocation processor, real `params-fn`,
+and real tool dispatch all run.
+
+The pattern, distilled:
+
+. In the production chart's namespace, lift the state into a `def`. The
+  assembled chart references the var; behavior is unchanged.
++
+[source,clojure]
+----
+(def refine-state               ; isolatable segment
+  (state {:id :refine}
+    (h/llm-conversation {:id "refine" :params-fn ...})
+    (transition {:event :refine/sealed :target :pipeline-done} ...)
+    (transition {:event :refine/give-up :target :pipeline-done} ...)))
+
+(def agent
+  (chart/statechart {:initial :run}
+    ...
+    refine-state                ; same var, in place
+    ...))
+----
+
+. In the test, build a shim chart that wraps just that segment with the
+  smallest possible parent state + finals so the segment's
+  `:target` ids resolve.
++
+[source,clojure]
+----
+(def shim
+  (chart/statechart {:initial :run}
+    (state {:id :run :initial :refine}
+      refine-state
+      (final {:id :pipeline-done}))))
+----
+
+. Run the shim through `escapement.engine.testing` with a mocked backend
+  and (optionally) stubbed tools. The harness is unaware that it is
+  driving an extracted sub-chart — everything else (the
+  `:llm-conversation` invocation processor, the worker thread, event
+  validation, transition algorithm, data-model ops) is the real
+  production code path.
++
+A complete example: `demos/unit_test/test/unit_test/refine_segment_test.clj`
+extracts `refine-state` from `demos/unit_test/chart.clj` (a parallel,
+two-region, seven-LLM-state pipeline) and exercises it in isolation.
+Run it via:
++
+[source,bash]
+----
+bb test-demo-unit-test
+----
+
+When to reach for this pattern:
+
+* The full chart is expensive to set up — multiple parallel regions,
+  long initialization chains, complex initial-data requirements.
+* You want focused failure messages: a broken refine transition should
+  surface as a refine-segment test failure, not as a chart-level
+  "didn't reach :finished" timeout 30 states downstream.
+* You want to characterize one state's contract — what inputs it
+  requires, what events it emits, what data-model deltas it produces —
+  without coupling the test to the surrounding chart.
+
+When NOT to:
+
+* If two segments are coupled (shared data, parallel coordination
+  events), test them together — the shim chart can wrap both. The
+  pattern works at any granularity: one state, one region, one
+  compound substate.
 
 === Live smoke scripts
 
@@ -2247,7 +2334,11 @@ require network access and real credentials.
   `helpers` — authoring sugar (`llm-conversation`, `tell-llm`).
 
 `src/escapement/charts/`::
-  Demo charts: `hello`, `scan`, `parallel_demo`, `iterate`.
+  Demo charts: `hello`, `scan`, `parallel_demo`, `iterate` (the four
+  walkthrough exemplars covered in <<authoring>>), plus `ask` (a minimal
+  interactive `:human-input` demo) and `artifacts_demo` (the
+  `capture-llm-output` / `render-template` pipeline used in
+  <<multi-agent>>).
 
 `src/escapement/`::
   `transcript` (single-writer JSONL sink), `runner` (top-level pump loop),
@@ -2270,9 +2361,6 @@ require network access and real credentials.
 `bb_test/`::
   Babashka-runnable scripts: sanity checks and live smoke runs.
 
-`spike/`::
-  Original spike scripts that proved the patterns under bb. Kept for
-  reference; not used at runtime.
 
 [[known-limitations]]
 == Known limitations and roadmap

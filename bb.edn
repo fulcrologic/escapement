@@ -1,4 +1,4 @@
-{:paths ["src" "bb_test" "spike" "demos"]
+{:paths ["src" "bb_test" "demos"]
  :deps  {com.fulcrologic/statecharts {:mvn/version "1.4.0-RC13"}
          com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
          metosin/malli               {:mvn/version "0.16.4"}
@@ -15,4 +15,10 @@
          test   {:doc  "Run all tests under bb (test/**/*_test.clj)."
                  :extra-paths ["test"]
                  :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
-                 :task (exec 'escapement.test.runner/run!)}}}
+                 :task (exec 'escapement.test.runner/run!)}
+         test-demo-unit-test
+         {:doc  "Run the unit_test demo's own tests (segment-composition pattern)."
+          :extra-paths ["demos/unit_test/test"]
+          :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
+          :task (exec 'escapement.test.runner/run-paths!)
+          :exec-args {:paths ["demos/unit_test/test"]}}}}
