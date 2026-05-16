@@ -1,0 +1,37 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  bb-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Babashka
+        uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          bb: latest
+
+      - name: Cache Maven artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: ${{ runner.os }}-deps-${{ hashFiles('bb.edn', 'deps.edn') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-
+
+      - name: bb sanity
+        run: bb sanity
+
+      - name: bb test
+        run: bb test
