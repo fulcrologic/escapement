@@ -1,5 +1,5 @@
 (ns escapement.engine.testing
-  "JVM-friendly test harness replacing `com.fulcrologic.statecharts.testing` (which crashes under bb).
+  "Bb-friendly test harness replacing `com.fulcrologic.statecharts.testing` (which crashes under bb).
 
   Drives a chart synchronously by polling the manual queue until quiescent. Test code injects
   mock `InvocationProcessor`s as needed; chart authors don't need to know they're in a test."

@@ -11,21 +11,19 @@
    [escapement.invocation.llm-conversation :as llmc]
    [escapement.llm.protocol :as llm]
    [escapement.tools.builtin :as builtin]
+   [escapement.test-support :as ts]
    [escapement.tools.protocol :as tp]
-   [fulcro-spec.core :refer [specification assertions =>]])
-  (:import (java.util.concurrent LinkedBlockingDeque)))
+   [fulcro-spec.core :refer [specification assertions =>]]))
 
 (defrecord MockBackend [responses call-log]
   llm/LLMBackend
   (send-turn [_ request]
     (swap! call-log conj request)
-    (or (.pollFirst ^LinkedBlockingDeque responses)
+    (or (ts/pop-first! responses)
         (throw (ex-info "mock out of canned responses" {})))))
 
 (defn- mock-backend [responses]
-  (let [q (LinkedBlockingDeque.)]
-    (doseq [r responses] (.add q r))
-    (->MockBackend q (atom []))))
+  (->MockBackend (ts/queue responses) (atom [])))
 
 (defn- tool-use [tool-uses]
   {:stop-reason :tool_use
@@ -46,13 +44,11 @@
   (input-schema [_] [:map [:command :string]])
   (invoke [_ input]
     (swap! calls conj input)
-    (let [r (.pollFirst ^LinkedBlockingDeque responses)]
-      (or r {:result "no canned response" :is-error true}))))
+    (or (ts/pop-first! responses)
+        {:result "no canned response" :is-error true})))
 
 (defn- stub-shell [responses]
-  (let [q (LinkedBlockingDeque.)]
-    (doseq [r responses] (.add q r))
-    (->StubShellTool q (atom []))))
+  (->StubShellTool (ts/queue responses) (atom [])))
 
 (defn- registry-with-shell [shell-tool]
   (let [reg (builtin/new-builtin-registry)]

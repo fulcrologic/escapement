@@ -1310,7 +1310,7 @@
       (emit! (str alt-screen-on-s clear-screen-s hide-cursor-s))
       (render-frame! h)
       (.start t)
-      ;; Always-on safety net: if the JVM exits via SIGINT/SIGTERM/etc.
+      ;; Always-on safety net: if the process exits via SIGINT/SIGTERM/etc.
       ;; before stop! ran, the shutdown hook still leaves the alt screen
       ;; and resets attributes so the user's terminal isn't left in raw
       ;; mode. stop! is idempotent so it's safe whether or not it already
@@ -1518,7 +1518,7 @@
 
 (defn stop!
   "Restore the terminal. Idempotent — safe to call repeatedly and from
-   both the normal exit path and a JVM shutdown hook (Ctrl-C, SIGTERM)."
+   both the normal exit path and a process shutdown hook (Ctrl-C, SIGTERM)."
   [h]
   (when (and (:enabled? h)
              (compare-and-set! (:stopped? h) false true))

@@ -6,8 +6,7 @@
   done.
 
   The chart accumulates findings via an internal-transition handler so each
-  `:found-bug` does not exit the bound state and kill the LLM worker (per the
-  M4 finding in `SPIKE_FINDINGS.md`)."
+  `:found-bug` does not exit the bound state and kill the LLM worker."
   (:require
    [com.fulcrologic.statecharts.chart :as chart]
    [com.fulcrologic.statecharts.data-model.operations :as ops]

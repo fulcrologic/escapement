@@ -3,8 +3,8 @@
   LLM is asked to call a single event-tool `event__done` with a short greeting
   string; the chart then transitions to a wrapped final state.
 
-  Per `SPIKE_FINDINGS.md`, the top-level `final` would empty the configuration
-  set on entry, so the final is wrapped in a compound parent `:run`."
+  A top-level `final` would empty the configuration set on entry, so the final
+  is wrapped in a compound parent `:run`."
   (:require
    [com.fulcrologic.statecharts.chart :as chart]
    [com.fulcrologic.statecharts.data-model.operations :as ops]

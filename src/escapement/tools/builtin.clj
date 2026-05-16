@@ -1,5 +1,5 @@
 (ns escapement.tools.builtin
-  "Built-in tools usable from both bb and JVM:
+  "Built-in tools:
   `:fs/read`, `:fs/write`, `:fs/edit`, `:fs/multi-edit`, `:fs/glob`, `:fs/grep`,
   `:shell/run`, `:repl/eval`, `:web/search`, `:web/fetch`.
 

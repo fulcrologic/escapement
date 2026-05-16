@@ -48,10 +48,11 @@ key idea:
   and re-spawns invocations; processors are written to be idempotent on
   re-entry.
 
-The runtime is **Babashka** for the agent process and CLI. Tests run on the
-JVM (kaocha) because the statechart library's `simple` and `testing`
-namespaces transitively pull `promesa`, which crashes under SCI. See
-<<known-limitations>> and `SPIKE_FINDINGS.md`.
+The runtime is **Babashka** for the agent process, CLI, and test suite
+(`bb test`). The statechart library's `simple` and `testing` namespaces
+transitively pull `promesa`, which crashes under SCI, so escapement assembles
+the env manually and ships its own bb-friendly `escapement.engine.testing`
+harness. See <<known-limitations>>.
 
 The dependency stack is small: `com.fulcrologic/statecharts 1.4.0-RC13`,
 `metosin/malli`, `cheshire`, `babashka.process`, `org.babashka/http-client`,
@@ -280,9 +281,9 @@ The chart itself:
 Notes:
 
 * The outer `:run` state is required because a **top-level** `final` would
-  empty the configuration set on entry (see `SPIKE_FINDINGS.md`). The
-  convention throughout this project is to wrap the final in a compound
-  parent state so callers can observe completion.
+  empty the configuration set on entry. The convention throughout this project
+  is to wrap the final in a compound parent state so callers can observe
+  completion.
 * `h/llm-conversation` (see <<llm-conversation-helper>>) expands to
   `(invoke {:type :llm-conversation ...})` with `:autoforward? true` set so
   `tell-llm` works.
@@ -1063,7 +1064,7 @@ calling it and failing. Opt in explicitly via `:real-tools [:web/search
 NOTE: The `:web/search` record still defends itself with a
 `"GEMINI_API_KEY not set"` error result if someone constructs and registers
 it manually after the namespace has loaded — but the recommended path is to
-set the env var before the JVM/bb process starts.
+set the env var before the bb process starts.
 
 === `:web/search`
 
@@ -1651,9 +1652,8 @@ using `malli.json-schema/transform`. Qualified keywords are flattened
 
 === Built-in tools
 
-Defined in `src/escapement/tools/builtin.clj`. All eight are available
-from both bb and JVM. The filesystem and search tools are designed to
-sit at Claude-Code-parity ergonomics for the LLM.
+Defined in `src/escapement/tools/builtin.clj`. The filesystem and search
+tools are designed to sit at Claude-Code-parity ergonomics for the LLM.
 
 `:fs/read`::
   Read a UTF-8 text file. Input: `{:path :string
@@ -1825,8 +1825,8 @@ escapement run my.chart/agent --tools-ns my.app.tools/register-tools!
 
 === Driving the chart yourself
 
-If you are NOT using the CLI — your own bb script or JVM entry point —
-choose your registry deliberately:
+If you are NOT using the CLI — your own bb script — choose your registry
+deliberately:
 
 [source,clojure]
 ----
@@ -2112,8 +2112,7 @@ See also: <<add-chart,Adding a new chart>>.
   `parallel_demo.clj`.
 
 * **Top-level `final` empties the configuration.** Wrap finals in a
-  compound parent state (every demo chart does this). See
-  `SPIKE_FINDINGS.md` item 2.
+  compound parent state (every demo chart does this).
 
 * **Resume restarts in-flight conversations from scratch.** When the chart
   re-enters a bound state on resume, a fresh worker is spawned with a fresh
@@ -2129,17 +2128,16 @@ See also: <<add-chart,Adding a new chart>>.
   way to read the event payload.
 
 * **Daemon threads only.** All worker threads (`llm-conv-...`) and the
-  transcript writer are daemon threads. They do not prevent JVM/bb exit.
+  transcript writer are daemon threads. They do not prevent bb exit.
 
 [[testing]]
 == Testing
 
-Tests run on the JVM via kaocha. The bb runtime is not used because
-`com.fulcrologic.statecharts.testing` transitively requires `promesa`,
-which crashes under SCI (see `SPIKE_FINDINGS.md`).
-
-The harness is `escapement.engine.testing`. It replaces the library's
-testing helpers with a synchronous pump:
+Tests run under bb with `bb test`. The library's
+`com.fulcrologic.statecharts.testing` is unusable because it transitively
+requires `promesa`, which crashes under SCI; escapement ships its own
+harness, `escapement.engine.testing`, that replaces the library's testing
+helpers with a synchronous pump:
 
 [source,clojure]
 ----
@@ -2225,7 +2223,7 @@ require network access and real credentials.
   Custom engine pieces — `queue` (in-process FIFO event queue), `store`
   (atomic file-backed working-memory checkpoint), `exec` (lambda
   `ExecutionModel`), `env` (assembles the `::sc/env` map), and `testing`
-  (JVM synchronous test harness). These replace
+  (bb-friendly synchronous test harness). These replace
   `com.fulcrologic.statecharts.simple`, which crashes under Babashka
   because of a transitive `promesa`/SCI conflict.
 
@@ -2253,7 +2251,7 @@ require network access and real credentials.
 
 `src/escapement/`::
   `transcript` (single-writer JSONL sink), `runner` (top-level pump loop),
-  `cli` (bb/JVM entry), `prompts` (file-based prompt loading with
+  `cli` (bb entry), `prompts` (file-based prompt loading with
   `{{VAR}}` substitution).
 
 `demos/`::
@@ -2267,7 +2265,7 @@ require network access and real credentials.
   + a single `:repl/available` event.
 
 `test/`::
-  Unit tests (kaocha + fulcro-spec). Run from a JVM REPL.
+  Unit tests (fulcro-spec). Run with `bb test`.
 
 `bb_test/`::
   Babashka-runnable scripts: sanity checks and live smoke runs.
@@ -2299,11 +2297,10 @@ require network access and real credentials.
 [[contributing]]
 == Contributing and running tests
 
-Tests run via REPL with kaocha. The project's REPL convention (see the
-`clojure-repl` skill in the user's global instructions) is to start an
-nREPL, connect, and evaluate `(k/run ...)`. The relevant aliases are in
-`deps.edn`: `:test` adds `test/`, `bb_test/`, fulcro-spec, kaocha, and the
-guardrails JVM properties; `:kaocha` invokes `kaocha.runner`.
+Tests run under bb with `bb test`. The task lives in `bb.edn` and
+auto-discovers `test/**/*_test.clj`, requires each namespace, and runs
+`clojure.test/run-tests`. The runner is `escapement.test.runner` (under
+`bb_test/`).
 
 [[add-chart]]
 === Adding a new chart

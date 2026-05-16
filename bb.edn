@@ -11,4 +11,8 @@
                            (println "bb nREPL on 1667")
                            (deref (promise)))}
          sanity {:doc  "Run the bb sanity script for the engine."
-                 :task (shell "bb bb_test/sanity.clj")}}}
+                 :task (shell "bb bb_test/sanity.clj")}
+         test   {:doc  "Run all tests under bb (test/**/*_test.clj)."
+                 :extra-paths ["test"]
+                 :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
+                 :task (exec 'escapement.test.runner/run!)}}}

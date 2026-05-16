@@ -1,5 +1,5 @@
 (ns escapement.cli
-  "Babashka/JVM entry point for the agent.
+  "Babashka entry point for the agent.
 
   Subcommands:
 

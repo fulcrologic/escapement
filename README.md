@@ -18,7 +18,7 @@ A statechart-driven autonomous coding agent in Clojure/Babashka.
 - **JSONL transcript** of every LLM request, response, tool call, transition, and checkpoint. Full replay possible.
 - **Atomic checkpointing** of working memory after every event for crash-resume.
 - Backends: Anthropic Messages API, **OpenAI Chat Completions / OpenRouter**, and z.ai's GLM family (Anthropic-compat).
-- Runs under **Babashka**; tests run on the JVM with kaocha.
+- Runs under **Babashka**, including the test suite (`bb test`). No JVM required.
 
 ## Install
 
@@ -79,15 +79,14 @@ The guide covers:
 - **Tools** — `Tool` protocol, the eight built-ins (fs read/write/edit/multi-edit/glob/grep + shell + repl), how to register a custom tool
 - **Transcript, runner, CLI** — event vocabulary, `jq` recipes, `--resume` / `--param` / `--debug` / `--no-tui`, work-dir layout
 - **Idioms and gotchas** — `:type :internal`, `tell-llm` mid-binding, parallel regions, the top-level-`final` trap, resume side-effect caveat
-- **Testing** — the JVM-only harness, mocking `LLMBackend`, stubbing tools, stub `HumanRenderer`, live smoke scripts
+- **Testing** — the bb-friendly harness (`escapement.engine.testing`), mocking `LLMBackend`, stubbing tools, stub `HumanRenderer`, live smoke scripts; run with `bb test`
 - **Project layout** — one paragraph per top-level directory
 - **Known limitations and roadmap**
 - **Contributing** — adding a chart, tool, or backend
 
 ## Built-in tools
 
-All available from both bb and JVM. The fs and search tools are at
-Claude-Code-parity ergonomics for the LLM.
+All bb-resident. The fs and search tools are at Claude-Code-parity ergonomics for the LLM.
 
 | Tool | Purpose |
 |---|---|
@@ -128,6 +127,6 @@ End-to-end demo under `demos/`:
 
 - [`demos/unit_test/`](demos/unit_test/) — port of the pi `unit_test` extension. Drives an LLM through behaviors → abstraction → (write|gap-analysis) → (critique|patch) → refine to author and seal `fulcro-spec` tests for a target function. Includes a sibling **REPL-manager parallel region** that establishes a project nREPL (cheap scripted discovery first; LLM-driven `deps.edn` inspection on miss) and hands the port to refine via shared data + one coordination event. Tested end-to-end against [`fulcrologic/fulcro`](https://github.com/fulcrologic/fulcro): generated and sealed a 52-assertion test file for `resolve-tempids`.
 
-See [`plan.md`](plan.md) for design history and [`SPIKE_FINDINGS.md`](SPIKE_FINDINGS.md) for the Babashka/JVM compatibility notes.
+See [`plan.md`](plan.md) for design history.
 
 Status: prototype.

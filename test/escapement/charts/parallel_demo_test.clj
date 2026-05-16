@@ -4,9 +4,9 @@
    [escapement.engine.testing :as dct]
    [escapement.invocation.llm-conversation :as llmc]
    [escapement.llm.protocol :as llm]
+   [escapement.test-support :as ts]
    [escapement.tools.protocol :as tp]
-   [fulcro-spec.core :refer [specification assertions =>]])
-  (:import (java.util.concurrent LinkedBlockingDeque)))
+   [fulcro-spec.core :refer [specification assertions =>]]))
 
 ;; A per-invocation backend dispatcher: distinct queues are picked by sniffing
 ;; which tool the assistant is expected to call next. The simplest reliable
@@ -19,18 +19,14 @@
     (swap! call-log conj request)
     (let [tool-names (set (map :name (:tools request)))
           k         (some #(when (contains? tool-names %) %) (keys tool-name->responses))
-          ^LinkedBlockingDeque q (get tool-name->responses k)
-          r         (when q (.pollFirst q))]
+          q         (get tool-name->responses k)
+          r         (when q (ts/pop-first! q))]
       (or r (throw (ex-info "mock out of canned responses"
                             {:tool-names tool-names :k k}))))))
 
 (defn- routing-backend [m]
   (->RoutingMockBackend
-   (into {} (map (fn [[k vs]]
-                   (let [q (LinkedBlockingDeque.)]
-                     (doseq [v vs] (.add q v))
-                     [k q]))
-                 m))
+   (into {} (map (fn [[k vs]] [k (ts/queue vs)])) m)
    (atom [])))
 
 (defn- tool-use [tool-uses]

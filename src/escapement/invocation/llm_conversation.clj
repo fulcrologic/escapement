@@ -17,7 +17,7 @@
   parent and parks until either `:llm.user-message` arrives via `forward-event!` (continues
   the conversation with a new user message) or the invocation is stopped.
 
-  See `plan.md` for the design and `SPIKE_FINDINGS.md` for library errata."
+  See `plan.md` for the design."
   (:require
    [clojure.string :as str]
    [escapement.llm.models :as models]

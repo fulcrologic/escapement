@@ -21,7 +21,7 @@ This gives us:
 
 ## Decisions (settled)
 
-- **Runtime**: Babashka for the agent process and CLI. JVM for tests. Charts and code live in `.clj`/`.cljc`.
+- **Runtime**: Babashka end to end — agent process, CLI, and test suite (`bb test`) all run under bb. Charts and code live in `.clj`/`.cljc`.
 - **Use the statechart library's invocation mechanism.** Our LLM binding is a custom `InvocationProcessor` for `:type :llm-conversation`. Lifecycle (spawn on entry, kill on exit, parent-event routing) is provided by the library. The spike proved it works under bb.
 - **No SCI layer beyond bb itself.** Charts are regular namespaces loaded via `require` (or `load-file` for hot reload).
 - **Custom event queue, working-memory store, execution model, registry.** We implement the library's protocols ourselves rather than using `simple/simple-env` (it transitively pulls `promesa`, which crashes under bb).
@@ -75,7 +75,7 @@ This gives us:
 - `deep-cookie.engine.store` — `WorkingMemoryStore` with atomic file checkpointing.
 - `deep-cookie.engine.exec` — `ExecutionModel` impl (lambda style).
 - `deep-cookie.engine.env` — assembles env map; registers our custom processors.
-- `deep-cookie.engine.testing` — JVM-only test harness (mocked LLMBackend, sync drive, transcript capture).
+- `deep-cookie.engine.testing` — bb-friendly test harness (mocked LLMBackend, sync drive, transcript capture).
 
 ### LLM
 - `deep-cookie.llm.protocol` — `LLMBackend` defprotocol (`send-turn`).
@@ -133,7 +133,7 @@ This gives us:
 
 The chart never handles `tool_use` for `:fs/read` or `:shell/run`. Those are invisible. The chart only sees `:found-bug` and `:scan-complete`, because those are the event-tools we exposed.
 
-## Spike findings folded in (see SPIKE_FINDINGS.md)
+## Library notes
 
 - Avoid `com.fulcrologic.statecharts.simple` and `com.fulcrologic.statecharts.testing` under bb — they transitively load `promesa`, which crashes SCI. Build env manually; build our own testing helpers.
 - Custom `InvocationProcessor` works under bb (`spike/custom_invocation.clj` proves it).
@@ -151,8 +151,8 @@ The chart never handles `tool_use` for `:fs/read` or `:shell/run`. Those are inv
 
 ## Verification
 
-1. **Unit (JVM)**: `claude_p_test` shells real `claude -p`; asserts parsed response matches protocol schema. Skips if `claude` not on PATH.
-2. **Unit (JVM)**: chart-test via `deep-cookie.engine.testing` with a mocked backend — asserts `:done` reached, data model populated, transcript event sequence correct.
+1. **Unit (bb)**: `claude_p_test` shells real `claude -p`; asserts parsed response matches protocol schema. Skips if `claude` not on PATH.
+2. **Unit (bb)**: chart-test via `deep-cookie.engine.testing` with a mocked backend — asserts `:done` reached, data model populated, transcript event sequence correct.
 3. **Smoke (bb)**: `bb -m deep-cookie.cli run deep-cookie.charts.hello` against real `claude -p` — produces `transcript.jsonl` whose `jq '.event'` shows the expected sequence.
 4. **Event-tool routing**: a chart where the LLM is told to fire two `:found-bug` then `:scan-complete` produces three chart events in order; chart reaches `:done`; data model accumulates both findings.
 5. **Resume optimization**: two-turn binding — second turn shows `:via :resume`.
@@ -164,8 +164,8 @@ The chart never handles `tool_use` for `:fs/read` or `:shell/run`. Those are inv
 ## Progress Checklist
 
 ### Milestone 0 — Project skeleton & sanity ✅
-- [x] Spike: verify statecharts + custom InvocationProcessor under bb (see `SPIKE_FINDINGS.md`)
-- [x] Decision: **hybrid — bb runtime, JVM tests**
+- [x] Spike: verify statecharts + custom InvocationProcessor under bb
+- [x] Decision: **bb runtime and bb tests** (fulcro-spec 3.2.9 added bb support)
 - [x] Decision: **use the library's invocation mechanism, with custom processors**
 - [x] `deps.edn`, `bb.edn` (spike-level; finalize as Milestone 1 starts)
 - [ ] `.gitignore`, README stub
@@ -175,9 +175,9 @@ The chart never handles `tool_use` for `:fs/read` or `:shell/run`. Those are inv
 - [ ] `deep-cookie.engine.store` — `WorkingMemoryStore` with atomic checkpoint (write-temp → rename)
 - [ ] `deep-cookie.engine.exec` — `ExecutionModel` impl
 - [ ] `deep-cookie.engine.env` — assemble env map (replaces `simple/simple-env`)
-- [ ] `deep-cookie.engine.testing` — JVM test harness (mocks + sync drive + transcript capture)
+- [ ] `deep-cookie.engine.testing` — bb test harness (mocks + sync drive + transcript capture)
 - [ ] Test: trivial 2-state chart runs end-to-end through our env (bb)
-- [ ] Test: same chart through the testing harness (JVM)
+- [ ] Test: same chart through the testing harness (bb)
 - [ ] Test: checkpoint round-trip — kill mid-run, reload, complete
 
 ### Milestone 2 — LLM protocol & backends

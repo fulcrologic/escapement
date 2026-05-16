@@ -9,11 +9,10 @@
    [escapement.engine.testing :as dct]
    [escapement.invocation.llm-conversation :as llmc]
    [escapement.llm.protocol :as llm]
+   [escapement.test-support :as ts]
    [escapement.tools.builtin :as builtin]
    [escapement.tools.protocol :as tp]
-   [fulcro-spec.core :refer [specification behavior component assertions =>]])
-  (:import
-   (java.util.concurrent LinkedBlockingDeque TimeUnit)))
+   [fulcro-spec.core :refer [specification behavior component assertions =>]]))
 
 ;; ---------------------------------------------------------------------------
 ;; Mock LLMBackend
@@ -23,7 +22,7 @@
   llm/LLMBackend
   (send-turn [_ request]
     (swap! call-log conj request)
-    (let [r (.pollFirst ^LinkedBlockingDeque responses)]
+    (let [r (ts/pop-first! responses)]
       (when (nil? r)
         (throw (ex-info "Mock backend out of canned responses" {:n-calls (count @call-log)})))
       r)))
@@ -31,9 +30,7 @@
 (defn mock-backend
   "Build a mock backend whose `send-turn` will return canned responses in order."
   [responses]
-  (let [q (LinkedBlockingDeque.)]
-    (doseq [r responses] (.add q r))
-    (->MockBackend q (atom []))))
+  (->MockBackend (ts/queue responses) (atom [])))
 
 (defn end-turn-response [text]
   {:stop-reason :end_turn
@@ -262,7 +259,7 @@
                             "every builtin tool name made it into the request alongside the event tool"
                             (last-request-tool-names backend)
                             => #{"fs_read" "fs_write" "fs_edit" "fs_multi-edit" "fs_glob" "fs_grep"
-                                 "shell_run" "repl_eval" "event__done"})))
+                                 "shell_run" "repl_eval" "web_fetch" "event__done"})))
 
                (behavior "an explicit selector vector is a whitelist"
                          (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
@@ -694,138 +691,138 @@
   ;; Chart-author writes :id :researcher (keyword). The :on-end-turn-event
   ;; :from field should be the string "researcher", and a :target keyword
   ;; in tell-other-llm should still match.
-  (let [backend (mock-backend [(end-turn-response "ok")])
-        seen    (atom nil)
-        chart   (chart/statechart
-                  {:initial :wrap}
-                  (state {:id :wrap :initial :work}
-                    (state {:id :work}
-                      (h/llm-conversation
-                        {:id        :researcher          ;; <-- keyword
-                         :params-fn (fn [_ _] {:initial-user-message "go"})})
-                      (transition {:event :llm.idle :target :done}
-                        (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
-                    (final {:id :done})))
-        t       (new-llm-test-env {:statechart chart :backend backend})
-        t       (await-config! t :done 3000)]
-    (assertions
-      "chart finished"
-      (dct/in? t :done) => true
-      ":from is the canonical string form"
-      (get-in @seen [:data :from]) => "researcher")))
+               (let [backend (mock-backend [(end-turn-response "ok")])
+                     seen    (atom nil)
+                     chart   (chart/statechart
+                              {:initial :wrap}
+                              (state {:id :wrap :initial :work}
+                                     (state {:id :work}
+                                            (h/llm-conversation
+                                             {:id        :researcher          ;; <-- keyword
+                                              :params-fn (fn [_ _] {:initial-user-message "go"})})
+                                            (transition {:event :llm.idle :target :done}
+                                                        (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
+                                     (final {:id :done})))
+                     t       (new-llm-test-env {:statechart chart :backend backend})
+                     t       (await-config! t :done 3000)]
+                 (assertions
+                  "chart finished"
+                  (dct/in? t :done) => true
+                  ":from is the canonical string form"
+                  (get-in @seen [:data :from]) => "researcher")))
 
 (specification "->id-str normalizes keywords and strings"
-  (assertions
-    "keyword loses the colon"
-    (escapement.invocation.llm-conversation/->id-str :foo) => "foo"
-    "namespaced keyword keeps just the name"
-    (escapement.invocation.llm-conversation/->id-str :a/foo) => "foo"
-    "string passes through"
-    (escapement.invocation.llm-conversation/->id-str "foo") => "foo"
-    "nil stays nil"
-    (escapement.invocation.llm-conversation/->id-str nil) => nil))
+               (assertions
+                "keyword loses the colon"
+                (escapement.invocation.llm-conversation/->id-str :foo) => "foo"
+                "namespaced keyword keeps just the name"
+                (escapement.invocation.llm-conversation/->id-str :a/foo) => "foo"
+                "string passes through"
+                (escapement.invocation.llm-conversation/->id-str "foo") => "foo"
+                "nil stays nil"
+                (escapement.invocation.llm-conversation/->id-str nil) => nil))
 
 ;; ---------------------------------------------------------------------------
 ;; Enriched transcript content (text/thinking/tool_use + tool-result)
 ;; ---------------------------------------------------------------------------
 
 (specification "transcript :llm/response carries assistant content blocks"
-  (let [captured (atom [])
-        backend  (mock-backend
-                   [{:stop-reason :tool_use
-                     :content     [{:type :text     :text "thinking out loud"}
-                                   {:type :thinking :thinking "deeper thought"}
-                                   {:type :tool_use :id "u1" :name "event__done"
-                                    :input {:n 7}}]
-                     :usage       {:input-tokens 1 :output-tokens 1}
-                     :model       "mock"}
-                    (end-turn-response "ok")])
-        chart    (chart/statechart
-                   {:initial :wrap}
-                   (state {:id :wrap :initial :work}
-                     (state {:id :work}
-                       (h/llm-conversation
-                         {:id        "trans"
-                          :params-fn (fn [_ _]
-                                       {:system               "long-and-static system prompt"
-                                        :real-tools           []
-                                        :allowed-events       [{:event       :done
-                                                                :data-schema [:map [:n :int]]}]
-                                        :initial-user-message "go"})})
-                       (transition {:event :done :target :finished}))
-                     (final {:id :finished})))
-        t        (new-llm-test-env
-                   {:statechart    chart
-                    :backend       backend
-                    :transcript-fn (fn [ev] (swap! captured conj ev))})
-        _        (await-config! t :finished 3000)
-        responses (filter #(= :llm/response (:event %)) @captured)
-        tool-results (filter #(= :llm/tool-result (:event %)) @captured)
-        requests  (filter #(= :llm/request (:event %)) @captured)
-        first-resp (first responses)]
-    (assertions
-      "at least one :llm/response captured"
-      (boolean (seq responses)) => true
-      ":content vector is present"
-      (vector? (get-in first-resp [:data :content])) => true
-      "the three block types are surfaced (text, thinking, tool_use)"
-      (set (mapv :type (get-in first-resp [:data :content])))
-      => #{:text :thinking :tool_use}
-      "tool_use block carries :input"
-      (->> (get-in first-resp [:data :content])
-           (some (fn [b] (when (= :tool_use (:type b)) (:input b)))))
-      => {:n 7}
-      ":invokeid is included on the response"
-      (string? (get-in first-resp [:data :invokeid])) => true
-      ":llm/request carries :user-blocks and :system-preview"
-      (boolean (some (fn [r]
-                       (and (vector? (get-in r [:data :user-blocks]))
-                            (string? (get-in r [:data :system-preview]))))
-                     requests))
-      => true
-      ":llm/tool-result was emitted for the event-tool dispatch"
-      (boolean (seq tool-results)) => true
-      "tool-result carries :tool, :is-error, :content-preview, :invokeid"
-      (let [tr (first tool-results)]
-        (and (= :done (get-in tr [:data :tool]))
-             (false? (get-in tr [:data :is-error]))
-             (= "ok" (get-in tr [:data :content-preview]))
-             (string? (get-in tr [:data :invokeid]))))
-      => true)))
+               (let [captured (atom [])
+                     backend  (mock-backend
+                               [{:stop-reason :tool_use
+                                 :content     [{:type :text     :text "thinking out loud"}
+                                               {:type :thinking :thinking "deeper thought"}
+                                               {:type :tool_use :id "u1" :name "event__done"
+                                                :input {:n 7}}]
+                                 :usage       {:input-tokens 1 :output-tokens 1}
+                                 :model       "mock"}
+                                (end-turn-response "ok")])
+                     chart    (chart/statechart
+                               {:initial :wrap}
+                               (state {:id :wrap :initial :work}
+                                      (state {:id :work}
+                                             (h/llm-conversation
+                                              {:id        "trans"
+                                               :params-fn (fn [_ _]
+                                                            {:system               "long-and-static system prompt"
+                                                             :real-tools           []
+                                                             :allowed-events       [{:event       :done
+                                                                                     :data-schema [:map [:n :int]]}]
+                                                             :initial-user-message "go"})})
+                                             (transition {:event :done :target :finished}))
+                                      (final {:id :finished})))
+                     t        (new-llm-test-env
+                               {:statechart    chart
+                                :backend       backend
+                                :transcript-fn (fn [ev] (swap! captured conj ev))})
+                     _        (await-config! t :finished 3000)
+                     responses (filter #(= :llm/response (:event %)) @captured)
+                     tool-results (filter #(= :llm/tool-result (:event %)) @captured)
+                     requests  (filter #(= :llm/request (:event %)) @captured)
+                     first-resp (first responses)]
+                 (assertions
+                  "at least one :llm/response captured"
+                  (boolean (seq responses)) => true
+                  ":content vector is present"
+                  (vector? (get-in first-resp [:data :content])) => true
+                  "the three block types are surfaced (text, thinking, tool_use)"
+                  (set (mapv :type (get-in first-resp [:data :content])))
+                  => #{:text :thinking :tool_use}
+                  "tool_use block carries :input"
+                  (->> (get-in first-resp [:data :content])
+                       (some (fn [b] (when (= :tool_use (:type b)) (:input b)))))
+                  => {:n 7}
+                  ":invokeid is included on the response"
+                  (string? (get-in first-resp [:data :invokeid])) => true
+                  ":llm/request carries :user-blocks and :system-preview"
+                  (boolean (some (fn [r]
+                                   (and (vector? (get-in r [:data :user-blocks]))
+                                        (string? (get-in r [:data :system-preview]))))
+                                 requests))
+                  => true
+                  ":llm/tool-result was emitted for the event-tool dispatch"
+                  (boolean (seq tool-results)) => true
+                  "tool-result carries :tool, :is-error, :content-preview, :invokeid"
+                  (let [tr (first tool-results)]
+                    (and (= :done (get-in tr [:data :tool]))
+                         (false? (get-in tr [:data :is-error]))
+                         (= "ok" (get-in tr [:data :content-preview]))
+                         (string? (get-in tr [:data :invokeid]))))
+                  => true)))
 
 (specification "transcript truncation caps oversized text/thinking blocks"
-  (let [big      (apply str (repeat (+ 100 escapement.invocation.llm-conversation/transcript-block-cap)
-                                    "x"))
-        captured (atom [])
-        backend  (mock-backend
-                   [{:stop-reason :tool_use
-                     :content     [{:type :text :text big}
-                                   {:type :tool_use :id "u1" :name "event__done" :input {}}]
-                     :usage       {:input-tokens 1 :output-tokens 1}
-                     :model       "mock"}
-                    (end-turn-response "ok")])
-        chart    (chart/statechart
-                   {:initial :wrap}
-                   (state {:id :wrap :initial :work}
-                     (state {:id :work}
-                       (h/llm-conversation
-                         {:id        "trunc"
-                          :params-fn (fn [_ _]
-                                       {:allowed-events       [{:event :done :data-schema [:map]}]
-                                        :initial-user-message "go"})})
-                       (transition {:event :done :target :finished}))
-                     (final {:id :finished})))
-        t        (new-llm-test-env
-                   {:statechart chart :backend backend
-                    :transcript-fn (fn [ev] (swap! captured conj ev))})
-        _        (await-config! t :finished 3000)
-        resp     (first (filter #(= :llm/response (:event %)) @captured))
-        text     (->> (get-in resp [:data :content])
-                      (some (fn [b] (when (= :text (:type b)) (:text b)))))]
-    (assertions
-      "transcript text was truncated to the cap + marker"
-      (clojure.string/ends-with? text
-                                 escapement.invocation.llm-conversation/transcript-truncate-marker)
-      => true
-      (count text) => (+ escapement.invocation.llm-conversation/transcript-block-cap
-                         (count escapement.invocation.llm-conversation/transcript-truncate-marker)))))
+               (let [big      (apply str (repeat (+ 100 escapement.invocation.llm-conversation/transcript-block-cap)
+                                                 "x"))
+                     captured (atom [])
+                     backend  (mock-backend
+                               [{:stop-reason :tool_use
+                                 :content     [{:type :text :text big}
+                                               {:type :tool_use :id "u1" :name "event__done" :input {}}]
+                                 :usage       {:input-tokens 1 :output-tokens 1}
+                                 :model       "mock"}
+                                (end-turn-response "ok")])
+                     chart    (chart/statechart
+                               {:initial :wrap}
+                               (state {:id :wrap :initial :work}
+                                      (state {:id :work}
+                                             (h/llm-conversation
+                                              {:id        "trunc"
+                                               :params-fn (fn [_ _]
+                                                            {:allowed-events       [{:event :done :data-schema [:map]}]
+                                                             :initial-user-message "go"})})
+                                             (transition {:event :done :target :finished}))
+                                      (final {:id :finished})))
+                     t        (new-llm-test-env
+                               {:statechart chart :backend backend
+                                :transcript-fn (fn [ev] (swap! captured conj ev))})
+                     _        (await-config! t :finished 3000)
+                     resp     (first (filter #(= :llm/response (:event %)) @captured))
+                     text     (->> (get-in resp [:data :content])
+                                   (some (fn [b] (when (= :text (:type b)) (:text b)))))]
+                 (assertions
+                  "transcript text was truncated to the cap + marker"
+                  (clojure.string/ends-with? text
+                                             escapement.invocation.llm-conversation/transcript-truncate-marker)
+                  => true
+                  (count text) => (+ escapement.invocation.llm-conversation/transcript-block-cap
+                                     (count escapement.invocation.llm-conversation/transcript-truncate-marker)))))

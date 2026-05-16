@@ -14,8 +14,7 @@
        `render` to throw, listing every unresolved token. Prompts must never
        ship with literal `{{...}}` placeholders.
 
-   This namespace is intentionally dependency-free so it loads cleanly on
-   Babashka as well as the JVM."
+   This namespace is intentionally dependency-free."
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]))
