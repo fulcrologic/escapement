@@ -1,5 +1,7 @@
 # Escapement
 
+[![test](https://github.com/fulcrologic/escapement/actions/workflows/test.yml/badge.svg)](https://github.com/fulcrologic/escapement/actions/workflows/test.yml)
+
 *Escapement regulates LLM agents the way a watch escapement regulates a mainspring.*
 
 A statechart-driven autonomous coding agent in Clojure/Babashka.
