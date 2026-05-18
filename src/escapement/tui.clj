@@ -906,54 +906,57 @@
              (if (> n 2000) (subvec v' (- n 2000)) v')))))
 
 (defn- do-visualize!
-  "Render the current chart + active config to SVG via `escapement.debug.d2`
-   and attempt to open it. Always writes a status line to the scrollback so
-   the user sees that something happened (success or failure)."
+  "On the first `v` press, start a tiny httpkit-backed viz server that renders
+   the chart to SVG once and pushes a config update to the browser via SSE on
+   every state change. Subsequent presses re-log the URL so the user can grab
+   it again. Server lifetime is tied to the TUI state atom under `:viz-server`
+   and torn down by `stop!`."
   [h]
   (let [state (:state h)
-        s     @state
-        env   (some-> (:env h) deref)
-        chart (chart-from-env env)
-        sdir  (session-dir-from-env env)
-        active (:config s)]
-    (cond
-      (nil? chart)
-      (append-scrollback! state "[viz] no chart attached to TUI handle (debug bug)")
+        s     @state]
+    (if-let [server (:viz-server s)]
+      (append-scrollback! state (str "[viz] already running: " (:url server)))
+      (let [env    (some-> (:env h) deref)
+            chart  (chart-from-env env)
+            sdir   (session-dir-from-env env)]
+        (cond
+          (nil? chart)
+          (append-scrollback! state "[viz] no chart attached to TUI handle (debug bug)")
 
-      (nil? sdir)
-      (append-scrollback! state "[viz] no session-dir on env — cannot write chart.svg")
+          (nil? sdir)
+          (append-scrollback! state "[viz] no session-dir on env — cannot write chart.svg")
 
-      :else
-      (let [f (try (requiring-resolve 'escapement.debug.d2/render-and-open!)
-                   (catch Throwable t
-                     (append-scrollback! state (str "[viz] cannot load d2 ns: " (.getMessage t)))
-                     nil))]
-        (when f
-          (try
-            (let [r (f chart active sdir (:debug-config h))]
-              (append-scrollback!
-               state
-               (cond
-                 (and (:svg-path r) (:error r))
-                 (str "[viz] svg written but viewer failed: " (:error r)
-                      " — file: " (:svg-path r))
+          :else
+          (let [start! (try (requiring-resolve 'escapement.debug.viz-server/start!)
+                            (catch Throwable t
+                              (append-scrollback!
+                               state (str "[viz] cannot load viz-server ns: " (.getMessage t)))
+                              nil))]
+            (when start!
+              (try
+                (let [r (start! {:chart       chart
+                                 :state-atom  state
+                                 :session-dir sdir
+                                 :config      (:debug-config h)
+                                 :title       (str (:chart-sym h)
+                                                   " · " (:session-short h))})]
+                  (cond
+                    (:error r)
+                    (append-scrollback!
+                     state (str "[viz] failed: " (:error r)
+                                " (d2 source still at " sdir "/chart.d2)"))
 
-                 (:error r)
-                 (str "[viz] d2 failed: " (:error r)
-                      " (d2 source still at " sdir "/chart.d2)")
+                    (:url r)
+                    (do (swap! state assoc :viz-server r)
+                        (append-scrollback!
+                         state (str "[viz] live: " (:url r)
+                                    " (SVG also at " (:svg-path r) ")")))
 
-                 (:internal? r)
-                 (str "[viz] svg written: " (:svg-path r)
-                      " (viewer is :internal — open the .svg yourself)")
-
-                 (:svg-path r)
-                 (str "[viz] svg written + viewer launched ("
-                      (:viewer-cmd r) "): " (:svg-path r))
-
-                 :else
-                 (str "[viz] result: " (pr-str r)))))
-            (catch Throwable t
-              (append-scrollback! state (str "[viz] threw: " (.getMessage t))))))))))
+                    :else
+                    (append-scrollback! state (str "[viz] result: " (pr-str r)))))
+                (catch Throwable t
+                  (append-scrollback!
+                   state (str "[viz] threw: " (.getMessage t))))))))))))
 
 (defn- open-artifact-file!
   "Open `path` using `(:viewers cfg)`. Falls back to the internal pager when
@@ -1522,6 +1525,10 @@
   [h]
   (when (and (:enabled? h)
              (compare-and-set! (:stopped? h) false true))
+    (try
+      (when-let [stop-viz (some-> (:state h) deref :viz-server :stop)]
+        (stop-viz))
+      (catch Throwable _ nil))
     (try
       (when-let [^Thread t (:input-thread h)] (.interrupt t))
       (catch Throwable _ nil))

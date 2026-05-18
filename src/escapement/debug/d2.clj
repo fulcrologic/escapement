@@ -32,9 +32,10 @@
 (def ^:private active-fill   "\"#ffe680\"")
 (def ^:private active-stroke 3)
 
-(defn- safe-id
+(defn safe-id
   "Returns a d2-safe identifier for a state id. Replaces characters that
-   confuse d2's container-path syntax."
+   confuse d2's container-path syntax. Public because consumers that build
+   CSS class names need to mirror the same encoding the renderer used."
   [id]
   (let [s (cond
             (keyword? id) (subs (str id) 1)
@@ -107,6 +108,7 @@
             label (node-label node)]
         (.append sb (str pad sid ": " (d2-quote label) " {\n"))
         (.append sb (str pad "  shape: " (shape-for node) "\n"))
+        (.append sb (str pad "  class: state-" sid "\n"))
         (when (= :parallel node-type)
           (.append sb (str pad "  style.stroke-dash: 3\n")))
         (when (active? id)
@@ -147,15 +149,19 @@
 
 (defn- emit-edge!
   "Writes one d2 edge line for a transition `t`. Falls back to a self-loop
-   when `:target` is empty (i.e. an internal/no-target transition)."
+   when `:target` is empty (i.e. an internal/no-target transition). Each
+   emitted edge carries `class: edge-<safe-transition-id>` so the rendered
+   SVG can be retargeted via CSS without recompiling the layout."
   [sb elements-by-id t]
-  (let [{:keys [parent target]} t
+  (let [{:keys [id parent target]} t
         label (chart/transition-label elements-by-id t)
         from  (d2-path elements-by-id parent)
-        tgts  (if (and target (sequential? target)) target (when target [target]))]
+        tgts  (if (and target (sequential? target)) target (when target [target]))
+        cls   (str "edge-" (safe-id id))]
     (doseq [to (or (seq tgts) [parent])]
       (.append sb (str from " -> " (d2-path elements-by-id to)
-                       (if label (str ": " (d2-quote label)) "")
+                       ": " (if label (d2-quote label) "\"\"")
+                       " { class: " cls " }"
                        "\n")))))
 
 (defn chart->d2
