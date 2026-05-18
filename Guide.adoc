@@ -1312,6 +1312,39 @@ not and falls back to per-frame writes (still flicker-light, just not
 guaranteed atomic). On exit the alt-screen buffer is left, restoring your
 shell scrollback exactly as it was before.
 
+[[viz]]
+=== Live chart visualization (`v`)
+
+Press `v` in the TUI (works in both normal and `--debug` runs) to start
+a tiny embedded HTTP server that renders the chart to SVG **once** via
+the `d2` binary, then streams every configuration change to your browser
+over Server-Sent Events. The browser only rewrites a single `<style>`
+block keyed on CSS classes — the SVG layout never re-runs, so transitions
+recolor states and the most-recently-fired edge **without** shuffling the
+diagram.
+
+* Each shape carries `class="state-<id>"` and each transition carries
+  `class="edge-<id>"`. The page targets them via
+  `[class~="state-..."]` attribute selectors, so any state-id encoding
+  works (dots, slashes, namespaced keywords).
+* First `v` press: the server binds on `127.0.0.1:0`, writes
+  `<session-dir>/chart.d2` and `chart.svg`, logs the live URL to the
+  scrollback, and (optionally — see `:viewers "url"` below) launches your
+  configured browser. Subsequent `v` presses just re-log the URL.
+* In `--debug` mode the active state lights up exactly when you step
+  (`s`) or continue (`c`); the just-fired transition flashes red on
+  every step. No special config is needed — debug-paced transitions
+  flow through the same path normal-mode transitions do.
+* The page header has zoom controls (`−` / `100%` / `+` / `Fit`),
+  responds to `⌘+` / `⌘−` / `⌘0` (or `Ctrl` on non-Mac), and `⌘-scroll`
+  zooms around the cursor. Plain scroll-wheel pans.
+* The server shuts down with the TUI; SSE clients reconnect
+  automatically on browser reload while the run is live.
+
+Requires the `d2` binary on `$PATH` (or pinned via `:d2 :command`); on
+failure, the scrollback explains and the `chart.d2` source is left on
+disk so you can render it manually.
+
 [[multi-agent]]
 == Multi-agent / team patterns
 
@@ -2066,8 +2099,37 @@ Schema (validated with Malli on load; unknown keys are rejected):
                  {:mvn/version "2.0.0-RC3"}}  ;; runtime deps via add-deps
  :tools-ns      [my.app/register-tools]       ;; symbol or vector of symbols
  :work-dir      "ai/agents/transcripts"       ;; default --work-dir
- :default-chart my.app.charts.hello/agent}    ;; used when no chart given
+ :default-chart my.app.charts.hello/agent     ;; used when no chart given
+ :viewers       {"svg"     "open -a 'Google Chrome' {{path}}"
+                 "url"     "open -a 'Google Chrome' {{path}}"
+                 "default" "open {{path}}"}   ;; see Viewers below
+ :d2            {:command "d2" :layout "elk"} ;; chart rendering (see Viz)
+ :debug         {:auto-pause? true}}          ;; --debug pause-on-start
 ----
+
+==== Viewers — opening artifacts and the live chart URL
+
+The `:viewers` map controls how Escapement opens artifact files
+(`chart.svg`, transcripts, request/response captures, …) and the live
+visualization URL. Keys are matched in this order:
+
+* For an **artifact file**: lower-cased file extension (e.g. `"svg"`,
+  `"jsonl"`, `"md"`) → `"default"` → `:internal` (the built-in pager).
+* For the **live chart URL** (`v` in the TUI): the special key `"url"` →
+  `:internal` (no auto-open; the URL still appears in the scrollback so
+  you can click/paste it).
+
+Values are shell-command templates. `{{path}}` is replaced with a
+shell-quoted path (or URL); a template with no `{{path}}` placeholder
+gets the path appended, so naked entries like `"open"` work too.
+Templates are executed via `sh -c`.
+
+==== d2 rendering
+
+`:d2 :command` is the path to the `d2` binary (default `"d2"`, looked up
+on `$PATH`). `:d2 :layout` selects the layout engine (`elk` by default;
+`dagre` and `tala` are common alternatives). Used both by `v` in the TUI
+and by any chart that calls `escapement.debug.d2/render-and-open!`.
 
 Startup order (matters because each step may require what the previous
 one made visible):
