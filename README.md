@@ -1,5 +1,7 @@
 # Escapement
 
+WARNING: Not even alpha yet. Breaking changes will be common until we finish exploring the space.
+
 [![test](https://github.com/fulcrologic/escapement/actions/workflows/test.yml/badge.svg)](https://github.com/fulcrologic/escapement/actions/workflows/test.yml)
 
 *Escapement regulates LLM agents the way a watch escapement regulates a mainspring.*
