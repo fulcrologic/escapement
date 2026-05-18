@@ -87,6 +87,34 @@
                   (get-in resp [:backend-metadata :backend]) => :api
                   (get-in resp [:backend-metadata :message-id]) => "msg_01abc")))
 
+(specification "image content blocks round-trip through the wire"
+               (let [req  (assoc sample-request :messages
+                                 [{:role    :user
+                                   :content [{:type :text :text "Describe this"}
+                                             {:type   :image
+                                              :source {:type :base64 :media-type "image/png" :data "iVBOR"}}
+                                             {:type   :image
+                                              :source {:type :url :url "https://x/y.jpg"}}]}])
+                     wire (api/request->anthropic-json req)
+                     blks (get-in wire ["messages" 0 "content"])]
+                 (assertions
+                  "the request is Malli-valid"
+                  (types/validate-request req) => nil
+                  "base64 image serializes to Anthropic's source shape"
+                  (get-in blks [1 "type"]) => "image"
+                  (get-in blks [1 "source" "type"]) => "base64"
+                  (get-in blks [1 "source" "media_type"]) => "image/png"
+                  (get-in blks [1 "source" "data"]) => "iVBOR"
+                  "url image serializes to the url source shape"
+                  (get-in blks [2 "source" "type"]) => "url"
+                  (get-in blks [2 "source" "url"]) => "https://x/y.jpg"
+                  "an Anthropic image block parses back to our shape"
+                  (#'api/wire->block {"type"   "image"
+                                      "source" {"type"       "base64"
+                                                "media_type" "image/jpeg"
+                                                "data"       "abc"}})
+                  => {:type :image :source {:type :base64 :media-type "image/jpeg" :data "abc"}})))
+
 (specification "validate-request accepts requests with tools (regression: bug #2)"
                ;; The internal Tool schema requires :input-schema (dash). Verify that the
                ;; canonical sample-request — which uses dash form — passes validation, and

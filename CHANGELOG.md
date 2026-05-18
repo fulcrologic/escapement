@@ -3,6 +3,12 @@
 ## [unreleased] — feat/llm-catalog-and-merge-playbook — 2026-05-18
 
 ### Added
+- Image attachments in the LLM request protocol: a new `:image` content
+  block (`escapement.llm.types/ImageBlock`) accepted on `:user` messages,
+  with `:base64` (inline data + media-type) or `:url` sources. The Anthropic
+  backend serializes it to the Messages API `image`/`source` wire shape and
+  parses it back. Enables vision-model steps (e.g. reference-image →
+  description pipelines) without invocation-code changes.
 - Ollama Cloud and OpenCode Go LLM backends. `escapement run --backend ollama`
   and `--backend opencode-go` are now selectable, `OLLAMA_API_KEY` /
   `OPENCODE_GO_API_KEY` are auto-detected for the default multi-backend, and

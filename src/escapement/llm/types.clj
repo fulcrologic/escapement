@@ -5,7 +5,7 @@
 
    - `Request`  : :model, :system, :messages, :tools, :max-tokens, optional :cache-control carriers
    - `Message`  : :role (:user | :assistant), :content (vector of ContentBlock)
-   - `ContentBlock` tagged union by :type — :text | :tool_use | :tool_result
+   - `ContentBlock` tagged union by :type — :text | :image | :tool_use | :tool_result | :thinking
    - `Response` : :stop-reason, :content (vector of ContentBlock), :usage, :model, optional :backend-metadata
    - `Tool`     : :name, :description, :input-schema (a JSON Schema map)
 
@@ -43,6 +43,27 @@
    [:content :string]
    [:is-error {:optional true} :boolean]])
 
+(def ImageSource
+  "Where an image's bytes come from. `:base64` carries inline data; `:url`
+   references a remotely-hosted image (Anthropic fetches it server-side)."
+  [:multi {:dispatch :type}
+   [:base64 [:map {:closed false}
+             [:type [:= :base64]]
+             [:media-type [:enum "image/jpeg" "image/png" "image/gif" "image/webp"]]
+             [:data :string]]]
+   [:url [:map {:closed false}
+          [:type [:= :url]]
+          [:url :string]]]])
+
+(def ImageBlock
+  "Vision input block. Allowed on `:user` messages so a chart can hand a
+   reference image to a vision-capable model. Backends without vision
+   support should reject or drop it explicitly rather than silently."
+  [:map {:closed false}
+   [:type [:= :image]]
+   [:source ImageSource]
+   [:cache-control {:optional true} CacheControl]])
+
 (def ThinkingBlock
   "Anthropic extended-thinking content block. Present on assistant responses
    when `:thinking` was enabled on the request. `:signature` is the opaque
@@ -63,6 +84,7 @@
 (def ContentBlock
   [:multi {:dispatch :type}
    [:text TextBlock]
+   [:image ImageBlock]
    [:tool_use ToolUseBlock]
    [:tool_result ToolResultBlock]
    [:thinking ThinkingBlock]

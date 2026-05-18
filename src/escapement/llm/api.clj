@@ -35,6 +35,13 @@
   [{:keys [type] :as blk}]
   (let [base (case type
                :text        {"type" "text" "text" (:text blk)}
+               :image       {"type"   "image"
+                             "source" (let [{:keys [type] :as s} (:source blk)]
+                                        (case type
+                                          :base64 {"type"       "base64"
+                                                   "media_type" (:media-type s)
+                                                   "data"       (:data s)}
+                                          :url    {"type" "url" "url" (:url s)}))}
                :tool_use    {"type"  "tool_use"
                              "id"    (:id blk)
                              "name"  (:name blk)
@@ -129,6 +136,13 @@
 (defn- wire->block [{:strs [type] :as blk}]
   (case type
     "text"        {:type :text :text (get blk "text")}
+    "image"       {:type   :image
+                   :source (let [s (get blk "source")]
+                             (case (get s "type")
+                               "base64" {:type       :base64
+                                         :media-type (get s "media_type")
+                                         :data       (get s "data")}
+                               "url"    {:type :url :url (get s "url")}))}
     "tool_use"    {:type  :tool_use
                    :id    (get blk "id")
                    :name  (get blk "name")
