@@ -1333,15 +1333,27 @@
       (emit! (str alt-screen-on-s clear-screen-s hide-cursor-s))
       (render-frame! h)
       (.start t)
-      ;; Always-on safety net: if the process exits via SIGINT/SIGTERM/etc.
-      ;; before stop! ran, the shutdown hook still leaves the alt screen
-      ;; and resets attributes so the user's terminal isn't left in raw
-      ;; mode. stop! is idempotent so it's safe whether or not it already
-      ;; ran from the normal exit path.
+      ;; JLine installs its own SIGINT handler on system terminals, which
+      ;; swallows the signal — JVM shutdown hooks are NOT invoked on Ctrl-C
+      ;; otherwise. Install our own handler via sun.misc.Signal (the
+      ;; SignalHandler interface has no inner classes, so reify works
+      ;; under bb/SCI). Doing this AFTER (.build) means we overwrite
+      ;; whatever JLine just installed.
+      (try
+        (sun.misc.Signal/handle
+         (sun.misc.Signal. "INT")
+         (reify sun.misc.SignalHandler
+           (handle [_ _signal]
+             (try (stop! h) (catch Throwable _ nil))
+             (System/exit 130))))
+        (catch Throwable _ nil))
+      ;; Belt for non-INT exit paths (SIGTERM, normal System/exit): the JVM
+      ;; shutdown hook still runs stop! so the terminal is restored.
       (try
         (.addShutdownHook (Runtime/getRuntime)
-                          (Thread. ^Runnable (fn [] (try (stop! h)
-                                                         (catch Throwable _ nil)))
+                          (Thread. ^Runnable
+                           (fn [] (try (stop! h)
+                                       (catch Throwable _ nil)))
                                    "tui-shutdown"))
         (catch Throwable _ nil))
       h)))
@@ -1579,21 +1591,13 @@
           (when (not= t (Thread/currentThread)) (.interrupt t)))
         (catch Throwable _ nil))
       (finally
-        ;; First, leave alt screen via stderr while JLine still owns the
-        ;; tty so the shell scrollback is restored cleanly.
-        (try
-          (emit! (str reset-attrs-s alt-screen-off-s "\n"))
-          (catch Throwable _ nil))
+        (try (emit! (str reset-attrs-s alt-screen-off-s "\n"))
+             (catch Throwable _ nil))
         (try
           (when (and (:terminal h) @(:raw-mode? h))
             (when-let [^Terminal term (:terminal h)]
               (.close term)))
           (catch Throwable _ nil))
-        ;; Finally: shell out to tput cnorm. This is the only path that
-        ;; reliably restores the cursor under tmux — terminfo emits the
-        ;; right \e[34h-prefixed sequence for the active TERM, and the
-        ;; separate-process write to the inherited tty bypasses any JVM
-        ;; stdio state JLine may have left behind.
         (run-tput-cnorm!))))
   h)
 
