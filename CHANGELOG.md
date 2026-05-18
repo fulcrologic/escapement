@@ -32,16 +32,21 @@
   restating the rest; dated ids resolve to the family entry).
 - `ai/escapement-check.md` — the four-gate pre-merge "Escapement Check"
   playbook is now part of the repo.
+- New worked example `escapement.examples.clj-refactor` demonstrating
+  declarative model auto-selection gated on per-dimension ratings
+  (`:model-policy {:min {:clojure 8 :tool-calling 6}}`).
 
 ### Changed
+- **Breaking:** demo charts moved from `escapement.charts.*` to
+  `escapement.examples.*` (e.g. `escapement run escapement.examples.hello/agent`).
+  Any caller using the old `escapement.charts.*` names must update.
 - The legacy `:intelligence N` floor on a conversation node still works
   unchanged — it is now folded into the new declarative policy as a
-  `:min {:intelligence N}` floor; the `:llm/intelligence-filter-empty`
-  transcript event now also carries the resolved `:policy`.
-- `escapement.llm.models` is now a backward-compatible shim re-exporting the
-  catalog accessors; existing callers keep working with no change. Its
-  `pricing` is the "cheapest metered list price" answer; new code should call
-  `escapement.llm.catalog/pricing` with an explicit provider.
+  `:min {:intelligence N}` floor. The transcript event for an
+  all-models-excluded fallback was renamed `:llm/intelligence-filter-empty`
+  → `:llm/model-policy-empty` and now carries the resolved `:policy` and the
+  `:default-models` it rejected (anyone matching on the old event name must
+  update; the TUI summary line was updated to match).
 - Empty/blank credential env vars are now treated as unset during backend
   auto-detection (previously a blank value could register a dead route).
 - More OpenAI-compatible model families (`glm-`, `kimi-`, `deepseek-`,
@@ -49,19 +54,20 @@
   request key instead of `max_completion_tokens`.
 
 ### Removed
-- The hand-maintained `known-models` fact table in `escapement.llm.models`
-  (context windows, output caps, per-model `:intelligence`/`:provider`) is
-  gone; those facts now come from the catalog's three layers.
+- The entire `escapement.llm.models` namespace was deleted (no shim, no
+  re-export): its hand-maintained `known-models` fact table (context
+  windows, output caps, per-model `:intelligence`/`:provider`) and the
+  unused `approaching-limit?` helper are gone. All callers were migrated to
+  `escapement.llm.catalog`; those facts now come from the catalog's three
+  layers, and pricing is `escapement.llm.catalog/pricing` with an explicit
+  provider.
 
 ### Notes
-- The new `cli_test.clj` provider-wiring tests exercise `escapement.cli`,
-  which transitively requires `escapement.tui`'s JVM-only `org.jline.*`
-  `:import` that Babashka's SCI cannot resolve. This is a pre-existing
-  condition on `main` (a clean baseline run fails identically), not a
-  branch regression, but it means the new CLI provider-routing tests must
-  be eyeballed or run in a JVM/jline environment — verify Ollama /
-  OpenCode-Go route selection and base-url defaults there. (Authoritative
-  test verdict is Gate 1's.)
+- The full suite (including the new `cli_test.clj` provider-wiring tests
+  and the new `:model-policy` wiring tests) runs green under `bb test`:
+  145 tests, 711 assertions, 0 failures, 0 errors; `bb sanity` passes.
+  Ollama / OpenCode-Go route selection and base-url defaults are unit-
+  covered offline.
 - Backend behavior against the real Ollama Cloud and OpenCode Go endpoints
   is credential-gated (`OLLAMA_API_KEY` / `OPENCODE_GO_API_KEY`) and
   subjective — list-price/quality figures in `:llm/ratings` are opinion,

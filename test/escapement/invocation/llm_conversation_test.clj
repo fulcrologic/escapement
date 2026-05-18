@@ -826,3 +826,81 @@
                   => true
                   (count text) => (+ escapement.invocation.llm-conversation/transcript-block-cap
                                      (count escapement.invocation.llm-conversation/transcript-truncate-marker)))))
+
+;; ---------------------------------------------------------------------------
+;; Declarative :model-policy wiring (params->policy / candidate-models /
+;; the :llm/model-policy-empty transcript event). The decision core
+;; (catalog/satisfies-policy?) is covered in catalog_test.clj; this covers
+;; the invocation-layer glue that reads :model-policy from params, filters
+;; the auto-fallback list, and surfaces the empty-result event.
+;; ---------------------------------------------------------------------------
+
+(specification "params->policy extracts a usable policy or nil"
+  (assertions
+   "no :model-policy key → nil"
+   (#'llmc/params->policy {}) => nil
+   "empty policy map (no :require/:min/:max) → nil"
+   (#'llmc/params->policy {:model-policy {}}) => nil
+   "a :min clause is returned verbatim"
+   (#'llmc/params->policy {:model-policy {:min {:intelligence 8}}})
+   => {:min {:intelligence 8}}
+   "a :require clause counts as expressed"
+   (#'llmc/params->policy {:model-policy {:require {:vision? true}}})
+   => {:require {:vision? true}}))
+
+(specification "candidate-models applies :model-policy to the fallback list"
+  (let [defaults ["gpt-4o-mini" "claude-sonnet-4-5" "claude-opus-4-1"]]
+    (component "auto-fallback list is filtered by the policy"
+      (assertions
+       ":min {:intelligence 8} drops gpt-4o-mini (intelligence 5)"
+       (#'llmc/candidate-models {:model-policy {:min {:intelligence 8}}}
+                                defaults (atom {}))
+       => ["claude-sonnet-4-5" "claude-opus-4-1"]))
+    (component "an explicit :model pick is never silently switched"
+      (assertions
+       "policy is ignored when the user names a model"
+       (#'llmc/candidate-models {:model "gpt-4o-mini"
+                                 :model-policy {:min {:intelligence 8}}}
+                                defaults (atom {}))
+       => ["gpt-4o-mini"]))
+    (component "an unsatisfiable policy falls back to the unfiltered list"
+      (assertions
+       "so the conversation still runs"
+       (#'llmc/candidate-models {:model-policy {:min {:intelligence 99}}}
+                                defaults (atom {}))
+       => defaults))
+    (component ":down models are removed after policy filtering"
+      (assertions
+       "claude-sonnet-4-5 marked :down → only claude-opus-4-1 survives"
+       (#'llmc/candidate-models {:model-policy {:min {:intelligence 8}}}
+                                defaults
+                                (atom {"claude-sonnet-4-5" :down}))
+       => ["claude-opus-4-1"]))
+    (component "no policy → default-models verbatim"
+      (assertions
+       (#'llmc/candidate-models {} defaults (atom {})) => defaults))))
+
+(specification "try-models! surfaces :llm/model-policy-empty when the policy excludes every fallback model"
+  (let [captured (atom [])
+        backend  (mock-backend [(end-turn-response "ok")])
+        result   (#'llmc/try-models!
+                  {:backend        backend
+                   :transcript-fn  (fn [ev] (swap! captured conj ev))
+                   :worker-state   (atom :running)
+                   :model-status   (atom {})
+                   :default-models ["gpt-4o-mini"]
+                   :parent-ctx     {:invokeid "iv"}}
+                  {:model-policy {:min {:intelligence 99}}}
+                  [{:role :user :content [{:type :text :text "hi"}]}]
+                  [])
+        ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
+    (assertions
+     "the renamed event was emitted"
+     (some? ev) => true
+     "it carries the resolved policy"
+     (get-in ev [:data :policy]) => {:min {:intelligence 99}}
+     "it carries the default-models that all failed the policy"
+     (get-in ev [:data :default-models]) => ["gpt-4o-mini"]
+     "the turn still completes via the unfiltered fallback model"
+     (some? (:ok result)) => true
+     (:model-used result) => "gpt-4o-mini")))
