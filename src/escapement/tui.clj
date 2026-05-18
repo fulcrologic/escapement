@@ -27,17 +27,8 @@
    [escapement.debug.controller :as dbg]
    [escapement.invocation.human-input :as hi])
   (:import
-   (java.io Reader)))
-
-;; jline is a JVM-only dependency (deps.edn, absent from bb.edn); bb/SCI also
-;; cannot load arbitrary Java classes from a jar. A `:import` of it — or even
-;; an unreached `TerminalBuilder/builder` class literal in a fn body — aborts
-;; loading this namespace under `bb`, taking the whole `cli` → `tui` chain
-;; with it. The only jline class literal (terminal construction) is therefore
-;; isolated in `escapement.tui-jline`, pulled in via `requiring-resolve` only
-;; on the interactive-TTY path (never reached under bb). Method calls on a
-;; terminal value (`.getHeight`, `.enterRawMode`, …) need no class literal, so
-;; they stay inline and run reflectively.
+   (java.io Reader)
+   (org.jline.terminal Terminal TerminalBuilder)))
 
 ;; ---------------------------------------------------------------------------
 ;; TTY detection
@@ -594,8 +585,8 @@
 (defn- render-frame!
   [{:keys [state lock terminal] :as h}]
   (locking lock
-    (let [term-h (if terminal (.getHeight terminal) 24)
-          term-w (if terminal (.getWidth  terminal) 80)
+    (let [term-h (if terminal (.getHeight ^Terminal terminal) 24)
+          term-w (if terminal (.getWidth  ^Terminal terminal) 80)
           ;; Restore an auto-suspended overlay once the modal has cleared.
           _      (swap! state
                         (fn [s]
@@ -1139,9 +1130,9 @@
 (defn- input-loop!
   [{:keys [terminal raw-mode? state sync-output?] :as h}]
   (try
-    (.enterRawMode terminal)
+    (.enterRawMode ^Terminal terminal)
     (reset! raw-mode? true)
-    (let [rdr ^Reader (.reader terminal)]
+    (let [rdr ^Reader (.reader ^Terminal terminal)]
       (reset! sync-output? (detect-sync-output! rdr))
       ;; A render after detection so the first 2026-wrapped frame appears.
       (render-frame! h)
@@ -1298,7 +1289,9 @@
     (->TuiHandle false (atom {}) (Object.) nil (atom false) nil (atom nil) (atom nil)
                  (str chart-sym) (str session-short) (atom false) (atom false)
                  false (boolean debug?) debug-controller debug-config (atom nil) (atom false))
-    (let [terminal ((requiring-resolve 'escapement.tui-jline/make-terminal))
+    (let [terminal (-> (TerminalBuilder/builder)
+                       (.system true)
+                       (.build))
           state    (atom {:config           []
                           :scrollback       []
                           :scroll-offset    0
