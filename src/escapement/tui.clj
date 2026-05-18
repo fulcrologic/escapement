@@ -1545,15 +1545,24 @@
     (try
       (when-let [^Thread t (:input-thread h)] (.interrupt t))
       (catch Throwable _ nil))
+    ;; Leave the alt screen FIRST so the subsequent show-cursor lands on the
+    ;; main screen — some terminals (Apple Terminal in particular) track
+    ;; cursor visibility per-screen, and show-cursor emitted inside the alt
+    ;; buffer is lost on screen switch. Belt-and-braces: emit show-cursor on
+    ;; both screens so any per-screen tracking is covered, then a trailing
+    ;; newline keeps the shell prompt on its own line.
+    ;; This MUST run before JLine's terminal close, since closing the JLine
+    ;; terminal may emit its own teardown sequences that could otherwise
+    ;; interleave with ours.
+    (emit! (str reset-attrs-s show-cursor-s alt-screen-off-s show-cursor-s "\n"))
     (try
       (when (and (:terminal h) @(:raw-mode? h))
         (when-let [^Terminal term (:terminal h)]
           (.close term)))
       (catch Throwable _ nil))
-    ;; Leave alt screen (restores prior terminal contents), reset attributes,
-    ;; show the cursor. Newline at the end keeps the next shell prompt on its
-    ;; own line.
-    (emit! (str reset-attrs-s show-cursor-s alt-screen-off-s)))
+    ;; Final restoration after JLine's close, in case JLine re-hid the cursor
+    ;; as part of its own cleanup. Cheap to send twice; safe everywhere.
+    (emit! show-cursor-s))
   h)
 
 ;; ---------------------------------------------------------------------------
