@@ -38,9 +38,9 @@
                (tp/dispatch reg :fs/edit
                             {:path p :old-string "sanity" :new-string "WORLD"}))
 
-    (let [{:keys [result is-error]} (tp/dispatch reg :fs/read {:path p})]
-      (when (or is-error (not= result "hello WORLD"))
-        (fail! (str ":fs/edit did not produce expected content: " result))))
+    (let [on-disk (slurp p)]
+      (when (not= on-disk "hello WORLD")
+        (fail! (str ":fs/edit did not produce expected content: " (pr-str on-disk)))))
 
     (expect-ok :shell/run
                (tp/dispatch reg :shell/run {:command "echo hi"}))
@@ -48,10 +48,7 @@
     (expect-err :shell/run
                 (tp/dispatch reg :shell/run {:command "exit 3"}))
 
-    (expect-ok :repl/eval
-               (tp/dispatch reg :repl/eval {:code "(+ 1 2 3)"}))
-
-    (println "PASS: tools_sanity — all five builtin tools dispatched correctly")
+    (println "PASS: tools_sanity — all four builtin tools dispatched correctly")
     (System/exit 0)))
 
 (-main)

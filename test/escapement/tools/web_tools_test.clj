@@ -35,7 +35,7 @@
                                ":web/search absent" (contains? names :web/search) => false
                                ":web/fetch present" (contains? names :web/fetch)  => true
                                "core tools still present"
-                               (every? names [:fs/read :fs/write :shell/run :repl/eval]) => true))))
+                               (every? names [:fs/read :fs/write :shell/run]) => true))))
 
                (component "with GEMINI_API_KEY: :web/search is registered"
                           (with-redefs [builtin/env (env-fn {"GEMINI_API_KEY" "test-key"})]

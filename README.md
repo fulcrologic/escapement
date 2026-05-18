@@ -45,16 +45,16 @@ bbin install io.github.fulcrologic/escapement
 ## Quickstart
 
 ```bash
-# Any one of these will be auto-detected:
+# Any one of these will be auto-detected (precedence top-to-bottom):
 export ANTHROPIC_API_KEY=...     # claude-sonnet-4-6 by default
-export ZAI_API_KEY=...           # glm-4.6 (cheap dev option)
 export OPENAI_API_KEY=...        # gpt-4o-mini by default (override via OPENAI_MODEL)
 export OPENROUTER_API_KEY=...    # openai/gpt-4o-mini by default (override via OPENROUTER_MODEL)
+export ZAI_API_KEY=...           # glm-4.6 (cheap dev option)
 
 escapement run escapement.examples.hello/agent
 ```
 
-The CLI auto-detects a backend from those env vars in the order above; pass `--backend` explicitly to override. Useful run-time flags:
+The CLI auto-detects a backend from those env vars in the order above; pass `--backend` explicitly to override. A logged-in OpenAI Codex OAuth token (between ANTHROPIC and OPENAI in precedence), `OPENCODE_GO_API_KEY`, and `OLLAMA_API_KEY` are also picked up automatically when present. Useful run-time flags:
 
 - `--param key=value` — seed initial-data entries (repeatable; merges over `--input <edn-file>`).
 - `--debug` — force the persistent TUI on (paused at first event so you can step or press `c` to continue). This is the recommended way to watch a non-interactive chart's LLM conversations stream by in real time.
@@ -101,7 +101,8 @@ All bb-resident. The fs and search tools are at Claude-Code-parity ergonomics fo
 | `:fs/glob`       | `PathMatcher`-backed walk; matches `**/*.foo` at root and nested |
 | `:fs/grep`       | `rg` if available, `grep -rE` fallback; files / content / count modes |
 | `:shell/run`     | `bash -lc` with timeout |
-| `:repl/eval`     | Sandboxed Clojure eval (fresh namespace per call) |
+| `:web/search`    | Google search via Gemini `google_search` grounding (only registered when `GEMINI_API_KEY` is set) |
+| `:web/fetch`     | HTTP GET streamed to a temp file under `$TMPDIR/escapement-fetch/`; returns metadata so the LLM reads slices off disk |
 
 These are seeded into `escapement.tools.builtin/default-registry` — a `defonce` singleton the CLI uses. Custom tools self-register by side effect at the top of their namespace:
 
@@ -127,6 +128,8 @@ Small worked examples under `src/escapement/examples/`:
 - [`parallel_demo.clj`](src/escapement/examples/parallel_demo.clj) — two parallel regions, independent conversations, join on compound final
 - [`iterate.clj`](src/escapement/examples/iterate.clj) — non-trivial coding loop with `tell-llm` mid-binding, `:max-iterations` cap, retry, and give-up paths
 - [`clj_refactor.clj`](src/escapement/examples/clj_refactor.clj) — gates model auto-selection on per-dimension ratings via a declarative `:model-policy` (`:min {:clojure 8 :tool-calling 6}`)
+- [`artifacts_demo.clj`](src/escapement/examples/artifacts_demo.clj) — sequential LLM phases sharing context through file-backed artifacts and `{{name}}` template rendering
+- [`ask.clj`](src/escapement/examples/ask.clj) — `:human-input` invocation patterns (text / confirm) plus Esc-based `:ui.interrupt`
 
 End-to-end demo under `demos/`:
 

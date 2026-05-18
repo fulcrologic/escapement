@@ -1,7 +1,7 @@
 (ns escapement.tools.builtin
   "Built-in tools:
   `:fs/read`, `:fs/write`, `:fs/edit`, `:fs/multi-edit`, `:fs/glob`, `:fs/grep`,
-  `:shell/run`, `:repl/eval`, `:web/search`, `:web/fetch`.
+  `:shell/run`, `:web/search`, `:web/fetch`.
 
   Each tool is a `defrecord` implementing `escapement.tools.protocol/Tool`. Inputs are
   validated by `dispatch` before `invoke` is called; the bodies here can therefore assume
@@ -21,7 +21,7 @@
    (java.nio.charset StandardCharsets)
    (java.nio.file CopyOption Files FileSystems FileVisitOption LinkOption Path StandardCopyOption)
    (java.util UUID)
-   (java.util.concurrent TimeoutException TimeUnit)))
+   (java.util.concurrent TimeUnit)))
 
 (def ^:const max-read-bytes
   "Soft cap on bytes returned by `:fs/read` before truncation."
@@ -498,55 +498,6 @@
            :is-error (not (zero? exit))})))))
 
 ;; ---------------------------------------------------------------------------
-;; :repl/eval
-;; ---------------------------------------------------------------------------
-
-(def ^:private repl-eval-schema
-  [:map {:closed true}
-   [:code :string]
-   [:timeout-ms {:optional true} :int]])
-
-(def ^:const default-eval-timeout-ms 5000)
-
-(defn- fresh-eval-ns
-  "Create a fresh namespace `escapement.tools.eval.<n>` with `clojure.core` referred,
-   evaluate `code` in it, then remove the namespace. Returns the pr-str of the result.
-
-   Uses thread-local `binding` of `*ns*` instead of `in-ns` so that this works on
-   non-main threads (e.g. inside a `future`) where `set!`-ing root vars is forbidden."
-  [code]
-  (let [sym (symbol (str "escapement.tools.eval." (System/nanoTime)))
-        ns  (create-ns sym)]
-    (try
-      (binding [*ns* ns]
-        (refer 'clojure.core)
-        (pr-str (load-string code)))
-      (finally
-        (try (remove-ns sym) (catch Throwable _ nil))))))
-
-(defrecord ReplEvalTool []
-  tp/Tool
-  (tool-name    [_] :repl/eval)
-  (description  [_] "Evaluate Clojure `code` in a fresh sandboxed namespace. Returns pr-str of the value.")
-  (input-schema [_] repl-eval-schema)
-  (invoke [_ {:keys [code timeout-ms]}]
-    (let [timeout (or timeout-ms default-eval-timeout-ms)
-          fut     (future
-                    (try
-                      {:ok true :value (fresh-eval-ns code)}
-                      (catch Throwable ex
-                        {:ok false :error (str (.getClass ex) ": " (.getMessage ex))})))]
-      (try
-        (let [res (.get ^java.util.concurrent.Future fut timeout TimeUnit/MILLISECONDS)]
-          (if (:ok res)
-            {:result (:value res) :is-error false}
-            {:result (:error res) :is-error true}))
-        (catch TimeoutException _
-          (future-cancel fut)
-          {:result   (str "Eval timed out after " timeout "ms")
-           :is-error true})))))
-
-;; ---------------------------------------------------------------------------
 ;; :web/search  (Gemini google_search grounding)
 ;; ---------------------------------------------------------------------------
 
@@ -824,12 +775,11 @@
                 (->FsGlobTool)
                 (->FsGrepTool)
                 (->ShellRunTool)
-                (->ReplEvalTool)
                 (->WebFetchTool)]
          (env "GEMINI_API_KEY") (conj (->WebSearchTool))))
 
 (>defn new-builtin-registry
-       "Return a FRESH registry populated with the built-in tools (nine or ten,
+       "Return a FRESH registry populated with the built-in tools (eight or nine,
         depending on whether `GEMINI_API_KEY` is set — see `builtin-tools`).
         Use this when you want isolation — most commonly in tests, or when a
         host process drives multiple chart runs that need disjoint tool sets."

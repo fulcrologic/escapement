@@ -1813,16 +1813,6 @@ tools are designed to sit at Claude-Code-parity ergonomics for the LLM.
   stdout+stderr and the exit code; `is-error` is true on non-zero exit
   or timeout.
 
-`:repl/eval`::
-  Evaluate Clojure code in a fresh sandboxed namespace. Input:
-  `{:code :string :timeout-ms (? :int)}`. Default timeout 5s. Returns
-  the `pr-str` of the result. Each call creates and removes a one-shot
-  `escapement.tools.eval.<nanotime>` namespace; thread-local `*ns*` is
-  used (not `in-ns`) so this works from worker threads. This is a
-  *sandboxed* evaluator — it does NOT talk to a live project nREPL.
-  Use `:shell/run` with `clj-nrepl-eval` for that (see the unit-test
-  demo for an example).
-
 [[custom-tool]]
 === Registering a custom tool
 
@@ -2469,9 +2459,10 @@ require network access and real credentials.
   (`:llm/ratings` subjective overlay).
 
 `src/escapement/tools/`::
-  `protocol` (`Tool` + registry + `dispatch`) and `builtin` (the eight
-  ship tools — `:fs/read`, `:fs/write`, `:fs/edit`, `:fs/multi-edit`,
-  `:fs/glob`, `:fs/grep`, `:shell/run`, `:repl/eval`).
+  `protocol` (`Tool` + registry + `dispatch`) and `builtin` (the ship
+  tools — `:fs/read`, `:fs/write`, `:fs/edit`, `:fs/multi-edit`,
+  `:fs/glob`, `:fs/grep`, `:shell/run`, `:web/fetch`, and `:web/search`
+  when `GEMINI_API_KEY` is set).
 
 `src/escapement/invocation/`::
   `llm_conversation` — the `InvocationProcessor` that binds an LLM

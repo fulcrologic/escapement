@@ -258,8 +258,10 @@
                            (assertions
                             "every builtin tool name made it into the request alongside the event tool"
                             (last-request-tool-names backend)
-                            => #{"fs_read" "fs_write" "fs_edit" "fs_multi-edit" "fs_glob" "fs_grep"
-                                 "shell_run" "repl_eval" "web_fetch" "event__done"})))
+                            => (->> (tp/all-tools registry)
+                                    (map #(:name (tp/tool->anthropic-tool-def %)))
+                                    (cons "event__done")
+                                    set))))
 
                (behavior "an explicit selector vector is a whitelist"
                          (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])

@@ -216,15 +216,3 @@
                                "result mentions timeout"
                                (boolean (re-find #"timed out" (:result r))) => true)))))
 
-(specification ":repl/eval"
-               (let [reg (builtin/new-builtin-registry)]
-                 (component "happy path evaluates an expression"
-                            (assertions
-                             "(+ 1 2) => 3"
-                             (tp/dispatch reg :repl/eval {:code "(+ 1 2)"})
-                             => {:result "3" :is-error false}))
-
-                 (component "syntax error is caught"
-                            (let [r (tp/dispatch reg :repl/eval {:code "(+ 1 "})]
-                              (assertions
-                               "is-error" (:is-error r) => true)))))

@@ -56,9 +56,8 @@ The Escapement transcript and per-event checkpoints land under
 ## Refine-phase prerequisites
 
 The `refine.md` prompt drives the LLM to talk to a *live project nREPL* via the
-`clj-nrepl-eval` CLI (the same helper used by Claude Code skills). Escapement's
-built-in `:repl/eval` tool is a sandboxed evaluator and is *not* what these
-prompts target — the model uses `:shell/run` to invoke `clj-nrepl-eval` instead.
+`clj-nrepl-eval` CLI (the same helper used by Claude Code skills). The model
+uses `:shell/run` to invoke `clj-nrepl-eval`.
 
 Before running the demo, make sure:
 

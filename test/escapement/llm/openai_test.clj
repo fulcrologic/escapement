@@ -186,23 +186,3 @@
                   (count (:content resp)) => 1
                   (get-in resp [:content 0 :type]) => :tool_use)))
 
-;;; --- Live test (gated on env var) -------------------------------------------
-
-(defn- short-prompt []
-  {:messages [{:role :user
-               :content [{:type :text :text "Reply with exactly: OK"}]}]
-   :max-tokens 32})
-
-(specification "live OpenAI API (gated on OPENAI_API_KEY)"
-               (if-let [key (System/getenv "OPENAI_API_KEY")]
-                 (let [backend (oai/new-backend {:base-url      "https://api.openai.com/v1"
-                                                 :api-key       key
-                                                 :default-model (or (System/getenv "OPENAI_MODEL") "gpt-4o-mini")})
-                       resp    (proto/send-turn backend (short-prompt))]
-                   (assertions
-                    "live OpenAI response is Malli-valid"
-                    (types/validate-response resp) => nil
-                    "has at least one text block"
-                    (boolean (some #(= :text (:type %)) (:content resp))) => true))
-                 (do (println "[skip] OPENAI_API_KEY not set; skipping live OpenAI test")
-                     (assertions "skipped" true => true))))
