@@ -201,7 +201,11 @@
      * `:messages` — required; the running conversation
      * `:tools` — vector of tool definitions
      * `:model` — model id string (e.g. `\"claude-opus-4-7\"`)
-     * `:max-tokens` — int; default 4096 at the backend if absent
+     * `:max-tokens` — int output cap. NOT a chart param: the invocation
+                       supplies the resolved model's catalog
+                       `max-output-tokens` (models-api.json `limit.output`).
+                       Falls back to the backend's wire default for models
+                       the catalog doesn't know.
      * `:temperature` — number in (0,1]
      * `:top-p` — number in (0,1]
      * `:top-k` — pos-int
@@ -269,6 +273,81 @@
       (some? tool-choice)  (assoc :tool-choice tool-choice)
       (seq metadata)       (assoc :metadata metadata)
       conv-id              (assoc :conversation/id conv-id))))
+
+(defn effective-max-tokens
+  "The per-turn output cap for `model`, taken purely from the catalog's
+   `max-output-tokens` (sourced from models-api.json `limit.output`).
+   `max_tokens` is an API/model fact, not a chart concern: charts never set
+   it. Returns nil for models the catalog doesn't know, in which case the
+   backend's own hard default applies."
+  [model]
+  (some-> model catalog/max-output-tokens))
+
+;; ---------------------------------------------------------------------------
+;; Resilience: transient-error retry + max_tokens continuation
+;; ---------------------------------------------------------------------------
+
+(def ^:private default-resilience
+  "Applied when a chart omits (or partially specifies) `:resilience`. Recovery
+   is ON by default and per-state tunable; `:max-retries 0` disables retry.
+   There is intentionally no continuation knob — `:max_tokens` truncation is
+   always continued (see `drive-turn!`)."
+  {:max-retries 3 :backoff-ms 500})
+
+(def ^:private transient-error-categories
+  "Backend error categories that warrant a bounded automatic retry of the same
+   model. The remaining categories (`:auth` `:invalid-request`
+   `:context-length`) are terminal: they fail fast and are never retried, so a
+   bad key or oversized prompt cannot burn quota in a retry loop."
+  #{:rate-limited :overloaded :timeout :transport})
+
+(defn- params->resilience [params]
+  (merge default-resilience (:resilience params)))
+
+(defn- sleep-unless-dying!
+  "Sleep up to `ms`, but wake early (and stop) if the worker is told to die.
+   Sliced so a stop signal is honored promptly during backoff."
+  [ms worker-state]
+  (let [deadline (+ (now-ms) (long ms))]
+    (loop []
+      (let [left (- deadline (now-ms))]
+        (when (and (pos? left) (not= :dying @worker-state))
+          (Thread/sleep (long (min 100 left)))
+          (recur))))))
+
+(defn- backoff-delay-ms
+  "Exponential backoff for retry `attempt` (0-based) off `base` ms, honoring an
+   explicit `:retry-after-ms` from the throwable's ex-data (e.g. a 429
+   Retry-After) when present."
+  [base attempt ^Throwable t]
+  (let [ra (:retry-after-ms (ex-data t))]
+    (if (and (number? ra) (not (neg? ra)))
+      (long ra)
+      (long (* (long base) (Math/pow 2 attempt))))))
+
+(defn- merge-with-usage
+  "Sum numeric usage fields across continuation segments; non-numeric fields
+   take the latest non-nil value."
+  [a b]
+  (merge-with (fn [x y]
+                (if (and (number? x) (number? y)) (+ x y) (or y x)))
+              (or a {}) (or b {})))
+
+(defn- merge-segment-content
+  "Append continuation blocks `more` onto accumulated `acc`, merging the
+   boundary when both sides are `:text` (a truncation mid-prose) so the
+   stitched message reads as one coherent block."
+  [acc more]
+  (cond
+    (empty? acc)  (vec more)
+    (empty? more) (vec acc)
+    (and (= :text (:type (peek acc)))
+         (= :text (:type (first more))))
+    (-> (vec (pop (vec acc)))
+        (conj {:type :text
+               :text (str (:text (peek (vec acc))) (:text (first more)))})
+        (into (rest more)))
+    :else (into (vec acc) (vec more))))
 
 ;; ---------------------------------------------------------------------------
 ;; Worker loop
@@ -455,7 +534,8 @@
                               :error.llm.backend. `attempts` is a vector of
                               `{:model :error}` pairs (oldest first)."
   [{:keys [backend transcript-fn worker-state model-status default-models parent-ctx]} params messages tools]
-  (let [policy        (params->policy params)
+  (let [{:keys [max-retries backoff-ms]} (params->resilience params)
+        policy        (params->policy params)
         auto-fallback? (and (not (seq (:models params)))
                             (nil? (:model params)))
         _              (when (and auto-fallback? policy (seq default-models)
@@ -473,7 +553,7 @@
                        :messages             messages
                        :tools                tools
                        :model                m
-                       :max-tokens           (:max-tokens params)
+                       :max-tokens           (effective-max-tokens m)
                        :temperature          (:temperature params)
                        :top-p                (:top-p params)
                        :top-k                (:top-k params)
@@ -492,8 +572,42 @@
                                                    :system-preview (truncate-for-transcript (:system params))
                                                    :invokeid (:invokeid parent-ctx)}
                                             m (assoc :model m))})
-            response (try (llm/send-turn backend request)
-                          (catch Throwable t {:_throw t}))]
+            on-delta (when (:stream? params)
+                       (fn [d]
+                         (transcript! transcript-fn
+                                      {:event :llm/delta :ts (now-ms)
+                                       :data  (assoc d
+                                                     :model    m
+                                                     :invokeid (:invokeid parent-ctx))})))
+            ;; Bounded same-model retry for *transient* categories
+            ;; (rate-limited/overloaded/timeout/transport) with exponential
+            ;; backoff before falling back to the next candidate. Terminal
+            ;; categories (auth/invalid-request/context-length) and
+            ;; uncategorized throws are NOT retried here — they fall straight
+            ;; through to model fallback / :exhausted.
+            response (loop [retry 0]
+                       (let [r (try (llm/send-turn* backend request on-delta)
+                                     (catch Throwable t {:_throw t}))
+                             t (:_throw r)
+                             cat (when t (llm/error-category t))]
+                         (if (and t
+                                  (contains? transient-error-categories cat)
+                                  (< retry (long max-retries))
+                                  (not (instance? InterruptedException t))
+                                  (not (instance? InterruptedException (ex-cause t)))
+                                  (not= :dying @worker-state))
+                           (do
+                             (transcript! transcript-fn
+                                          {:event :llm/retry :ts (now-ms)
+                                           :data  {:model     m
+                                                   :category  cat
+                                                   :attempt   (inc retry)
+                                                   :max-retries max-retries
+                                                   :invokeid  (:invokeid parent-ctx)}})
+                             (sleep-unless-dying!
+                              (backoff-delay-ms backoff-ms retry t) worker-state)
+                             (recur (inc retry)))
+                           r)))]
         (cond
           (and (:_throw response)
                (or (instance? InterruptedException (:_throw response))
@@ -504,6 +618,7 @@
           (:_throw response)
           (let [^Throwable t (:_throw response)
                 details      (throwable->details t)
+                category     (llm/error-category t)
                 ;; Only mark a real model id down. nil (backend's default
                 ;; pick) is not a routable identifier.
                 _            (when m (swap! model-status assoc m :down))
@@ -511,6 +626,7 @@
                                           {:event :llm/model-down :ts (now-ms)
                                            :data  {:model m
                                                    :message (:message details)
+                                                   :category category
                                                    :remaining (vec more)}})
                 attempts'    (conj attempts {:model m :error (select-keys details [:message :class])})]
             (if (seq more)
@@ -520,6 +636,61 @@
 
           :else
           {:ok response :model-used m})))))
+
+(defn- drive-turn!
+  "Issue one logical assistant turn. A `stop_reason :max_tokens` means the API
+   forcibly cut the model off mid-message — it is NOT a finished turn. We
+   transparently request continuation (the partial assistant content is used as
+   prefill but is NOT persisted in the conversation) and keep going until a
+   terminal stop (`:end_turn` / `:tool_use` / `:stop_sequence` / …). Only the
+   merged terminal Response is returned, so callers never see a truncated
+   message and no tool runs until the model is genuinely done.
+
+   Continuation is unbounded by design: it is just \"finish reading the
+   message\". The sole guard is forward progress — if a continuation segment
+   adds no new content (a stuck model), we stop with `{:no-progress response}`
+   rather than loop and drain quota. Other `try-models!` shapes
+   (`:interrupted` / `:exhausted`) pass straight through.
+
+   Note: continuation prefill is the Anthropic-supported pattern for truncated
+   *text*. A truncation landing inside a tool_use block cannot be reassembled
+   from parsed content (its JSON args never parsed); such a segment yields no
+   forward progress and is surfaced via `:no-progress` rather than a malformed
+   tool call ever being dispatched."
+  [{:keys [transcript-fn parent-ctx] :as ctx} params base-messages tools]
+  (loop [acc-content nil
+         acc-usage   {}
+         seg         0]
+    (let [msgs    (if (seq acc-content)
+                    (conj (vec base-messages) (assistant-message acc-content))
+                    (vec base-messages))
+          outcome (try-models! ctx params msgs tools)]
+      (if-not (:ok outcome)
+        outcome
+        (let [resp         (:ok outcome)
+              {:keys [stop-reason content usage]} resp
+              merged       (if acc-content
+                             (merge-segment-content acc-content content)
+                             (vec content))
+              merged-usage (merge-with-usage acc-usage usage)
+              resp'        (assoc resp :content merged :usage merged-usage)]
+          (cond
+            (not= :max_tokens stop-reason)
+            {:ok resp' :model-used (:model-used outcome)}
+
+            ;; truncated but the continuation added nothing new → stuck.
+            (and acc-content (= merged (vec acc-content)))
+            {:no-progress resp'}
+
+            :else
+            (do
+              (transcript! transcript-fn
+                           {:event :llm/continuation :ts (now-ms)
+                            :data  {:segment  (inc seg)
+                                    :blocks   (count content)
+                                    :usage    (or usage {})
+                                    :invokeid (:invokeid parent-ctx)}})
+              (recur merged merged-usage (inc seg)))))))))
 
 (defn- handle-running-turn!
   "Issue one LLM round-trip and process its response. Returns one of:
@@ -533,8 +704,20 @@
            worker-state messages-atom retry-counts
            params parent-ctx] :as ctx}
    post-error! on-end-turn-event]
-  (let [outcome (try-models! ctx params @messages-atom tool-defs)]
+  (let [outcome (drive-turn! ctx params @messages-atom tool-defs)]
     (cond
+      (:no-progress outcome)
+      (do
+        (transcript! transcript-fn
+                     {:event :llm/error :ts (now-ms)
+                      :data  {:reason :unexpected-stop
+                              :stop-reason :max_tokens
+                              :detail :no-forward-progress}})
+        (post-error! :unexpected-stop {:stop-reason :max_tokens
+                                       :detail :no-forward-progress})
+        (reset! worker-state :dying)
+        :error-and-die)
+
       (:interrupted outcome)
       (do
         (transcript! transcript-fn
@@ -546,13 +729,22 @@
       (:exhausted outcome)
       (let [attempts (:exhausted outcome)
             last-t   ^Throwable (:last-throwable outcome)
-            details  (throwable->details last-t)]
+            details  (throwable->details last-t)
+            category (llm/error-category last-t)
+            ;; Known category → reason is that category (yields
+            ;; :error.llm.<category>). Uncategorized/unknown → :backend,
+            ;; which preserves the legacy :error.llm.backend event exactly.
+            reason   (if (contains? llm/error-categories category)
+                       category
+                       :backend)]
         (transcript! transcript-fn {:event :llm/error :ts (now-ms)
                                     :data  (assoc details
-                                                  :reason   :backend
+                                                  :reason   reason
+                                                  :category category
                                                   :attempts attempts)})
-        (post-error! :backend (-> (select-keys details [:message :class])
-                                  (assoc :attempts attempts)))
+        (post-error! reason (-> (select-keys details [:message :class])
+                                (assoc :category category
+                                       :attempts attempts)))
         (reset! worker-state :dying)
         :error-and-die)
 
@@ -641,13 +833,40 @@
                                      start to a clean :end_turn. Self-cancels
                                      with :error.llm.timeout when exceeded.
 
+   Streaming:
+     :stream? — when true AND the backend implements
+                `escapement.llm.protocol/StreamingLLMBackend`, incremental
+                output is emitted as `:llm/delta` transcript events
+                (`{:type :text-delta|:thinking-delta :text s :model :invokeid}`)
+                while the turn is in flight. The final Response and all chart
+                semantics are identical to a non-streamed turn; consumers
+                relay deltas off the transcript tap. No-op if the backend
+                lacks streaming support.
+
    Error events follow SCXML convention `:error.llm.<reason>`:
-     :error.llm.backend          — backend call threw (HTTP / parse / etc.)
+     :error.llm.backend          — backend call threw an UNCATEGORIZED
+                                    throwable (HTTP / parse / etc.). This is
+                                    the back-compat fallback: any throw that
+                                    is not an `escapement.llm.protocol`
+                                    categorized error still collapses here.
+     :error.llm.rate-limited     — backend threw a categorized 429/rate-limit
+     :error.llm.overloaded       — backend threw a categorized overload (529)
+     :error.llm.auth             — backend threw a categorized auth failure
+     :error.llm.invalid-request  — backend threw a categorized bad request
+     :error.llm.context-length   — backend threw a categorized context/token
+                                    length error
+     :error.llm.timeout          — backend threw a categorized timeout, OR
+                                    the :max-conversation-duration-ms budget
+                                    was exceeded (both map here intentionally)
+     :error.llm.transport        — backend threw a categorized transport error
      :error.llm.tool-validation  — tool/event-tool input failed schema twice
      :error.llm.unexpected-stop  — stop_reason other than :end_turn / :tool_use
      :error.llm.max-turns        — :max-turns budget exceeded
-     :error.llm.timeout          — :max-conversation-duration-ms exceeded
-     :error.llm.worker-exception — uncaught throwable in the worker loop"
+     :error.llm.worker-exception — uncaught throwable in the worker loop
+
+   The categorized events above come from a backend throwing
+   `(escapement.llm.protocol/llm-error category msg ...)`; consumers map
+   `category` ∈ `protocol/error-categories` to `:error.llm.<category>`."
   [{:keys [backend tool-registry transcript-fn
            name->tool-kw name->event-entry tool-defs
            worker-state messages-atom user-msg-queue retry-counts

@@ -117,8 +117,7 @@
                                               :data-schema [:map [:reasoning :string]]}
                                              {:event       :give-up
                                               :data-schema [:map [:reason :string]]}]
-                      :initial-user-message (user-message-for-read-spec data)
-                      :max-tokens           (or (:max-tokens data) 512)})})
+                      :initial-user-message (user-message-for-read-spec data)})})
 
                  (state {:id :read-spec}
                         (transition {:event :spec-ready :target :propose-patch :type :internal}))

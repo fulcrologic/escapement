@@ -1,10 +1,95 @@
 (ns escapement.llm.api-test
   (:require
    [cheshire.core :as json]
+   [clojure.string :as str]
    [escapement.llm.api :as api]
    [escapement.llm.protocol :as proto]
    [escapement.llm.types :as types]
-   [fulcro-spec.core :refer [specification assertions component =>]]))
+   [fulcro-spec.core :refer [specification assertions component =>]])
+  (:import (java.io BufferedReader StringReader)))
+
+(defn- sse
+  "Render a vector of SSE event maps into an Anthropic-style data stream."
+  [evs]
+  (->> evs
+       (mapcat (fn [m] [(str "event: " (get m "type"))
+                        (str "data: " (json/generate-string m))
+                        ""]))
+       (str/join "\n")))
+
+(def streamed-events
+  [{"type" "message_start" "message" {"model" "claude-x" "usage" {"input_tokens" 10}}}
+   {"type" "content_block_start" "index" 0 "content_block" {"type" "text" "text" ""}}
+   {"type" "content_block_delta" "index" 0 "delta" {"type" "text_delta" "text" "Hel"}}
+   {"type" "content_block_delta" "index" 0 "delta" {"type" "text_delta" "text" "lo"}}
+   {"type" "content_block_stop" "index" 0}
+   {"type" "content_block_start" "index" 1
+    "content_block" {"type" "tool_use" "id" "t1" "name" "do_it" "input" {}}}
+   {"type" "content_block_delta" "index" 1
+    "delta" {"type" "input_json_delta" "partial_json" "{\"x\":"}}
+   {"type" "content_block_delta" "index" 1
+    "delta" {"type" "input_json_delta" "partial_json" "1}"}}
+   {"type" "content_block_stop" "index" 1}
+   {"type" "message_delta" "delta" {"stop_reason" "tool_use"} "usage" {"output_tokens" 7}}
+   {"type" "message_stop"}])
+
+(specification "parse-anthropic-sse! reconstructs a Response and emits deltas"
+               (let [deltas (atom [])
+                     reader (BufferedReader. (StringReader. (sse streamed-events)))
+                     resp   (api/parse-anthropic-sse! reader "fallback-model"
+                                                      #(swap! deltas conj %))]
+                 (assertions
+                  "final Response is Malli-valid"
+                  (types/validate-response resp) => nil
+                  "text deltas were streamed in order"
+                  (mapv :text (filter #(= :text-delta (:type %)) @deltas)) => ["Hel" "lo"]
+                  "tool input json deltas are NOT surfaced as text deltas"
+                  (some #(= "1}" (:text %)) @deltas) => nil
+                  "accumulated text block"
+                  (get-in resp [:content 0]) => {:type :text :text "Hello"}
+                  "accumulated tool_use block with assembled + keywordized input"
+                  (get-in resp [:content 1 :type]) => :tool_use
+                  (get-in resp [:content 1 :name]) => "do_it"
+                  (get-in resp [:content 1 :input]) => {:x 1}
+                  "stop reason and usage from message_delta/start"
+                  (:stop-reason resp) => :tool_use
+                  (get-in resp [:usage :input-tokens]) => 10
+                  (get-in resp [:usage :output-tokens]) => 7
+                  "model taken from message_start"
+                  (:model resp) => "claude-x"
+                  "tagged as a streamed api response"
+                  (:backend-metadata resp) => {:backend :api :streamed true})))
+
+(defrecord NonStreamingStub [resp]
+  proto/LLMBackend
+  (send-turn [_ _] resp))
+
+(defrecord StreamingStub [resp chunks]
+  proto/LLMBackend
+  (send-turn [_ _] resp)
+  proto/StreamingLLMBackend
+  (stream-turn [_ _ on-delta]
+    (doseq [c chunks] (on-delta {:type :text-delta :text c}))
+    resp))
+
+(specification "send-turn* is capability-aware"
+               (let [r {:stop-reason :end_turn :content [] :usage {} :model "m"}]
+                 (assertions
+                  "streaming? reflects protocol satisfaction"
+                  (proto/streaming? (->NonStreamingStub r)) => false
+                  (proto/streaming? (->StreamingStub r ["a"])) => true
+                  "non-streaming backend: returns response, on-delta never called"
+                  (let [seen (atom [])]
+                    [(proto/send-turn* (->NonStreamingStub r) {} #(swap! seen conj %))
+                     @seen])
+                  => [r []]
+                  "streaming backend with on-delta: deltas flow"
+                  (let [seen (atom [])]
+                    (proto/send-turn* (->StreamingStub r ["x" "y"]) {} #(swap! seen conj %))
+                    (mapv :text @seen))
+                  => ["x" "y"]
+                  "streaming backend but nil on-delta: falls back to send-turn"
+                  (proto/send-turn* (->StreamingStub r ["x"]) {} nil) => r)))
 
 (def sample-request
   {:model     "claude-sonnet-4-6"
@@ -86,6 +171,34 @@
                   "backend-metadata tagged"
                   (get-in resp [:backend-metadata :backend]) => :api
                   (get-in resp [:backend-metadata :message-id]) => "msg_01abc")))
+
+(specification "image content blocks round-trip through the wire"
+               (let [req  (assoc sample-request :messages
+                                 [{:role    :user
+                                   :content [{:type :text :text "Describe this"}
+                                             {:type   :image
+                                              :source {:type :base64 :media-type "image/png" :data "iVBOR"}}
+                                             {:type   :image
+                                              :source {:type :url :url "https://x/y.jpg"}}]}])
+                     wire (api/request->anthropic-json req)
+                     blks (get-in wire ["messages" 0 "content"])]
+                 (assertions
+                  "the request is Malli-valid"
+                  (types/validate-request req) => nil
+                  "base64 image serializes to Anthropic's source shape"
+                  (get-in blks [1 "type"]) => "image"
+                  (get-in blks [1 "source" "type"]) => "base64"
+                  (get-in blks [1 "source" "media_type"]) => "image/png"
+                  (get-in blks [1 "source" "data"]) => "iVBOR"
+                  "url image serializes to the url source shape"
+                  (get-in blks [2 "source" "type"]) => "url"
+                  (get-in blks [2 "source" "url"]) => "https://x/y.jpg"
+                  "an Anthropic image block parses back to our shape"
+                  (#'api/wire->block {"type"   "image"
+                                      "source" {"type"       "base64"
+                                                "media_type" "image/jpeg"
+                                                "data"       "abc"}})
+                  => {:type :image :source {:type :base64 :media-type "image/jpeg" :data "abc"}})))
 
 (specification "validate-request accepts requests with tools (regression: bug #2)"
                ;; The internal Tool schema requires :input-schema (dash). Verify that the

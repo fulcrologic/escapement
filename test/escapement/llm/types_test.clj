@@ -32,6 +32,24 @@
                         [{:name "fs/read" :description "read a file"
                           :input-schema {:type "object" :properties {:path {:type "string"}}}}]))
                 => nil
+                "accepts a base64 image block on a user message"
+                (types/validate-request
+                 (assoc valid-request :messages
+                        [{:role    :user
+                          :content [{:type :text :text "What is this?"}
+                                    {:type   :image
+                                     :source {:type :base64 :media-type "image/png" :data "iVBOR"}}]}]))
+                => nil
+                "accepts a url image block"
+                (types/validate-request
+                 (assoc-in valid-request [:messages 0 :content]
+                           [{:type :image :source {:type :url :url "https://x/y.png"}}]))
+                => nil
+                "rejects an image block with an unsupported media-type"
+                (some? (types/validate-request
+                        (assoc-in valid-request [:messages 0 :content]
+                                  [{:type   :image
+                                    :source {:type :base64 :media-type "image/tiff" :data "x"}}]))) => true
                 "rejects missing :model"
                 (some? (types/validate-request (dissoc valid-request :model))) => true
                 "rejects bad role"

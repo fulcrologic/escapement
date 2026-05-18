@@ -139,16 +139,14 @@
    :allowed-events       [done-event]
    :initial-user-message (str "Begin the `" (name phase)
                               "` phase for `" (:function data)
-                              "` in `" (:source-path data) "`. Follow the instructions exactly.")
-   :max-tokens           4096})
+                              "` in `" (:source-path data) "`. Follow the instructions exactly.")})
 
 (defn- mutation-params [phase data]
   {:system               (p/render-phase phase data)
    :real-tools           [:fs/read :fs/write :fs/edit]
    :allowed-events       [done-event]
    :initial-user-message (str "Begin the `" (name phase) "` phase. The test file is `"
-                              (:test-file data) "`. Follow the instructions exactly.")
-   :max-tokens           8192})
+                              (:test-file data) "`. Follow the instructions exactly.")})
 
 (defn- refine-params [data]
   {:system               (p/render-phase :refine data)
@@ -161,8 +159,7 @@
                            :data-schema [:map [:reason :string]]}]
    :initial-user-message (str "Refine the tests in `" (:test-file data)
                               "` for `" (:function data) "` until they pass and seal `:covers`."
-                              " REPL port: " (:nrepl-port data) ".")
-   :max-tokens           16384})
+                              " REPL port: " (:nrepl-port data) ".")})
 
 (defn- repl-mgr-params [data]
   {:system               (p/render-phase :repl-manager data)
@@ -173,8 +170,7 @@
                            :data-schema [:map [:reason :string]]}]
    :initial-user-message (str "Establish a TEST-mode nREPL for the project at `"
                               (:project-dir data)
-                              "`. Follow the procedure exactly.")
-   :max-tokens           4096})
+                              "`. Follow the procedure exactly.")})
 
 ;; ---------------------------------------------------------------------------
 ;; REPL discovery (scripted cheap path)

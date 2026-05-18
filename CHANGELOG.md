@@ -1,5 +1,149 @@
 # Changelog
 
+## [unreleased] — feat/lib-compat — 2026-05-19
+
+Resilience + a live end-to-end harness on top of the structured error
+categories: conversations now recover from transient backend failures and
+output-cap truncation on their own, and a new `bb test:e2e` exercises the
+real provider wire.
+
+### Added
+- Automatic recovery in `:llm-conversation`, driven by the error
+  categories. **Transient failures auto-retry**: a backend throw
+  categorized `:rate-limited` / `:overloaded` / `:timeout` / `:transport`
+  is retried on the same model with exponential backoff (honoring an
+  explicit `:retry-after-ms` from the throwable's ex-data) before any
+  model fallback. **Terminal failures fail fast**: `:auth` /
+  `:invalid-request` / `:context-length` are never retried, so a bad key
+  or oversized prompt cannot burn quota in a loop. Tunable per state via a
+  new `:resilience {:max-retries N :backoff-ms MS}` param (defaults
+  `{:max-retries 3 :backoff-ms 500}`, on by default; `:max-retries 0`
+  disables retry). A `:llm/retry` transcript event is emitted per attempt.
+- **Unbounded `:max_tokens` continuation.** A turn the API truncates at the
+  output cap (`stop_reason :max_tokens`) is no longer an error — the
+  partial assistant content is used as prefill and the turn is continued
+  until a genuine terminal stop, then the segments are stitched into one
+  coherent Response (text merged across the boundary, usage summed). No
+  tool runs and no chart event fires until the message is actually
+  complete. There is no continuation limit; the only guard is forward
+  progress — a continuation that adds nothing (a stuck model) aborts with
+  `:error.llm.unexpected-stop` rather than looping. A `:llm/continuation`
+  transcript event is emitted per segment.
+- `escapement.llm.providers` — the env→provider→backend matrix
+  (`detect-available-credentials`, `build-credential-backend`, the backend
+  builders) extracted into a public namespace and now the single source of
+  truth shared by the CLI's auto-detection and the e2e suite.
+- `bb test:e2e` — a live end-to-end suite (`e2e/escapement/e2e/`) that, for
+  every provider credential present in the environment, checks the real
+  wire: a basic turn, streaming, vision, `:max_tokens` truncation
+  detection, and (credential-independently) the `:transport` / `:timeout`
+  / `:auth` error categories, plus catalog freshness. Providers without a
+  credential are reported as SKIP, never a failure; secrets are never
+  printed. It is NOT run by `bb test`.
+
+### Changed
+- A backend error categorized as a transient category now triggers a
+  bounded retry **before** surfacing as `:error.llm.<category>`; charts
+  that previously saw an immediate `:error.llm.rate-limited` will now see
+  it only after retries are exhausted (set `:resilience {:max-retries 0}`
+  to restore fail-fast).
+- `stop_reason :max_tokens` no longer maps to
+  `:error.llm.unexpected-stop`; it is continued transparently. Only a
+  no-forward-progress continuation still surfaces
+  `:error.llm.unexpected-stop` (now carrying `:detail :no-forward-progress`).
+
+### Notes
+- Transient-retry (backoff, `:retry-after-ms` honoring, fail-fast on
+  terminal categories, `:max-retries 0` disable) and the unbounded
+  `:max_tokens` continuation (segment stitching, usage summing,
+  no-forward-progress abort) are unit-covered offline under `bb test`
+  with a mock backend — they do not require any credential.
+- `bb test:e2e` is the only credential-gated surface here: its live
+  per-provider sweep (basic turn, streaming, vision, `:max_tokens`
+  truncation detection) runs only for providers whose API key is present
+  in the environment (`ANTHROPIC_API_KEY` / `ZAI_API_KEY` /
+  `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `OLLAMA_API_KEY` /
+  `OPENCODE_GO_API_KEY`, or a saved Codex OAuth token) and reports
+  credential-less providers as SKIP. The credential-independent checks
+  (`:transport` / `:timeout` / `:auth` categories, catalog freshness)
+  always run. A reviewer with real keys should run `bb test:e2e` to
+  verify the live wire; the harness cannot exercise it without secrets.
+
+---
+
+## [unreleased] — feat/lib-compat — 2026-05-18
+
+Builds on the now-merged LLM catalog work: SSE token streaming with a
+catalog-driven per-turn output cap, plus image content blocks in the LLM
+request protocol.
+
+### Added
+- Structured backend error categories in the LLM protocol contract.
+  `escapement.llm.protocol` now exports `error-categories`
+  (`#{:rate-limited :overloaded :auth :invalid-request :context-length
+  :timeout :transport}`), an `llm-error` constructor, and an
+  `error-category` accessor (walks the `ex-cause` chain). Backends SHOULD
+  throw `(protocol/llm-error category msg ...)`; the `llm-conversation`
+  consumer now maps a known category to a finer
+  `:error.llm.<category>` chart event (e.g. `:error.llm.rate-limited`) so a
+  statechart can branch "rate-limited → wait & resume" vs
+  "invalid-request → fail". The `:llm/error` and `:llm/model-down`
+  transcript events gained an additive `:category` key. **Back-compat: an
+  uncategorized throwable still collapses to exactly `:error.llm.backend`
+  with `:reason :backend`, unchanged.** The native Anthropic api backend
+  now participates: non-2xx HTTP maps status→category (429 →
+  `:rate-limited`, 529/overloaded → `:overloaded`, 401/403 → `:auth`,
+  400/422 → `:invalid-request` or `:context-length`, timeouts →
+  `:timeout`, else `:transport`) and the SSE `error` event categorizes as
+  `:overloaded`/`:transport`, all preserving the legacy message text and
+  `:status`/`:body`/`:url` ex-data.
+- Token streaming. New optional
+  `escapement.llm.protocol/StreamingLLMBackend` (`stream-turn`) plus
+  `streaming?` / `send-turn*` capability helpers. The Anthropic api
+  backend implements SSE streaming (`"stream": true`), rebuilding a
+  byte-identical Response from `content_block_*` events. A new
+  `:stream?` `llm-conversation` param opts a state in: incremental output
+  is published as `:llm/delta` transcript events
+  (`{:type :text-delta|:thinking-delta :text … :model … :invokeid …}`)
+  for relay to a UI while the turn is in flight. Chart semantics and the
+  final Response are unchanged; no-op on backends without streaming.
+- Image (vision) attachments in the LLM request protocol: a new `:image`
+  content block (`escapement.llm.types/ImageBlock`) accepted on `:user`
+  messages, with `:base64` (inline data + media-type) or `:url` sources.
+  The Anthropic backend serializes it to the Messages API
+  `image`/`source` wire shape and parses it back symmetrically (survives
+  a streamed turn). Enables vision-model steps (e.g. reference-image →
+  description pipelines) at the protocol level without invocation-code
+  changes.
+
+### Changed
+- The per-turn output cap (`max_tokens` on the wire) is now purely
+  catalog-driven: it is always the resolved model's
+  `catalog/max-output-tokens` (models-api.json `limit.output`), with the
+  api backend's wire default (8192) for models the catalog doesn't know.
+  To give a state more output room, pick a model with a larger output
+  limit rather than tuning a param.
+
+### Removed
+- The `:max-tokens` `llm-conversation` param. It is no longer a chart
+  concern (see Changed above) and was dropped from all bundled example
+  charts; setting it in `params-fn` now has no effect. It remains only on
+  the low-level `escapement.llm.types/Request` for backend wire
+  translation.
+
+### Notes
+- Protocol/translation logic is unit-covered offline: SSE
+  reconstruction (`parse-anthropic-sse!`), `send-turn*` capability
+  dispatch, image-block round-trip, `effective-max-tokens`, the
+  status→category mapping, and the categorized vs uncategorized
+  `:error.llm.*` consumer behavior all run green under `bb test`. The
+  end-to-end paths that need a live Anthropic-compatible endpoint —
+  a real streamed HTTP turn, a real non-2xx status producing a
+  categorized throw, and a real vision request — are credential-gated
+  (`ANTHROPIC_API_KEY` / `ZAI_API_KEY`) and exercised only by the
+  offline simulations above; a reviewer with a key should smoke one
+  live streamed + one vision turn.
+
 ## [unreleased] — feat/llm-catalog-and-merge-playbook — 2026-05-18
 
 ### Added

@@ -48,6 +48,15 @@
    :usage       {:input-tokens 1 :output-tokens 1}
    :model       "mock"})
 
+(defrecord ThrowingBackend [throw-fn]
+  llm/LLMBackend
+  (send-turn [_ _] (throw (throw-fn))))
+
+(defn throwing-backend
+  "Build a backend whose every `send-turn` throws `(throw-fn)`."
+  [throw-fn]
+  (->ThrowingBackend throw-fn))
+
 ;; ---------------------------------------------------------------------------
 ;; Helpers for building a test env with the LLM processor
 ;; ---------------------------------------------------------------------------
@@ -89,6 +98,16 @@
 ;; ---------------------------------------------------------------------------
 ;; #1: Happy path, one event-tool fired
 ;; ---------------------------------------------------------------------------
+
+(specification "effective-max-tokens is purely catalog-driven (models-api.json limit.output)"
+               (assertions
+                "resolves the model's catalog output cap"
+                (llmc/effective-max-tokens "claude-sonnet-4-7")        => 64000
+                (llmc/effective-max-tokens "claude-3-sonnet-20240229") => 4096
+                "unknown model → nil (backend wire default applies)"
+                (llmc/effective-max-tokens "totally-unknown-model")   => nil
+                "nil model (backend default pick) → nil"
+                (llmc/effective-max-tokens nil)                       => nil))
 
 (specification "happy path: single event-tool fired then end_turn"
                (let [captured (atom [])
@@ -882,6 +901,83 @@
       (assertions
        (#'llmc/candidate-models {} defaults (atom {})) => defaults))))
 
+;; ---------------------------------------------------------------------------
+;; Categorized backend errors → finer :error.llm.<category> chart events,
+;; with full back-compat for uncategorized throwables.
+;; ---------------------------------------------------------------------------
+
+(defn- run-error-chart!
+  "Run a one-turn chart against `backend` (which will throw). Returns the
+   `:_event` map the chart received on the catch-all :error.llm.* transition."
+  [backend]
+  (let [err-seen (atom nil)
+        captured (atom [])
+        chart    (chart/statechart
+                  {:initial :wrap}
+                  (state {:id :wrap :initial :work}
+                         (state {:id :work}
+                                (h/llm-conversation
+                                 {:id        "p"
+                                  ;; These specs assert the category→event
+                                  ;; mapping, not recovery. Disable the default
+                                  ;; transient retry so a thrown rate-limited/
+                                  ;; timeout/etc. fails fast deterministically
+                                  ;; instead of backing off past the timeout.
+                                  :params-fn (fn [_ _] {:initial-user-message "go"
+                                                        :resilience {:max-retries 0}})})
+                                (transition {:event :error.llm.* :target :failed}
+                                            (script {:expr (fn [_ d]
+                                                             (reset! err-seen (:_event d))
+                                                             nil)})))
+                         (final {:id :failed})))
+        t        (new-llm-test-env {:statechart    chart
+                                    :backend       backend
+                                    :transcript-fn (fn [ev] (swap! captured conj ev))})
+        t        (await-config! t :failed 3000)]
+    {:event @err-seen :in-failed? (dct/in? t :failed) :transcript @captured}))
+
+(specification "categorized backend error → :error.llm.rate-limited"
+  (let [{:keys [event in-failed? transcript]}
+        (run-error-chart!
+         (throwing-backend #(llm/llm-error :rate-limited "429 slow down"
+                                           {:status 429})))]
+    (assertions
+     "chart reached :failed"
+     in-failed? => true
+     "the categorized event name is :error.llm.rate-limited"
+     (:name event) => :error.llm.rate-limited
+     ":reason on the event data is the category"
+     (get-in event [:data :reason]) => :rate-limited
+     ":category is carried for observability"
+     (get-in event [:data :category]) => :rate-limited
+     ":llm/error transcript carries reason + category"
+     (let [te (first (filter #(= :llm/error (:event %)) transcript))]
+       [(get-in te [:data :reason]) (get-in te [:data :category])])
+     => [:rate-limited :rate-limited]
+     ":llm/model-down transcript carries the category"
+     (->> transcript
+          (filter #(= :llm/model-down (:event %)))
+          first :data :category)
+     => :rate-limited)))
+
+(specification "UNCATEGORIZED backend throwable still yields :error.llm.backend (back-compat)"
+  (let [{:keys [event in-failed? transcript]}
+        (run-error-chart!
+         (throwing-backend #(ex-info "kaboom" {:status 500})))]
+    (assertions
+     "chart reached :failed"
+     in-failed? => true
+     "the legacy event name is unchanged"
+     (:name event) => :error.llm.backend
+     ":reason stays :backend exactly as before"
+     (get-in event [:data :reason]) => :backend
+     "additive :category key is present and nil for uncategorized"
+     (contains? (:data event) :category) => true
+     (get-in event [:data :category]) => nil
+     ":llm/error transcript reason is still :backend"
+     (->> transcript (filter #(= :llm/error (:event %))) first :data :reason)
+     => :backend)))
+
 (specification "try-models! surfaces :llm/model-policy-empty when the policy excludes every fallback model"
   (let [captured (atom [])
         backend  (mock-backend [(end-turn-response "ok")])
@@ -906,3 +1002,128 @@
      "the turn still completes via the unfiltered fallback model"
      (some? (:ok result)) => true
      (:model-used result) => "gpt-4o-mini")))
+
+;; ---------------------------------------------------------------------------
+;; Resilience: unbounded :max_tokens continuation + transient-error retry
+;; ---------------------------------------------------------------------------
+
+(defn max-tokens-response
+  "An assistant turn the API forcibly truncated at the output cap."
+  [text]
+  {:stop-reason :max_tokens
+   :content     [{:type :text :text text}]
+   :usage       {:input-tokens 2 :output-tokens 2}
+   :model       "mock"})
+
+(defn- drive-ctx [backend captured]
+  {:backend        backend
+   :transcript-fn  (fn [ev] (swap! captured conj ev))
+   :worker-state   (atom :running)
+   :model-status   (atom {})
+   :default-models ["mock"]
+   :parent-ctx     {:invokeid "iv"}})
+
+(defn- flaky-backend
+  "Throws `(throw-fn)` for the first `n-fail` calls, then returns `resp`.
+   Returns `[backend counter-atom]`."
+  [n-fail throw-fn resp]
+  (let [counter (atom 0)]
+    [(reify llm/LLMBackend
+       (send-turn [_ _]
+         (if (<= (swap! counter inc) n-fail) (throw (throw-fn)) resp)))
+     counter]))
+
+(specification "resilience + continuation pure helpers"
+  (assertions
+   "params->resilience: defaults, per-key override keeps the rest"
+   (#'llmc/params->resilience nil) => {:max-retries 3 :backoff-ms 500}
+   (#'llmc/params->resilience {:resilience {:max-retries 0}})
+   => {:max-retries 0 :backoff-ms 500}
+   "merge-segment-content stitches text across a truncation boundary"
+   (#'llmc/merge-segment-content [{:type :text :text "Hel"}]
+                                 [{:type :text :text "lo"}])
+   => [{:type :text :text "Hello"}]
+   "non-text boundary just appends"
+   (#'llmc/merge-segment-content [{:type :text :text "a"}]
+                                 [{:type :tool_use :id "i" :name "n" :input {}}])
+   => [{:type :text :text "a"} {:type :tool_use :id "i" :name "n" :input {}}]
+   "empty continuation yields the accumulator unchanged"
+   (#'llmc/merge-segment-content [{:type :text :text "a"}] []) => [{:type :text :text "a"}]
+   "merge-with-usage sums numeric fields"
+   (#'llmc/merge-with-usage {:input-tokens 2 :output-tokens 3}
+                            {:input-tokens 1 :output-tokens 4})
+   => {:input-tokens 3 :output-tokens 7}))
+
+(specification "drive-turn!: unbounded :max_tokens continuation stitches one terminal Response"
+  (let [captured (atom [])
+        backend  (mock-backend [(max-tokens-response "Hel")
+                                 (max-tokens-response "lo wor")
+                                 (end-turn-response "ld")])
+        result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+    (assertions
+     "the merged turn is terminal, not truncated"
+     (get-in result [:ok :stop-reason]) => :end_turn
+     "text from every segment is stitched into one block"
+     (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+     => "Hello world"
+     "usage is summed across all three segments (2+2+1)"
+     (get-in result [:ok :usage :output-tokens]) => 5
+     "a :llm/continuation transcript event fired per continuation"
+     (count (filter #(= :llm/continuation (:event %)) @captured)) => 2)))
+
+(specification "drive-turn!: a no-forward-progress continuation aborts instead of looping"
+  (let [captured (atom [])
+        backend  (mock-backend [(max-tokens-response "X")
+                                 {:stop-reason :max_tokens :content []
+                                  :usage {} :model "mock"}])
+        result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+    (assertions
+     "stuck model surfaces :no-progress (handler maps it to :error.llm.unexpected-stop)"
+     (boolean (:no-progress result)) => true
+     (contains? result :ok) => false)))
+
+(specification "try-models!: transient category is retried (bounded) then succeeds"
+  (let [captured      (atom [])
+        [backend cnt] (flaky-backend 2 #(llm/llm-error :rate-limited "429" {})
+                                      (end-turn-response "ok"))
+        result        (#'llmc/try-models!
+                       {:backend backend
+                        :transcript-fn (fn [ev] (swap! captured conj ev))
+                        :worker-state (atom :running)
+                        :model-status (atom {})
+                        :default-models ["mock"]
+                        :parent-ctx {:invokeid "iv"}}
+                       {:resilience {:max-retries 3 :backoff-ms 1}}
+                       [{:role :user :content [{:type :text :text "hi"}]}]
+                       [])]
+    (assertions
+     "succeeds after the bounded retries"
+     (get-in result [:ok :stop-reason]) => :end_turn
+     "two failures + one success = three calls"
+     @cnt => 3
+     "each retry emitted a :llm/retry transcript event"
+     (count (filter #(= :llm/retry (:event %)) @captured)) => 2)))
+
+(specification "try-models!: terminal category fails fast and is never retried"
+  (let [captured      (atom [])
+        [backend cnt] (flaky-backend 99 #(llm/llm-error :auth "401" {})
+                                      (end-turn-response "never"))
+        result        (#'llmc/try-models!
+                       {:backend backend
+                        :transcript-fn (fn [ev] (swap! captured conj ev))
+                        :worker-state (atom :running)
+                        :model-status (atom {})
+                        :default-models ["mock"]
+                        :parent-ctx {:invokeid "iv"}}
+                       {:resilience {:max-retries 3 :backoff-ms 1}}
+                       [{:role :user :content [{:type :text :text "hi"}]}]
+                       [])]
+    (assertions
+     "exhausted immediately (auth is terminal)"
+     (boolean (:exhausted result)) => true
+     "called exactly once — no retry"
+     @cnt => 1
+     "no :llm/retry transcript event"
+     (count (filter #(= :llm/retry (:event %)) @captured)) => 0)))

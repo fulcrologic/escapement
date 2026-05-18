@@ -2,6 +2,7 @@
   (:require
    [clojure.java.io :as io]
    [escapement.cli :as cli]
+   [escapement.llm.providers :as providers]
    [fulcro-spec.core :refer [specification component assertions =>]])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
@@ -115,7 +116,8 @@
 
 (specification "provider backend wiring"
                (component "explicit Ollama backend uses the Ollama Cloud OpenAI-compatible endpoint"
-                          (with-redefs [cli/build-openai-backend identity]
+                          (with-redefs [cli/build-openai-backend identity
+                                        providers/build-openai-backend identity]
                             (let [result (#'cli/make-backend {:backend "ollama"
                                                               :model "kimi-k2.5"})]
                               (assertions
@@ -127,9 +129,9 @@
                                (:default-models result) => ["kimi-k2.5"]))))
 
                (component "OpenCode Go chooses OpenAI-compatible wiring for GLM/Kimi/MIMO models"
-                          (with-redefs [cli/build-openai-backend identity
-                                        cli/build-api-backend identity]
-                            (let [backend (#'cli/build-opencode-go-backend {:api-key "k" :model "glm-5"})]
+                          (with-redefs [providers/build-openai-backend identity
+                                        providers/build-api-backend identity]
+                            (let [backend (#'providers/build-opencode-go-backend {:api-key "k" :model "glm-5"})]
                               (assertions
                                "base URL"
                                (:base-url backend) => "https://opencode.ai/zen/go/v1"
@@ -138,7 +140,9 @@
 
                (component "explicit OpenCode Go backend honors --api-base-url"
                           (with-redefs [cli/build-openai-backend identity
-                                        cli/build-api-backend identity]
+                                        cli/build-api-backend identity
+                                        providers/build-openai-backend identity
+                                        providers/build-api-backend identity]
                             (let [openai-backend (#'cli/make-backend {:backend "opencode-go"
                                                                        :model "glm-5"
                                                                        :api-base-url "https://proxy.example/v1"})
@@ -152,9 +156,9 @@
                                (get-in api-backend [:backend :base-url]) => "https://proxy.example/anthropic"))))
 
                (component "OpenCode Go chooses Anthropic-compatible wiring for MiniMax models"
-                          (with-redefs [cli/build-openai-backend identity
-                                        cli/build-api-backend identity]
-                            (let [backend (#'cli/build-opencode-go-backend {:api-key "k" :model "minimax-m2.7"})]
+                          (with-redefs [providers/build-openai-backend identity
+                                        providers/build-api-backend identity]
+                            (let [backend (#'providers/build-opencode-go-backend {:api-key "k" :model "minimax-m2.7"})]
                               (assertions
                                "base URL"
                                (:base-url backend) => "https://opencode.ai/zen/go"
@@ -164,10 +168,10 @@
                                (:default-model backend) => "minimax-m2.7"))))
 
                (component "auto-detection keeps z.ai glm routing ahead of new hosted gateways"
-                           (with-redefs [cli/nonblank-env (fn [k]
-                                                             (when (contains? #{"ZAI_API_KEY" "OLLAMA_API_KEY" "OPENCODE_GO_API_KEY"} k)
-                                                               (str k "-value")))]
-                            (let [kinds (mapv :kind (#'cli/detect-available-credentials))]
+                           (with-redefs [providers/nonblank-env (fn [k]
+                                                                   (when (contains? #{"ZAI_API_KEY" "OLLAMA_API_KEY" "OPENCODE_GO_API_KEY"} k)
+                                                                     (str k "-value")))]
+                            (let [kinds (mapv :kind (#'providers/detect-available-credentials))]
                               (assertions
                                "z.ai route is present"
                                (some? (index-of kinds :zai)) => true

@@ -50,8 +50,7 @@
                                                                        [:summary :string]]}
                                                         {:event       :scan-complete
                                                          :data-schema [:map [:total_findings :int]]}]
-                                 :initial-user-message (user-message data)
-                                 :max-tokens           1024})})
+                                 :initial-user-message (user-message data)})})
                  ;; Accumulate findings without leaving :scanning (internal transition).
                  (transition {:event :found-bug :type :internal}
                              (script {:expr (fn [_env data]
