@@ -950,7 +950,20 @@
                     (do (swap! state assoc :viz-server r)
                         (append-scrollback!
                          state (str "[viz] live: " (:url r)
-                                    " (SVG also at " (:svg-path r) ")")))
+                                    " (SVG also at " (:svg-path r) ")"))
+                        (let [viewer (ecfg/viewer-for-url (:debug-config h))]
+                          (when (string? viewer)
+                            (try
+                              (let [cmd (ecfg/expand-command viewer (:url r))]
+                                (.exec (Runtime/getRuntime) ^"[Ljava.lang.String;"
+                                       (into-array String ["sh" "-c" cmd]))
+                                (append-scrollback!
+                                 state (str "[viz] launched: " cmd)))
+                              (catch Throwable t
+                                (append-scrollback!
+                                 state (str "[viz] auto-open failed: "
+                                            (.getMessage t)
+                                            " — open " (:url r) " manually")))))))
 
                     :else
                     (append-scrollback! state (str "[viz] result: " (pr-str r)))))

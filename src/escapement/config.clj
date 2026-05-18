@@ -110,6 +110,15 @@
         (get viewers "default")
         :internal)))
 
+(defn viewer-for-url
+  "Resolves the viewer entry for a URL (no file extension to key on). Looks
+   up `(get-in cfg [:viewers \"url\"])`. Falls back to `:internal` — i.e.
+   *don't* auto-open — when no entry is configured, so opt-in is explicit.
+
+   Returns either `:internal` or a command-template string."
+  [cfg]
+  (or (get-in cfg [:viewers "url"]) :internal))
+
 (def project-schema
   [:map {:closed true}
    [:source-paths  {:optional true} [:vector :string]]
