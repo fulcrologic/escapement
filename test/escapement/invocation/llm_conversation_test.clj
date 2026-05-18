@@ -12,7 +12,7 @@
    [escapement.test-support :as ts]
    [escapement.tools.builtin :as builtin]
    [escapement.tools.protocol :as tp]
-   [fulcro-spec.core :refer [specification behavior component assertions =>]]))
+   [fulcro-spec.core :refer [specification component assertions =>]]))
 
 ;; ---------------------------------------------------------------------------
 ;; Mock LLMBackend
@@ -254,57 +254,56 @@
   [backend]
   (->> @(:call-log backend) last :tools (mapv :name) set))
 
-(specification "real-tools selector"
-               (behavior "absent (nil) exposes EVERY tool registered in the registry"
-                         (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
-                                                       (end-turn-response "ok")])
-                               registry (builtin/new-builtin-registry)
-                               chart    (chart/statechart
-                                         {:initial :wrap}
-                                         (state {:id :wrap :initial :work}
-                                                (state {:id :work}
-                                                       (h/llm-conversation
-                                                        {:id        "all"
-                                                         :params-fn (fn [_ _]
-                                                                      {:system               "go"
-                                                    ;; :real-tools intentionally omitted
-                                                                       :allowed-events       [{:event :done :data-schema [:map]}]
-                                                                       :initial-user-message "go"})})
-                                                       (transition {:event :done :target :finished}))
-                                                (final {:id :finished})))
-                               t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
-                               _        (await-config! t :finished 3000)]
-                           (assertions
-                            "every builtin tool name made it into the request alongside the event tool"
-                            (last-request-tool-names backend)
-                            => (->> (tp/all-tools registry)
-                                    (map #(:name (tp/tool->anthropic-tool-def %)))
-                                    (cons "event__done")
-                                    set))))
+(specification "real-tools selector: absent (nil) exposes every tool registered in the registry"
+               (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
+                                             (end-turn-response "ok")])
+                     registry (builtin/new-builtin-registry)
+                     chart    (chart/statechart
+                               {:initial :wrap}
+                               (state {:id :wrap :initial :work}
+                                      (state {:id :work}
+                                             (h/llm-conversation
+                                              {:id        "all"
+                                               :params-fn (fn [_ _]
+                                                            {:system               "go"
+                                              ;; :real-tools intentionally omitted
+                                                             :allowed-events       [{:event :done :data-schema [:map]}]
+                                                             :initial-user-message "go"})})
+                                             (transition {:event :done :target :finished}))
+                                      (final {:id :finished})))
+                     t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
+                     _        (await-config! t :finished 3000)]
+                 (assertions
+                  "every builtin tool name made it into the request alongside the event tool"
+                  (last-request-tool-names backend)
+                  => (->> (tp/all-tools registry)
+                          (map #(:name (tp/tool->anthropic-tool-def %)))
+                          (cons "event__done")
+                          set))))
 
-               (behavior "an explicit selector vector is a whitelist"
-                         (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
-                                                       (end-turn-response "ok")])
-                               registry (builtin/new-builtin-registry)
-                               chart    (chart/statechart
-                                         {:initial :wrap}
-                                         (state {:id :wrap :initial :work}
-                                                (state {:id :work}
-                                                       (h/llm-conversation
-                                                        {:id        "subset"
-                                                         :params-fn (fn [_ _]
-                                                                      {:system               "go"
-                                                                       :real-tools           [:fs/read :fs/grep]
-                                                                       :allowed-events       [{:event :done :data-schema [:map]}]
-                                                                       :initial-user-message "go"})})
-                                                       (transition {:event :done :target :finished}))
-                                                (final {:id :finished})))
-                               t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
-                               _        (await-config! t :finished 3000)]
-                           (assertions
-                            "only the whitelisted real tools + the event tool"
-                            (last-request-tool-names backend)
-                            => #{"fs_read" "fs_grep" "event__done"}))))
+(specification "real-tools selector: an explicit selector vector is a whitelist"
+               (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
+                                             (end-turn-response "ok")])
+                     registry (builtin/new-builtin-registry)
+                     chart    (chart/statechart
+                               {:initial :wrap}
+                               (state {:id :wrap :initial :work}
+                                      (state {:id :work}
+                                             (h/llm-conversation
+                                              {:id        "subset"
+                                               :params-fn (fn [_ _]
+                                                            {:system               "go"
+                                                             :real-tools           [:fs/read :fs/grep]
+                                                             :allowed-events       [{:event :done :data-schema [:map]}]
+                                                             :initial-user-message "go"})})
+                                             (transition {:event :done :target :finished}))
+                                      (final {:id :finished})))
+                     t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
+                     _        (await-config! t :finished 3000)]
+                 (assertions
+                  "only the whitelisted real tools + the event tool"
+                  (last-request-tool-names backend)
+                  => #{"fs_read" "fs_grep" "event__done"})))
 
 ;; ---------------------------------------------------------------------------
 ;; #3c: prompt caching flows from params-fn through to the Request
@@ -857,49 +856,49 @@
 ;; ---------------------------------------------------------------------------
 
 (specification "params->policy extracts a usable policy or nil"
-  (assertions
-   "no :model-policy key → nil"
-   (#'llmc/params->policy {}) => nil
-   "empty policy map (no :require/:min/:max) → nil"
-   (#'llmc/params->policy {:model-policy {}}) => nil
-   "a :min clause is returned verbatim"
-   (#'llmc/params->policy {:model-policy {:min {:context-tokens 200000}}})
-   => {:min {:context-tokens 200000}}
-   "a :require clause counts as expressed"
-   (#'llmc/params->policy {:model-policy {:require {:vision? true}}})
-   => {:require {:vision? true}}))
+               (assertions
+                "no :model-policy key → nil"
+                (#'llmc/params->policy {}) => nil
+                "empty policy map (no :require/:min/:max) → nil"
+                (#'llmc/params->policy {:model-policy {}}) => nil
+                "a :min clause is returned verbatim"
+                (#'llmc/params->policy {:model-policy {:min {:context-tokens 200000}}})
+                => {:min {:context-tokens 200000}}
+                "a :require clause counts as expressed"
+                (#'llmc/params->policy {:model-policy {:require {:vision? true}}})
+                => {:require {:vision? true}}))
 
 (specification "candidate-models applies :model-policy to the fallback list"
-  (let [defaults ["gpt-4o-mini" "claude-sonnet-4-5" "claude-opus-4-1"]]
-    (component "auto-fallback list is filtered by the policy"
-      (assertions
-       ":min {:context-tokens 200000} drops gpt-4o-mini (128k window)"
-       (#'llmc/candidate-models {:model-policy {:min {:context-tokens 200000}}}
-                                defaults (atom {}))
-       => ["claude-sonnet-4-5" "claude-opus-4-1"]))
-    (component "an explicit :model pick is never silently switched"
-      (assertions
-       "policy is ignored when the user names a model"
-       (#'llmc/candidate-models {:model "gpt-4o-mini"
-                                 :model-policy {:min {:context-tokens 200000}}}
-                                defaults (atom {}))
-       => ["gpt-4o-mini"]))
-    (component "an unsatisfiable policy falls back to the unfiltered list"
-      (assertions
-       "so the conversation still runs"
-       (#'llmc/candidate-models {:model-policy {:min {:context-tokens 999999999}}}
-                                defaults (atom {}))
-       => defaults))
-    (component ":down models are removed after policy filtering"
-      (assertions
-       "claude-sonnet-4-5 marked :down → only claude-opus-4-1 survives"
-       (#'llmc/candidate-models {:model-policy {:min {:context-tokens 200000}}}
-                                defaults
-                                (atom {"claude-sonnet-4-5" :down}))
-       => ["claude-opus-4-1"]))
-    (component "no policy → default-models verbatim"
-      (assertions
-       (#'llmc/candidate-models {} defaults (atom {})) => defaults))))
+               (let [defaults ["gpt-4o-mini" "claude-sonnet-4-5" "claude-opus-4-1"]]
+                 (component "auto-fallback list is filtered by the policy"
+                            (assertions
+                             ":min {:context-tokens 200000} drops gpt-4o-mini (128k window)"
+                             (#'llmc/candidate-models {:model-policy {:min {:context-tokens 200000}}}
+                                                      defaults (atom {}))
+                             => ["claude-sonnet-4-5" "claude-opus-4-1"]))
+                 (component "an explicit :model pick is never silently switched"
+                            (assertions
+                             "policy is ignored when the user names a model"
+                             (#'llmc/candidate-models {:model "gpt-4o-mini"
+                                                       :model-policy {:min {:context-tokens 200000}}}
+                                                      defaults (atom {}))
+                             => ["gpt-4o-mini"]))
+                 (component "an unsatisfiable policy falls back to the unfiltered list"
+                            (assertions
+                             "so the conversation still runs"
+                             (#'llmc/candidate-models {:model-policy {:min {:context-tokens 999999999}}}
+                                                      defaults (atom {}))
+                             => defaults))
+                 (component ":down models are removed after policy filtering"
+                            (assertions
+                             "claude-sonnet-4-5 marked :down → only claude-opus-4-1 survives"
+                             (#'llmc/candidate-models {:model-policy {:min {:context-tokens 200000}}}
+                                                      defaults
+                                                      (atom {"claude-sonnet-4-5" :down}))
+                             => ["claude-opus-4-1"]))
+                 (component "no policy → default-models verbatim"
+                            (assertions
+                             (#'llmc/candidate-models {} defaults (atom {})) => defaults))))
 
 ;; ---------------------------------------------------------------------------
 ;; Categorized backend errors → finer :error.llm.<category> chart events,
@@ -937,71 +936,71 @@
     {:event @err-seen :in-failed? (dct/in? t :failed) :transcript @captured}))
 
 (specification "categorized backend error → :error.llm.rate-limited"
-  (let [{:keys [event in-failed? transcript]}
-        (run-error-chart!
-         (throwing-backend #(llm/llm-error :rate-limited "429 slow down"
-                                           {:status 429})))]
-    (assertions
-     "chart reached :failed"
-     in-failed? => true
-     "the categorized event name is :error.llm.rate-limited"
-     (:name event) => :error.llm.rate-limited
-     ":reason on the event data is the category"
-     (get-in event [:data :reason]) => :rate-limited
-     ":category is carried for observability"
-     (get-in event [:data :category]) => :rate-limited
-     ":llm/error transcript carries reason + category"
-     (let [te (first (filter #(= :llm/error (:event %)) transcript))]
-       [(get-in te [:data :reason]) (get-in te [:data :category])])
-     => [:rate-limited :rate-limited]
-     ":llm/model-down transcript carries the category"
-     (->> transcript
-          (filter #(= :llm/model-down (:event %)))
-          first :data :category)
-     => :rate-limited)))
+               (let [{:keys [event in-failed? transcript]}
+                     (run-error-chart!
+                      (throwing-backend #(llm/llm-error :rate-limited "429 slow down"
+                                                        {:status 429})))]
+                 (assertions
+                  "chart reached :failed"
+                  in-failed? => true
+                  "the categorized event name is :error.llm.rate-limited"
+                  (:name event) => :error.llm.rate-limited
+                  ":reason on the event data is the category"
+                  (get-in event [:data :reason]) => :rate-limited
+                  ":category is carried for observability"
+                  (get-in event [:data :category]) => :rate-limited
+                  ":llm/error transcript carries reason + category"
+                  (let [te (first (filter #(= :llm/error (:event %)) transcript))]
+                    [(get-in te [:data :reason]) (get-in te [:data :category])])
+                  => [:rate-limited :rate-limited]
+                  ":llm/model-down transcript carries the category"
+                  (->> transcript
+                       (filter #(= :llm/model-down (:event %)))
+                       first :data :category)
+                  => :rate-limited)))
 
 (specification "UNCATEGORIZED backend throwable still yields :error.llm.backend (back-compat)"
-  (let [{:keys [event in-failed? transcript]}
-        (run-error-chart!
-         (throwing-backend #(ex-info "kaboom" {:status 500})))]
-    (assertions
-     "chart reached :failed"
-     in-failed? => true
-     "the legacy event name is unchanged"
-     (:name event) => :error.llm.backend
-     ":reason stays :backend exactly as before"
-     (get-in event [:data :reason]) => :backend
-     "additive :category key is present and nil for uncategorized"
-     (contains? (:data event) :category) => true
-     (get-in event [:data :category]) => nil
-     ":llm/error transcript reason is still :backend"
-     (->> transcript (filter #(= :llm/error (:event %))) first :data :reason)
-     => :backend)))
+               (let [{:keys [event in-failed? transcript]}
+                     (run-error-chart!
+                      (throwing-backend #(ex-info "kaboom" {:status 500})))]
+                 (assertions
+                  "chart reached :failed"
+                  in-failed? => true
+                  "the legacy event name is unchanged"
+                  (:name event) => :error.llm.backend
+                  ":reason stays :backend exactly as before"
+                  (get-in event [:data :reason]) => :backend
+                  "additive :category key is present and nil for uncategorized"
+                  (contains? (:data event) :category) => true
+                  (get-in event [:data :category]) => nil
+                  ":llm/error transcript reason is still :backend"
+                  (->> transcript (filter #(= :llm/error (:event %))) first :data :reason)
+                  => :backend)))
 
 (specification "try-models! surfaces :llm/model-policy-empty when the policy excludes every fallback model"
-  (let [captured (atom [])
-        backend  (mock-backend [(end-turn-response "ok")])
-        result   (#'llmc/try-models!
-                  {:backend        backend
-                   :transcript-fn  (fn [ev] (swap! captured conj ev))
-                   :worker-state   (atom :running)
-                   :model-status   (atom {})
-                   :default-models ["gpt-4o-mini"]
-                   :parent-ctx     {:invokeid "iv"}}
-                  {:model-policy {:min {:context-tokens 999999999}}}
-                  [{:role :user :content [{:type :text :text "hi"}]}]
-                  [])
-        ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
-    (assertions
-     "the renamed event was emitted"
-     (some? ev) => true
-     "it carries the resolved policy"
-     (get-in ev [:data :policy]) => {:min {:context-tokens 999999999}}
-     "it carries the default-models that all failed the policy"
-     (get-in ev [:data :default-models]) => ["gpt-4o-mini"]
-     "the turn still completes via the unfiltered fallback model"
-     (some? (:ok result)) => true
-     (:model-used result) => "gpt-4o-mini")))
+               (let [captured (atom [])
+                     backend  (mock-backend [(end-turn-response "ok")])
+                     result   (#'llmc/try-models!
+                               {:backend        backend
+                                :transcript-fn  (fn [ev] (swap! captured conj ev))
+                                :worker-state   (atom :running)
+                                :model-status   (atom {})
+                                :default-models ["gpt-4o-mini"]
+                                :parent-ctx     {:invokeid "iv"}}
+                               {:model-policy {:min {:context-tokens 999999999}}}
+                               [{:role :user :content [{:type :text :text "hi"}]}]
+                               [])
+                     ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
+                 (assertions
+                  "the renamed event was emitted"
+                  (some? ev) => true
+                  "it carries the resolved policy"
+                  (get-in ev [:data :policy]) => {:min {:context-tokens 999999999}}
+                  "it carries the default-models that all failed the policy"
+                  (get-in ev [:data :default-models]) => ["gpt-4o-mini"]
+                  "the turn still completes via the unfiltered fallback model"
+                  (some? (:ok result)) => true
+                  (:model-used result) => "gpt-4o-mini")))
 
 ;; ---------------------------------------------------------------------------
 ;; Resilience: unbounded :max_tokens continuation + transient-error retry
@@ -1034,96 +1033,96 @@
      counter]))
 
 (specification "resilience + continuation pure helpers"
-  (assertions
-   "params->resilience: defaults, per-key override keeps the rest"
-   (#'llmc/params->resilience nil) => {:max-retries 3 :backoff-ms 500}
-   (#'llmc/params->resilience {:resilience {:max-retries 0}})
-   => {:max-retries 0 :backoff-ms 500}
-   "merge-segment-content stitches text across a truncation boundary"
-   (#'llmc/merge-segment-content [{:type :text :text "Hel"}]
-                                 [{:type :text :text "lo"}])
-   => [{:type :text :text "Hello"}]
-   "non-text boundary just appends"
-   (#'llmc/merge-segment-content [{:type :text :text "a"}]
-                                 [{:type :tool_use :id "i" :name "n" :input {}}])
-   => [{:type :text :text "a"} {:type :tool_use :id "i" :name "n" :input {}}]
-   "empty continuation yields the accumulator unchanged"
-   (#'llmc/merge-segment-content [{:type :text :text "a"}] []) => [{:type :text :text "a"}]
-   "merge-with-usage sums numeric fields"
-   (#'llmc/merge-with-usage {:input-tokens 2 :output-tokens 3}
-                            {:input-tokens 1 :output-tokens 4})
-   => {:input-tokens 3 :output-tokens 7}))
+               (assertions
+                "params->resilience: defaults, per-key override keeps the rest"
+                (#'llmc/params->resilience nil) => {:max-retries 3 :backoff-ms 500}
+                (#'llmc/params->resilience {:resilience {:max-retries 0}})
+                => {:max-retries 0 :backoff-ms 500}
+                "merge-segment-content stitches text across a truncation boundary"
+                (#'llmc/merge-segment-content [{:type :text :text "Hel"}]
+                                              [{:type :text :text "lo"}])
+                => [{:type :text :text "Hello"}]
+                "non-text boundary just appends"
+                (#'llmc/merge-segment-content [{:type :text :text "a"}]
+                                              [{:type :tool_use :id "i" :name "n" :input {}}])
+                => [{:type :text :text "a"} {:type :tool_use :id "i" :name "n" :input {}}]
+                "empty continuation yields the accumulator unchanged"
+                (#'llmc/merge-segment-content [{:type :text :text "a"}] []) => [{:type :text :text "a"}]
+                "merge-with-usage sums numeric fields"
+                (#'llmc/merge-with-usage {:input-tokens 2 :output-tokens 3}
+                                         {:input-tokens 1 :output-tokens 4})
+                => {:input-tokens 3 :output-tokens 7}))
 
 (specification "drive-turn!: unbounded :max_tokens continuation stitches one terminal Response"
-  (let [captured (atom [])
-        backend  (mock-backend [(max-tokens-response "Hel")
-                                 (max-tokens-response "lo wor")
-                                 (end-turn-response "ld")])
-        result   (#'llmc/drive-turn! (drive-ctx backend captured)
-                                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
-    (assertions
-     "the merged turn is terminal, not truncated"
-     (get-in result [:ok :stop-reason]) => :end_turn
-     "text from every segment is stitched into one block"
-     (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
-     => "Hello world"
-     "usage is summed across all three segments (2+2+1)"
-     (get-in result [:ok :usage :output-tokens]) => 5
-     "a :llm/continuation transcript event fired per continuation"
-     (count (filter #(= :llm/continuation (:event %)) @captured)) => 2)))
+               (let [captured (atom [])
+                     backend  (mock-backend [(max-tokens-response "Hel")
+                                             (max-tokens-response "lo wor")
+                                             (end-turn-response "ld")])
+                     result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                                                  {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                 (assertions
+                  "the merged turn is terminal, not truncated"
+                  (get-in result [:ok :stop-reason]) => :end_turn
+                  "text from every segment is stitched into one block"
+                  (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+                  => "Hello world"
+                  "usage is summed across all three segments (2+2+1)"
+                  (get-in result [:ok :usage :output-tokens]) => 5
+                  "a :llm/continuation transcript event fired per continuation"
+                  (count (filter #(= :llm/continuation (:event %)) @captured)) => 2)))
 
 (specification "drive-turn!: a no-forward-progress continuation aborts instead of looping"
-  (let [captured (atom [])
-        backend  (mock-backend [(max-tokens-response "X")
-                                 {:stop-reason :max_tokens :content []
-                                  :usage {} :model "mock"}])
-        result   (#'llmc/drive-turn! (drive-ctx backend captured)
-                                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
-    (assertions
-     "stuck model surfaces :no-progress (handler maps it to :error.llm.unexpected-stop)"
-     (boolean (:no-progress result)) => true
-     (contains? result :ok) => false)))
+               (let [captured (atom [])
+                     backend  (mock-backend [(max-tokens-response "X")
+                                             {:stop-reason :max_tokens :content []
+                                              :usage {} :model "mock"}])
+                     result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                                                  {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                 (assertions
+                  "stuck model surfaces :no-progress (handler maps it to :error.llm.unexpected-stop)"
+                  (boolean (:no-progress result)) => true
+                  (contains? result :ok) => false)))
 
 (specification "try-models!: transient category is retried (bounded) then succeeds"
-  (let [captured      (atom [])
-        [backend cnt] (flaky-backend 2 #(llm/llm-error :rate-limited "429" {})
-                                      (end-turn-response "ok"))
-        result        (#'llmc/try-models!
-                       {:backend backend
-                        :transcript-fn (fn [ev] (swap! captured conj ev))
-                        :worker-state (atom :running)
-                        :model-status (atom {})
-                        :default-models ["mock"]
-                        :parent-ctx {:invokeid "iv"}}
-                       {:resilience {:max-retries 3 :backoff-ms 1}}
-                       [{:role :user :content [{:type :text :text "hi"}]}]
-                       [])]
-    (assertions
-     "succeeds after the bounded retries"
-     (get-in result [:ok :stop-reason]) => :end_turn
-     "two failures + one success = three calls"
-     @cnt => 3
-     "each retry emitted a :llm/retry transcript event"
-     (count (filter #(= :llm/retry (:event %)) @captured)) => 2)))
+               (let [captured      (atom [])
+                     [backend cnt] (flaky-backend 2 #(llm/llm-error :rate-limited "429" {})
+                                                  (end-turn-response "ok"))
+                     result        (#'llmc/try-models!
+                                    {:backend backend
+                                     :transcript-fn (fn [ev] (swap! captured conj ev))
+                                     :worker-state (atom :running)
+                                     :model-status (atom {})
+                                     :default-models ["mock"]
+                                     :parent-ctx {:invokeid "iv"}}
+                                    {:resilience {:max-retries 3 :backoff-ms 1}}
+                                    [{:role :user :content [{:type :text :text "hi"}]}]
+                                    [])]
+                 (assertions
+                  "succeeds after the bounded retries"
+                  (get-in result [:ok :stop-reason]) => :end_turn
+                  "two failures + one success = three calls"
+                  @cnt => 3
+                  "each retry emitted a :llm/retry transcript event"
+                  (count (filter #(= :llm/retry (:event %)) @captured)) => 2)))
 
 (specification "try-models!: terminal category fails fast and is never retried"
-  (let [captured      (atom [])
-        [backend cnt] (flaky-backend 99 #(llm/llm-error :auth "401" {})
-                                      (end-turn-response "never"))
-        result        (#'llmc/try-models!
-                       {:backend backend
-                        :transcript-fn (fn [ev] (swap! captured conj ev))
-                        :worker-state (atom :running)
-                        :model-status (atom {})
-                        :default-models ["mock"]
-                        :parent-ctx {:invokeid "iv"}}
-                       {:resilience {:max-retries 3 :backoff-ms 1}}
-                       [{:role :user :content [{:type :text :text "hi"}]}]
-                       [])]
-    (assertions
-     "exhausted immediately (auth is terminal)"
-     (boolean (:exhausted result)) => true
-     "called exactly once — no retry"
-     @cnt => 1
-     "no :llm/retry transcript event"
-     (count (filter #(= :llm/retry (:event %)) @captured)) => 0)))
+               (let [captured      (atom [])
+                     [backend cnt] (flaky-backend 99 #(llm/llm-error :auth "401" {})
+                                                  (end-turn-response "never"))
+                     result        (#'llmc/try-models!
+                                    {:backend backend
+                                     :transcript-fn (fn [ev] (swap! captured conj ev))
+                                     :worker-state (atom :running)
+                                     :model-status (atom {})
+                                     :default-models ["mock"]
+                                     :parent-ctx {:invokeid "iv"}}
+                                    {:resilience {:max-retries 3 :backoff-ms 1}}
+                                    [{:role :user :content [{:type :text :text "hi"}]}]
+                                    [])]
+                 (assertions
+                  "exhausted immediately (auth is terminal)"
+                  (boolean (:exhausted result)) => true
+                  "called exactly once — no retry"
+                  @cnt => 1
+                  "no :llm/retry transcript event"
+                  (count (filter #(= :llm/retry (:event %)) @captured)) => 0)))

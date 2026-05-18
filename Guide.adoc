@@ -554,6 +554,15 @@ makes `tell-llm` work).
   maps. Each becomes a synthetic Anthropic tool named `event__<encoded>`
   with `:input-schema` derived from `:data-schema`.
 
+`:chart-tools`::
+  Optional vector pulling tools from *service regions* elsewhere in the
+  chart. Each entry is `{:owner <state-id> :as <kw-prefix>?}`. Tools
+  declared by the named owner state are added to this conversation's
+  palette as ordinary Anthropic tools, named `region__<encoded>` (or
+  `region__<as>__<encoded>` when aliased). The palette is **snapshotted
+  at conversation start** — tools registered after that point are not
+  callable. See <<service-regions>> for the full pattern.
+
 `:initial-user-message`::
   Optional string. If present, the worker starts in `:running` and sends
   this as the first user turn. Otherwise it starts in `:awaiting-user` and
@@ -1570,6 +1579,319 @@ from `<session-dir>/artifacts/<name>`:
 
 Latest write wins. Keep history by picking versioned filenames
 (`(str "draft-" iteration ".md")`).
+
+[[service-regions]]
+== Service regions: subcharts as tools
+
+The multi-agent patterns above route _messages_ between LLM conversations.
+Sometimes you want the opposite: one conversation calls into another part
+of the chart as if it were an ordinary tool, gets a synchronous-looking
+reply, and continues. The callee is a **service region** — a chart region
+that owns stateful resources (a REPL, a cached connection, an indexer) and
+declares which of its states handle which tool keywords.
+
+The chart's event bus is the wire. The framework is a thin layer over it:
+`escapement.chart.service` (≈3 public fns) plus one new
+`:llm-conversation` param (`:chart-tools`).
+
+=== The whole pattern in one chart
+
+[source,clojure]
+----
+(require '[escapement.chart.service :as service]
+         '[escapement.chart.helpers :as h])
+
+(state {:id :run :initial :work}
+  (parallel {:id :work}
+
+    ;; --- the service region -----------------------------------------------
+    (state {:id :repl-A :initial :idle}
+      (on-entry {} (service/register-tool!
+                     {:tool         :repl/eval
+                      :description  "Evaluate a Clojure form."
+                      :input-schema [:map [:expr :string]]}))
+      (on-exit  {} (service/unregister-tool! :repl/eval))
+
+      (state {:id :idle}
+        ;; A handler that runs while we're in :idle.
+        (h/handle-tool :repl/eval
+          (fn [_env _req] {:result "not running" :is-error true}))))
+
+    ;; --- the consumer conversation ----------------------------------------
+    (state {:id :consumer :initial :running}
+      (state {:id :running}
+        (h/llm-conversation
+          {:id        "coder"
+           :params-fn (fn [_ _]
+                        {:initial-user-message "evaluate (+ 1 2)"
+                         :chart-tools          [{:owner :repl-A}]})})
+        (transition {:event :llm.idle :target :done}))
+      (final {:id :done})))
+
+  (transition {:event :done.state.work :target :finished})
+  (final {:id :finished}))
+----
+
+What happens when the LLM in `coder` decides to call `region__repl_eval`:
+
+. The worker fires `:repl/eval` on the chart's event queue, carrying a
+  correlation id and the routing payload.
+. The engine routes the event to `:repl-A`'s `:idle` substate, where
+  `handle-tool` has installed a transition.
+. The handler returns `{:result "not running" :is-error true}`. The helper
+  fires an `:escapement.tool/reply` event back.
+. The worker, parked in a poll loop, drains the reply and emits the
+  matching `tool_result` block on its next assistant turn.
+
+The LLM sees a normal `tool_use → tool_result` exchange. No `:end_turn`
+back-and-forth in the consumer's transcript for the service's work.
+
+=== `service/register-tool!`
+
+Returns a `script` element. Place it on the service region's `on-entry`:
+
+[source,clojure]
+----
+(on-entry {} (service/register-tool!
+               {:tool         :repl/eval
+                :description  "Evaluate a Clojure form. Input :expr (string)."
+                :input-schema [:map [:expr :string]]}))
+----
+
+* `:tool` — the chart event the LLM call fires.
+* `:description` — exposed to the LLM verbatim.
+* `:input-schema` — a Malli schema. Must be _open_ (no `{:closed true}`)
+  so the framework can merge an implicit optional `:timeout-ms` field;
+  closed schemas error at registration time.
+
+The `:owner` is read from the enclosing state (`::sc/context-element-id`)
+at runtime — you never pass it. Two sibling regions MAY register the same
+tool keyword; consumers disambiguate with `:as`. A single owner
+re-registering the same keyword with a _different_ declaration is a hard
+error.
+
+=== `service/unregister-tool!`
+
+Returns a `script` element. Place it on `on-exit` if you want to scrub the
+entry when the region leaves:
+
+[source,clojure]
+----
+(on-exit {} (service/unregister-tool! :repl/eval))
+----
+
+The chart-level registry is scoped to one engine run, so stale entries
+only matter if a later sibling conversation might mistake an exited
+region's tools for available ones.
+
+=== `service/handle` / `h/handle-tool`
+
+Produces a `transition` element bound to the tool event, with the
+handler-fn wired as the transition's action:
+
+[source,clojure]
+----
+(state {:id :running}
+  (h/handle-tool :repl/eval
+    (fn [env {:keys [data reply-id reply-to timeout-ms]}]
+      {:result (str (eval-form (:expr data)))
+       :is-error false})))
+----
+
+The handler receives `[env request]`. The `request` map carries:
+
+* `:data` — the LLM-supplied input, with framework-injected keys stripped.
+* `:reply-id` — correlation id (you only need this for the slow-work
+  pattern below).
+* `:reply-to` — caller invokeid string (ditto).
+* `:timeout-ms` — the deadline the caller is enforcing.
+
+Return value:
+
+* `{:result <string> :is-error <bool>}` — replies synchronously.
+* `nil` — promises a deferred reply via `service/post-reply` (see below).
+* a throw — surfaced as `{:result "handler threw: <msg>" :is-error true}`.
+
+The owner is derived from chart structure at call time — the transition is
+tagged at build time with a synthetic id, and the cond walks
+`::sc/elements-by-id [tid :parent]` to find the enclosing service-region
+state, comparing it against the request's `:escapement.tool/owner`. So
+`(h/handle-tool ...)` is identical in single-owner and multi-owner charts;
+the author never names the state-id twice.
+
+The helper `h/handle-tool` is a thin alias for `service/handle`. Use
+either; the codebase prefers `h/handle-tool` for symmetry with other
+`h/*` helpers.
+
+=== Consumer side: `:chart-tools`
+
+The consumer conversation opts in via its `params-fn`:
+
+[source,clojure]
+----
+{:chart-tools [{:owner :repl-A}]                         ;; pull from one region
+ ;; or, with aliasing for multi-region scenarios:
+ :chart-tools [{:owner :repl-A :as :py}
+               {:owner :repl-B :as :clj}]}
+----
+
+The palette is built by walking the registry at conversation start. Each
+tool becomes an Anthropic tool named `region__<encoded>`. With `:as
+:py`, `:repl/eval` becomes `region__py__repl_eval` on the LLM side and
+the consumer can call both `:py` and `:clj` variants in the same turn
+without collision.
+
+The LLM may include `:timeout-ms` in any region-tool call to override the
+default (30s). The framework merges that field into every region-tool's
+JSON schema automatically.
+
+[CAUTION]
+====
+The palette is a **snapshot** taken at conversation start. Tools
+registered _after_ that point are NOT in the consumer's palette and will
+fall through to the worker's "Unknown tool" branch. If a service region
+needs to add tools dynamically, the consumer must be started after the
+registration completes (the existing readiness-barrier pattern: have the
+service fire an `:x/ready` event the consumer's parent state waits for).
+====
+
+=== Substate routing (`:idle` / `:running` / `:busy`)
+
+The handler installed by `h/handle-tool` is a transition on the
+*enclosing* state. SCXML transition precedence means a substate's handler
+overrides the parent's — the framework rides this for free.
+
+[source,clojure]
+----
+(state {:id :repl-A :initial :idle}
+  (on-entry {} (service/register-tool!
+                 {:tool         :repl/eval
+                  :description  "Evaluate."
+                  :input-schema [:map [:expr :string]]}))
+
+  (state {:id :idle}
+    (h/handle-tool :repl/eval
+      (fn [_ _] {:result "not started; call :repl/start first"
+                 :is-error true})))
+
+  (state {:id :running}
+    (h/handle-tool :repl/eval real-eval-fn)))
+----
+
+A call to `:repl/eval` while in `:idle` gets the "not started" reply; the
+same call after a transition into `:running` runs the real handler. No
+framework dispatch table — the chart's state machine IS the dispatch
+table.
+
+[WARNING]
+====
+**Use `:type :internal` for transitions between substates of a service
+region.** Per SCXML §3.13, `findLCCA` excludes the source state itself,
+so an _external_ transition `:source :repl-A → :target <child-of-:repl-A>`
+has LCCA = `:repl-A`'s parent. If `:repl-A` is one branch of a
+`<parallel>`, the external transition will exit and re-enter the entire
+parallel — including sibling branches running the consumer LLM
+conversation, which restart from scratch.
+
+The fix is one keyword: `(transition {:event :repl/start
+:target :running :type :internal})`. Place it on the compound
+service-region state; the parallel sibling is undisturbed.
+====
+
+=== Slow / async work — `service/post-reply`
+
+A synchronous handler that needs to do slow work blocks the chart's
+microstep, which serializes other event processing. The pattern is to
+return `nil`, kick off the work on another thread, and call
+`service/post-reply` from that thread when the result is ready:
+
+[source,clojure]
+----
+(state {:id :running}
+  (h/handle-tool :repl/eval
+    (fn [env {:keys [reply-id reply-to data]}]
+      (future
+        (let [result (slow-eval (:expr data))]
+          (service/post-reply env
+                              {:reply-id reply-id
+                               :reply-to reply-to
+                               :result   (str result)
+                               :is-error false})))
+      ;; nil = "the reply is in the mail"
+      nil)))
+----
+
+The consumer's worker is parked in a poll loop with the caller's
+`:timeout-ms`. As long as `post-reply` fires inside that window, the
+worker receives it like any synchronous reply. If the deadline passes
+first, the worker emits an is-error `tool_result` with "timed out after
+Xms" and continues; a `post-reply` that arrives later is logged on the
+transcript as `:llm/region-tool-late-reply` and dropped.
+
+For "busy, retry shortly" behavior under concurrent calls to the same
+slow tool, model it as a substate the region transitions into for the
+duration of the work, with its own handler returning `{:result "busy,
+retry shortly" :is-error true}`. The chart's state IS the policy.
+
+=== `escapement.chart.repl-service` — a worked drop-in
+
+`escapement.chart.repl-service/repl-service-region` packages the
+pattern for a Clojure REPL service:
+
+[source,clojure]
+----
+(require '[escapement.chart.repl-service :as repl-svc])
+
+(state {:id :run :initial :work}
+  (parallel {:id :work}
+    (repl-svc/repl-service-region
+      {:id          :repl-mgr
+       :project-dir "/path/to/project"})         ;; optional auto-discovery
+    (state {:id :consumer :initial :running}
+      (state {:id :running}
+        (h/llm-conversation
+          {:id        "coder"
+           :params-fn (fn [_ _]
+                        {:initial-user-message "Refactor foo.clj"
+                         :chart-tools          [{:owner :repl-mgr}]})})))))
+----
+
+Defaults to in-process SCI eval via the `:repl/eval` builtin tool. Pass
+`:eval-fn` to talk to a real external nREPL; pass `:status-fn` to
+register `:repl/status` (the helper has no honest default for status —
+omit if you don't have one).
+
+=== The wire (for debugging)
+
+Region-tool calls travel as two chart events. You'll see them on the
+transcript when something goes wrong:
+
+Request, posted by the consumer worker on a `tool_use`::
++
+[source,clojure]
+----
+{:event :repl/eval
+ :data  {:expr "(+ 1 2)"
+         :escapement.tool/reply-id   "tr_abc"     ;; correlation
+         :escapement.tool/reply-to   "coder"      ;; caller invokeid
+         :escapement.tool/owner      :repl-A      ;; chosen owner
+         :escapement.tool/timeout-ms 30000}}
+----
+
+Reply, fired by the handler helper::
++
+[source,clojure]
+----
+{:event :escapement.tool/reply
+ :data  {:escapement.tool/reply-id "tr_abc"
+         :escapement.tool/reply-to "coder"
+         :result   "3"
+         :is-error false}}
+----
+
+Replies are hard-routed by `:reply-to`, not broadcast: the conversation
+processor's `forward-event!` only delivers when the calling invocation's
+own invokeid equals `:reply-to`.
 
 [[backends]]
 == LLM backends
