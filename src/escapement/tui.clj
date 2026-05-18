@@ -1148,7 +1148,14 @@
             :stop
 
             (= :ctrl-c k)
-            (do (send-ui-event! h :ui.quit) :stop)
+            ;; Force-quit. Send :ui.quit on the off-chance the chart wants
+            ;; to react, but don't wait: the runner's quiescent loop drops
+            ;; events without transitions, so cooperative shutdown isn't
+            ;; reliable. Restore the terminal directly, then System/exit so
+            ;; any shutdown hooks (transcript flush, etc.) still run.
+            (do (send-ui-event! h :ui.quit)
+                (stop! h)
+                (System/exit 130))
 
             ;; Modal active: a small set of keys is intercepted FIRST so the
             ;; user can still pop the inspector OVER the modal and scroll the
@@ -1557,14 +1564,13 @@
           (stop-viz))
         (catch Throwable _ nil))
       (try
-        (when-let [^Thread t (:input-thread h)] (.interrupt t))
+        (when-let [^Thread t (:input-thread h)]
+          (when (not= t (Thread/currentThread)) (.interrupt t)))
         (catch Throwable _ nil))
       (finally
+        ;; Restore terminal state FIRST, while JLine still holds the tty —
+        ;; emitting after .close drops the bytes on tmux's per-pane state.
         (try
-          ;; Emit the restore sequence FIRST, while JLine is still live.
-          ;; Show cursor both before and after leaving the alt screen so
-          ;; per-screen-tracking terminals (Apple Terminal) and tmux
-          ;; pane state both end up correct.
           (emit! (str reset-attrs-s show-cursor-s alt-screen-off-s show-cursor-s "\n"))
           (catch Throwable _ nil))
         (try
