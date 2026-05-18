@@ -1148,11 +1148,6 @@
             :stop
 
             (= :ctrl-c k)
-            ;; Force-quit. Send :ui.quit on the off-chance the chart wants
-            ;; to react, but don't wait: the runner's quiescent loop drops
-            ;; events without transitions, so cooperative shutdown isn't
-            ;; reliable. Restore the terminal directly, then System/exit so
-            ;; any shutdown hooks (transcript flush, etc.) still run.
             (do (send-ui-event! h :ui.quit)
                 (stop! h)
                 (System/exit 130))
@@ -1544,17 +1539,33 @@
                 (let [s @(:state h)]
                   (or (:modal s) (:pending-modal s))))))
 
+(defn- run-tput-cnorm!
+  "Shell out to `tput cnorm` to restore the cursor. Necessary because
+   different `TERM`s need different escape sequences (e.g. tmux-256color
+   needs `\\e[34h\\e[?25h`, xterm-256color needs `\\e[?12l\\e[?25h`).
+   Terminfo knows; we read it via tput so we don't have to maintain a
+   table of TERM→bytes. Output is inherited (writes go straight to the
+   controlling tty) and the call is fire-and-forget."
+  []
+  (try
+    (-> (ProcessBuilder.
+         ^"[Ljava.lang.String;"
+         (into-array String ["sh" "-c" "tput cnorm 2>/dev/null"]))
+        (.inheritIO)
+        (.start)
+        (.waitFor))
+    (catch Throwable _ nil)))
+
 (defn stop!
   "Restore the terminal. Idempotent — safe to call repeatedly and from
    both the normal exit path and a process shutdown hook (Ctrl-C, SIGTERM).
 
-   The restoration runs in a `finally` so the user gets their cursor and
+   Restoration runs in a `finally` so the user gets their cursor and
    alt-screen state back even if viz-server teardown or thread interrupt
-   throws past its catch. Critically, the restore-emit happens BEFORE
-   JLine's `.close`: under tmux (and likely other multiplexers) the
-   show-cursor sequence must reach the terminal while JLine still owns
-   the tty handle, or the multiplexer's pane state remains 'cursor
-   hidden' on the next refresh."
+   throws past its catch. We emit our ANSI restore sequence while JLine
+   still owns the tty AND shell out to `tput cnorm` afterwards — the
+   `tput` call uses terminfo, which is the only thing that reliably
+   wakes up tmux's per-pane cursor visibility tracking."
   [h]
   (when (and (:enabled? h)
              (compare-and-set! (:stopped? h) false true))
@@ -1568,16 +1579,22 @@
           (when (not= t (Thread/currentThread)) (.interrupt t)))
         (catch Throwable _ nil))
       (finally
-        ;; Restore terminal state FIRST, while JLine still holds the tty —
-        ;; emitting after .close drops the bytes on tmux's per-pane state.
+        ;; First, leave alt screen via stderr while JLine still owns the
+        ;; tty so the shell scrollback is restored cleanly.
         (try
-          (emit! (str reset-attrs-s show-cursor-s alt-screen-off-s show-cursor-s "\n"))
+          (emit! (str reset-attrs-s alt-screen-off-s "\n"))
           (catch Throwable _ nil))
         (try
           (when (and (:terminal h) @(:raw-mode? h))
             (when-let [^Terminal term (:terminal h)]
               (.close term)))
-          (catch Throwable _ nil)))))
+          (catch Throwable _ nil))
+        ;; Finally: shell out to tput cnorm. This is the only path that
+        ;; reliably restores the cursor under tmux — terminfo emits the
+        ;; right \e[34h-prefixed sequence for the active TERM, and the
+        ;; separate-process write to the inherited tty bypasses any JVM
+        ;; stdio state JLine may have left behind.
+        (run-tput-cnorm!))))
   h)
 
 ;; ---------------------------------------------------------------------------
