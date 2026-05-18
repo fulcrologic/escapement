@@ -46,8 +46,7 @@
                   {:id        "writer"
                    :params-fn (fn [_env _data]
                                 {:system               writer-system
-                                 :initial-user-message "Write a haiku about debugging a statechart at midnight."
-                                 :max-tokens           200})})
+                                 :initial-user-message "Write a haiku about debugging a statechart at midnight."})})
                  (transition {:event :llm.idle :target :critiquing}
                              (h/capture-llm-output {:as "writer.md"})))
 
@@ -61,8 +60,7 @@
                                  (h/render-template
                                   (str "Please critique the following haiku:\n\n"
                                        "{{writer.md}}\n")
-                                  env)
-                                 :max-tokens           400})})
+                                  env)})})
                  (transition {:event :llm.idle :target :done}
                              (h/capture-llm-output {:as "critic.md"})))
 

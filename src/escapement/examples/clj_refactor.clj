@@ -63,8 +63,7 @@
                                  :initial-user-message
                                  (str "Rename the function `foo` to `bar` "
                                       "across `src/example.clj` and update "
-                                      "its call sites.")
-                                 :max-tokens   1500})})
+                                      "its call sites.")})})
                  (transition {:event :done :target :finished}
                              (script {:expr (fn [_env data]
                                               [(ops/assign :summary

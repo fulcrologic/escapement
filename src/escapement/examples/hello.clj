@@ -28,8 +28,7 @@
                                  :real-tools           []
                                  :allowed-events       [{:event       :done
                                                          :data-schema [:map [:greeting :string]]}]
-                                 :initial-user-message "Say hello."
-                                 :max-tokens           120})})
+                                 :initial-user-message "Say hello."})})
                  (transition {:event :done :target :finished}
                              (script {:expr (fn [_env data]
                                               [(ops/assign :greeting

@@ -18,7 +18,9 @@
    [clojure.string :as str]
    [com.fulcrologic.guardrails.malli.core :refer [>defn => ?]]
    [escapement.llm.protocol :as proto]
-   [escapement.llm.types :as types]))
+   [escapement.llm.types :as types])
+  (:import
+   (java.io BufferedReader InputStreamReader)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Translation: our Request -> Anthropic JSON
@@ -188,6 +190,110 @@
                             (get parsed "role") (assoc :role (get parsed "role")))})
 
 ;;; ---------------------------------------------------------------------------
+;;; Streaming (SSE) — Messages API with "stream": true
+;;;
+;;; Wire shape: a sequence of SSE events. We only read `data:` lines (JSON);
+;;; `event:` lines are redundant with the JSON `type`. Blocks are rebuilt by
+;;; index from content_block_start/_delta/_stop; the final assembly reuses the
+;;; same `wire->block` / `wire->usage` translators as the non-streaming path,
+;;; so a streamed turn yields a byte-identical Response to a buffered one.
+
+(defn stream-acc-init []
+  {:blocks (sorted-map) :model nil :usage {} :stop-reason nil})
+
+(defn- block-builder [{:strs [type] :as cb}]
+  (case type
+    "text"              {:type "text" :text (or (get cb "text") "")}
+    "thinking"          {:type "thinking" :thinking (or (get cb "thinking") "") :signature ""}
+    "redacted_thinking" {:type "redacted_thinking" :data (get cb "data")}
+    "tool_use"          {:type "tool_use" :id (get cb "id") :name (get cb "name")
+                         :partial-json ""}
+    {:type (or type "text") :text ""}))
+
+(defn- builder->wire [b]
+  (case (:type b)
+    "text"              {"type" "text" "text" (:text b)}
+    "thinking"          (cond-> {"type" "thinking" "thinking" (:thinking b)}
+                          (seq (:signature b)) (assoc "signature" (:signature b)))
+    "redacted_thinking" {"type" "redacted_thinking" "data" (:data b)}
+    "tool_use"          {"type" "tool_use" "id" (:id b) "name" (:name b)
+                         "input" (let [pj (:partial-json b)]
+                                   (if (seq pj)
+                                     (try (json/parse-string pj) (catch Throwable _ {}))
+                                     {}))}
+    {"type" "text" "text" (or (:text b) "")}))
+
+(defn stream-acc-step
+  "Fold one parsed SSE `data:` payload into accumulator `acc`. Calls
+   `(on-delta {:type :text-delta|:thinking-delta :text s})` for incremental
+   text/thinking. Pure except for the supplied callback."
+  [acc {:strs [type index] :as ev} on-delta]
+  (case type
+    "message_start"
+    (let [m (get ev "message")]
+      (-> acc
+          (assoc :model (get m "model"))
+          (update :usage merge (wire->usage (get m "usage" {})))))
+
+    "content_block_start"
+    (assoc-in acc [:blocks index] (block-builder (get ev "content_block")))
+
+    "content_block_delta"
+    (let [d (get ev "delta")]
+      (case (get d "type")
+        "text_delta"
+        (do (when on-delta (on-delta {:type :text-delta :text (get d "text")}))
+            (update-in acc [:blocks index :text] str (get d "text")))
+        "thinking_delta"
+        (do (when on-delta (on-delta {:type :thinking-delta :text (get d "thinking")}))
+            (update-in acc [:blocks index :thinking] str (get d "thinking")))
+        "signature_delta"
+        (update-in acc [:blocks index :signature] str (get d "signature"))
+        "input_json_delta"
+        (update-in acc [:blocks index :partial-json] str (get d "partial_json"))
+        acc))
+
+    "message_delta"
+    (-> acc
+        (cond-> (get-in ev ["delta" "stop_reason"])
+          (assoc :stop-reason (get-in ev ["delta" "stop_reason"])))
+        (update :usage merge (wire->usage (get ev "usage" {}))))
+
+    "error"
+    (throw (ex-info "Anthropic SSE stream reported an error"
+                    {:error (get ev "error")}))
+
+    ;; content_block_stop, message_stop, ping, unknown — no-op
+    acc))
+
+(defn stream-acc-finalize
+  "Build the final Response map from a completed accumulator."
+  [acc request-model]
+  {:stop-reason      (parse-stop-reason (:stop-reason acc))
+   :content          (mapv (comp wire->block builder->wire)
+                            (vals (:blocks acc)))
+   :usage            (:usage acc)
+   :model            (or (:model acc) request-model)
+   :backend-metadata {:backend :api :streamed true}})
+
+(defn parse-anthropic-sse!
+  "Drive an SSE `BufferedReader` to completion, returning the final Response.
+   Invokes `on-delta` for each incremental text/thinking chunk."
+  [^BufferedReader reader request-model on-delta]
+  (loop [acc (stream-acc-init)]
+    (let [line (.readLine reader)]
+      (if (nil? line)
+        (stream-acc-finalize acc request-model)
+        (if (str/starts-with? line "data:")
+          (let [data (str/trim (subs line 5))]
+            (if (or (empty? data) (= data "[DONE]"))
+              (recur acc)
+              (recur (stream-acc-step acc (json/parse-string data)
+                                      (fn [d] (try (when on-delta (on-delta d))
+                                                   (catch Throwable _ nil)))))))
+          (recur acc))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; HTTP
 
 (defn- mask-key [k]
@@ -236,6 +342,32 @@
         (throw (ex-info "Failed to parse API JSON response"
                         {:body body :cause (.getMessage t)}))))))
 
+(defn- stream-messages! [{:keys [base-url api-key auth-mode anthropic-version
+                                 extra-headers http-timeout-ms]} body-map
+                          request-model on-delta]
+  (let [url     (str base-url "/v1/messages")
+        headers (merge {"Content-Type" "application/json"
+                        "Accept"       "text/event-stream"}
+                       (auth-headers {:auth-mode         auth-mode
+                                      :base-url          base-url
+                                      :api-key           api-key
+                                      :anthropic-version anthropic-version})
+                       extra-headers)
+        {:keys [status body]} (http/post url
+                                         {:headers headers
+                                          :body    (json/generate-string
+                                                    (assoc body-map "stream" true))
+                                          :as      :stream
+                                          :timeout (or http-timeout-ms 60000)
+                                          :throw   false})]
+    (when-not (and (>= status 200) (< status 300))
+      (throw (ex-info (str "API error: HTTP " status)
+                      {:status status
+                       :body   (try (slurp body) (catch Throwable _ ""))
+                       :url    url})))
+    (with-open [reader (BufferedReader. (InputStreamReader. body "UTF-8"))]
+      (parse-anthropic-sse! reader request-model on-delta))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Backend record
 
@@ -265,6 +397,33 @@
         (when-let [err (types/validate-response response)]
           (throw (ex-info "API produced an invalid response"
                           {:errors err :response response :raw parsed})))
+        response)))
+
+  proto/StreamingLLMBackend
+  (stream-turn [_ request on-delta]
+    (let [request (cond-> request
+                    (and (nil? (:model request)) (:default-model opts))
+                    (assoc :model (:default-model opts)))]
+      (when-let [err (types/validate-request request)]
+        (throw (ex-info "Invalid LLM request" {:errors err :request request})))
+      (let [transcript-fn (:transcript-fn opts)
+            body-map      (request->anthropic-json request)
+            _             (when transcript-fn
+                            (transcript-fn {:event    :llm/request
+                                            :backend  :api
+                                            :base-url (:base-url opts)
+                                            :api-key  (mask-key (:api-key opts))
+                                            :model    (:model request)
+                                            :stream   true
+                                            :body     body-map}))
+            response      (stream-messages! opts body-map (:model request) on-delta)]
+        (when transcript-fn
+          (transcript-fn {:event    :llm/response
+                          :backend  :api
+                          :response response}))
+        (when-let [err (types/validate-response response)]
+          (throw (ex-info "API produced an invalid response"
+                          {:errors err :response response})))
         response))))
 
 (>defn new-backend

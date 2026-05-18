@@ -38,8 +38,7 @@
                                                   :allowed-events       [{:event       :translated
                                                                           :data-schema [:map [:text :string]]}]
                                                   :initial-user-message (str "Translate to French: "
-                                                                             (pr-str (:phrase data "Hello, world.")))
-                                                  :max-tokens           120})})
+                                                                             (pr-str (:phrase data "Hello, world.")))})})
                                   (transition {:event :translated :target :t-done}
                                               (script {:expr (fn [_env data]
                                                                [(ops/assign :translation
@@ -55,8 +54,7 @@
                                                   :allowed-events       [{:event       :summarized
                                                                           :data-schema [:map [:text :string]]}]
                                                   :initial-user-message (str "Summarize this passage: "
-                                                                             (pr-str (:passage data "Once upon a time there was a cat.")))
-                                                  :max-tokens           160})})
+                                                                             (pr-str (:passage data "Once upon a time there was a cat.")))})})
                                   (transition {:event :summarized :target :s-done}
                                               (script {:expr (fn [_env data]
                                                                [(ops/assign :summary

@@ -3,6 +3,22 @@
 ## [unreleased] — feat/llm-catalog-and-merge-playbook — 2026-05-18
 
 ### Added
+- `max_tokens` is now purely catalog-driven and is no longer a chart
+  concern. The per-turn output cap is always the resolved model's
+  `catalog/max-output-tokens` (models-api.json `limit.output`); models the
+  catalog doesn't know fall back to the backend's wire default. The
+  `:max-tokens` param is removed from `llm-conversation` params (dropped
+  from all bundled example charts); it remains only on the low-level
+  `escapement.llm.types/Request` for backend wire translation.
+- Token streaming. New optional `escapement.llm.protocol/StreamingLLMBackend`
+  (`stream-turn`) plus `streaming?` / `send-turn*` capability helpers. The
+  Anthropic backend implements SSE streaming (`"stream": true`), rebuilding a
+  byte-identical Response from `content_block_*` events. `llm-conversation`
+  honors a `:stream?` param: when set and the backend supports it, incremental
+  output is emitted as `:llm/delta` transcript events
+  (`:text-delta` / `:thinking-delta`) for relay to a UI; chart semantics and
+  the final Response are unchanged, and it is a no-op on non-streaming
+  backends.
 - Image attachments in the LLM request protocol: a new `:image` content
   block (`escapement.llm.types/ImageBlock`) accepted on `:user` messages,
   with `:base64` (inline data + media-type) or `:url` sources. The Anthropic

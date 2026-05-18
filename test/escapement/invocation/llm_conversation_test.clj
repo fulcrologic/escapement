@@ -90,6 +90,16 @@
 ;; #1: Happy path, one event-tool fired
 ;; ---------------------------------------------------------------------------
 
+(specification "effective-max-tokens is purely catalog-driven (models-api.json limit.output)"
+               (assertions
+                "resolves the model's catalog output cap"
+                (llmc/effective-max-tokens "claude-sonnet-4-7")        => 64000
+                (llmc/effective-max-tokens "claude-3-sonnet-20240229") => 4096
+                "unknown model → nil (backend wire default applies)"
+                (llmc/effective-max-tokens "totally-unknown-model")   => nil
+                "nil model (backend default pick) → nil"
+                (llmc/effective-max-tokens nil)                       => nil))
+
 (specification "happy path: single event-tool fired then end_turn"
                (let [captured (atom [])
                      backend  (mock-backend

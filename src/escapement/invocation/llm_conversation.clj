@@ -201,7 +201,11 @@
      * `:messages` — required; the running conversation
      * `:tools` — vector of tool definitions
      * `:model` — model id string (e.g. `\"claude-opus-4-7\"`)
-     * `:max-tokens` — int; default 4096 at the backend if absent
+     * `:max-tokens` — int output cap. NOT a chart param: the invocation
+                       supplies the resolved model's catalog
+                       `max-output-tokens` (models-api.json `limit.output`).
+                       Falls back to the backend's wire default for models
+                       the catalog doesn't know.
      * `:temperature` — number in (0,1]
      * `:top-p` — number in (0,1]
      * `:top-k` — pos-int
@@ -269,6 +273,15 @@
       (some? tool-choice)  (assoc :tool-choice tool-choice)
       (seq metadata)       (assoc :metadata metadata)
       conv-id              (assoc :conversation/id conv-id))))
+
+(defn effective-max-tokens
+  "The per-turn output cap for `model`, taken purely from the catalog's
+   `max-output-tokens` (sourced from models-api.json `limit.output`).
+   `max_tokens` is an API/model fact, not a chart concern: charts never set
+   it. Returns nil for models the catalog doesn't know, in which case the
+   backend's own hard default applies."
+  [model]
+  (some-> model catalog/max-output-tokens))
 
 ;; ---------------------------------------------------------------------------
 ;; Worker loop
@@ -473,7 +486,7 @@
                        :messages             messages
                        :tools                tools
                        :model                m
-                       :max-tokens           (:max-tokens params)
+                       :max-tokens           (effective-max-tokens m)
                        :temperature          (:temperature params)
                        :top-p                (:top-p params)
                        :top-k                (:top-k params)
@@ -492,7 +505,14 @@
                                                    :system-preview (truncate-for-transcript (:system params))
                                                    :invokeid (:invokeid parent-ctx)}
                                             m (assoc :model m))})
-            response (try (llm/send-turn backend request)
+            on-delta (when (:stream? params)
+                       (fn [d]
+                         (transcript! transcript-fn
+                                      {:event :llm/delta :ts (now-ms)
+                                       :data  (assoc d
+                                                     :model    m
+                                                     :invokeid (:invokeid parent-ctx))})))
+            response (try (llm/send-turn* backend request on-delta)
                           (catch Throwable t {:_throw t}))]
         (cond
           (and (:_throw response)
@@ -640,6 +660,16 @@
      :max-conversation-duration-ms — wall-clock budget (in ms) from worker
                                      start to a clean :end_turn. Self-cancels
                                      with :error.llm.timeout when exceeded.
+
+   Streaming:
+     :stream? — when true AND the backend implements
+                `escapement.llm.protocol/StreamingLLMBackend`, incremental
+                output is emitted as `:llm/delta` transcript events
+                (`{:type :text-delta|:thinking-delta :text s :model :invokeid}`)
+                while the turn is in flight. The final Response and all chart
+                semantics are identical to a non-streamed turn; consumers
+                relay deltas off the transcript tap. No-op if the backend
+                lacks streaming support.
 
    Error events follow SCXML convention `:error.llm.<reason>`:
      :error.llm.backend          — backend call threw (HTTP / parse / etc.)
