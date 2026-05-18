@@ -149,7 +149,7 @@
                                          :human-input/interrupted)
                      :human
 
-                     (:llm/error :llm/model-down :llm/intelligence-filter-empty
+                     (:llm/error :llm/model-down :llm/model-policy-empty
                                  :runner/error :runner/aborted)
                      :error
 
@@ -236,9 +236,9 @@
         :summary (str "model-down " (or (:model data) "<default>")
                       " — " (truncate (:message data) 120))}]
 
-      :llm/intelligence-filter-empty
+      :llm/model-policy-empty
       [{:source :error :glyph \⚠ :ev ev
-        :summary (str ":intelligence " (:floor data) " filter empty")}]
+        :summary (str "model policy " (pr-str (:policy data)) " filter empty")}]
 
       :human-input/start
       [{:source :human :glyph \? :ev ev

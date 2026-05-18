@@ -1,4 +1,4 @@
-(ns escapement.charts.iterate-test
+(ns escapement.examples.iterate-test
   "Unit tests for the M7 iterate coding-agent chart.
 
   Uses a mock `LLMBackend` to drive the LLM-authored event tools, and a tool
@@ -6,7 +6,7 @@
   controlled by the test. The chart itself is exercised end-to-end through
   the testing harness."
   (:require
-   [escapement.charts.iterate :as it]
+   [escapement.examples.iterate :as it]
    [escapement.engine.testing :as dct]
    [escapement.invocation.llm-conversation :as llmc]
    [escapement.llm.protocol :as llm]

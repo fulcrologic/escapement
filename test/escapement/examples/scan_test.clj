@@ -1,7 +1,7 @@
-(ns escapement.charts.scan-test
+(ns escapement.examples.scan-test
   (:require
    [clojure.string :as str]
-   [escapement.charts.scan :as scan]
+   [escapement.examples.scan :as scan]
    [escapement.engine.testing :as dct]
    [escapement.invocation.llm-conversation :as llmc]
    [escapement.llm.protocol :as llm]

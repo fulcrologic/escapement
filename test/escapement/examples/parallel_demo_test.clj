@@ -1,6 +1,6 @@
-(ns escapement.charts.parallel-demo-test
+(ns escapement.examples.parallel-demo-test
   (:require
-   [escapement.charts.parallel-demo :as pd]
+   [escapement.examples.parallel-demo :as pd]
    [escapement.engine.testing :as dct]
    [escapement.invocation.llm-conversation :as llmc]
    [escapement.llm.protocol :as llm]

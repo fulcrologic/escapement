@@ -1,4 +1,4 @@
-(ns escapement.charts.ask
+(ns escapement.examples.ask
   "Minimal interactive chart for smoke-testing the :human-input invocation
    and the TUI. Asks the user's name, confirms it, and ends. An Esc keypress
    in the TUI sends :ui.interrupt and transitions to :cancelled."

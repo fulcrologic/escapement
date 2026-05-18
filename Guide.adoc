@@ -77,21 +77,23 @@ export ZAI_API_KEY=...              # glm-4.6 (Anthropic-compat endpoint)
 export OPENAI_API_KEY=...           # gpt-4o-mini default; OPENAI_MODEL overrides
 export OPENROUTER_API_KEY=...       # openai/gpt-4o-mini default; OPENROUTER_MODEL overrides
 
-escapement run escapement.charts.hello/agent
+escapement run escapement.examples.hello/agent
 ----
 
 Or, equivalently, before `bbin install`:
 
 [source,bash]
 ----
-bb -m escapement.cli run escapement.charts.hello/agent
+bb -m escapement.cli run escapement.examples.hello/agent
 ----
 
 ==== Multi-backend auto-fallback
 
 When more than one credential is configured, Escapement wires a
 multi-dispatch backend AND builds a preference-ordered list of model
-ids (one per credential, in the precedence order above). At conversation
+ids. That order comes from `:llm/preferences` in `.escapement.edn`
+(see <<project-config>>) intersected with the reachable credentials,
+falling back to a built-in default order when unset. At conversation
 time, if a model errors out (HTTP 429, network blip, parse error, etc.)
 the InvocationProcessor marks it `:down` for the rest of the process
 and tries the next candidate. `:error.llm.backend` is only fired once
@@ -106,13 +108,17 @@ Two ways for a chart to influence the auto-fallback list:
   explicit pick(s). When set, the auto-list is *not* consulted; only
   your strings are tried (with the same `:down`-marking fallback when
   you give a multi-element list).
-* `:intelligence N` (1–10) on the `:llm-conversation` node —
-  filters the auto-list to models whose rating (see
-  `escapement.llm.models/intelligence`) is `>= N`. Useful when a
-  state genuinely requires a strong model. If your configured
-  credentials only provide weaker models the filter is dropped and an
-  `:llm/intelligence-filter-empty` warning is emitted to the
-  transcript.
+* `:model-policy {...}` on the `:llm-conversation` node — a declarative
+  filter over the auto-list (see <<params-fn,the `params-fn` map>>).
+  It accepts `:require`/`:min`/`:max` clauses over *any* model fact in
+  the catalog — objective (`:vision?`, `:tool-call?`,
+  `:context-tokens`, …) or subjective (`:intelligence` plus any
+  opinion key defined via `:llm/ratings`). Useful when a state
+  genuinely requires, say, vision plus Sonnet-class reasoning. If the
+  policy excludes every reachable model the unfiltered list is used as
+  a best-effort fallback and an `:llm/model-policy-empty` warning is
+  emitted to the transcript. The legacy `:intelligence N` shorthand
+  still works and is folded into the policy as `:min {:intelligence N}`.
 
 ==== Manual configuration
 
@@ -121,7 +127,7 @@ endpoint or use a non-default model), pass the flags explicitly:
 
 [source,bash]
 ----
-escapement run escapement.charts.hello/agent \
+escapement run escapement.examples.hello/agent \
    --backend api \
    --api-base-url https://api.z.ai/api/anthropic \
    --api-key-env ZAI_API_KEY \
@@ -217,14 +223,14 @@ Resume::
 [[authoring]]
 == Authoring a chart, step by step
 
-The four demo charts under `src/escapement/charts/` are arranged from
+The four demo charts under `src/escapement/examples/` are arranged from
 simplest to most complex. Read them in order — together they cover every
 substantive pattern this library supports.
 
 [[hello-walkthrough]]
 === Walkthrough: `hello.clj`
 
-Full source: `src/escapement/charts/hello.clj`.
+Full source: `src/escapement/examples/hello.clj`.
 
 The chart binds an LLM conversation to a state, asks for a single
 `event__done` call, and transitions to a final state that assigns the
@@ -347,7 +353,7 @@ below for the worst-case guards.
 
 === Worked example: `scan.clj` — fan-out with a real tool
 
-Full source: `src/escapement/charts/scan.clj`.
+Full source: `src/escapement/examples/scan.clj`.
 
 This chart adds one real tool (`:fs/read`) and demonstrates **fan-out**:
 the LLM is expected to fire multiple `:found-bug` events and one
@@ -387,7 +393,7 @@ uses a normal (external) transition to `:finished`.
 
 === Worked example: `parallel_demo.clj` — two LLMs at once
 
-Full source: `src/escapement/charts/parallel_demo.clj`.
+Full source: `src/escapement/examples/parallel_demo.clj`.
 
 Two parallel regions, each with its own `:llm-conversation`. Region A is a
 translator; region B is a summarizer. The two workers run concurrently on
@@ -410,7 +416,7 @@ transitions to its own final.
 
 === Worked example: `iterate.clj` — multi-state coding loop
 
-Full source: `src/escapement/charts/iterate.clj`.
+Full source: `src/escapement/examples/iterate.clj`.
 
 The most ambitious demo. One long conversation is bound at the top of
 `:work`, exposing four event tools:
@@ -522,6 +528,7 @@ element of type `:llm-conversation` with `:autoforward? true` set.
 processor's `forward-event!`. You almost always want this true (it is what
 makes `tell-llm` work).
 
+[[params-fn]]
 === The `params-fn` map
 
 `params-fn` returns a map consumed by the processor. The keys it understands:
@@ -572,17 +579,36 @@ makes `tell-llm` work).
   `:model`, an explicit list disables the auto-detected default
   fallback list — only the strings you name are tried.
 
-`:intelligence`::
-  Optional integer (1–10). Only meaningful when neither `:model` nor
-  `:models` is set, i.e. when the conversation is using the
-  auto-detected fallback list. With `:intelligence N` the auto-list is
-  filtered to models whose intelligence rating (see
-  `escapement.llm.models`) is `>= N`. Use this to say "this state
-  needs at least Sonnet-class reasoning; if you only have a cheap
-  model wired up, complain rather than silently downgrade." If the
-  filter removes every candidate, the unfiltered list is used as a
-  best-effort fallback and an `:llm/intelligence-filter-empty`
-  warning is emitted to the transcript so you can spot the gap.
+`:model-policy`::
+  Optional declarative filter over the auto-detected fallback list.
+  Only meaningful when neither `:model` nor `:models` is set. The map
+  takes three optional clauses, all of which must hold for a model to
+  survive:
++
+[source,clojure]
+----
+{:require {:vision? true}        ; exact equality on a model fact
+ :min     {:intelligence 8}      ; numeric floor
+ :max     {:context-tokens 200000}} ; numeric ceiling
+----
++
+  Keys may be any fact in the catalog (`escapement.llm.catalog`):
+  objective ones from the bundled models.dev data (`:vision?`,
+  `:tool-call?`, `:reasoning?`, `:context-tokens`, `:max-output-tokens`,
+  …) or subjective ones supplied via `:llm/ratings` in
+  `.escapement.edn` (`:intelligence` plus any opinion key you define —
+  e.g. `:clojure`, `:tool-calling`). The invocation layer never names a
+  specific key, so a brand-new opinion dimension is filterable with no
+  code change. Use this to say "this state needs vision and at least
+  Sonnet-class reasoning; if you only have a cheap text model wired up,
+  complain rather than silently downgrade." If the policy removes every
+  candidate, the unfiltered list is used as a best-effort fallback and
+  an `:llm/model-policy-empty` warning (carrying the resolved `:policy`
+  and the rejected `:default-models`) is emitted to the transcript so
+  you can spot the gap.
++
+  The legacy `:intelligence N` key is still accepted on the node and is
+  equivalent to `:model-policy {:min {:intelligence N}}`.
 
 `:max-tokens`::
   Optional int; defaults to **8192** in the api backend's request builder.
@@ -895,30 +921,48 @@ First request shows a creation count, subsequent ones show reads.
 [[context-tracking]]
 === Context-window tracking
 
-Anthropic never returns the context-window size on a response. We keep
-a small lookup table at `src/escapement/llm/models.clj` and use it to
-enrich the transcript so chart authors and reviewers can see, at any
+Anthropic never returns the context-window size on a response. We
+resolve it from the model catalog (`escapement.llm.catalog`) and use it
+to enrich the transcript so chart authors and reviewers can see, at any
 point in a run, how much of the model's context the running
 conversation has consumed.
 
-==== `escapement.llm.models`
+==== `escapement.llm.catalog`
+
+The catalog assembles model facts from three layers: objective facts
+from a bundled models.dev data dump (loaded via
+`escapement.llm.catalog-source`), a tiny local fact overlay for ids the
+dump doesn't carry yet, and a subjective `:llm/ratings` overlay from
+`.escapement.edn` (see <<project-config>>).
 
 [source,clojure]
 ----
-(require '[escapement.llm.models :as m])
+(require '[escapement.llm.catalog :as cat])
 
-(m/info "claude-opus-4-7")
-;; => {:context-tokens 200000 :max-output-tokens 64000 :provider :anthropic}
+(cat/info "claude-opus-4-7")
+;; => {:context-tokens 200000 :max-output-tokens 64000 :vision? true
+;;     :tool-call? true :intelligence 9 ...}  ; objective + ratings merged
 
-(m/context-window "claude-sonnet-4-6")           ; => 200000
-(m/max-output-tokens "claude-haiku-4-5")         ; => 32000
-(m/approaching-limit? "claude-opus-4-7" 180000)  ; => true (≥ 80% of cap)
+(cat/context-window "claude-sonnet-4-6")          ; => 200000
+(cat/max-output-tokens "claude-haiku-4-5")        ; => 32000
+(cat/vision? "claude-opus-4-7")                   ; => true
+(cat/pricing :anthropic "claude-opus-4-7")        ; => {:input .. :output ..}
+(cat/pricing "claude-opus-4-7")                   ; cheapest metered list price
+(cat/satisfies-policy? "claude-opus-4-7"
+                       {:min {:intelligence 8}})  ; => true
 ----
+
+There is no `intelligence` accessor: intelligence is just one key in
+the subjective ratings overlay, surfaced through `info` and filtered
+like any other fact via `satisfies-policy?` (this is what backs the
+`:model-policy` node option). Subscription providers (`:z-ai-plan`,
+`:ollama`, `:openai-codex`) report zero marginal per-token cost.
 
 Resolution is exact-match-first, then longest-prefix. Dated ids like
 `claude-opus-4-7-20260101` resolve to the `claude-opus-4-7` family
-entry. Add new model rows to the `known-models` map at the top of
-the namespace as Anthropic ships them.
+entry. Objective facts update by regenerating the models.dev dump;
+ids the dump lacks go in the small `local-models`/`local-providers`
+overlay in `escapement.llm.catalog`.
 
 ==== Transcript enrichment
 
@@ -1484,11 +1528,11 @@ NOTE: z.ai does not currently return `cache_creation_input_tokens` and does
 not require the `anthropic-version` header. Both differences are tolerated
 silently by the request builder and the usage parser.
 
-z.ai's published GLM family (current as of authoring) is tracked in
-`escapement.llm.models`: `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`,
-`glm-4.7-flashx`, `glm-4.7-flash`, `glm-4.6` (200K context), and the
-`glm-4.5*` and `glm-4-32b-0414-128k` family (128K). Pass any of them as
-`:default-model` or per-state `:model`.
+z.ai's published GLM family (`glm-5.1`, `glm-5`, `glm-5-turbo`,
+`glm-4.7`, `glm-4.7-flashx`, `glm-4.7-flash`, `glm-4.6` at 200K
+context, the `glm-4.5*` / `glm-4-32b-0414-128k` family at 128K, …) is
+tracked in the model catalog (`escapement.llm.catalog`). Pass any of
+them as `:default-model` or per-state `:model`.
 
 === `escapement.llm.openai` — OpenAI Chat Completions / OpenRouter
 
@@ -1650,6 +1694,26 @@ wins. If no route matches, `:default-backend` handles the request, or an
 
 The CLI assembles this dispatcher automatically when more than one
 credential is available — see <<cli>> for the default route table.
+
+=== Ollama Cloud and OpenCode Go
+
+Two further provider wirings are selectable without a new protocol
+implementation — both reuse the `api`/`openai` backends above against
+provider-specific endpoints:
+
+* **Ollama Cloud** — `escapement run --backend ollama`, served via the
+  OpenAI-compatible backend at `https://ollama.com/v1`. Credential:
+  `OLLAMA_API_KEY`.
+* **OpenCode Go** — `escapement run --backend opencode-go`, served at
+  `https://opencode.ai/zen/go`. The wire shape is chosen per model:
+  Anthropic-shaped for `minimax-*` models, OpenAI-shaped for
+  `glm-*`/`kimi-*`/`mimo-*`. Credential: `OPENCODE_GO_API_KEY`.
+  `--api-base-url` overrides the endpoint.
+
+Both are auto-detected from their env vars for the default
+multi-backend and reported by `escapement info`. A blank/empty
+credential env var is treated as unset (it no longer registers a dead
+route).
 
 === `escapement.llm.cache` — content-addressed disk cache
 
@@ -1974,7 +2038,8 @@ Initial data:
 
 LLM backend selection:
 
-* `--backend (api|openai|codex)` — explicit single backend.
+* `--backend (api|codex|openai|ollama|opencode-go)` — explicit single
+  backend.
 * Without `--backend`, the CLI scans available credentials and
   auto-assembles a backend:
 +
@@ -1986,13 +2051,17 @@ LLM backend selection:
 | `OPENAI_API_KEY`         | `openai`          | `+#"^gpt-"+`
 | `OPENROUTER_API_KEY`     | `openai` (router) | `+#".+/.+"+`
 | `ZAI_API_KEY`            | `api` (z.ai)      | `+#"^glm-"+`
+| `OLLAMA_API_KEY`         | `openai` (Ollama Cloud) | Ollama model ids
+| `OPENCODE_GO_API_KEY`    | `api`/`openai` (OpenCode Go) | `minimax-*` → Anthropic shape; `glm-*`/`kimi-*`/`mimo-*` → OpenAI shape
 |===
 +
-With a single credential the bare sub-backend is used. With two or more,
-a `escapement.llm.multi` dispatcher is built so that a per-state
-`:model` keyword in `params-fn` automatically reaches the right
-provider. The first available credential (in the table's preference
-order) becomes the default backend when no route matches. Run
+A blank/empty value in any of these env vars is treated as unset (it
+no longer registers a dead route). With a single credential the bare
+sub-backend is used. With two or more, a `escapement.llm.multi`
+dispatcher is built so that a per-state `:model` keyword in `params-fn`
+automatically reaches the right provider. The default backend and the
+auto-fallback model order follow `:llm/preferences` (see
+<<project-config>>) when set, otherwise a built-in default order. Run
 `escapement info` to see exactly what would be built for the current
 environment.
 * `--model`, `--api-base-url`, `--api-key-env` override the auto-detected
@@ -2099,12 +2168,22 @@ Schema (validated with Malli on load; unknown keys are rejected):
                  {:mvn/version "2.0.0-RC3"}}  ;; runtime deps via add-deps
  :tools-ns      [my.app/register-tools]       ;; symbol or vector of symbols
  :work-dir      "ai/agents/transcripts"       ;; default --work-dir
- :default-chart my.app.charts.hello/agent     ;; used when no chart given
+ :default-chart my.app.examples.hello/agent   ;; used when no chart given
  :viewers       {"svg"     "open -a 'Google Chrome' {{path}}"
                  "url"     "open -a 'Google Chrome' {{path}}"
                  "default" "open {{path}}"}   ;; see Viewers below
  :d2            {:command "d2" :layout "elk"} ;; chart rendering (see Viz)
- :debug         {:auto-pause? true}}          ;; --debug pause-on-start
+ :debug         {:auto-pause? true}           ;; --debug pause-on-start
+ :llm/preferences [{:provider :anthropic :model "claude-opus-4-7"}
+                   {:provider :z-ai      :model "glm-4.6"}]
+ ;; ^ priority-ordered {:provider :model} pairs; validated against the
+ ;;   catalog (unreachable entries are dropped). Sets the default
+ ;;   backend and the auto-fallback model order. Built-in default order
+ ;;   is used when unset.
+ :llm/ratings   {"claude-opus-4-7" {:intelligence 10 :clojure 10}}}
+ ;; ^ subjective opinion overlay; there is no built-in opinion, so the
+ ;;   table comes entirely from config. Any key here becomes filterable
+ ;;   via :model-policy. Dated ids resolve to the family entry.
 ----
 
 ==== Viewers — opening artifacts and the live chart URL
@@ -2221,7 +2300,7 @@ helpers with a synchronous pump:
 
 Implement `LLMBackend` with a script-driven queue of canned responses. The
 M7 iterate test
-(`test/escapement/charts/iterate_test.clj`) is a complete example:
+(`test/escapement/examples/iterate_test.clj`) is a complete example:
 
 [source,clojure]
 ----
@@ -2379,9 +2458,15 @@ require network access and real credentials.
 `src/escapement/llm/`::
   `protocol` (the one-method `LLMBackend`), `types` (Malli schemas for
   requests/responses/content-blocks/tool-defs), `api` (Anthropic-compatible
-  HTTP backend, sniffing z.ai vs Anthropic auth modes), `openai_codex`
-  (ChatGPT Plus/Pro subscription backend via OAuth 2.0 + PKCE), and `cache`
-  (content-addressed disk cache).
+  HTTP backend, sniffing z.ai vs Anthropic auth modes), `openai` /
+  `openai_codex` (OpenAI Chat Completions and the ChatGPT Plus/Pro
+  subscription backend via OAuth 2.0 + PKCE), `multi` (model-routed
+  dispatcher), `cache` (content-addressed disk cache), and the model
+  catalog trio — `catalog_source` (loads the bundled
+  `models-api.json` models.dev dump), `catalog` (the three-layer
+  objective+local+ratings model facts and `:model-policy` filtering),
+  `preferences` (`:llm/preferences` ordering), and `ratings`
+  (`:llm/ratings` subjective overlay).
 
 `src/escapement/tools/`::
   `protocol` (`Tool` + registry + `dispatch`) and `builtin` (the eight
@@ -2395,10 +2480,12 @@ require network access and real credentials.
 `src/escapement/chart/`::
   `helpers` — authoring sugar (`llm-conversation`, `tell-llm`).
 
-`src/escapement/charts/`::
+`src/escapement/examples/`::
   Demo charts: `hello`, `scan`, `parallel_demo`, `iterate` (the four
   walkthrough exemplars covered in <<authoring>>), plus `ask` (a minimal
-  interactive `:human-input` demo) and `artifacts_demo` (the
+  interactive `:human-input` demo), `clj_refactor` (declarative
+  `:model-policy` model auto-selection gated on per-dimension ratings),
+  and `artifacts_demo` (the
   `capture-llm-output` / `render-template` pipeline used in
   <<multi-agent>>).
 
@@ -2455,12 +2542,12 @@ auto-discovers `test/**/*_test.clj`, requires each namespace, and runs
 [[add-chart]]
 === Adding a new chart
 
-1. Create `src/escapement/charts/my_thing.clj`. Pattern after the demos.
+1. Create `src/escapement/examples/my_thing.clj`. Pattern after the demos.
 2. Use `h/llm-conversation` for any LLM-bound state; wrap finals in a
    compound parent.
-3. Add a unit test under `test/escapement/charts/my_thing_test.clj`
+3. Add a unit test under `test/escapement/examples/my_thing_test.clj`
    using a `MockBackend` and (where applicable) stub tools.
-4. Run via `escapement run escapement.charts.my-thing/agent`.
+4. Run via `escapement run escapement.examples.my-thing/agent`.
 
 For host projects that want to keep charts and chart utility namespaces
 outside the Escapement source tree, add an `.escapement.edn` at the

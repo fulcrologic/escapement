@@ -8,7 +8,7 @@
     * test command  — `clojure -M -e ...` that loads target.clj and verifies
                       `(square 5) == 25` (returns non-zero on mismatch)
 
-  Then runs `escapement.charts.iterate/agent` with `:max-iterations 3`. The
+  Then runs `escapement.examples.iterate/agent` with `:max-iterations 3`. The
   agent is expected to edit `target.clj` until the test passes, terminating
   with `:final-status :passed`.
 
@@ -20,7 +20,7 @@
    [clojure.string :as str]
    [com.fulcrologic.statecharts :as sc]
    [com.fulcrologic.statecharts.protocols :as sp]
-   [escapement.charts.iterate :as it]
+   [escapement.examples.iterate :as it]
    [escapement.llm.api :as api]
    [escapement.runner :as runner]
    [escapement.tools.builtin :as builtin]))

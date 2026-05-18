@@ -175,7 +175,35 @@
                              "throws on unknown key"
                              (try (config/load-project-config root) :ok
                                   (catch clojure.lang.ExceptionInfo _ :err))
-                             => :err))))
+                             => :err)))
+
+               ;; Regression: the closed schema must permit the documented
+               ;; LLM overlays in a *project* .escapement.edn. Previously
+               ;; these tripped the closed-map check and `escapement run`
+               ;; died before the chart loaded, so the surface documented in
+               ;; CHANGELOG/Guide/clj_refactor was non-functional.
+               (component "documented :llm/preferences and :llm/ratings survive validation (flat keys)"
+                          (let [root (tmp-dir)
+                                prefs [{:provider :anthropic :model "claude-opus-4-7"}]
+                                rate  {"claude-opus-4-7" {:clojure 10 :tool-calling 9}}]
+                            (spit (io/file root ".escapement.edn")
+                                  (pr-str {:llm/preferences prefs
+                                           :llm/ratings     rate}))
+                            (let [cfg (:config (config/load-project-config root))]
+                              (assertions
+                               "load-project-config does not throw and preserves the keys"
+                               (:llm/preferences cfg) => prefs
+                               (:llm/ratings cfg) => rate))))
+
+               (component "documented :llm overlays survive validation (nested map form)"
+                          (let [root (tmp-dir)
+                                rate {"gpt-5" {:intelligence 9}}]
+                            (spit (io/file root ".escapement.edn")
+                                  (pr-str {:llm {:ratings rate}}))
+                            (let [cfg (:config (config/load-project-config root))]
+                              (assertions
+                               "nested [:llm :ratings] passes the closed schema"
+                               (get-in cfg [:llm :ratings]) => rate)))))
 
 (specification "resolve-path"
                (let [root (tmp-dir)]

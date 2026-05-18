@@ -25,7 +25,7 @@
 (let [session   (str (java.util.UUID/randomUUID))
       work-dir  "/tmp/escapement-codex-smoke"
       _         (.mkdirs (java.io.File. work-dir))
-      [chart _] (runner/load-chart-with-meta 'escapement.charts.hello/hello-chart)
+      [chart _] (runner/load-chart-with-meta 'escapement.examples.hello/hello-chart)
       summary   (try
                   (runner/run!
                    {:chart           chart

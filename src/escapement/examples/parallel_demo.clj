@@ -1,4 +1,4 @@
-(ns escapement.charts.parallel-demo
+(ns escapement.examples.parallel-demo
   "M6 demo: two parallel regions, each running its own `:llm-conversation`.
 
   Region A is a translator: asks the LLM to call `event__translated`.

@@ -1,4 +1,4 @@
-(ns escapement.charts.artifacts-demo
+(ns escapement.examples.artifacts-demo
   "Demo chart that exercises the debug TUI's Invocations + Artifacts views.
 
    Two LLM conversations run in sequence:
@@ -14,7 +14,7 @@
    `o` to open externally / `:internal` for the built-in pager).
 
    Run it:
-     escapement run escapement.charts.artifacts-demo/agent --debug
+     escapement run escapement.examples.artifacts-demo/agent --debug
 
    With `:debug :auto-pause? true` (default) the runner halts before the
    first event — press `c` to continue, or `s` to single-step. After each

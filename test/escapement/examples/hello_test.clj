@@ -1,6 +1,6 @@
-(ns escapement.charts.hello-test
+(ns escapement.examples.hello-test
   (:require
-   [escapement.charts.hello :as hello]
+   [escapement.examples.hello :as hello]
    [escapement.engine.testing :as dct]
    [escapement.invocation.llm-conversation :as llmc]
    [escapement.llm.protocol :as llm]

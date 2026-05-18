@@ -14,3 +14,7 @@ escapement.iml
 target/
 transcripts/
 .claude/worktrees
+ai/scratch/
+.clj-kondo/.cache/
+.clj-kondo/imports/
+.lsp/

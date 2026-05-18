@@ -1,4 +1,4 @@
-(ns escapement.charts.hello
+(ns escapement.examples.hello
   "M6 demo: minimal single-region chart that drives one LLM conversation. The
   LLM is asked to call a single event-tool `event__done` with a short greeting
   string; the chart then transitions to a wrapped final state.

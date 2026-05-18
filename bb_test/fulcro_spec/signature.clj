@@ -1,0 +1,755 @@
+;; VENDORED, DO NOT EDIT casually.
+;;
+;; Verbatim copy of fulcro-spec 3.2.9's `fulcro_spec/signature.clj`, placed on
+;; the `bb_test` classpath so it shadows the jar's copy under babashka. The
+;; only change is `source-from-absolute-path`, rewritten to avoid the
+;; `proxy-super` special form, which babashka's SCI does not implement — its
+;; presence alone breaks namespace analysis and, because `fulcro-spec.core`
+;; requires this ns, makes the entire `bb test` suite fail to load.
+;;
+;; If the pinned fulcro-spec version changes, re-extract this file from the new
+;; jar and re-apply the single patch (search for "NOTE (escapement)").
+(ns fulcro-spec.signature
+  "On-demand signature computation and resealing for staleness detection.
+
+   Signatures are short hashes of normalized function source code.
+   When a function's implementation changes, its signature changes,
+   allowing detection of stale test coverage.
+
+   The signature is computed by:
+   1. Extracting full source using clojure.repl/source-fn
+   2. Removing docstrings (so doc changes don't invalidate tests)
+   3. Normalizing whitespace (so formatting changes don't invalidate tests)
+   4. Hashing with SHA-256 and taking first 6 characters
+
+   Signature format:
+   - LEAF functions (no in-scope callees): Single-field \"xxxxxx\"
+   - NON-LEAF functions: Two-field \"xxxxxx,yyyyyy\" where:
+     - xxxxxx: 6-char hash of the function's own source
+     - yyyyyy: 6-char hash of all transitive callees' signatures
+
+   The `signature` function automatically detects leaf vs non-leaf and
+   returns the appropriate format. Use it for all signature needs.
+
+   Resealing (updating :covers signatures in source files):
+   - `reseal!` updates signatures at a given file/line for IDE integration
+
+   IDE keybinding examples:
+     Cursive: (fulcro-spec.signature/reseal! \"$FilePath$\" $LineNumber$)
+     CIDER:   (cider-interactive-eval
+               (format \"(fulcro-spec.signature/reseal! \\\"%s\\\" %d)\"
+                       (buffer-file-name) (line-number-at-pos)))
+
+   Performance options (Java system properties):
+   - fulcro-spec.auto-skip: Enable auto-skipping of already-checked tests
+   - fulcro-spec.sigcache: Cache signatures for duration of JVM"
+  (:require
+    [clojure.edn :as edn]
+    [clojure.java.io :as io]
+    [clojure.repl]
+    [clojure.string :as str]
+    [com.fulcrologic.guardrails.impl.externs :as gr.externs]
+    [rewrite-clj.node :as n]
+    [rewrite-clj.zip :as z])
+  (:import
+    (java.nio.charset StandardCharsets)
+    (java.security MessageDigest)))
+
+;; =============================================================================
+;; Content Normalization
+;; =============================================================================
+
+(defn- find-string-end
+  "Finds the end position of a string starting at idx (after opening quote).
+   Returns the index after the closing quote, or nil if not found.
+   Handles escape sequences correctly."
+  [s idx]
+  (loop [i idx]
+    (when (< i (count s))
+      (let [ch (get s i)]
+        (cond
+          (= ch \\) (recur (+ i 2))                         ; Skip escaped char
+          (= ch \") (inc i)                                 ; Found closing quote
+          :else (recur (inc i)))))))
+
+(defn- skip-whitespace
+  "Returns index of first non-whitespace character starting from idx."
+  [s idx]
+  (loop [i idx]
+    (if (and (< i (count s))
+          (Character/isWhitespace (char (get s i))))
+      (recur (inc i))
+      i)))
+
+(defn- find-matching-bracket
+  "Finds the closing bracket matching the opening bracket at idx.
+   Returns index after the closing bracket, or nil if not found.
+   Handles nested brackets and strings correctly."
+  [s idx]
+  (let [open-ch  (get s idx)
+        close-ch (case open-ch
+                   \[ \]
+                   \( \)
+                   \{ \}
+                   nil)]
+    (when close-ch
+      (loop [i     (inc idx)
+             depth 1]
+        (when (< i (count s))
+          (let [ch (get s i)]
+            (cond
+              (= ch \")
+              (if-let [end (find-string-end s (inc i))]
+                (recur end depth)
+                nil)
+
+              (= ch open-ch)
+              (recur (inc i) (inc depth))
+
+              (= ch close-ch)
+              (if (= depth 1)
+                (inc i)
+                (recur (inc i) (dec depth)))
+
+              :else
+              (recur (inc i) depth))))))))
+
+(defn- remove-docstring-from-def
+  "Removes docstring from a def* form (defn, defn-, >defn, etc.) in source text.
+
+   Handles both forms:
+   - (defn name \"docstring\" [args] body)
+   - (defn name [args] \"docstring\" body)
+
+   Returns source with docstrings removed."
+  [s]
+  (let [len (count s)]
+    (loop [i      0
+           result (StringBuilder.)]
+      (if (>= i len)
+        (str result)
+        (let [ch (get s i)]
+          (cond
+            ;; Handle strings not in def position - preserve them
+            (= ch \")
+            (if-let [end (find-string-end s (inc i))]
+              (do
+                (.append result (subs s i end))
+                (recur end result))
+              (recur (inc i) result))
+
+            ;; Look for def forms: (def..., (>def...
+            (and (= ch \()
+              (< (inc i) len)
+              (let [next-ch (get s (inc i))]
+                (or (= next-ch \d)                          ; (def...
+                  (= next-ch \>))))                         ; (>def...
+            (let [;; Skip the > if present
+                  def-start (if (= \> (get s (inc i))) (+ i 2) (inc i))
+                  def-end   (loop [j def-start]
+                              (if (and (< j len)
+                                    (let [c (get s j)]
+                                      (or (Character/isLetterOrDigit (char c))
+                                        (= c \-)
+                                        (= c \>))))         ; for >defn
+                                (recur (inc j))
+                                j))]
+              (if (and (>= (- def-end def-start) 3)         ; At least "def"
+                    (str/starts-with? (subs s def-start (min (+ def-start 3) len)) "def")
+                    (< def-end len)
+                    (Character/isWhitespace (get s def-end)))
+                (let [after-def  (skip-whitespace s def-end)
+                      ;; Skip the function name
+                      name-end   (loop [j after-def]
+                                   (if (and (< j len)
+                                         (let [c (get s j)]
+                                           (not (Character/isWhitespace (char c)))))
+                                     (recur (inc j))
+                                     j))
+                      after-name (skip-whitespace s name-end)]
+                  ;; Check for docstring right after name: (defn name "doc" ...)
+                  (if (and (< after-name len)
+                        (= \" (get s after-name)))
+                    (if-let [doc-end (find-string-end s (inc after-name))]
+                      (do
+                        (.append result (subs s i after-name))
+                        (recur doc-end result))
+                      (do
+                        (.append result ch)
+                        (recur (inc i) result)))
+                    ;; Check for docstring after args: (defn name [args] "doc" ...)
+                    (if (and (< after-name len)
+                          (= \[ (get s after-name)))
+                      (if-let [args-end (find-matching-bracket s after-name)]
+                        (let [after-args (skip-whitespace s args-end)]
+                          (if (and (< after-args len)
+                                (= \" (get s after-args)))
+                            (if-let [doc-end (find-string-end s (inc after-args))]
+                              (do
+                                (.append result (subs s i after-args))
+                                (recur doc-end result))
+                              (do
+                                (.append result ch)
+                                (recur (inc i) result)))
+                            (do
+                              (.append result ch)
+                              (recur (inc i) result))))
+                        (do
+                          (.append result ch)
+                          (recur (inc i) result)))
+                      (do
+                        (.append result ch)
+                        (recur (inc i) result)))))
+                (do
+                  (.append result ch)
+                  (recur (inc i) result))))
+
+            :else
+            (do
+              (.append result ch)
+              (recur (inc i) result))))))))
+
+(defn- normalize-content
+  "Normalizes source code content for semantic comparison.
+
+   Removes docstrings and normalizes whitespace so that:
+   - Implementation changes ARE detected
+   - Docstring changes are NOT detected
+   - Whitespace/formatting changes are NOT detected"
+  [source-text]
+  (when source-text
+    (try
+      (let [without-docs (remove-docstring-from-def source-text)
+            normalized   (-> without-docs
+                           (str/replace #"\s+" " ")
+                           str/trim)]
+        normalized)
+      (catch Exception _e
+        source-text))))
+
+;; =============================================================================
+;; Hashing
+;; =============================================================================
+
+(defn- sha256
+  "Generates a SHA256 hash of the input string."
+  [^String s]
+  (when s
+    (let [digest     (MessageDigest/getInstance "SHA-256")
+          hash-bytes (.digest digest (.getBytes s StandardCharsets/UTF_8))]
+      (apply str (map #(format "%02x" %) hash-bytes)))))
+
+(defn- hash-content
+  "Generates a content hash for normalized source text.
+   Returns full SHA256 hex string."
+  [source-text]
+  (some-> source-text
+    normalize-content
+    sha256))
+
+;; =============================================================================
+;; Self-Signature (internal helper)
+;; =============================================================================
+
+(defn- absolute-path?
+  "Returns true if the path string appears to be an absolute filesystem path."
+  [^String path]
+  (and path
+    (or (.startsWith path "/")
+      (and (> (count path) 2)
+        (= \: (get path 1))))))                             ;; Windows: C:\...
+
+(defn- source-from-absolute-path
+  "Reads source from an absolute file path starting at the given line.
+   Returns the source text of the first readable form, or nil on failure.
+
+   This handles the case where files were loaded via `load-file` (common in IDE
+   workflows) which sets :file metadata to an absolute path that
+   clojure.repl/source-fn can't resolve via the classpath."
+  [^String filepath line]
+  ;; NOTE (escapement): rewritten to avoid `proxy-super`, which babashka's SCI
+  ;; does not implement (fails at namespace analysis). Behaviour is equivalent:
+  ;; capture the source text of the first form at/after `line` by reading one
+  ;; form and measuring how many characters the reader consumed.
+  (try
+    (let [all       (slurp filepath)
+          tail      (->> (str/split-lines all)
+                         (drop (dec line))
+                         (str/join "\n"))
+          read-opts (if (.endsWith filepath "cljc") {:read-cond :allow} {})
+          pbr       (java.io.PushbackReader. (java.io.StringReader. tail))]
+      (read read-opts pbr)
+      (let [remaining (loop [n 0]
+                         (if (neg? (.read pbr)) n (recur (inc n))))
+            consumed  (max 0 (- (count tail) remaining))]
+        (subs tail 0 consumed)))
+    (catch Exception _e
+      nil)))
+
+(defn- get-source
+  "Gets source code for a var, handling both classpath-relative and absolute paths.
+
+   Binds *ns* to the function's defining namespace so that namespace-aliased
+   keywords (::alias/key) in the source are readable by the Clojure reader.
+
+   First tries clojure.repl/source-fn (works for classpath-loaded files).
+   Falls back to direct filesystem read for absolute paths (load-file scenario)."
+  [fn-sym]
+  (when-let [v (resolve fn-sym)]
+    (let [fn-ns (-> v meta :ns)]
+      (binding [*ns* (or fn-ns *ns*)]
+        (or (clojure.repl/source-fn fn-sym)
+          (let [{:keys [file line]} (meta v)]
+            (when (and (absolute-path? file) line)
+              (source-from-absolute-path file line))))))))
+
+(defn self-signature
+  "Computes a short signature (first 6 chars of SHA256) for a function's own source.
+
+   This is an internal helper - use `signature` for the public API which
+   automatically handles leaf vs non-leaf functions.
+
+   Args:
+     fn-sym - Fully qualified symbol of the function
+
+   Returns:
+     6-character signature string, or nil if source not available."
+  [fn-sym]
+  (when-let [source (get-source fn-sym)]
+    (when-let [hash (hash-content source)]
+      (subs hash 0 (min 6 (count hash))))))
+
+;; =============================================================================
+;; Property Checks (cached at first access for zero overhead)
+;; =============================================================================
+
+(def ^:private auto-skip-enabled?*
+  "Cached result of auto-skip property check.
+   Property is enabled if set to any value (including empty string)."
+  (delay (some? (System/getProperty "fulcro-spec.auto-skip"))))
+
+(def ^:private sigcache-enabled?*
+  "Cached result of sigcache property check.
+   Property is enabled if set to any value (including empty string)."
+  (delay (some? (System/getProperty "fulcro-spec.sigcache"))))
+
+(defn auto-skip-enabled?
+  "Returns true if the fulcro-spec.auto-skip system property is set.
+   Presence of the property (even with empty value) enables the feature.
+   Result is cached at first call for zero overhead on subsequent checks."
+  []
+  @auto-skip-enabled?*)
+
+(defn sigcache-enabled?
+  "Returns true if the fulcro-spec.sigcache system property is set.
+   Presence of the property (even with empty value) enables the feature.
+   Result is cached at first call for zero overhead on subsequent checks."
+  []
+  @sigcache-enabled?*)
+
+;; =============================================================================
+;; Signature Caching (only used when sigcache enabled)
+;; =============================================================================
+
+;; Cache for computed signatures. Only populated when sigcache is enabled.
+;; Valid for duration of JVM process - intended for full test suite runs,
+;; not interactive development where code changes between test runs.
+(defonce ^:private signature-cache (atom {}))
+
+(defn- get-self-signature
+  "Gets self-only signature for fn-sym, using cache if -Dfulcro-spec.sigcache=true."
+  [fn-sym]
+  (if (sigcache-enabled?)
+    (or (get @signature-cache fn-sym)
+      (let [sig (self-signature fn-sym)]
+        (swap! signature-cache assoc fn-sym sig)
+        sig))
+    (self-signature fn-sym)))
+
+;; =============================================================================
+;; Public API
+;; =============================================================================
+
+(defn leaf?
+  "Returns true if the function has no in-scope transitive callees.
+
+   A leaf function is one that doesn't call any other guardrailed functions
+   within the given namespace scope. Leaf functions use single-field signatures
+   because there are no dependencies to track.
+
+   Args:
+     fn-sym - Fully qualified symbol of the function
+     scope-ns-prefixes - Set of namespace prefix strings to include
+
+   Example:
+     (leaf? 'myapp.utils/format-date #{\"myapp\"})
+     ;; => true (if it calls no other myapp.* guardrailed functions)"
+  [fn-sym scope-ns-prefixes]
+  (let [all-callees (gr.externs/transitive-calls fn-sym scope-ns-prefixes)
+        callees     (disj all-callees fn-sym)]
+    (empty? callees)))
+
+;; Cache for loaded config (to avoid repeated file reads)
+(defonce ^:private loaded-config* (atom nil))
+
+(defn- load-scope-from-config
+  "Loads scope-ns-prefixes from .fulcro-spec.edn file.
+   Returns empty set if file doesn't exist or can't be read.
+   Result is cached for the lifetime of the JVM."
+  []
+  (or @loaded-config*
+    (let [config (try
+                   (let [f (io/file ".fulcro-spec.edn")]
+                     (when (.exists f)
+                       (edn/read-string (slurp f))))
+                   (catch Exception _ nil))]
+      (reset! loaded-config* (or (:scope-ns-prefixes config) #{}))
+      @loaded-config*)))
+
+(defn signature
+  "Returns the appropriate signature for a function based on its call graph.
+
+   For LEAF functions (no in-scope callees):
+     Returns single-field: \"xxxxxx\"
+     - Just the 6-char hash of the function's own source
+
+   For NON-LEAF functions (has in-scope callees):
+     Returns two-field: \"xxxxxx,yyyyyy\"
+     - xxxxxx: 6-char hash of the function's own source
+     - yyyyyy: 6-char hash of all transitive callees' signatures (sorted)
+
+   This design ensures:
+   - Leaf functions don't have redundant ',000000' suffix
+   - Non-leaf functions MUST have the callee hash (single-field rejected)
+   - Changes to any function in the call chain invalidate dependent tests
+
+   Args:
+     fn-sym - Fully qualified symbol of the function
+     scope-ns-prefixes - Optional set of namespace prefix strings to include.
+                         If not provided, reads from .fulcro-spec.edn config file.
+
+   Uses signature caching if -Dfulcro-spec.sigcache=true
+
+   Examples:
+     ;; Using config from .fulcro-spec.edn (1-arity)
+     (signature 'myapp.utils/format)
+     ;; => \"a1b2c3\"
+
+     ;; With explicit scope (2-arity)
+     (signature 'myapp.orders/process #{\"myapp\"})
+     ;; => \"a1b2c3,d4e5f6\""
+  ([fn-sym]
+   (signature fn-sym (load-scope-from-config)))
+  ([fn-sym scope-ns-prefixes]
+   (when-let [self-sig (get-self-signature fn-sym)]
+     (let [all-callees (gr.externs/transitive-calls fn-sym scope-ns-prefixes)
+           callees     (disj all-callees fn-sym)
+           sorted      (sort-by str callees)
+           callee-sigs (keep get-self-signature sorted)]
+       (if (seq callee-sigs)
+         ;; Non-leaf: two-field format with callee hash
+         (let [combined    (str/join "," callee-sigs)
+               callees-sig (subs (sha256 combined) 0 6)]
+           (str self-sig "," callees-sig))
+         ;; Leaf: single-field format (no callees)
+         self-sig)))))
+
+;; =============================================================================
+;; Test Skipping Predicate
+;; =============================================================================
+
+(defn- sigs-match?
+  "Returns true if sealed-sig matches current-sig, handling legacy compatibility.
+   Legacy format used 'xxx,000000' for leaf functions; new format uses just 'xxx'.
+   This function considers them equivalent."
+  [sealed-sig current-sig]
+  (or (= sealed-sig current-sig)
+    ;; Handle legacy: sealed has ,000000 but current is single-field (leaf)
+    (and (str/ends-with? (str sealed-sig) ",000000")
+      (= (subs sealed-sig 0 (- (count sealed-sig) 7)) current-sig))))
+
+(defn already-checked?
+  "Returns true if this test's coverage declarations indicate it has already
+   been verified and nothing has changed since.
+
+   IMPORTANT: Zero overhead when disabled - property check short-circuits first.
+   No expensive signature computation occurs unless auto-skip is enabled.
+
+   A test is considered 'already checked' when:
+   1. -Dfulcro-spec.auto-skip=true
+   2. scope-ns-prefixes configured (passed as argument)
+   3. Every covered function's sealed signature matches current signature
+
+   This means: the test was previously run, passed, and the developer sealed
+   it by recording the signatures in the :covers metadata. Since then, neither
+   the covered functions nor any functions they call have changed.
+
+   For fast full-suite runs, also enable -Dfulcro-spec.sigcache=true
+
+   Args:
+     covers-map - Map of {fn-symbol sealed-signature} from test's :covers metadata
+     scope-ns-prefixes - Set of namespace prefix strings for transitive analysis
+
+   Returns:
+     true if test can be skipped, false otherwise"
+  [covers-map scope-ns-prefixes]
+  ;; Property check FIRST - returns false immediately if disabled (zero overhead)
+  (and (auto-skip-enabled?)
+    (seq scope-ns-prefixes)
+    (every? (fn [[fn-sym sealed-sig]]
+              (sigs-match? sealed-sig (signature fn-sym scope-ns-prefixes)))
+      covers-map)))
+
+;; =============================================================================
+;; Reseal: Automatic Signature Updates in Source Files
+;; =============================================================================
+
+(defn- specification-form?
+  "Returns true if the zipper location is a specification form."
+  [zloc]
+  (when (z/list? zloc)
+    (let [first-child (z/down zloc)]
+      (when first-child
+        (let [sym (z/sexpr first-child)]
+          (and (symbol? sym)
+            (= "specification" (name sym))))))))
+
+(defn- form-contains-line?
+  "Returns true if the form at zloc spans the given line number."
+  [zloc line]
+  (let [pos (meta (z/node zloc))]
+    (when pos
+      (let [start-line (:row pos)
+            end-line   (:end-row pos)]
+        (and start-line end-line
+          (<= start-line line end-line))))))
+
+(defn- find-specification-at-line
+  "Finds the specification form containing the given line.
+   Returns the zipper location or nil if not found."
+  [zloc line]
+  (loop [loc zloc]
+    (when (and loc (not (z/end? loc)))
+      (if (and (specification-form? loc)
+            (form-contains-line? loc line))
+        loc
+        (recur (z/next loc))))))
+
+(defn- find-covers-map
+  "Finds the :covers map within a specification form.
+   Returns zloc of the covers map value, or nil if not found.
+
+   Handles: (specification {:covers {...}} \"name\" ...)"
+  [spec-zloc]
+  (let [first-arg (-> spec-zloc z/down z/right)]
+    (when (and first-arg (z/map? first-arg))
+      ;; First arg is a map, look for :covers key
+      (loop [loc (z/down first-arg)]
+        (when loc
+          (if (and (z/sexpr loc) (= :covers (z/sexpr loc)))
+            (z/right loc)                                   ; Return the value (the covers map)
+            (recur (z/right loc))))))))
+
+(defn- unquote-sym
+  "Extracts the symbol from a (quote sym) form or returns the symbol as-is."
+  [x]
+  (cond
+    (symbol? x) x
+    (and (seq? x) (= 'quote (first x))) (second x)
+    :else x))
+
+(defn- extract-sym-from-node
+  "Extracts the qualified symbol from a zipper node.
+   Handles syntax-quote nodes specially by qualifying with the given namespace."
+  [zloc file-ns]
+  (let [node (z/node zloc)
+        tag  (n/tag node)]
+    (if (= :syntax-quote tag)
+      ;; Syntax-quote: extract inner symbol and qualify with namespace
+      (let [inner (z/down zloc)
+            sym   (when inner (z/sexpr inner))]
+        (if (and sym (symbol? sym) (not (namespace sym)))
+          (symbol (str file-ns) (name sym))
+          sym))
+      ;; Regular form - use sexpr and unquote
+      (unquote-sym (z/sexpr zloc)))))
+
+(defn- extract-file-ns
+  "Extracts the namespace name from the file's ns form."
+  [root-zloc]
+  (loop [loc root-zloc]
+    (when loc
+      (if (and (z/list? loc)
+            (let [first-child (z/down loc)]
+              (when first-child
+                (= 'ns (z/sexpr first-child)))))
+        ;; Found ns form - get the namespace name
+        (let [ns-sym (-> loc z/down z/right z/sexpr)]
+          (when (symbol? ns-sym)
+            (str ns-sym)))
+        (recur (z/next loc))))))
+
+(defn- extract-fn-syms-from-covers
+  "Extracts the function symbols from a covers map zipper location.
+   Handles both plain symbols and syntax-quoted symbols like `my-fn.
+   Returns a vector of resolved symbols."
+  [covers-zloc file-ns]
+  (when covers-zloc
+    (let [key-locs (loop [loc  (z/down covers-zloc)
+                          keys []]
+                     (if (nil? loc)
+                       keys
+                       ;; Alternate: key, value, key, value...
+                       (recur (-> loc z/right z/right)
+                         (conj keys loc))))]
+      (mapv #(extract-sym-from-node % file-ns) key-locs))))
+
+(defn- compute-new-signatures
+  "Computes new signatures for the given function symbols.
+   Returns a map of {fn-sym new-signature}."
+  [fn-syms scope-ns-prefixes]
+  (into {}
+    (for [fn-sym fn-syms
+          :let [new-sig (signature fn-sym scope-ns-prefixes)]
+          :when new-sig]
+      [fn-sym new-sig])))
+
+(defn- update-covers-map
+  "Updates the covers map with new signatures IN PLACE.
+   Walks through the map entries and replaces signature values.
+   Preserves all formatting and syntax-quote nodes.
+   Returns the updated zipper location pointing to the covers map."
+  [covers-zloc new-sigs file-ns]
+  (loop [loc (z/down covers-zloc)]
+    (if (nil? loc)
+      ;; Done - return the covers map (z/down returns nil for empty maps)
+      covers-zloc
+      ;; loc is at a key, next sibling is the value
+      (let [key-sym   (extract-sym-from-node loc file-ns)
+            value-loc (z/right loc)
+            new-sig   (get new-sigs key-sym)]
+        (if (and new-sig value-loc)
+          ;; Update this value and continue
+          (let [updated-value-loc (z/replace value-loc (n/coerce new-sig))
+                ;; Move to next key (skip the updated value)
+                next-key-loc      (z/right updated-value-loc)]
+            (if next-key-loc
+              (recur next-key-loc)
+              ;; No more keys - go back up to the map
+              (z/up updated-value-loc)))
+          ;; No update needed, skip key and value
+          (let [next-loc (-> loc z/right z/right)]
+            (if next-loc
+              (recur next-loc)
+              ;; No more entries - go back up
+              (z/up (z/right loc)))))))))
+
+(defn reseal!
+  "Updates the :covers signatures in the specification at the given file and line.
+
+   Arguments:
+     file-path - Absolute path to the source file
+     line      - Line number within the specification
+
+   Options (optional third argument map):
+     :scope-ns-prefixes - Set of namespace prefixes for transitive analysis
+                          Defaults to value from .fulcro-spec.edn
+
+   Returns a map with:
+     :file      - The file path
+     :spec-name - Name of the specification (if found)
+     :updated   - Map of {fn-sym {:old old-sig :new new-sig}}
+     :unchanged - Set of fn-syms with unchanged signatures
+     :errors    - Any errors encountered
+
+   Example:
+     (reseal! \"/path/to/my_test.clj\" 42)
+     ;; => {:file \"...\", :spec-name \"my test\", :updated {...}, ...}"
+  ([file-path line]
+   (reseal! file-path line {}))
+  ([file-path line {:keys [scope-ns-prefixes]}]
+   (let [scope (or scope-ns-prefixes (load-scope-from-config) #{})]
+     (try
+       (let [root-zloc   (z/of-file file-path {:track-position? true})
+             file-ns     (extract-file-ns root-zloc)
+             spec-zloc   (find-specification-at-line root-zloc line)
+             _           (when-not spec-zloc
+                           (throw (ex-info "No specification found at line"
+                                    {:file file-path :line line})))
+             ;; Extract spec name for reporting
+             spec-name   (let [down (z/down spec-zloc)
+                               arg1 (z/right down)
+                               arg2 (when arg1 (z/right arg1))]
+                           (cond
+                             (and arg1 (string? (z/sexpr arg1))) (z/sexpr arg1)
+                             (and arg2 (string? (z/sexpr arg2))) (z/sexpr arg2)
+                             :else "<unnamed>"))
+             covers-zloc (find-covers-map spec-zloc)
+             _           (when-not covers-zloc
+                           (throw (ex-info "Specification has no :covers map"
+                                    {:file file-path :line line :spec-name spec-name})))
+             fn-syms     (extract-fn-syms-from-covers covers-zloc file-ns)
+             ;; Build old-sigs map with qualified symbols as keys
+             old-sigs    (zipmap fn-syms
+                           (loop [loc  (z/down covers-zloc)
+                                  vals []]
+                             (if (nil? loc)
+                               vals
+                               ;; key is at loc, value is at (z/right loc)
+                               (let [val-loc (z/right loc)
+                                     val     (when val-loc (z/sexpr val-loc))]
+                                 (recur (-> val-loc z/right)
+                                   (conj vals val))))))
+             new-sigs    (compute-new-signatures fn-syms scope)
+             ;; Compute what changed
+             updated     (into {}
+                           (for [[fn-sym new-sig] new-sigs
+                                 :let [old-sig (get old-sigs fn-sym)]
+                                 :when (not= old-sig new-sig)]
+                             [fn-sym {:old old-sig :new new-sig}]))
+             unchanged   (set (for [[fn-sym new-sig] new-sigs
+                                    :when (= (get old-sigs fn-sym) new-sig)]
+                                fn-sym))]
+         (if (seq updated)
+           ;; Write updated file
+           (let [updated-covers (update-covers-map covers-zloc new-sigs file-ns)
+                 new-content    (z/root-string updated-covers)]
+             (spit file-path new-content)
+             {:file      file-path
+              :spec-name spec-name
+              :updated   updated
+              :unchanged unchanged
+              :errors    nil})
+           ;; Nothing to update
+           {:file      file-path
+            :spec-name spec-name
+            :updated   {}
+            :unchanged unchanged
+            :errors    nil}))
+       (catch Exception e
+         {:file   file-path
+          :errors {:message (ex-message e)
+                   :data    (ex-data e)}})))))
+
+(defn print-reseal-result
+  "Pretty-prints the result of a reseal! call."
+  [{:keys [file spec-name updated unchanged errors]}]
+  (println)
+  (if errors
+    (do
+      (println "ERROR:" (:message errors))
+      (when-let [data (:data errors)]
+        (println "  " (pr-str data))))
+    (do
+      (println "Resealed:" spec-name)
+      (println "File:" file)
+      (if (seq updated)
+        (do
+          (println "\nUpdated signatures:")
+          (doseq [[fn-sym {:keys [old new]}] (sort-by str updated)]
+            (println "  " fn-sym)
+            (println "    old:" old)
+            (println "    new:" new)))
+        (println "\nNo signatures changed."))
+      (when (seq unchanged)
+        (println "\nUnchanged:" (count unchanged) "function(s)")))))

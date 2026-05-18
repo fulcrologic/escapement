@@ -31,7 +31,7 @@
           (final {:id :pipeline-done}))))
 
 ;; ---------------------------------------------------------------------------
-;; Mock LLM backend (same pattern as test/escapement/charts/iterate_test.clj)
+;; Mock LLM backend (same pattern as test/escapement/examples/iterate_test.clj)
 ;; ---------------------------------------------------------------------------
 
 (defn- pop-first! [a]

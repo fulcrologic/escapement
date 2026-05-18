@@ -16,7 +16,7 @@
         --transcript <path>     Transcript path; default <work-dir>/<session>/transcript.jsonl
         --checkpoint-dir <dir>  Checkpoint dir; default <work-dir>/<session>/checkpoints
         --resume                Resume from saved working memory.
-        --backend (api|codex|openai)  LLM backend (optional; only needed for LLM charts).
+        --backend (api|codex|openai|ollama|opencode-go)  LLM backend (optional; only needed for LLM charts).
         --model <name>          Model name.
         --api-base-url <url>    API base URL.
         --api-key-env <name>    Env-var name holding the API key.
@@ -162,22 +162,41 @@
     (assert ctor "escapement.llm.multi/new-backend not found")
     (ctor opts)))
 
+(defn- nonblank-env [k]
+  (let [v (System/getenv k)]
+    (when-not (str/blank? v) v)))
+
+(defn- opencode-go-anthropic-model? [model]
+  (and model (re-find #"^minimax-" model)))
+
+(defn- build-opencode-go-backend [{:keys [model api-key base-url] :as opts}]
+  (if (opencode-go-anthropic-model? model)
+    (build-api-backend {:api-key       api-key
+                        :base-url      (or base-url "https://opencode.ai/zen/go")
+                        :default-model model
+                        :auth-mode     :x-api-key})
+    (build-openai-backend {:api-key       api-key
+                           :base-url      (or base-url "https://opencode.ai/zen/go/v1")
+                           :default-model (or model (:default-model opts) "glm-5")})))
+
 (defn- detect-available-credentials
   "Returns a vector of available credential descriptors (one per env var or
    OAuth token present). Order is the preference order used for the default
    backend when assembling a multi-dispatch."
   []
-  (let [anthropic  (System/getenv "ANTHROPIC_API_KEY")
-        zai        (System/getenv "ZAI_API_KEY")
-        openai     (System/getenv "OPENAI_API_KEY")
-        openrouter (System/getenv "OPENROUTER_API_KEY")
+  (let [anthropic       (nonblank-env "ANTHROPIC_API_KEY")
+        zai             (nonblank-env "ZAI_API_KEY")
+        openai          (nonblank-env "OPENAI_API_KEY")
+        openrouter      (nonblank-env "OPENROUTER_API_KEY")
+        ollama          (nonblank-env "OLLAMA_API_KEY")
+        opencode-go     (nonblank-env "OPENCODE_GO_API_KEY")
         codex-auth (try
                      (require 'escapement.llm.openai-codex.auth)
                      (when-let [load! (resolve 'escapement.llm.openai-codex.auth/load-auth!)]
                        (load!))
                      (catch Throwable _ nil))]
     (cond-> []
-      (and anthropic (not (str/blank? anthropic)))
+      anthropic
       (conj {:kind :anthropic :source "ANTHROPIC_API_KEY"
              :api-key anthropic :base-url "https://api.anthropic.com"
              :default-model "claude-sonnet-4-6" :auth-mode :x-api-key
@@ -188,23 +207,43 @@
              :default-model "gpt-5.1-codex"
              :route #"^gpt-5"})
 
-      (and openai (not (str/blank? openai)))
+      openai
       (conj {:kind :openai :source "OPENAI_API_KEY"
              :api-key openai :base-url "https://api.openai.com/v1"
              :default-model (or (System/getenv "OPENAI_MODEL") "gpt-4o-mini")
              :route #"^gpt-"})
 
-      (and openrouter (not (str/blank? openrouter)))
+      openrouter
       (conj {:kind :openrouter :source "OPENROUTER_API_KEY"
              :api-key openrouter :base-url "https://openrouter.ai/api/v1"
              :default-model (or (System/getenv "OPENROUTER_MODEL") "openai/gpt-4o-mini")
              :route #".+/.+"})
 
-      (and zai (not (str/blank? zai)))
+      ;; Keep established provider routes before newer hosted gateways so
+      ;; adding Ollama/OpenCode credentials does not steal existing glm-* traffic.
+      zai
       (conj {:kind :zai :source "ZAI_API_KEY"
              :api-key zai :base-url "https://api.z.ai/api/anthropic"
              :default-model "glm-4.6" :auth-mode :bearer
-             :route #"^glm-"}))))
+             :route #"^glm-"})
+
+      opencode-go
+      (conj {:kind :opencode-go-openai :source "OPENCODE_GO_API_KEY"
+             :api-key opencode-go :base-url "https://opencode.ai/zen/go/v1"
+             :default-model (or (System/getenv "OPENCODE_GO_MODEL") "glm-5")
+             :route #"^(glm-|kimi-|mimo-)"})
+
+      opencode-go
+      (conj {:kind :opencode-go-anthropic :source "OPENCODE_GO_API_KEY"
+             :api-key opencode-go :base-url "https://opencode.ai/zen/go"
+             :default-model "minimax-m2.7" :auth-mode :x-api-key
+             :route #"^minimax-"})
+
+      ollama
+      (conj {:kind :ollama :source "OLLAMA_API_KEY"
+             :api-key ollama :base-url "https://ollama.com/v1"
+             :default-model (or (System/getenv "OLLAMA_MODEL") "kimi-k2.5")
+             :route #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}))))
 
 (defn- build-credential-backend
   "Instantiate the sub-backend for one credential descriptor."
@@ -214,6 +253,9 @@
     :zai        (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
     :openai     (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
+    :ollama     (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
+    :opencode-go-openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
+    :opencode-go-anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
     :codex      (build-codex-backend {:default-model (:default-model c)})))
 
 (defn- build-default-multi-backend!
@@ -279,6 +321,23 @@
                                                  (not api-key-env) (assoc :api-key (System/getenv "OPENAI_API_KEY"))))
          :default-models [m]})
 
+      "ollama"
+      (let [m (or model "kimi-k2.5")]
+        {:backend        (build-openai-backend (cond-> {:base-url      (or api-base-url "https://ollama.com/v1")
+                                                        :default-model m}
+                                                 api-key-env (assoc :api-key (System/getenv api-key-env))
+                                                 (not api-key-env) (assoc :api-key (System/getenv "OLLAMA_API_KEY"))))
+         :default-models [m]})
+
+      "opencode-go"
+      (let [m (or model "glm-5")]
+        {:backend        (build-opencode-go-backend {:api-key (if api-key-env
+                                                                (System/getenv api-key-env)
+                                                                (System/getenv "OPENCODE_GO_API_KEY"))
+                                                     :base-url api-base-url
+                                                     :model   m})
+         :default-models [m]})
+
       "codex"
       {:backend        (build-codex-backend (cond-> {}
                                               model (assoc :default-model model)))
@@ -311,7 +370,7 @@
 
 (defn- needs-llm?
   "Heuristic: does this chart require an LLM backend? We treat any chart loaded
-   from the conventional `*.charts.*` namespace as potentially LLM-using; the
+   from the conventional `*.examples.*` namespace as potentially LLM-using; the
    safer signal is the absence of env keys AND no --backend flag — at that
    point we surface the actionable error before the engine reports a cryptic
    `:type :llm-conversation` message."
@@ -331,11 +390,15 @@
   (let [anthropic  (System/getenv "ANTHROPIC_API_KEY")
         zai        (System/getenv "ZAI_API_KEY")
         openai     (System/getenv "OPENAI_API_KEY")
-        openrouter (System/getenv "OPENROUTER_API_KEY")]
+        openrouter (System/getenv "OPENROUTER_API_KEY")
+        ollama     (System/getenv "OLLAMA_API_KEY")
+        ocgo       (System/getenv "OPENCODE_GO_API_KEY")]
     (println "  ANTHROPIC_API_KEY : " (if (seq anthropic) "set" "not set"))
     (println "  ZAI_API_KEY       : " (if (seq zai) "set" "not set"))
     (println "  OPENAI_API_KEY    : " (if (seq openai) "set" "not set"))
-    (println "  OPENROUTER_API_KEY: " (if (seq openrouter) "set" "not set")))
+    (println "  OPENROUTER_API_KEY: " (if (seq openrouter) "set" "not set"))
+    (println "  OLLAMA_API_KEY    : " (if (seq ollama) "set" "not set"))
+    (println "  OPENCODE_GO_API_KEY: " (if (seq ocgo) "set" "not set")))
   (let [codex-info (codex-auth-info)
         auth-file  (codex-auth-file)]
     (println "  codex OAuth       : " (or codex-info "not logged in"))
@@ -523,7 +586,9 @@
                                "Options:\n"
                                "  1. Set ANTHROPIC_API_KEY (Anthropic API)\n"
                                "  2. Set ZAI_API_KEY (z.ai Anthropic-compatible endpoint)\n"
-                               "  3. Pass --backend codex  (ChatGPT Plus/Pro subscription; run 'escapement login codex' first)\n"
+                               "  3. Set OLLAMA_API_KEY (Ollama Cloud)\n"
+                               "  4. Set OPENCODE_GO_API_KEY (OpenCode Go)\n"
+                               "  5. Pass --backend codex  (ChatGPT Plus/Pro subscription; run 'escapement login codex' first)\n"
                                "See: escapement info   (or:  Guide.adoc, \"LLM backends\")")
                           1))
         backend-info  (make-backend opts)
@@ -648,7 +713,8 @@ Common `run` flags:
   --transcript <path>           Transcript path.
   --checkpoint-dir <dir>        Checkpoint dir.
   --resume                      Resume from saved working memory.
-  --backend (api|codex|openai)  LLM backend (only needed for LLM charts).
+  --backend (api|codex|openai|ollama|opencode-go)
+                                LLM backend (only needed for LLM charts).
   --model <name>                Model name.
   --api-base-url <url>          API base URL.
   --api-key-env <name>          Env-var name holding the API key.
