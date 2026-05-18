@@ -275,8 +275,7 @@ The chart itself:
                                  :real-tools           []
                                  :allowed-events       [{:event       :done
                                                          :data-schema [:map [:greeting :string]]}]
-                                 :initial-user-message "Say hello."
-                                 :max-tokens           120})})
+                                 :initial-user-message "Say hello."})})
                  (transition {:event :done :target :finished}
                              (script {:expr (fn [_env data]
                                               [(ops/assign :greeting
@@ -347,8 +346,8 @@ These are blends of one knob — *what event-tools you declare* — not
 different invocation types. A chart can have all three shapes in
 different states (or in parallel regions) at the same time. See
 <<tokens-and-turns>> for the mechanics that make long runs work
-(separate `:max-tokens` budget per round-trip, prompt caching across
-turns) and the `:max-turns` / `:max-conversation-duration-ms` options
+(separate catalog-driven output budget per round-trip, prompt caching
+across turns) and the `:max-turns` / `:max-conversation-duration-ms` options
 below for the worst-case guards.
 
 === Worked example: `scan.clj` — fan-out with a real tool
@@ -611,12 +610,25 @@ makes `tell-llm` work).
   equivalent to `:model-policy {:min {:intelligence N}}`.
 
 `:max-tokens`::
-  Optional int; defaults to **8192** in the api backend's request builder.
-  This caps generation in ONE assistant HTTP response — not the whole
-  conversation, not a tool round-trip. See <<tokens-and-turns>> for the
-  full mechanics, when to raise it, and how `:thinking` interacts with it.
-  Required to be strictly greater than `:thinking`'s `:budget-tokens`
-  when extended thinking is enabled.
+  **Not a chart param.** The per-turn output cap is resolved automatically
+  from the model catalog — it is the selected model's
+  `catalog/max-output-tokens` (sourced from models-api.json `limit.output`).
+  Setting `:max-tokens` in `params-fn` has no effect; remove it from
+  charts. Models the catalog does not know fall back to the api backend's
+  wire default (**8192**). This caps generation in ONE assistant HTTP
+  response — not the whole conversation, not a tool round-trip. See
+  <<tokens-and-turns>> for the full mechanics and how `:thinking` interacts
+  with it.
+
+`:stream?`::
+  Optional boolean. When `true` AND the backend implements streaming (the
+  bundled Anthropic/z.ai api backend does), the turn is issued over SSE and
+  incremental output is published as `:llm/delta` transcript events
+  (`{:type :text-delta|:thinking-delta :text "…" :model … :invokeid …}`)
+  while the turn is still in flight — relay these to a UI for live output.
+  The final Response and all chart semantics are byte-identical to a
+  non-streamed turn. No-op (plain buffered turn) on backends without
+  streaming support.
 
 `:temperature`::
   Optional number in `(0, 1]`. Use values near zero for deterministic
@@ -645,8 +657,9 @@ The model emits one or more `:thinking` (and possibly `:redacted_thinking`)
 content blocks before its normal text/tool_use blocks. They are recorded
 in the message history so the model can build on them across turns; the
 chart never sees them — they pass through transparently. Set
-`:budget-tokens` low enough to leave room within `:max-tokens` for the
-actual answer.
+`:budget-tokens` low enough to leave room, within the model's
+catalog output cap, for the actual answer (select a model with a large
+enough output limit when enabling deep thinking).
 
 `:tool-choice`::
   Optional. Forces the model's hand on tool selection:
@@ -715,20 +728,43 @@ for the full explanation and when caching is wasted effort.
 NOTE: Error reporting now follows SCXML's `:error.x.y` convention. The
 processor fires one of:
 +
-* `:error.llm.backend` — HTTP / parse / unexpected backend throw. Fired
-  only after EVERY candidate model has been tried (see `:models` /
-  `:intelligence`). The event data carries `:attempts`, a vector of
-  `{:model :error}` entries (oldest first) so the chart can see which
-  models were tried and what each one failed with.
+* `:error.llm.backend` — backend threw an **uncategorized** throwable
+  (HTTP / parse / unexpected). This is the back-compat fallback: any
+  throw that is not a categorized `escapement.llm.protocol` error still
+  collapses here with `:reason :backend`, unchanged. Fired only after
+  EVERY candidate model has been tried (see `:models` / `:intelligence`).
+  The event data carries `:attempts`, a vector of `{:model :error}`
+  entries (oldest first) so the chart can see which models were tried and
+  what each one failed with.
+* `:error.llm.rate-limited` / `:error.llm.overloaded` /
+  `:error.llm.auth` / `:error.llm.invalid-request` /
+  `:error.llm.context-length` / `:error.llm.timeout` /
+  `:error.llm.transport` — a backend threw a **categorized** failure
+  (`escapement.llm.protocol/llm-error`); the consumer maps the category
+  (∈ `escapement.llm.protocol/error-categories`) to the matching
+  `:error.llm.<category>` event so a chart can branch on the failure
+  class — e.g. "rate-limited → wait & resume" vs "invalid-request →
+  fail". The bundled Anthropic/z.ai api backend categorizes non-2xx HTTP
+  by status (429 → `:rate-limited`, 529/overloaded → `:overloaded`,
+  401/403 → `:auth`, 400/422 → `:invalid-request` or `:context-length`,
+  timeouts → `:timeout`, connection/IO failures → `:transport`) and SSE
+  `error` events as `:overloaded`/`:transport`. As with
+  `:error.llm.backend`, these fire only after every candidate model has
+  been exhausted and carry the same `:attempts` data. (`:error.llm.timeout`
+  is shared: it also fires when `:max-conversation-duration-ms` is
+  exceeded — see above.)
 * `:error.llm.tool-validation` — tool input failed schema after one retry.
 * `:error.llm.unexpected-stop` — `:max_tokens` / `:stop_sequence` /
   `:refusal` stop reason.
 * `:error.llm.max-turns` — `:max-turns` budget exceeded.
-* `:error.llm.timeout` — `:max-conversation-duration-ms` exceeded.
 * `:error.llm.worker-exception` — uncaught throwable in the worker.
 +
-Chart-authors catch the family with `(transition {:event :error.llm.*
-:target :recover})` or pin to a specific cause. The old
+Every `:error.llm.*` event (and the `:llm/error` / `:llm/model-down`
+transcript events) carries an additive `:category` key: the matched
+category keyword for a categorized failure, or `nil` when uncategorized
+(so existing `:error.llm.backend` consumers are unaffected). Chart-authors
+catch the whole family with `(transition {:event :error.llm.* :target
+:recover})` or pin to a specific cause/category. The old
 `:on-error-event` option has been removed; the canonical event is always
 fired.
 
@@ -878,7 +914,6 @@ Set the explicit map:
  :system-cache-control {:type :ephemeral :ttl :1h}        ; longer-lived
  :tools-cache-control  {:type :ephemeral :ttl :1h}
  :real-tools           [:fs/read :fs/edit :shell/run]
- :max-tokens           16384
  :allowed-events       [...]
  :initial-user-message "..."}
 ----
@@ -1008,14 +1043,17 @@ either transitions to a compaction state or trims `messages-atom`
 before the request goes out.
 
 [[tokens-and-turns]]
-=== Tokens and turns — what `:max-tokens` actually limits
+=== Tokens and turns — what the output cap actually limits
 
 This trips people up the first time. The short version:
 
-* `:max-tokens` caps generation in **one HTTP response** from the model.
-  It is not a session budget, not a per-tool budget, not a per-chart
-  budget. It only constrains "how long can the assistant's single
-  message be."
+* The per-turn output cap (the `max_tokens` sent on the wire) is
+  **catalog-driven**: it is the selected model's
+  `catalog/max-output-tokens`, resolved by the invocation layer — charts
+  do not set it. It caps generation in **one HTTP response** from the
+  model. It is not a session budget, not a per-tool budget, not a
+  per-chart budget. It only constrains "how long can the assistant's
+  single message be."
 * A tool round-trip is a **separate HTTP call** with a **separate fresh
   budget**. The worker emits one request, the model returns
   `stop_reason=tool_use` with some text + tool_use blocks (≤ `:max-tokens`
@@ -1023,10 +1061,11 @@ This trips people up the first time. The short version:
   to the message history, and POSTs the next request. The next response
   gets its own clean `:max-tokens` allocation.
 * So a long, tool-heavy conversation can produce far more total tokens
-  than `:max-tokens` over many turns. The only failure mode that
-  `:max-tokens` actually causes is **truncation inside a single
-  response** — for example, when you ask the model to write a 6 KB file
-  in one shot and `:max-tokens` is set to 4 KB.
+  than the per-turn cap over many turns. The only failure mode the cap
+  actually causes is **truncation inside a single response** — for
+  example, when a model's catalog output ceiling is small relative to a
+  whole-file write the chart asks for in one shot. The fix is to select a
+  model with a larger output limit, not to tweak a param.
 
 ==== Stop reasons
 
@@ -1039,47 +1078,40 @@ When a response completes, Anthropic returns `stop_reason`:
 * `:tool_use` — the response contains at least one tool_use block. The
   worker dispatches the tools, appends results, and immediately POSTs
   the next request. Chart-side scripts don't see this.
-* `:max_tokens` — the response was truncated at the cap. The worker
-  fires `:error.llm.unexpected-stop {:stop-reason :max_tokens}`. The
-  chart can either transition to an error path or just let the binding
-  die. Treat this as a "bump `:max-tokens` for this state" signal.
+* `:max_tokens` — the response was truncated at the model's catalog
+  output cap. The worker fires
+  `:error.llm.unexpected-stop {:stop-reason :max_tokens}`. The chart can
+  either transition to an error path or just let the binding die. Treat
+  this as a "this state needs a model with a larger output limit" signal
+  (or split the work into smaller turns) — it is no longer tunable per
+  state via a param.
 * `:stop_sequence`, `:pause_turn`, `:refusal` — same as `:max_tokens`:
   fired as `:error.llm.unexpected-stop` with `:stop-reason` set to the
   specific cause. Charts that opt into `:stop-sequences` (or care about
   refusals) wire a transition on `:error.llm.unexpected-stop` and
   inspect `:_event :data :stop-reason`.
 
-==== Default and recommended values
+==== Where the cap comes from
 
-The wire-layer default is **8192**. That is high enough that most agent
-turns (short reasoning + a tool call + a short summary) never truncate,
-while staying well below every Claude 4 model's hard output ceiling
-(64K+).
+The cap is the selected model's `catalog/max-output-tokens`
+(models-api.json `limit.output`), resolved per turn by the invocation
+layer — see `escapement.llm.catalog`. Modern Claude 4 models expose a
+large ceiling (64K+), so most agent turns (short reasoning + a tool call
++ a short summary) never truncate. Models the catalog does not know fall
+back to the api backend's wire default of **8192**.
 
-When to raise `:max-tokens` per state:
-
-* **Whole-file authoring** — emitting a complete `.cljc` test file,
-  a markdown report, or any long-form text. The unit-test demo uses
-  8192 for the write/critique/patch states and 16384 for refine.
-* **Long markdown analysis** — behavior or coverage reports that may
-  span many sections.
-* **Extended thinking enabled** — `:max-tokens` must be strictly greater
-  than `:thinking`'s `:budget-tokens` (the cap covers BOTH the thinking
-  blocks and the visible answer). A working pair is e.g.
-  `{:max-tokens 16384 :thinking {:type :enabled :budget-tokens 8192}}`.
-
-When NOT to raise:
-
-* **Routine tool-driven states** — extra budget is just extra room for
-  the model to ramble; it doesn't make tool work better.
-* **Per-call rate-limit sensitivity** — higher caps don't cost more if
-  the model stops earlier (you pay per token actually generated), but
-  they DO raise the per-request rate-limit allotment used.
+To give a state more output room, **select a model with a larger output
+limit** (via `:model`, `:model-policy`, or `:llm/preferences`) — there is
+no per-state cap param to raise. If a state needs whole-file authoring or
+long markdown analysis, pick a high-output model for it. With extended
+thinking enabled, the resolved cap must accommodate BOTH the thinking
+blocks and the visible answer; choose a model whose output limit
+comfortably exceeds `:thinking`'s `:budget-tokens`.
 
 ==== Cost note
 
-Anthropic bills per token actually generated, not per `:max-tokens`
-ceiling. Raising the cap doesn't cost more on its own — it just gives
+Anthropic bills per token actually generated, not per output-cap
+ceiling. A large catalog cap doesn't cost more on its own — it just gives
 the model permission to produce more. Real cost driver is the number of
 tokens in the request (your accumulated message history and system
 prompt). Use `cache_control` markers on `system` and stable message
@@ -1534,6 +1566,49 @@ context, the `glm-4.5*` / `glm-4-32b-0414-128k` family at 128K, …) is
 tracked in the model catalog (`escapement.llm.catalog`). Pass any of
 them as `:default-model` or per-state `:model`.
 
+==== Image (vision) content blocks
+
+The request protocol accepts an `:image` content block on `:user`
+messages, alongside `:text` / `:tool_result`. Its `:source` is either
+inline base64 or a URL the provider fetches server-side:
+
+[source,clojure]
+----
+;; inline bytes
+{:role :user
+ :content [{:type :image
+            :source {:type :base64
+                     :media-type "image/png"   ; jpeg|png|gif|webp
+                     :data b64-string}}
+           {:type :text :text "Describe this screenshot."}]}
+
+;; remote URL (Anthropic fetches it)
+{:type :image :source {:type :url :url "https://…/ref.png"}}
+----
+
+The api backend serializes this to the Messages API `image`/`source`
+wire shape and parses it back symmetrically; it survives a streamed turn
+identically. This is a **protocol-level capability** — it is consumed by
+any code constructing a `Request`/`Message` (e.g. a custom invocation or
+a chart that builds user content directly). Backends without vision
+support should reject or drop the block explicitly rather than silently.
+Use it for reference-image → description pipelines without changing
+invocation code.
+
+==== SSE token streaming
+
+The api backend also implements the optional
+`escapement.llm.protocol/StreamingLLMBackend` (`stream-turn`). Callers
+go through `proto/send-turn*`, which streams when the backend supports it
+and a delta callback is supplied, and otherwise issues a plain buffered
+`send-turn` — the final Response is byte-identical either way. With
+`"stream": true` the backend reads the SSE `data:` events and rebuilds
+the Response from `content_block_*` events; `proto/streaming?`
+feature-detects support. Charts opt in per state with the `:stream?`
+`llm-conversation` param (see <<params-fn>>), which surfaces deltas as
+`:llm/delta` transcript events; nothing else about chart semantics
+changes.
+
 === `escapement.llm.openai` — OpenAI Chat Completions / OpenRouter
 
 Defined in `src/escapement/llm/openai.clj`. Sibling of the Anthropic
@@ -1950,6 +2025,12 @@ emitted across the codebase:
 * `:checkpoint/written`
 * `:llm/start`, `:llm/request`, `:llm/response`, `:llm/error`,
   `:llm/user-message`, `:llm/worker-exit`, `:llm/context-warning`
+* `:llm/delta` — incremental output during a `:stream?` turn. `:data` is
+  `{:type :text-delta|:thinking-delta :text "…" :model … :invokeid …}`.
+  Only emitted when the state set `:stream?` and the backend supports
+  streaming; consumers MUST ignore unknown `:type` values (more may be
+  added). Relay these off the transcript tap for live UI output; the
+  final `:llm/response` is unchanged.
 * `:human-input/start`, `:human-input/answer`, `:human-input/cancelled`,
   `:human-input/error`, `:human-input/interrupted`,
   `:human-input/validation-failed`
@@ -2518,9 +2599,10 @@ require network access and real credentials.
   `:on-entry`. There is currently no policy layer.
 
 * **LLM token budgets are per-turn, not per-session.** Long iterative
-  runs accumulate context. Use `:max-tokens` in `params-fn`, prompt for
-  brevity, and watch the `:context-used-frac` field on
-  `:llm/response` transcript events (see <<context-tracking>>).
+  runs accumulate context. The per-turn output cap is catalog-driven (not
+  a param); prompt for brevity, pick an appropriately-sized model, and
+  watch the `:context-used-frac` field on `:llm/response` transcript
+  events (see <<context-tracking>>).
 
 [[contributing]]
 == Contributing and running tests

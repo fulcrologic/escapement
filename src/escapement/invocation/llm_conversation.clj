@@ -524,6 +524,7 @@
           (:_throw response)
           (let [^Throwable t (:_throw response)
                 details      (throwable->details t)
+                category     (llm/error-category t)
                 ;; Only mark a real model id down. nil (backend's default
                 ;; pick) is not a routable identifier.
                 _            (when m (swap! model-status assoc m :down))
@@ -531,6 +532,7 @@
                                           {:event :llm/model-down :ts (now-ms)
                                            :data  {:model m
                                                    :message (:message details)
+                                                   :category category
                                                    :remaining (vec more)}})
                 attempts'    (conj attempts {:model m :error (select-keys details [:message :class])})]
             (if (seq more)
@@ -566,13 +568,22 @@
       (:exhausted outcome)
       (let [attempts (:exhausted outcome)
             last-t   ^Throwable (:last-throwable outcome)
-            details  (throwable->details last-t)]
+            details  (throwable->details last-t)
+            category (llm/error-category last-t)
+            ;; Known category → reason is that category (yields
+            ;; :error.llm.<category>). Uncategorized/unknown → :backend,
+            ;; which preserves the legacy :error.llm.backend event exactly.
+            reason   (if (contains? llm/error-categories category)
+                       category
+                       :backend)]
         (transcript! transcript-fn {:event :llm/error :ts (now-ms)
                                     :data  (assoc details
-                                                  :reason   :backend
+                                                  :reason   reason
+                                                  :category category
                                                   :attempts attempts)})
-        (post-error! :backend (-> (select-keys details [:message :class])
-                                  (assoc :attempts attempts)))
+        (post-error! reason (-> (select-keys details [:message :class])
+                                (assoc :category category
+                                       :attempts attempts)))
         (reset! worker-state :dying)
         :error-and-die)
 
@@ -672,12 +683,29 @@
                 lacks streaming support.
 
    Error events follow SCXML convention `:error.llm.<reason>`:
-     :error.llm.backend          — backend call threw (HTTP / parse / etc.)
+     :error.llm.backend          — backend call threw an UNCATEGORIZED
+                                    throwable (HTTP / parse / etc.). This is
+                                    the back-compat fallback: any throw that
+                                    is not an `escapement.llm.protocol`
+                                    categorized error still collapses here.
+     :error.llm.rate-limited     — backend threw a categorized 429/rate-limit
+     :error.llm.overloaded       — backend threw a categorized overload (529)
+     :error.llm.auth             — backend threw a categorized auth failure
+     :error.llm.invalid-request  — backend threw a categorized bad request
+     :error.llm.context-length   — backend threw a categorized context/token
+                                    length error
+     :error.llm.timeout          — backend threw a categorized timeout, OR
+                                    the :max-conversation-duration-ms budget
+                                    was exceeded (both map here intentionally)
+     :error.llm.transport        — backend threw a categorized transport error
      :error.llm.tool-validation  — tool/event-tool input failed schema twice
      :error.llm.unexpected-stop  — stop_reason other than :end_turn / :tool_use
      :error.llm.max-turns        — :max-turns budget exceeded
-     :error.llm.timeout          — :max-conversation-duration-ms exceeded
-     :error.llm.worker-exception — uncaught throwable in the worker loop"
+     :error.llm.worker-exception — uncaught throwable in the worker loop
+
+   The categorized events above come from a backend throwing
+   `(escapement.llm.protocol/llm-error category msg ...)`; consumers map
+   `category` ∈ `protocol/error-categories` to `:error.llm.<category>`."
   [{:keys [backend tool-registry transcript-fn
            name->tool-kw name->event-entry tool-defs
            worker-state messages-atom user-msg-queue retry-counts

@@ -48,6 +48,15 @@
    :usage       {:input-tokens 1 :output-tokens 1}
    :model       "mock"})
 
+(defrecord ThrowingBackend [throw-fn]
+  llm/LLMBackend
+  (send-turn [_ _] (throw (throw-fn))))
+
+(defn throwing-backend
+  "Build a backend whose every `send-turn` throws `(throw-fn)`."
+  [throw-fn]
+  (->ThrowingBackend throw-fn))
+
 ;; ---------------------------------------------------------------------------
 ;; Helpers for building a test env with the LLM processor
 ;; ---------------------------------------------------------------------------
@@ -891,6 +900,77 @@
     (component "no policy → default-models verbatim"
       (assertions
        (#'llmc/candidate-models {} defaults (atom {})) => defaults))))
+
+;; ---------------------------------------------------------------------------
+;; Categorized backend errors → finer :error.llm.<category> chart events,
+;; with full back-compat for uncategorized throwables.
+;; ---------------------------------------------------------------------------
+
+(defn- run-error-chart!
+  "Run a one-turn chart against `backend` (which will throw). Returns the
+   `:_event` map the chart received on the catch-all :error.llm.* transition."
+  [backend]
+  (let [err-seen (atom nil)
+        captured (atom [])
+        chart    (chart/statechart
+                  {:initial :wrap}
+                  (state {:id :wrap :initial :work}
+                         (state {:id :work}
+                                (h/llm-conversation
+                                 {:id        "p"
+                                  :params-fn (fn [_ _] {:initial-user-message "go"})})
+                                (transition {:event :error.llm.* :target :failed}
+                                            (script {:expr (fn [_ d]
+                                                             (reset! err-seen (:_event d))
+                                                             nil)})))
+                         (final {:id :failed})))
+        t        (new-llm-test-env {:statechart    chart
+                                    :backend       backend
+                                    :transcript-fn (fn [ev] (swap! captured conj ev))})
+        t        (await-config! t :failed 3000)]
+    {:event @err-seen :in-failed? (dct/in? t :failed) :transcript @captured}))
+
+(specification "categorized backend error → :error.llm.rate-limited"
+  (let [{:keys [event in-failed? transcript]}
+        (run-error-chart!
+         (throwing-backend #(llm/llm-error :rate-limited "429 slow down"
+                                           {:status 429})))]
+    (assertions
+     "chart reached :failed"
+     in-failed? => true
+     "the categorized event name is :error.llm.rate-limited"
+     (:name event) => :error.llm.rate-limited
+     ":reason on the event data is the category"
+     (get-in event [:data :reason]) => :rate-limited
+     ":category is carried for observability"
+     (get-in event [:data :category]) => :rate-limited
+     ":llm/error transcript carries reason + category"
+     (let [te (first (filter #(= :llm/error (:event %)) transcript))]
+       [(get-in te [:data :reason]) (get-in te [:data :category])])
+     => [:rate-limited :rate-limited]
+     ":llm/model-down transcript carries the category"
+     (->> transcript
+          (filter #(= :llm/model-down (:event %)))
+          first :data :category)
+     => :rate-limited)))
+
+(specification "UNCATEGORIZED backend throwable still yields :error.llm.backend (back-compat)"
+  (let [{:keys [event in-failed? transcript]}
+        (run-error-chart!
+         (throwing-backend #(ex-info "kaboom" {:status 500})))]
+    (assertions
+     "chart reached :failed"
+     in-failed? => true
+     "the legacy event name is unchanged"
+     (:name event) => :error.llm.backend
+     ":reason stays :backend exactly as before"
+     (get-in event [:data :reason]) => :backend
+     "additive :category key is present and nil for uncategorized"
+     (contains? (:data event) :category) => true
+     (get-in event [:data :category]) => nil
+     ":llm/error transcript reason is still :backend"
+     (->> transcript (filter #(= :llm/error (:event %))) first :data :reason)
+     => :backend)))
 
 (specification "try-models! surfaces :llm/model-policy-empty when the policy excludes every fallback model"
   (let [captured (atom [])

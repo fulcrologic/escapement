@@ -1,30 +1,81 @@
 # Changelog
 
+## [unreleased] — feat/lib-compat — 2026-05-18
+
+Builds on the now-merged LLM catalog work: SSE token streaming with a
+catalog-driven per-turn output cap, plus image content blocks in the LLM
+request protocol.
+
+### Added
+- Structured backend error categories in the LLM protocol contract.
+  `escapement.llm.protocol` now exports `error-categories`
+  (`#{:rate-limited :overloaded :auth :invalid-request :context-length
+  :timeout :transport}`), an `llm-error` constructor, and an
+  `error-category` accessor (walks the `ex-cause` chain). Backends SHOULD
+  throw `(protocol/llm-error category msg ...)`; the `llm-conversation`
+  consumer now maps a known category to a finer
+  `:error.llm.<category>` chart event (e.g. `:error.llm.rate-limited`) so a
+  statechart can branch "rate-limited → wait & resume" vs
+  "invalid-request → fail". The `:llm/error` and `:llm/model-down`
+  transcript events gained an additive `:category` key. **Back-compat: an
+  uncategorized throwable still collapses to exactly `:error.llm.backend`
+  with `:reason :backend`, unchanged.** The native Anthropic api backend
+  now participates: non-2xx HTTP maps status→category (429 →
+  `:rate-limited`, 529/overloaded → `:overloaded`, 401/403 → `:auth`,
+  400/422 → `:invalid-request` or `:context-length`, timeouts →
+  `:timeout`, else `:transport`) and the SSE `error` event categorizes as
+  `:overloaded`/`:transport`, all preserving the legacy message text and
+  `:status`/`:body`/`:url` ex-data.
+- Token streaming. New optional
+  `escapement.llm.protocol/StreamingLLMBackend` (`stream-turn`) plus
+  `streaming?` / `send-turn*` capability helpers. The Anthropic api
+  backend implements SSE streaming (`"stream": true`), rebuilding a
+  byte-identical Response from `content_block_*` events. A new
+  `:stream?` `llm-conversation` param opts a state in: incremental output
+  is published as `:llm/delta` transcript events
+  (`{:type :text-delta|:thinking-delta :text … :model … :invokeid …}`)
+  for relay to a UI while the turn is in flight. Chart semantics and the
+  final Response are unchanged; no-op on backends without streaming.
+- Image (vision) attachments in the LLM request protocol: a new `:image`
+  content block (`escapement.llm.types/ImageBlock`) accepted on `:user`
+  messages, with `:base64` (inline data + media-type) or `:url` sources.
+  The Anthropic backend serializes it to the Messages API
+  `image`/`source` wire shape and parses it back symmetrically (survives
+  a streamed turn). Enables vision-model steps (e.g. reference-image →
+  description pipelines) at the protocol level without invocation-code
+  changes.
+
+### Changed
+- The per-turn output cap (`max_tokens` on the wire) is now purely
+  catalog-driven: it is always the resolved model's
+  `catalog/max-output-tokens` (models-api.json `limit.output`), with the
+  api backend's wire default (8192) for models the catalog doesn't know.
+  To give a state more output room, pick a model with a larger output
+  limit rather than tuning a param.
+
+### Removed
+- The `:max-tokens` `llm-conversation` param. It is no longer a chart
+  concern (see Changed above) and was dropped from all bundled example
+  charts; setting it in `params-fn` now has no effect. It remains only on
+  the low-level `escapement.llm.types/Request` for backend wire
+  translation.
+
+### Notes
+- Protocol/translation logic is unit-covered offline: SSE
+  reconstruction (`parse-anthropic-sse!`), `send-turn*` capability
+  dispatch, image-block round-trip, `effective-max-tokens`, the
+  status→category mapping, and the categorized vs uncategorized
+  `:error.llm.*` consumer behavior all run green under `bb test`. The
+  end-to-end paths that need a live Anthropic-compatible endpoint —
+  a real streamed HTTP turn, a real non-2xx status producing a
+  categorized throw, and a real vision request — are credential-gated
+  (`ANTHROPIC_API_KEY` / `ZAI_API_KEY`) and exercised only by the
+  offline simulations above; a reviewer with a key should smoke one
+  live streamed + one vision turn.
+
 ## [unreleased] — feat/llm-catalog-and-merge-playbook — 2026-05-18
 
 ### Added
-- `max_tokens` is now purely catalog-driven and is no longer a chart
-  concern. The per-turn output cap is always the resolved model's
-  `catalog/max-output-tokens` (models-api.json `limit.output`); models the
-  catalog doesn't know fall back to the backend's wire default. The
-  `:max-tokens` param is removed from `llm-conversation` params (dropped
-  from all bundled example charts); it remains only on the low-level
-  `escapement.llm.types/Request` for backend wire translation.
-- Token streaming. New optional `escapement.llm.protocol/StreamingLLMBackend`
-  (`stream-turn`) plus `streaming?` / `send-turn*` capability helpers. The
-  Anthropic backend implements SSE streaming (`"stream": true`), rebuilding a
-  byte-identical Response from `content_block_*` events. `llm-conversation`
-  honors a `:stream?` param: when set and the backend supports it, incremental
-  output is emitted as `:llm/delta` transcript events
-  (`:text-delta` / `:thinking-delta`) for relay to a UI; chart semantics and
-  the final Response are unchanged, and it is a no-op on non-streaming
-  backends.
-- Image attachments in the LLM request protocol: a new `:image` content
-  block (`escapement.llm.types/ImageBlock`) accepted on `:user` messages,
-  with `:base64` (inline data + media-type) or `:url` sources. The Anthropic
-  backend serializes it to the Messages API `image`/`source` wire shape and
-  parses it back. Enables vision-model steps (e.g. reference-image →
-  description pipelines) without invocation-code changes.
 - Ollama Cloud and OpenCode Go LLM backends. `escapement run --backend ollama`
   and `--backend opencode-go` are now selectable, `OLLAMA_API_KEY` /
   `OPENCODE_GO_API_KEY` are auto-detected for the default multi-backend, and

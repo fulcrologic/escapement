@@ -260,8 +260,11 @@
         (update :usage merge (wire->usage (get ev "usage" {}))))
 
     "error"
-    (throw (ex-info "Anthropic SSE stream reported an error"
-                    {:error (get ev "error")}))
+    (let [err  (get ev "error")
+          etyp (str/lower-case (str (when (map? err) (get err "type"))))
+          cat  (if (str/includes? etyp "overloaded") :overloaded :transport)]
+      (throw (proto/llm-error cat "Anthropic SSE stream reported an error"
+                              {:data {:error err}})))
 
     ;; content_block_stop, message_stop, ping, unknown — no-op
     acc))
@@ -296,6 +299,61 @@
 ;;; ---------------------------------------------------------------------------
 ;;; HTTP
 
+(defn- status->category
+  "Map an HTTP status (and best-effort response body) to an
+   `escapement.llm.protocol` error category."
+  [status body]
+  (let [b (str/lower-case (str body))
+        ;; Match the specific provider phrasings for an over-long prompt
+        ;; (Anthropic: "prompt is too long: N tokens > M maximum";
+        ;; OpenAI-compat: "maximum context length is N tokens"). Deliberately
+        ;; narrow so a generic 400 that merely mentions "token" is NOT
+        ;; misclassified as :context-length.
+        ctx-len? (some #(str/includes? b %)
+                       ["prompt is too long"
+                        "context length"
+                        "context window"
+                        "maximum context"
+                        "exceeds the maximum"
+                        "too many tokens"
+                        "reduce the length"])]
+    (cond
+      (= status 429)                         :rate-limited
+      (= status 529)                         :overloaded
+      (str/includes? b "overloaded")         :overloaded
+      (or (= status 401) (= status 403))     :auth
+      (and (or (= status 400) (= status 422))
+           ctx-len?)                         :context-length
+      (or (= status 400) (= status 422))     :invalid-request
+      :else                                  :transport)))
+
+(defn- non-2xx!
+  "Throw a categorized `protocol/llm-error` for a non-2xx HTTP response,
+   preserving the legacy message text and ex-data keys (:status :body :url)."
+  [status body url]
+  (throw (proto/llm-error (status->category status body)
+                          (str "API error: HTTP " status)
+                          {:status status
+                           :data   {:status status :body body :url url}})))
+
+(defn- with-timeout-category
+  "Run `f`; if the HTTP client throws a timeout or transport-level exception,
+   rethrow it as a categorized error (other throwables propagate as-is). A
+   timed-out request is `:timeout`; a refused/failed connection is
+   `:transport` (the request never completed at the transport layer)."
+  [url f]
+  (try
+    (f)
+    (catch java.net.http.HttpTimeoutException t
+      (throw (proto/llm-error :timeout (str "API request timed out: " url)
+                              {:cause t :data {:url url}})))
+    (catch java.net.ConnectException t
+      (throw (proto/llm-error :transport (str "API connection failed: " url)
+                              {:cause t :data {:url url}})))
+    (catch java.io.IOException t
+      (throw (proto/llm-error :transport (str "API transport error: " url)
+                              {:cause t :data {:url url}})))))
+
 (defn- mask-key [k]
   (when k
     (let [s (str k)]
@@ -328,14 +386,15 @@
                                       :anthropic-version anthropic-version})
                        extra-headers)
         body    (json/generate-string body-map)
-        {:keys [status body]} (http/post url
-                                         {:headers headers
-                                          :body    body
-                                          :timeout (or http-timeout-ms 60000)
-                                          :throw   false})]
+        {:keys [status body]} (with-timeout-category
+                                url
+                                #(http/post url
+                                            {:headers headers
+                                             :body    body
+                                             :timeout (or http-timeout-ms 60000)
+                                             :throw   false}))]
     (when-not (and (>= status 200) (< status 300))
-      (throw (ex-info (str "API error: HTTP " status)
-                      {:status status :body body :url url})))
+      (non-2xx! status body url))
     (try
       (json/parse-string body)
       (catch Throwable t
@@ -353,18 +412,17 @@
                                       :api-key           api-key
                                       :anthropic-version anthropic-version})
                        extra-headers)
-        {:keys [status body]} (http/post url
-                                         {:headers headers
-                                          :body    (json/generate-string
-                                                    (assoc body-map "stream" true))
-                                          :as      :stream
-                                          :timeout (or http-timeout-ms 60000)
-                                          :throw   false})]
+        {:keys [status body]} (with-timeout-category
+                                url
+                                #(http/post url
+                                            {:headers headers
+                                             :body    (json/generate-string
+                                                       (assoc body-map "stream" true))
+                                             :as      :stream
+                                             :timeout (or http-timeout-ms 60000)
+                                             :throw   false}))]
     (when-not (and (>= status 200) (< status 300))
-      (throw (ex-info (str "API error: HTTP " status)
-                      {:status status
-                       :body   (try (slurp body) (catch Throwable _ ""))
-                       :url    url})))
+      (non-2xx! status (try (slurp body) (catch Throwable _ "")) url))
     (with-open [reader (BufferedReader. (InputStreamReader. body "UTF-8"))]
       (parse-anthropic-sse! reader request-model on-delta))))
 

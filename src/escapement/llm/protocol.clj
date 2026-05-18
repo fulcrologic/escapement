@@ -7,11 +7,48 @@
    - `escapement.llm.openai-codex`  — ChatGPT Plus/Pro subscription via OAuth (Responses API)
    - `escapement.llm.cache`         — wraps any backend with a content-addressed disk cache.")
 
+(def error-categories
+  "Canonical set of backend-failure categories. A backend SHOULD throw
+   `(llm-error category msg ...)` with `category` drawn from this set so a
+   consumer (and a statechart on top of it) can branch on the failure class
+   instead of treating every failure identically."
+  #{:rate-limited :overloaded :auth :invalid-request :context-length :timeout :transport})
+
+(defn llm-error
+  "Construct a categorized backend failure as an `ex-info`. `category` must be
+   one of `error-categories`. Backends SHOULD throw this so consumers can
+   branch on the failure class; an uncategorized throwable is treated as the
+   generic backend error (back-compat).
+
+   `opts` may carry `:status` (HTTP status int), `:cause` (a wrapped
+   Throwable) and `:data` (extra ex-data merged in, e.g. `:body`/`:url`)."
+  ([category message] (llm-error category message nil))
+  ([category message {:keys [status cause data] :as _opts}]
+   (ex-info message
+            (merge {:llm/category category}
+                   (when status {:llm/status status})
+                   data)
+            cause)))
+
+(defn error-category
+  "Returns the `:llm/category` keyword carried by `throwable` (walking the
+   `ex-cause` chain so a wrapped/rethrown categorized error is still
+   detectable), or nil if uncategorized."
+  [throwable]
+  (loop [t throwable]
+    (when t
+      (or (:llm/category (ex-data t))
+          (recur (ex-cause t))))))
+
 (defprotocol LLMBackend
   "An LLM conversational backend. Implementations are responsible for honoring
    (or explicitly ignoring) cache_control markers carried in the request."
   (send-turn [this request]
-    "Send `request` to the backend and return a Response map. May throw on error."))
+    "Send `request` to the backend and return a Response map. May throw on
+     error. Backends SHOULD throw `(llm-error category msg ...)` with a
+     category from `error-categories`; consumers map known categories to
+     `:error.llm.<category>` chart events and fall back to
+     `:error.llm.backend` when the throwable is uncategorized."))
 
 (defprotocol StreamingLLMBackend
   "OPTIONAL capability. A backend that can surface incremental output before
