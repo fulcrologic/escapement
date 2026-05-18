@@ -24,13 +24,17 @@
    "unknown id returns nil, not a throw"
    (catalog/info "totally-made-up") => nil))
 
-(specification "catalog — subjective intelligence comes from the overlay"
+(specification "catalog — info carries objective facts; opinion is config-only"
   (assertions
-   "intelligence is surfaced through info (overlaid, not in the dump)"
-   (:intelligence (catalog/info "claude-opus-4-7")) => 10
-   (:intelligence (catalog/info "gpt-5")) => 10
+   "objective facts flow from the dump"
+   (:context-tokens (catalog/info "claude-opus-4-7")) => 1000000
+   (:vision? (catalog/info "gpt-5")) => true
    "unknown model has no info at all"
    (catalog/info "totally-made-up") => nil))
+;; The subjective overlay has no built-in opinion and is config-only; its
+;; merge into `info` is exercised hermetically (explicit cfg) in
+;; escapement.llm.ratings-test, not here where the process picks up
+;; whatever `.escapement.edn` is ambient.
 
 (specification "catalog — provider pricing & policy"
   (assertions
@@ -52,18 +56,18 @@
    "empty policy admits everything (even unknown ids)"
    (catalog/satisfies-policy? "totally-made-up" nil) => true
    (catalog/satisfies-policy? "totally-made-up" {}) => true
-   ":min is a numeric floor over the merged info (intelligence overlay)"
-   (catalog/satisfies-policy? "claude-opus-4-7" {:min {:intelligence 8}}) => true
-   (catalog/satisfies-policy? "claude-haiku-4-5" {:min {:intelligence 8}}) => false
+   ":min is a numeric floor over a (here objective) info key"
+   (catalog/satisfies-policy? "claude-opus-4-7" {:min {:context-tokens 300000}}) => true
+   (catalog/satisfies-policy? "claude-haiku-4-5" {:min {:context-tokens 300000}}) => false
    ":require is exact equality over an info key"
    (catalog/satisfies-policy? "gpt-5" {:require {:vision? true}}) => true
    ":max is a numeric ceiling"
-   (catalog/satisfies-policy? "gpt-5" {:max {:intelligence 6}}) => false
+   (catalog/satisfies-policy? "gpt-5" {:max {:context-tokens 150000}}) => false
    "a non-empty policy rejects an unknown id (no facts to vouch for it)"
-   (catalog/satisfies-policy? "totally-made-up" {:min {:intelligence 1}}) => false
+   (catalog/satisfies-policy? "totally-made-up" {:min {:context-tokens 1}}) => false
    "multiple clauses must all hold"
    (catalog/satisfies-policy? "claude-opus-4-7"
-                              {:require {:vision? true} :min {:intelligence 9}})
+                              {:require {:vision? true} :min {:context-tokens 500000}})
    => true))
 
 (specification "catalog — default preferences stay reachable"

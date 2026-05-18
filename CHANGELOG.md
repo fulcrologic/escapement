@@ -27,9 +27,11 @@
   in `.escapement.edn` (ordered `{:provider :model}` pairs, validated against
   the catalog; unreachable entries are dropped; a built-in default order is
   used when unset).
-- User-configurable subjective ratings via `:llm/ratings` in `.escapement.edn`,
-  deep-merged over the built-in defaults (override one model's opinion without
-  restating the rest; dated ids resolve to the family entry).
+- User-configurable subjective ratings via `:llm/ratings` in `.escapement.edn`.
+  There is **no built-in opinion**: the table comes entirely from config, so
+  with nothing configured no model carries a rating key and a rating-gated
+  policy matches nothing. Dated ids resolve to the family entry via
+  longest-prefix.
 - `ai/escapement-check.md` — the four-gate pre-merge "Escapement Check"
   playbook is now part of the repo.
 - New worked example `escapement.examples.clj-refactor` demonstrating

@@ -130,7 +130,16 @@
    ;; single .escapement.edn can hold both kinds of settings.
    [:debug         {:optional true} :any]
    [:viewers       {:optional true} :any]
-   [:d2            {:optional true} :any]])
+   [:d2            {:optional true} :any]
+   ;; LLM model selection overlays. Validated/sanitized downstream by
+   ;; `escapement.llm.preferences` / `escapement.llm.ratings` against the
+   ;; catalog, so kept `:any` here (same as the user-level keys above).
+   ;; Both the flat `:llm/preferences`/`:llm/ratings` keys and the nested
+   ;; `:llm` map (`[:llm :preferences]` / `[:llm :ratings]`) are accepted,
+   ;; matching those namespaces' `from-config`.
+   [:llm/preferences {:optional true} :any]
+   [:llm/ratings     {:optional true} :any]
+   [:llm             {:optional true} :any]])
 
 (defn find-project-config
   "Walks up from `start-dir` (a File or path string) looking for

@@ -7,34 +7,37 @@
    [fulcro-spec.core :refer [specification assertions component =>]]))
 
 (specification "ratings overlay"
-  (component "built-in defaults"
+  (component "no built-in opinion"
     (assertions
-     "ship a coarse intelligence rating for well-known ids"
-     (:intelligence (ratings/rating-for {} "claude-opus-4-7")) => 10
-     (:intelligence (ratings/rating-for {} "gpt-5")) => 10
-     "unknown model has no opinion"
-     (ratings/rating-for {} "totally-made-up") => nil
-     "dated id resolves to the family entry via longest-prefix"
-     (:intelligence (ratings/rating-for {} "claude-opus-4-7-20260101")) => 10))
+     "nothing configured → empty table, every id unknown"
+     (ratings/ratings {}) => {}
+     (ratings/rating-for {} "claude-opus-4-7") => nil
+     (ratings/rating-for {} "gpt-5") => nil))
 
-  (component "config overlay — :llm/ratings wins per key, project layered"
-    (let [cfg {:llm/ratings {"gpt-5"        {:intelligence 7}
-                             "claude-opus-4-7" {:good-at #{:code}}}}]
+  (component "config-defined — :llm/ratings is the only source"
+    (let [cfg {:llm/ratings {"gpt-5"           {:intelligence 7}
+                             "claude-opus-4-7" {:good-at #{:code} :clojure 9}}}]
       (assertions
-       "config overrides a default key"
+       "a configured id carries exactly the keys the user set"
        (:intelligence (ratings/rating-for cfg "gpt-5")) => 7
-       "config can add a brand-new opinion key (arbitrary, chart-usable)"
+       "keys are free-form (arbitrary, chart-usable)"
        (:good-at (ratings/rating-for cfg "claude-opus-4-7")) => #{:code}
-       "non-overridden default keys survive the merge"
-       (:intelligence (ratings/rating-for cfg "claude-opus-4-7")) => 10
+       (:clojure (ratings/rating-for cfg "claude-opus-4-7")) => 9
+       "an id absent from the config has no opinion"
+       (ratings/rating-for cfg "claude-haiku-4-5") => nil
        "nested [:llm :ratings] form is also accepted"
        (:intelligence (ratings/rating-for {:llm {:ratings {"gpt-5" {:intelligence 3}}}}
                                           "gpt-5"))
        => 3)))
 
+  (component "dated id resolves to the family entry via longest-prefix"
+    (let [cfg {:llm/ratings {"claude-opus-4-7" {:intelligence 10}}}]
+      (assertions
+       (:intelligence (ratings/rating-for cfg "claude-opus-4-7-20260101")) => 10)))
+
   (component "full merged table"
     (assertions
-     "ratings returns id->opinion map merged with config"
+     "ratings returns the config table verbatim"
      (get-in (ratings/ratings {:llm/ratings {"gpt-5" {:intelligence 1}}})
              ["gpt-5" :intelligence])
      => 1)))

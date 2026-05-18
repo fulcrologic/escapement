@@ -47,7 +47,7 @@ playbook, and its one job. It must not see another concern's reasoning.
 |---|---|---|---|
 | **Coverage & tests** (Gate 1) | fresh subagent | scope + repo | the coverage table, `bb test`/`bb sanity` output, baseline-attribution proof |
 | **Code review** (Gate 3) | fresh subagent, **no authoring context** — must not be the agent that wrote the code | the raw diff only | the subjective sign-off / debt findings |
-| **Changelog summary** (Gate 2) | fresh subagent | the diff only | the `CHANGELOG.md` entry |
+| **Changelog + Guide sync** (Gate 2) | fresh subagent | the diff + `Guide.adoc`'s TOC and the specific sections covering changed areas (orchestrator extracts these, so the subagent does not grep the 2400-line guide blindly) | the `CHANGELOG.md` entry **and** the `Guide.adoc` edits (or a written "no guide change needed" justification) |
 | **Proposal** (Gate 4) | may reuse the Gate 2 agent (same "describe the change" framing) | the diff + CHANGELOG entry | branch/commit/PR draft |
 | **Assembling `ai/scratch/collabnotes.md`** | a separate collator agent | each concern's returned result verbatim | the merged notes + Result block |
 
@@ -156,7 +156,7 @@ a key for and which then **fails** the live run is a Gate 1 **FAIL**.
 Record the table, the numeric summary, and any baseline-attribution proof
 in `ai/scratch/collabnotes.md`.
 
-## Gate 2 — Human-readable change summary → CHANGELOG.md
+## Gate 2 — Human-readable change summary → CHANGELOG.md + Guide.adoc sync
 
 Write a summary a reviewer can read in under a minute and know exactly what
 functionality was **added / changed / removed**. No implementation
@@ -184,8 +184,37 @@ absent, newest entry on top):
 Omit empty sections. Keep bullets concrete ("`escapement run` now resolves
 model aliases from preferences" — not "refactored model code").
 
-**Gate 2 passes** when the entry is prepended and a non-author could
-correctly describe the branch's user-visible effect from it alone.
+### Guide.adoc must stay in sync
+
+`Guide.adoc` (repo root) is the canonical user-facing manual — it documents
+how to author, run, and extend agents. Unlike `CHANGELOG.md` (a running
+ledger), the guide must reflect the **current** state of the code after this
+branch merges. Any branch that changes user-visible behavior, public API,
+CLI surface, config keys, or the authoring model **must** update the
+relevant `Guide.adoc` sections in the same merge — a stale guide is a Gate 2
+failure.
+
+To keep this cheap and focused, the orchestrator (not the subagent) first
+gathers context so the subagent does minimal searching:
+
+1. Extract `Guide.adoc`'s section list (the `==`/`===` headings + their
+   line ranges).
+2. Map each changed source unit (from Gate 1's scope) to the guide
+   section(s) that document it, if any.
+3. Hand the Gate 2 subagent: the diff, that mapping, and the full text of
+   only the mapped sections (plus the TOC for orientation) — not the whole
+   2400-line file.
+
+The subagent then either edits those sections so the guide matches
+post-merge reality, or, if the change is genuinely invisible at the guide's
+level of abstraction (internal refactor, test-only, pure infra), records a
+one-line justification: "no Guide.adoc change — <why>". Silent omission of a
+needed guide update is a Gate 2 FAIL, exactly like an absent CHANGELOG entry.
+
+**Gate 2 passes** when the CHANGELOG entry is prepended, `Guide.adoc` is
+either updated to match post-merge behavior or explicitly justified as
+needing no change, and a non-author could correctly describe the branch's
+user-visible effect from the CHANGELOG entry alone.
 
 ## Gate 3 — Subjective code-review sign-off
 
@@ -231,7 +260,7 @@ the CHANGELOG entry.
 # Escapement Check — <branch> — <date>
 Goal:                 <one sentence: this branch exists to ___>
 Gate 1 (tested):      PASS / CONDITIONAL / FAIL  — bb test: <n tests, n assertions>; bb sanity: <ok>
-Gate 2 (changelog):   PASS / FAIL                — entry prepended
+Gate 2 (changelog):   PASS / FAIL                — entry prepended; Guide.adoc synced/justified
 Gate 3 (review):      PASS / FAIL                — repo better, no new debt
 Gate 4 (proposal):    PASS / FAIL                — branch/commit/PR drafted
 OVERALL:              MERGEABLE / CONDITIONAL / BLOCKED

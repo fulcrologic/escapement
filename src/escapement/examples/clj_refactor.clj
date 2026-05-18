@@ -12,9 +12,21 @@
 
    Those keys come from the subjective overlay in
    `escapement.llm.ratings` (merged into `catalog/info`), so the filter is
-   pure data — no invocation code knows the word \"clojure\". Against the
-   shipped `default-ratings`, this keeps the Claude Opus/Sonnet 4.x family
-   and drops gpt-5 (clojure 6) and the GLM line (clojure ≤ 6).
+   pure data — no invocation code knows the word \"clojure\".
+
+   There is **no built-in opinion**: ratings are entirely user-defined.
+   This policy filters nothing until you supply the keys it gates on in
+   `.escapement.edn`, e.g.:
+
+     {:llm/ratings {\"claude-opus-4-7\"   {:clojure 10 :tool-calling 9}
+                    \"claude-sonnet-4-7\" {:clojure  8 :tool-calling 8}
+                    \"gpt-5\"             {:clojure  6 :tool-calling 7}}}
+
+   With that config the policy keeps the Claude family and drops gpt-5
+   (clojure 6 < 8). With *no* ratings configured, no id carries
+   `:clojure`/`:tool-calling`, the auto-fallback filter empties, the run
+   proceeds on the unfiltered default-models list, and a
+   `:llm/model-policy-empty` transcript event records the gap.
 
    Run it:
      escapement run escapement.examples.clj-refactor/agent --debug"

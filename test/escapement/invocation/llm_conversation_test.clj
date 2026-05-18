@@ -842,8 +842,8 @@
    "empty policy map (no :require/:min/:max) → nil"
    (#'llmc/params->policy {:model-policy {}}) => nil
    "a :min clause is returned verbatim"
-   (#'llmc/params->policy {:model-policy {:min {:intelligence 8}}})
-   => {:min {:intelligence 8}}
+   (#'llmc/params->policy {:model-policy {:min {:context-tokens 200000}}})
+   => {:min {:context-tokens 200000}}
    "a :require clause counts as expressed"
    (#'llmc/params->policy {:model-policy {:require {:vision? true}}})
    => {:require {:vision? true}}))
@@ -852,27 +852,27 @@
   (let [defaults ["gpt-4o-mini" "claude-sonnet-4-5" "claude-opus-4-1"]]
     (component "auto-fallback list is filtered by the policy"
       (assertions
-       ":min {:intelligence 8} drops gpt-4o-mini (intelligence 5)"
-       (#'llmc/candidate-models {:model-policy {:min {:intelligence 8}}}
+       ":min {:context-tokens 200000} drops gpt-4o-mini (128k window)"
+       (#'llmc/candidate-models {:model-policy {:min {:context-tokens 200000}}}
                                 defaults (atom {}))
        => ["claude-sonnet-4-5" "claude-opus-4-1"]))
     (component "an explicit :model pick is never silently switched"
       (assertions
        "policy is ignored when the user names a model"
        (#'llmc/candidate-models {:model "gpt-4o-mini"
-                                 :model-policy {:min {:intelligence 8}}}
+                                 :model-policy {:min {:context-tokens 200000}}}
                                 defaults (atom {}))
        => ["gpt-4o-mini"]))
     (component "an unsatisfiable policy falls back to the unfiltered list"
       (assertions
        "so the conversation still runs"
-       (#'llmc/candidate-models {:model-policy {:min {:intelligence 99}}}
+       (#'llmc/candidate-models {:model-policy {:min {:context-tokens 999999999}}}
                                 defaults (atom {}))
        => defaults))
     (component ":down models are removed after policy filtering"
       (assertions
        "claude-sonnet-4-5 marked :down → only claude-opus-4-1 survives"
-       (#'llmc/candidate-models {:model-policy {:min {:intelligence 8}}}
+       (#'llmc/candidate-models {:model-policy {:min {:context-tokens 200000}}}
                                 defaults
                                 (atom {"claude-sonnet-4-5" :down}))
        => ["claude-opus-4-1"]))
@@ -890,7 +890,7 @@
                    :model-status   (atom {})
                    :default-models ["gpt-4o-mini"]
                    :parent-ctx     {:invokeid "iv"}}
-                  {:model-policy {:min {:intelligence 99}}}
+                  {:model-policy {:min {:context-tokens 999999999}}}
                   [{:role :user :content [{:type :text :text "hi"}]}]
                   [])
         ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
@@ -898,7 +898,7 @@
      "the renamed event was emitted"
      (some? ev) => true
      "it carries the resolved policy"
-     (get-in ev [:data :policy]) => {:min {:intelligence 99}}
+     (get-in ev [:data :policy]) => {:min {:context-tokens 999999999}}
      "it carries the default-models that all failed the policy"
      (get-in ev [:data :default-models]) => ["gpt-4o-mini"]
      "the turn still completes via the unfiltered fallback model"
