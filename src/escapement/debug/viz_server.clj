@@ -175,13 +175,21 @@
   var pctBtn = document.getElementById('zoom-pct');
 
   // --- Zoom -------------------------------------------------------------
-  // d2 emits the SVG with explicit width/height attributes; capture those
-  // as the natural size and drive every zoom level off it.
+  // d2 emits a two-level SVG: the OUTER element has only viewBox (no
+  // width/height attrs), so derive the natural size from viewBox. That's
+  // the only reliable source — inline-block container shrink-wraps to
+  // content, so getBoundingClientRect() can be 0 before we size the SVG.
   function num(v, fallback) { var n = parseFloat(v); return isFinite(n) ? n : fallback; }
-  var rect  = svg.getBoundingClientRect();
-  var natW  = num(svg.getAttribute('width'),  rect.width);
-  var natH  = num(svg.getAttribute('height'), rect.height);
-  // Remove the SVG-level width/height attrs so our inline styles win cleanly.
+  function parseViewBox(s) {
+    if (!s) return null;
+    var p = s.trim().split(/[\\s,]+/).map(parseFloat);
+    return p.length === 4 && p.every(isFinite) ? p : null;
+  }
+  var vb   = parseViewBox(svg.getAttribute('viewBox')) || [0, 0, 0, 0];
+  var rect = svg.getBoundingClientRect();
+  var natW = num(svg.getAttribute('width'),  vb[2] || rect.width  || 800);
+  var natH = num(svg.getAttribute('height'), vb[3] || rect.height || 600);
+  // Drop attributes so our inline styles drive sizing unambiguously.
   svg.removeAttribute('width');
   svg.removeAttribute('height');
   var zoom = 1;
