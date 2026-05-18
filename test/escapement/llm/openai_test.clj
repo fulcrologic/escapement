@@ -84,6 +84,12 @@
                 => 1024
                 "o3 uses new max_completion_tokens"
                 (get (oai/request->openai-json (assoc sample-request :model "o3")) "max_completion_tokens")
+                => 1024
+                "OpenAI-compatible provider models use max_tokens"
+                (get (oai/request->openai-json (assoc sample-request :model "kimi-k2.5")) "max_tokens")
+                => 1024
+                "OpenRouter-style namespaced ids keep existing max_completion_tokens behavior"
+                (get (oai/request->openai-json (assoc sample-request :model "openai/gpt-4o-mini")) "max_completion_tokens")
                 => 1024))
 
 (specification "tool-choice translation"

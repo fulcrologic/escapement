@@ -1,0 +1,36 @@
+;; clj-kondo config for Escapement (Babashka / SCI project).
+;;
+;; Library configs (guardrails, fulcrologic, babashka, …) are auto-loaded
+;; from .clj-kondo/imports (gitignored; regenerate with
+;;   clj-kondo --copy-configs --dependencies --lint "$(classpath)").
+;; Lint locally with:  clj-kondo --lint src bb_test test demos
+{:hooks
+ {:analyze-call
+  {fulcro-spec.core/specification hooks.fulcro-spec/specification
+   fulcro-spec.core/behavior      hooks.fulcro-spec/behavior
+   fulcro-spec.core/component     hooks.fulcro-spec/component
+   fulcro-spec.core/assertions    hooks.fulcro-spec/assertions
+   fulcro-spec.core/provided!     hooks.fulcro-spec/provided!
+   fulcro-spec.core/when-mocking! hooks.fulcro-spec/when-mocking!}}
+
+ :linters
+ {;; `_` is the conventional ignore/wildcard placeholder (notably in
+  ;; fulcro-spec mock arglists) — never an "unresolved symbol".
+  :unresolved-symbol
+  {:exclude [_]}
+
+  ;; The arrow markers and block macros are referred purely as syntax that
+  ;; the hooks above consume, so clj-kondo can't see them "used".
+  :unused-referred-var
+  {:exclude {fulcro-spec.core [=> =1x=> =2x=> =3x=> =fn=> =throws=> =check=>
+                               specification behavior component assertions
+                               provided! when-mocking!]
+             ;; Guardrails' `=>`/`?` are gspec syntax inside `>defn`; the
+             ;; library's own hook consumes them, so the bare `:refer`
+             ;; always looks "unused" to the base linter.
+             com.fulcrologic.guardrails.malli.core [=> ?]}}
+
+  ;; This project is bb/SCI-first; the `:test` deps.edn alias is optional.
+  ;; Don't fail the build on style nits — keep them visible as info/warning.
+  :redundant-let         {:level :warning}
+  :redundant-do          {:level :warning}}}

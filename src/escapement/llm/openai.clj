@@ -103,15 +103,18 @@
     (map? tc)     {"type"     "function"
                    "function" {"name" (:name tc)}}))
 
+(def ^:private legacy-max-tokens-prefixes
+  "Model-id prefixes that still require the deprecated `max_tokens` key:
+   older OpenAI families plus known OpenAI-compatible provider families."
+  ["gpt-3.5" "gpt-4-" "gpt-4o" "gpt-oss"
+   "glm-" "kimi-" "deepseek-" "minimax-" "mimo-"])
+
 (defn- max-tokens-key
   "OpenAI deprecated `max_tokens` in favor of `max_completion_tokens` on newer
    models (o-series, gpt-4.1+, gpt-5). Use the new key by default; opt back
-   to the legacy key for models whose ids start with `gpt-3.5` or `gpt-4-`."
+   to the legacy key for the families in `legacy-max-tokens-prefixes`."
   [model]
-  (if (and model
-           (or (str/starts-with? model "gpt-3.5")
-               (str/starts-with? model "gpt-4-")
-               (str/starts-with? model "gpt-4o")))
+  (if (some #(str/starts-with? (str model) %) legacy-max-tokens-prefixes)
     "max_tokens"
     "max_completion_tokens"))
 
