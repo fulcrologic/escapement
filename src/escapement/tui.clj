@@ -1536,9 +1536,13 @@
   "Restore the terminal. Idempotent — safe to call repeatedly and from
    both the normal exit path and a process shutdown hook (Ctrl-C, SIGTERM).
 
-   The terminal-restoration emit runs in a `finally` so even if viz-server
-   teardown, thread interrupt, or JLine `.close` throws, the user still
-   gets their cursor and alt-screen state back."
+   The restoration runs in a `finally` so the user gets their cursor and
+   alt-screen state back even if viz-server teardown or thread interrupt
+   throws past its catch. Critically, the restore-emit happens BEFORE
+   JLine's `.close`: under tmux (and likely other multiplexers) the
+   show-cursor sequence must reach the terminal while JLine still owns
+   the tty handle, or the multiplexer's pane state remains 'cursor
+   hidden' on the next refresh."
   [h]
   (when (and (:enabled? h)
              (compare-and-set! (:stopped? h) false true))
@@ -1550,18 +1554,19 @@
       (try
         (when-let [^Thread t (:input-thread h)] (.interrupt t))
         (catch Throwable _ nil))
-      (try
-        (when (and (:terminal h) @(:raw-mode? h))
-          (when-let [^Terminal term (:terminal h)]
-            (.close term)))
-        (catch Throwable _ nil))
       (finally
-        ;; Leave the alt screen and show the cursor on BOTH screens — some
-        ;; terminals (Apple Terminal in particular) track cursor visibility
-        ;; per-screen, so a show-cursor emitted while still in the alt buffer
-        ;; is lost on the switch back to main. Trailing newline keeps the
-        ;; shell prompt on its own line.
-        (emit! (str reset-attrs-s show-cursor-s alt-screen-off-s show-cursor-s "\n")))))
+        (try
+          ;; Emit the restore sequence FIRST, while JLine is still live.
+          ;; Show cursor both before and after leaving the alt screen so
+          ;; per-screen-tracking terminals (Apple Terminal) and tmux
+          ;; pane state both end up correct.
+          (emit! (str reset-attrs-s show-cursor-s alt-screen-off-s show-cursor-s "\n"))
+          (catch Throwable _ nil))
+        (try
+          (when (and (:terminal h) @(:raw-mode? h))
+            (when-let [^Terminal term (:terminal h)]
+              (.close term)))
+          (catch Throwable _ nil)))))
   h)
 
 ;; ---------------------------------------------------------------------------
