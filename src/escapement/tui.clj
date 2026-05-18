@@ -75,7 +75,12 @@
 (def ^:private sync-output-end-s   (esc "?2026l"))
 (def ^:private sync-output-query-s (esc "?2026$p"))
 (def ^:private hide-cursor-s  (esc "?25l"))
-(def ^:private show-cursor-s  (esc "?25h"))
+;; Under tmux-256color, terminfo `cnorm` is `\e[34h\e[?25h` — the
+;; `\e[34h` ("Normal Cursor Visibility Mode") is what the multiplexer's
+;; per-pane state watches for; `\e[?25h` alone is a no-op. The extra
+;; code is harmless on terminals that don't recognise it, so we always
+;; send the union, exactly like terminfo would.
+(def ^:private show-cursor-s  (str (esc "34h") (esc "?25h")))
 (def ^:private reverse-on-s   (esc "7m"))
 (def ^:private reset-attrs-s  (esc "0m"))
 (defn- move-to-s [row col] (esc (str row ";" col "H")))
