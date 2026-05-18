@@ -9,6 +9,7 @@
    [com.fulcrologic.statecharts.algorithms.v20150901 :as alg]
    [com.fulcrologic.statecharts.data-model.working-memory-data-model :as wmdm]
    [com.fulcrologic.statecharts.registry.local-memory-registry :as lmr]
+   [escapement.chart.service :as-alias service]
    [escapement.engine.exec :as exec]
    [escapement.engine.queue :as queue]
    [escapement.engine.store :as store]
@@ -50,6 +51,10 @@
              ::sc/working-memory-store  store
              ::sc/processor             (alg/new-processor)
              ::sc/invocation-processors all-procs
-             ::sc/execution-model       exec}
+             ::sc/execution-model       exec
+             ;; Per-chart-run registry for service-region tool declarations.
+             ;; See `escapement.chart.service`. Empty at start; populated by
+             ;; on-entry actions calling `service/register-tool!`.
+             ::service/registry         (atom {})}
       tool-registry (assoc :escapement/tool-registry tool-registry)
       session-dir   (assoc :escapement/session-dir session-dir))))

@@ -20,6 +20,7 @@
   See `plan.md` for the design."
   (:require
    [clojure.string :as str]
+   [escapement.chart.service :as service]
    [escapement.llm.catalog :as catalog]
    [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
    [com.fulcrologic.statecharts :as sc]
@@ -97,6 +98,118 @@
        [(conj defs def) (assoc index tname entry)]))
    [[] {}]
    allowed-events))
+
+;; ---------------------------------------------------------------------------
+;; Region-tool palette (chart-tools)
+;; ---------------------------------------------------------------------------
+
+(declare ->id-str)
+
+(def ^:const region-tool-prefix
+  "Anthropic-tool name prefix for region-tools. Distinct from the
+   `event__` prefix so we can tell the two kinds apart in transcripts."
+  "region__")
+
+(defn- closed-map-schema?
+  "True for a Malli `[:map {:closed true} ...]` form."
+  [schema]
+  (and (vector? schema)
+       (= :map (first schema))
+       (map? (second schema))
+       (true? (:closed (second schema)))))
+
+(defn- assoc-implicit-timeout
+  "Merge an optional `:timeout-ms` field into a region-tool input schema.
+   The schema must be open so the merge doesn't reject valid LLM input."
+  [schema]
+  (let [base (or schema [:map])]
+    (when (closed-map-schema? base)
+      (throw (ex-info (str "Region-tool input-schema is closed (:closed true); "
+                           "cannot merge implicit :timeout-ms. Make the schema open.")
+                      {:reason :closed-region-tool-schema :schema base})))
+    (if (and (vector? base) (= :map (first base)))
+      ;; Append the optional field, preserving any existing properties map.
+      (let [props? (and (> (count base) 1) (map? (second base)))
+            head   (if props? (subvec base 0 2) (subvec base 0 1))
+            tail   (subvec base (count head))]
+        (-> (into head tail)
+            (conj [:timeout-ms {:optional true} [:int {:min 1}]])))
+      ;; Schema isn't a vanilla :map — wrap it. This is rare; chart authors
+      ;; usually pass `[:map ...]`. Caller's schema is preserved via :and.
+      [:and base [:map [:timeout-ms {:optional true} [:int {:min 1}]]]])))
+
+(defn- region-tool-name
+  "Anthropic-tool name string for a region tool, given the consumer-facing
+   `tool-kw` (already aliased by `:as` if applicable)."
+  [tool-kw]
+  (str region-tool-prefix (kw->anthropic-name tool-kw)))
+
+(defn- region-tool-palette
+  "Build the consumer-facing region-tool palette for one conversation.
+
+   `registry-snapshot` is the flattened entry vector from
+   `escapement.chart.service/entries`.
+
+   `chart-tools` is the params declaration: a vector of
+   `{:owner <state-id> :as <kw-prefix>?}` maps. Missing/empty → no region
+   tools.
+
+   Returns `[anthropic-tool-defs name->region-entry]` where each entry is
+
+       {:event-kw         <chart event keyword>
+        :owner            <state-id>
+        :input-schema     <malli, post-implicit-timeout merge>
+        :raw-input-schema <malli, as registered>
+        :timeout-default  <int>
+        :tool-kw          <consumer-facing keyword, aliased if applicable>}
+
+   Throws on collision (two entries mapping to the same LLM-facing name —
+   typically caused by two owners aliased to the same prefix, or an
+   undisambiguated multi-owner scenario)."
+  [registry-snapshot chart-tools default-timeout-ms]
+  (let [decls (or chart-tools [])
+        ;; Group registry entries by owner for fast lookup.
+        by-owner (reduce
+                  (fn [acc e] (update acc (:owner e) (fnil conj []) e))
+                  {}
+                  registry-snapshot)
+        pulled (vec
+                (mapcat
+                 (fn [{:keys [owner as]}]
+                   (for [entry (get by-owner owner [])
+                         :let [event-kw (:tool entry)
+                               tool-kw  (if as
+                                          (keyword (name as) (name event-kw))
+                                          event-kw)
+                               raw      (or (:input-schema entry) [:map])]]
+                     {:event-kw         event-kw
+                      :owner            owner
+                      :description      (:description entry)
+                      :raw-input-schema raw
+                      :input-schema     (assoc-implicit-timeout raw)
+                      :timeout-default  default-timeout-ms
+                      :tool-kw          tool-kw}))
+                 decls))]
+    (reduce
+     (fn [[defs index] entry]
+       (let [tname (region-tool-name (:tool-kw entry))]
+         (when (contains? index tname)
+           (let [other (get index tname)]
+             (throw (ex-info (str "Region-tool palette collision: "
+                                  (:tool-kw entry) " resolves to LLM-name "
+                                  tname " for both owner " (:owner other)
+                                  " and owner " (:owner entry)
+                                  ". Disambiguate with :as in :chart-tools.")
+                             {:reason :region-palette-collision
+                              :tool   (:tool-kw entry)
+                              :owners [(:owner other) (:owner entry)]}))))
+         (let [def {:name         tname
+                    :description  (or (:description entry)
+                                      (str "Call chart tool " (:event-kw entry)))
+                    :input-schema (llm-types/malli->json-schema (:input-schema entry))}]
+           [(conj defs def) (assoc index tname entry)])))
+     [[] {}]
+     pulled)))
 
 ;; ---------------------------------------------------------------------------
 ;; Worker state and helpers
@@ -274,6 +387,50 @@
 ;; Worker loop
 ;; ---------------------------------------------------------------------------
 
+(def ^:const region-tool-default-timeout-ms
+  "Default per-call deadline for a region-tool dispatch when neither the
+   LLM nor the conversation params specify one. 30 seconds matches the
+   plan's worked example (`{:timeout-ms 30000}`)."
+  30000)
+
+(def ^:const region-tool-poll-step-ms
+  "Maximum single poll wait for the tool-reply queue. Polling in short
+   slices lets the worker observe `:dying` promptly even when a region
+   handler is slow."
+  200)
+
+(defn- poll-reply-queue!
+  "Wait on the worker's `tool-reply-queue` until a reply for `reply-id`
+   arrives, until `deadline-ms` passes, or until `worker-state` flips to
+   `:dying`.
+
+   Mis-correlated replies (for a different `reply-id`) are dropped with
+   a transcript-log entry, NOT stashed: the worker has at most one
+   outstanding region call at a time, so any other reply is a strict
+   straggler."
+  [^ArrayBlockingQueue queue reply-id deadline-ms worker-state transcript-fn invokeid]
+  (loop []
+    (let [now      (now-ms)
+          remain   (- deadline-ms now)]
+      (cond
+        (= :dying @worker-state) nil
+        (<= remain 0)            nil
+        :else
+        (let [wait (min (long remain) (long region-tool-poll-step-ms))
+              msg  (.poll queue wait TimeUnit/MILLISECONDS)]
+          (cond
+            (nil? msg) (recur)
+            (= reply-id (:escapement.tool/reply-id msg)) msg
+            :else
+            (do
+              (transcript! transcript-fn
+                           {:event :llm/region-tool-late-reply
+                            :ts    (now-ms)
+                            :data  {:invokeid invokeid
+                                    :expected reply-id
+                                    :got      (:escapement.tool/reply-id msg)}})
+              (recur))))))))
+
 (defn- handle-tool-use-block
   "Process a single tool_use block. Returns a map:
      `{:result-block {tool_result-block}
@@ -283,7 +440,8 @@
 
    `parent-ctx` is the worker's context (env/queue/parent-session-id/invokeid).
    `state*` holds the per-tool_use_id retry counters."
-  [{:keys [tool-registry name->tool-kw name->event-entry retry-counts transcript-fn]
+  [{:keys [tool-registry name->tool-kw name->event-entry name->region-tool
+           tool-reply-queue worker-state retry-counts transcript-fn]
     :as   ctx} parent-ctx block]
   (let [{:keys [id name input]} block
         retries (get @retry-counts id 0)
@@ -339,6 +497,57 @@
               {:fatal?     true
                :error-data {:reason :tool-validation-failed
                             :tool   event
+                            :errors err
+                            :tool_use_id id}
+               :result-block {:type :tool_result :tool_use_id id
+                              :content err :is-error true}}
+              (do
+                (swap! retry-counts assoc id (inc retries))
+                {:result-block {:type :tool_result :tool_use_id id
+                                :content err :is-error true}})))))
+
+      ;; Region tool — dispatch synchronously: post the request event,
+      ;; poll the worker's `tool-reply-queue` until a matching reply
+      ;; arrives or the per-call deadline passes.
+      (contains? name->region-tool name)
+      (let [{:keys [event-kw owner input-schema timeout-default]}
+            (get name->region-tool name)
+            schema (or input-schema [:map])]
+        (if (m/validate schema (or input {}))
+          (let [reply-id   (str "tr_" (java.util.UUID/randomUUID))
+                ;; LLM may supply :timeout-ms; otherwise fall back to the
+                ;; per-tool default. The wire payload carries the relative
+                ;; duration; the worker computes the absolute deadline.
+                timeout-ms (or (get input :timeout-ms) timeout-default
+                               region-tool-default-timeout-ms)
+                payload    (-> (or input {})
+                               (dissoc :timeout-ms)
+                               (assoc :escapement.tool/reply-id   reply-id
+                                      :escapement.tool/reply-to   (->id-str
+                                                                   (:invokeid parent-ctx))
+                                      :escapement.tool/owner      owner
+                                      :escapement.tool/timeout-ms timeout-ms))
+                _          (post-event-to-parent! parent-ctx event-kw payload)
+                deadline   (+ (now-ms) (long timeout-ms))
+                reply      (poll-reply-queue! tool-reply-queue reply-id deadline
+                                              worker-state transcript-fn
+                                              (:invokeid parent-ctx))]
+            (if reply
+              (do
+                (post-tool-result! event-kw (boolean (:is-error reply)) (str (:result reply)))
+                {:result-block {:type :tool_result :tool_use_id id
+                                :content (str (:result reply))
+                                :is-error (boolean (:is-error reply))}})
+              (let [msg (str name " timed out after " timeout-ms "ms")]
+                (post-tool-result! event-kw true msg)
+                {:result-block {:type :tool_result :tool_use_id id
+                                :content msg :is-error true}})))
+          (let [err (humanize-malli-errors schema input)]
+            (post-tool-result! event-kw true err)
+            (if (>= retries 1)
+              {:fatal?     true
+               :error-data {:reason :tool-validation-failed
+                            :tool   event-kw
                             :errors err
                             :tool_use_id id}
                :result-block {:type :tool_result :tool_use_id id
@@ -611,6 +820,9 @@
                      {:tool-registry     tool-registry
                       :name->tool-kw     name->tool-kw
                       :name->event-entry name->event-entry
+                      :name->region-tool (:name->region-tool ctx)
+                      :tool-reply-queue  (:tool-reply-queue ctx)
+                      :worker-state      worker-state
                       :retry-counts      retry-counts
                       :transcript-fn     transcript-fn}
                      parent-ctx b)]
@@ -761,16 +973,25 @@
           _                 (when-let [old (get @workers k)]
                               (reset! (:worker-state old) :dying))
           queue             (::sc/event-queue env)
-          {:keys [real-tools allowed-events initial-user-message]} params
+          {:keys [real-tools allowed-events chart-tools initial-user-message]} params
           [real-defs name->tool-kw]   (resolve-real-tools tool-registry real-tools)
           [event-defs name->event]    (event-tool-defs (or allowed-events []))
-          tool-defs                   (into [] (concat real-defs event-defs))
+          ;; Palette snapshot for region tools — built once at start. Late
+          ;; registrations or unregistrations are NOT reflected in this
+          ;; conversation (see region-tools.md "Timing and executable-content
+          ;; order").
+          registry-snapshot           (service/entries env)
+          [region-defs name->region]  (region-tool-palette registry-snapshot
+                                                           chart-tools
+                                                           region-tool-default-timeout-ms)
+          tool-defs                   (into [] (concat real-defs event-defs region-defs))
           initial-msgs                (if initial-user-message
                                         [(text-user-message initial-user-message)]
                                         [])
           messages-atom               (atom initial-msgs)
           worker-state                (atom (if initial-user-message :running :awaiting-user))
           user-msg-queue              (ArrayBlockingQueue. 256)
+          tool-reply-queue            (ArrayBlockingQueue. 64)
           retry-counts                (atom {})
           parent-ctx                  {:env env :queue queue
                                        :parent-session-id parent-session-id
@@ -780,6 +1001,8 @@
                                        :transcript-fn      (or transcript-fn (fn [_] nil))
                                        :name->tool-kw      name->tool-kw
                                        :name->event-entry  name->event
+                                       :name->region-tool  name->region
+                                       :tool-reply-queue   tool-reply-queue
                                        :tool-defs          tool-defs
                                        :worker-state       worker-state
                                        :messages-atom      messages-atom
@@ -794,12 +1017,13 @@
                                                      (str "llm-conv-" parent-session-id "-" invokeid))
                                         (.setDaemon true))]
       (swap! workers assoc k
-             {:thread         thread
-              :worker-state   worker-state
-              :messages-atom  messages-atom
-              :user-msg-queue user-msg-queue
-              :retry-counts   retry-counts
-              :params         params})
+             {:thread           thread
+              :worker-state     worker-state
+              :messages-atom    messages-atom
+              :user-msg-queue   user-msg-queue
+              :tool-reply-queue tool-reply-queue
+              :retry-counts     retry-counts
+              :params           params})
       (transcript! (or transcript-fn (fn [_] nil))
                    {:event :llm/start :ts (now-ms)
                     :data  {:invokeid invokeid :session-id parent-session-id}})
@@ -832,7 +1056,25 @@
           target            (:target ev-data)
           accept?           (or (nil? target)
                                 (= (->id-str target) (->id-str invokeid)))]
-      (when (and entry accept? (= :llm.user-message ev-name))
+      (cond
+        ;; Region-tool reply — hard-routed by `:escapement.tool/reply-to`,
+        ;; NOT broadcast. The engine calls `forward-event!` once per live
+        ;; autoforwarded invocation; we deliver only on the call whose
+        ;; `invokeid` matches the reply's `:reply-to` (so a single physical
+        ;; reply lands on the addressed worker's queue exactly once).
+        ;;
+        ;; Invariant: `forward-event!` is only invoked by the engine for
+        ;; LIVE autoforwarding invocations, and every live invocation has an
+        ;; entry in `@workers` (added by `start-invocation!`, removed by
+        ;; `stop-invocation!`). When `invokeid == reply-to`, `entry` is
+        ;; therefore non-nil. No orphan branch is needed; the `(when entry …)`
+        ;; guard is purely defensive for direct callers (e.g. tests).
+        (= :escapement.tool/reply ev-name)
+        (let [reply-to (:escapement.tool/reply-to ev-data)]
+          (when (and entry (= (->id-str invokeid) (->id-str reply-to)))
+            (.offer ^ArrayBlockingQueue (:tool-reply-queue entry) ev-data)))
+
+        (and entry accept? (= :llm.user-message ev-name))
         (let [text (:text ev-data)]
           (when (string? text)
             ;; Just enqueue; the worker's :awaiting-user branch will pick it up,

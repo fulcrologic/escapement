@@ -20,10 +20,26 @@
    [com.fulcrologic.statecharts.elements :as elt]
    [com.fulcrologic.statecharts.environment :as env-ns]
    [com.fulcrologic.statecharts.protocols :as sp]
+   [escapement.chart.service :as service]
    [escapement.invocation.llm-conversation :as llmc])
   (:import
    (java.nio.file Files Paths StandardCopyOption)
    (java.nio.file.attribute FileAttribute)))
+
+;; ---------------------------------------------------------------------------
+;; Region-tool authoring sugar (re-exported from escapement.chart.service)
+;; ---------------------------------------------------------------------------
+
+(def ^{:doc "Alias for `escapement.chart.service/handle`. Returns a
+  transition element that runs `handler-fn` when the chart fires
+  `event-kw` on the addressed service region. See that ns for the full
+  contract."}
+  handle-tool service/handle)
+
+(def ^{:doc "Alias for `escapement.chart.service/post-reply`. Fire a
+  deferred reply for a region-tool request whose handler returned `nil`
+  (slow-work pattern). See that ns for the full contract."}
+  post-reply service/post-reply)
 
 (defn llm-conversation
   "Returns an `invoke` element of type `:llm-conversation`.
