@@ -1,4 +1,4 @@
-(ns escapement.charts.iterate
+(ns escapement.examples.iterate
   "M7 demo: a non-trivial coding agent that, given a spec and a target source file,
   iterates `read-spec → propose-patch → run-tests → reflect` until tests pass or
   it exhausts `:max-iterations`.

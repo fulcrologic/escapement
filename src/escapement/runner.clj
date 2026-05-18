@@ -18,7 +18,7 @@
 (defn- now-ms [] (System/currentTimeMillis))
 
 (defn load-chart
-  "Given a fully-qualified symbol such as `'escapement.charts.hello/agent`, `require` the
+  "Given a fully-qualified symbol such as `'escapement.examples.hello/agent`, `require` the
    namespace and return the resolved var's value. Throws if it can't be resolved."
   [chart-sym]
   (assert (qualified-symbol? chart-sym) "chart-sym must be qualified, e.g. my.ns/agent")

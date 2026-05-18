@@ -49,7 +49,7 @@ export ZAI_API_KEY=...           # glm-4.6 (cheap dev option)
 export OPENAI_API_KEY=...        # gpt-4o-mini by default (override via OPENAI_MODEL)
 export OPENROUTER_API_KEY=...    # openai/gpt-4o-mini by default (override via OPENROUTER_MODEL)
 
-escapement run escapement.charts.hello/agent
+escapement run escapement.examples.hello/agent
 ```
 
 The CLI auto-detects a backend from those env vars in the order above; pass `--backend` explicitly to override. Useful run-time flags:
@@ -118,12 +118,13 @@ Any chart whose require-graph reaches `my.app.tools` will then have `:http/get` 
 
 ## Demo charts
 
-Small worked examples under `src/escapement/charts/`:
+Small worked examples under `src/escapement/examples/`:
 
-- [`hello.clj`](src/escapement/charts/hello.clj) — minimal single-region chart, one event tool
-- [`scan.clj`](src/escapement/charts/scan.clj) — real tool (`:fs/read`) plus fan-out of multiple event-tool calls
-- [`parallel_demo.clj`](src/escapement/charts/parallel_demo.clj) — two parallel regions, independent conversations, join on compound final
-- [`iterate.clj`](src/escapement/charts/iterate.clj) — non-trivial coding loop with `tell-llm` mid-binding, `:max-iterations` cap, retry, and give-up paths
+- [`hello.clj`](src/escapement/examples/hello.clj) — minimal single-region chart, one event tool
+- [`scan.clj`](src/escapement/examples/scan.clj) — real tool (`:fs/read`) plus fan-out of multiple event-tool calls
+- [`parallel_demo.clj`](src/escapement/examples/parallel_demo.clj) — two parallel regions, independent conversations, join on compound final
+- [`iterate.clj`](src/escapement/examples/iterate.clj) — non-trivial coding loop with `tell-llm` mid-binding, `:max-iterations` cap, retry, and give-up paths
+- [`clj_refactor.clj`](src/escapement/examples/clj_refactor.clj) — gates model auto-selection on per-dimension ratings via a declarative `:model-policy` (`:min {:clojure 8 :tool-calling 6}`)
 
 End-to-end demo under `demos/`:
 

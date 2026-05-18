@@ -21,8 +21,9 @@
    backward-compat and answers \"cheapest metered list price\". Unknown
    ids/providers return `nil` rather than throwing.
 
-   `escapement.llm.models` re-exports the id-keyed helpers here for
-   backward compatibility; new code should prefer this namespace."
+   There is no `intelligence` accessor: intelligence is just one key in
+   the ratings overlay, surfaced through `info` and filtered like any
+   other via `satisfies-policy?` — callers never name it directly."
   (:require
    [clojure.string :as str]
    [escapement.config :as config]
@@ -102,12 +103,6 @@
    model sees on a request: system + tools + accumulated history."
   [model]
   (:context-tokens (info model)))
-
-(defn intelligence
-  "Coarse intelligence rating (1–10) for `model`, or nil when unknown.
-   Comes from the subjective ratings overlay, not the dump."
-  [model]
-  (:intelligence (info model)))
 
 (defn max-output-tokens
   "Per-response output cap (tokens) for `model`, or nil."

@@ -21,7 +21,6 @@
   (:require
    [clojure.string :as str]
    [escapement.llm.catalog :as catalog]
-   [escapement.llm.models :as models]
    [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
    [com.fulcrologic.statecharts :as sc]
    [com.fulcrologic.statecharts.environment :as env-ns]
@@ -380,18 +379,14 @@
   (keyword (str "error.llm." (name reason))))
 
 (defn- params->policy
-  "Build the declarative model policy from conversation `params`.
+  "The declarative model policy from conversation `params`.
 
    `:model-policy` is a `catalog/satisfies-policy?` map (`:require`/`:min`
-   /`:max` over any objective or subjective info key). The legacy
-   `:intelligence N` shorthand is folded in as a `:min {:intelligence N}`
-   floor so existing charts keep working unchanged. Returns nil when no
-   policy is expressed."
+   /`:max` over any objective or subjective info key — including
+   `:intelligence`, which is just one ratings key, not a special case).
+   Returns nil when no policy clause is expressed."
   [params]
-  (let [base (:model-policy params)
-        iq   (:intelligence params)
-        pol  (cond-> (or base {})
-               iq (update :min #(assoc % :intelligence (long iq))))]
+  (let [pol (:model-policy params)]
     (when (or (seq (:require pol)) (seq (:min pol)) (seq (:max pol)))
       pol)))
 
@@ -403,15 +398,14 @@
      2. `params :model`     — explicit single pick (no fallback)
      3. `default-models`    — processor-level auto-detected fallback list. When
                               a model policy is expressed (`params
-                              :model-policy`, or the legacy `:intelligence`
-                              floor shorthand) the list is filtered to
+                              :model-policy`) the list is filtered to
                               entries satisfying it via
                               `escapement.llm.catalog/satisfies-policy?`.
                               If the filter empties the list, the
                               unfiltered default-models is used so the
                               conversation still runs (the gap is surfaced
-                              as an `:llm/intelligence-filter-empty`
-                              transcript event by the caller).
+                              as an `:llm/model-policy-empty` transcript
+                              event by the caller).
      4. `[nil]`             — let the backend pick its own default.
 
    Cases 1 and 2 are honored verbatim: when the user names a model, we never
@@ -467,10 +461,9 @@
         _              (when (and auto-fallback? policy (seq default-models)
                                   (not-any? #(catalog/satisfies-policy? % policy) default-models))
                          (transcript! transcript-fn
-                                      {:event :llm/intelligence-filter-empty
+                                      {:event :llm/model-policy-empty
                                        :ts    (now-ms)
-                                       :data  {:floor          (:intelligence params)
-                                               :policy         policy
+                                       :data  {:policy         policy
                                                :default-models (vec default-models)}}))
         candidates    (candidate-models params default-models model-status)]
     (loop [[m & more] candidates
@@ -566,7 +559,7 @@
       :else
       (let [response (:ok outcome)
             {:keys [stop-reason content usage model]} response
-            ctx-window    (some-> model models/context-window)
+            ctx-window    (some-> model catalog/context-window)
             input-tokens  (:input-tokens usage)
             ctx-used-frac (when (and ctx-window input-tokens (pos? ctx-window))
                             (/ (double input-tokens) (double ctx-window)))]

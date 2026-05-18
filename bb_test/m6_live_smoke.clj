@@ -12,9 +12,9 @@
    [cheshire.core :as json]
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [escapement.charts.hello :as hello]
-   [escapement.charts.parallel-demo :as pd]
-   [escapement.charts.scan :as scan]
+   [escapement.examples.hello :as hello]
+   [escapement.examples.parallel-demo :as pd]
+   [escapement.examples.scan :as scan]
    [escapement.llm.api :as api]
    [escapement.runner :as runner]
    [escapement.tools.builtin :as builtin]))

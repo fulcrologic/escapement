@@ -1,4 +1,4 @@
-(ns escapement.charts.scan
+(ns escapement.examples.scan
   "M6 demo: a real-tool + fan-out demo. The LLM is given `:fs/read` and
   `:shell/run` as real tools, plus two event-tools (`event__found_bug` and
   `event__scan_complete`). It is instructed to scan a repo path, fire one or

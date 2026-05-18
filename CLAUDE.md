@@ -61,7 +61,7 @@ as the test harness in place of the library's `testing`.
 ```bash
 bb test               # full suite (133 tests, 614 assertions)
 bb sanity             # engine smoke
-bb -m escapement.cli run escapement.charts.hello/agent   # run a chart
+bb -m escapement.cli run escapement.examples.hello/agent   # run a chart
 bbin install .        # install the CLI
 ```
 

@@ -370,7 +370,7 @@
 
 (defn- needs-llm?
   "Heuristic: does this chart require an LLM backend? We treat any chart loaded
-   from the conventional `*.charts.*` namespace as potentially LLM-using; the
+   from the conventional `*.examples.*` namespace as potentially LLM-using; the
    safer signal is the absence of env keys AND no --backend flag — at that
    point we surface the actionable error before the engine reports a cryptic
    `:type :llm-conversation` message."

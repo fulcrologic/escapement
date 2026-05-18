@@ -27,10 +27,10 @@
 (specification "catalog — subjective intelligence comes from the overlay"
   (assertions
    "intelligence is surfaced through info (overlaid, not in the dump)"
-   (catalog/intelligence "claude-opus-4-7") => 10
-   (catalog/intelligence "gpt-5") => 10
-   "unknown model has no intelligence"
-   (catalog/intelligence "totally-made-up") => nil))
+   (:intelligence (catalog/info "claude-opus-4-7")) => 10
+   (:intelligence (catalog/info "gpt-5")) => 10
+   "unknown model has no info at all"
+   (catalog/info "totally-made-up") => nil))
 
 (specification "catalog — provider pricing & policy"
   (assertions
