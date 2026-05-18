@@ -134,12 +134,21 @@
   html, body { margin: 0; padding: 0; height: 100%; background: #fafafa;
                font: 13px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
   header { padding: 6px 12px; border-bottom: 1px solid #ddd; background: #fff;
-           display: flex; gap: 12px; align-items: baseline; }
+           display: flex; gap: 12px; align-items: center; }
   header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   header .meta { color: #888; }
-  header .status { margin-left: auto; font-variant-numeric: tabular-nums; }
-  #chart { width: 100%; height: calc(100% - 36px); overflow: auto; padding: 12px; box-sizing: border-box; }
-  #chart svg { max-width: 100%; height: auto; display: block; }
+  header .status { margin-left: auto; font-variant-numeric: tabular-nums; color: #555; }
+  .zoom-controls { display: flex; gap: 4px; align-items: center; margin-left: 16px; }
+  .zoom-controls button { font: inherit; font-size: 12px; padding: 2px 8px; cursor: pointer;
+                          border: 1px solid #ccc; background: #fff; border-radius: 3px; min-width: 28px; }
+  .zoom-controls button:hover { background: #f0f0f0; }
+  .zoom-controls .pct { min-width: 52px; text-align: center; font-variant-numeric: tabular-nums; }
+  #chart { width: 100%; height: calc(100% - 36px); overflow: auto;
+           padding: 12px; box-sizing: border-box; }
+  /* Scaling is driven by JS (sets svg.style.width/height in pixels),
+     so don't let CSS clamp the natural size. */
+  #chart-wrap { display: inline-block; }
+  #chart-wrap svg { display: block; max-width: none; }
 </style>
 <style id=\"live-style\"></style>
 </head>
@@ -147,14 +156,75 @@
 <header>
   <h1>Escapement</h1>
   <span class=\"meta\">__TITLE__</span>
+  <span class=\"zoom-controls\">
+    <button id=\"zoom-out\" title=\"Zoom out (⌘−)\">−</button>
+    <button id=\"zoom-pct\" class=\"pct\" title=\"Reset to 100% (⌘0)\">100%</button>
+    <button id=\"zoom-in\" title=\"Zoom in (⌘+)\">+</button>
+    <button id=\"zoom-fit\" title=\"Fit width\">Fit</button>
+  </span>
   <span class=\"status\" id=\"status\">connecting…</span>
 </header>
-<div id=\"chart\">__SVG__</div>
+<div id=\"chart\"><div id=\"chart-wrap\">__SVG__</div></div>
 <script>
 (function () {
-  var live = document.getElementById('live-style');
+  var live   = document.getElementById('live-style');
   var status = document.getElementById('status');
+  var chart  = document.getElementById('chart');
+  var wrap   = document.getElementById('chart-wrap');
+  var svg    = wrap.querySelector('svg');
+  var pctBtn = document.getElementById('zoom-pct');
 
+  // --- Zoom -------------------------------------------------------------
+  // d2 emits the SVG with explicit width/height attributes; capture those
+  // as the natural size and drive every zoom level off it.
+  function num(v, fallback) { var n = parseFloat(v); return isFinite(n) ? n : fallback; }
+  var rect  = svg.getBoundingClientRect();
+  var natW  = num(svg.getAttribute('width'),  rect.width);
+  var natH  = num(svg.getAttribute('height'), rect.height);
+  // Remove the SVG-level width/height attrs so our inline styles win cleanly.
+  svg.removeAttribute('width');
+  svg.removeAttribute('height');
+  var zoom = 1;
+  function apply() {
+    svg.style.width  = (natW * zoom) + 'px';
+    svg.style.height = (natH * zoom) + 'px';
+    pctBtn.textContent = Math.round(zoom * 100) + '%';
+  }
+  function setZoom(z) { zoom = Math.max(0.1, Math.min(8, z)); apply(); }
+  document.getElementById('zoom-in').onclick  = function () { setZoom(zoom * 1.2); };
+  document.getElementById('zoom-out').onclick = function () { setZoom(zoom / 1.2); };
+  pctBtn.onclick = function () { setZoom(1); };
+  document.getElementById('zoom-fit').onclick = function () {
+    var availW = chart.clientWidth - 24; // matches #chart padding
+    if (natW > 0) setZoom(availW / natW);
+  };
+  // ⌘+ / ⌘− / ⌘0  → zoom (also Ctrl on non-Mac).
+  window.addEventListener('keydown', function (e) {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    var k = e.key;
+    if (k === '=' || k === '+')      { e.preventDefault(); setZoom(zoom * 1.2); }
+    else if (k === '-' || k === '_') { e.preventDefault(); setZoom(zoom / 1.2); }
+    else if (k === '0')              { e.preventDefault(); setZoom(1); }
+  });
+  // ⌘-wheel zooms around the cursor; without modifier, the page scrolls
+  // (#chart's overflow handles panning naturally).
+  chart.addEventListener('wheel', function (e) {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    e.preventDefault();
+    var prev   = zoom;
+    var factor = e.deltaY < 0 ? 1.1 : (1 / 1.1);
+    setZoom(zoom * factor);
+    // Keep the point under the cursor roughly in place after the scale change.
+    var ratio = zoom / prev;
+    var cr    = chart.getBoundingClientRect();
+    var x     = e.clientX - cr.left + chart.scrollLeft;
+    var y     = e.clientY - cr.top  + chart.scrollTop;
+    chart.scrollLeft = x * ratio - (e.clientX - cr.left);
+    chart.scrollTop  = y * ratio - (e.clientY - cr.top);
+  }, { passive: false });
+  apply();
+
+  // --- Live SSE updates -------------------------------------------------
   function render(active, lastEdges) {
     var rules = [];
     (active || []).forEach(function (cls) {
@@ -175,8 +245,8 @@
   }
 
   var es = new EventSource('/events');
-  es.onopen = function () { status.textContent = 'live'; };
-  es.onerror = function () { status.textContent = 'disconnected'; };
+  es.onopen    = function () { status.textContent = 'live'; };
+  es.onerror   = function () { status.textContent = 'disconnected'; };
   es.onmessage = function (e) {
     try {
       var msg = JSON.parse(e.data);
