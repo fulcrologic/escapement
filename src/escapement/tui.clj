@@ -1534,35 +1534,34 @@
 
 (defn stop!
   "Restore the terminal. Idempotent — safe to call repeatedly and from
-   both the normal exit path and a process shutdown hook (Ctrl-C, SIGTERM)."
+   both the normal exit path and a process shutdown hook (Ctrl-C, SIGTERM).
+
+   The terminal-restoration emit runs in a `finally` so even if viz-server
+   teardown, thread interrupt, or JLine `.close` throws, the user still
+   gets their cursor and alt-screen state back."
   [h]
   (when (and (:enabled? h)
              (compare-and-set! (:stopped? h) false true))
     (try
-      (when-let [stop-viz (some-> (:state h) deref :viz-server :stop)]
-        (stop-viz))
-      (catch Throwable _ nil))
-    (try
-      (when-let [^Thread t (:input-thread h)] (.interrupt t))
-      (catch Throwable _ nil))
-    ;; Leave the alt screen FIRST so the subsequent show-cursor lands on the
-    ;; main screen — some terminals (Apple Terminal in particular) track
-    ;; cursor visibility per-screen, and show-cursor emitted inside the alt
-    ;; buffer is lost on screen switch. Belt-and-braces: emit show-cursor on
-    ;; both screens so any per-screen tracking is covered, then a trailing
-    ;; newline keeps the shell prompt on its own line.
-    ;; This MUST run before JLine's terminal close, since closing the JLine
-    ;; terminal may emit its own teardown sequences that could otherwise
-    ;; interleave with ours.
-    (emit! (str reset-attrs-s show-cursor-s alt-screen-off-s show-cursor-s "\n"))
-    (try
-      (when (and (:terminal h) @(:raw-mode? h))
-        (when-let [^Terminal term (:terminal h)]
-          (.close term)))
-      (catch Throwable _ nil))
-    ;; Final restoration after JLine's close, in case JLine re-hid the cursor
-    ;; as part of its own cleanup. Cheap to send twice; safe everywhere.
-    (emit! show-cursor-s))
+      (try
+        (when-let [stop-viz (some-> (:state h) deref :viz-server :stop)]
+          (stop-viz))
+        (catch Throwable _ nil))
+      (try
+        (when-let [^Thread t (:input-thread h)] (.interrupt t))
+        (catch Throwable _ nil))
+      (try
+        (when (and (:terminal h) @(:raw-mode? h))
+          (when-let [^Terminal term (:terminal h)]
+            (.close term)))
+        (catch Throwable _ nil))
+      (finally
+        ;; Leave the alt screen and show the cursor on BOTH screens — some
+        ;; terminals (Apple Terminal in particular) track cursor visibility
+        ;; per-screen, so a show-cursor emitted while still in the alt buffer
+        ;; is lost on the switch back to main. Trailing newline keeps the
+        ;; shell prompt on its own line.
+        (emit! (str reset-attrs-s show-cursor-s alt-screen-off-s show-cursor-s "\n")))))
   h)
 
 ;; ---------------------------------------------------------------------------
