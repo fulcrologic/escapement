@@ -1,5 +1,76 @@
 # Changelog
 
+## [unreleased] — feat/lib-compat — 2026-05-19
+
+Resilience + a live end-to-end harness on top of the structured error
+categories: conversations now recover from transient backend failures and
+output-cap truncation on their own, and a new `bb test:e2e` exercises the
+real provider wire.
+
+### Added
+- Automatic recovery in `:llm-conversation`, driven by the error
+  categories. **Transient failures auto-retry**: a backend throw
+  categorized `:rate-limited` / `:overloaded` / `:timeout` / `:transport`
+  is retried on the same model with exponential backoff (honoring an
+  explicit `:retry-after-ms` from the throwable's ex-data) before any
+  model fallback. **Terminal failures fail fast**: `:auth` /
+  `:invalid-request` / `:context-length` are never retried, so a bad key
+  or oversized prompt cannot burn quota in a loop. Tunable per state via a
+  new `:resilience {:max-retries N :backoff-ms MS}` param (defaults
+  `{:max-retries 3 :backoff-ms 500}`, on by default; `:max-retries 0`
+  disables retry). A `:llm/retry` transcript event is emitted per attempt.
+- **Unbounded `:max_tokens` continuation.** A turn the API truncates at the
+  output cap (`stop_reason :max_tokens`) is no longer an error — the
+  partial assistant content is used as prefill and the turn is continued
+  until a genuine terminal stop, then the segments are stitched into one
+  coherent Response (text merged across the boundary, usage summed). No
+  tool runs and no chart event fires until the message is actually
+  complete. There is no continuation limit; the only guard is forward
+  progress — a continuation that adds nothing (a stuck model) aborts with
+  `:error.llm.unexpected-stop` rather than looping. A `:llm/continuation`
+  transcript event is emitted per segment.
+- `escapement.llm.providers` — the env→provider→backend matrix
+  (`detect-available-credentials`, `build-credential-backend`, the backend
+  builders) extracted into a public namespace and now the single source of
+  truth shared by the CLI's auto-detection and the e2e suite.
+- `bb test:e2e` — a live end-to-end suite (`e2e/escapement/e2e/`) that, for
+  every provider credential present in the environment, checks the real
+  wire: a basic turn, streaming, vision, `:max_tokens` truncation
+  detection, and (credential-independently) the `:transport` / `:timeout`
+  / `:auth` error categories, plus catalog freshness. Providers without a
+  credential are reported as SKIP, never a failure; secrets are never
+  printed. It is NOT run by `bb test`.
+
+### Changed
+- A backend error categorized as a transient category now triggers a
+  bounded retry **before** surfacing as `:error.llm.<category>`; charts
+  that previously saw an immediate `:error.llm.rate-limited` will now see
+  it only after retries are exhausted (set `:resilience {:max-retries 0}`
+  to restore fail-fast).
+- `stop_reason :max_tokens` no longer maps to
+  `:error.llm.unexpected-stop`; it is continued transparently. Only a
+  no-forward-progress continuation still surfaces
+  `:error.llm.unexpected-stop` (now carrying `:detail :no-forward-progress`).
+
+### Notes
+- Transient-retry (backoff, `:retry-after-ms` honoring, fail-fast on
+  terminal categories, `:max-retries 0` disable) and the unbounded
+  `:max_tokens` continuation (segment stitching, usage summing,
+  no-forward-progress abort) are unit-covered offline under `bb test`
+  with a mock backend — they do not require any credential.
+- `bb test:e2e` is the only credential-gated surface here: its live
+  per-provider sweep (basic turn, streaming, vision, `:max_tokens`
+  truncation detection) runs only for providers whose API key is present
+  in the environment (`ANTHROPIC_API_KEY` / `ZAI_API_KEY` /
+  `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `OLLAMA_API_KEY` /
+  `OPENCODE_GO_API_KEY`, or a saved Codex OAuth token) and reports
+  credential-less providers as SKIP. The credential-independent checks
+  (`:transport` / `:timeout` / `:auth` categories, catalog freshness)
+  always run. A reviewer with real keys should run `bb test:e2e` to
+  verify the live wire; the harness cannot exercise it without secrets.
+
+---
+
 ## [unreleased] — feat/lib-compat — 2026-05-18
 
 Builds on the now-merged LLM catalog work: SSE token streaming with a

@@ -21,4 +21,10 @@
           :extra-paths ["demos/unit_test/test"]
           :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
           :task (exec 'escapement.test.runner/run-paths!)
-          :exec-args {:paths ["demos/unit_test/test"]}}}}
+          :exec-args {:paths ["demos/unit_test/test"]}}
+         test:e2e
+         {:doc  "Live e2e checks against real LLM providers (uses env API keys; skips what it can't reach). NOT run by `bb test`."
+          :extra-paths ["e2e"]
+          :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
+          :task (exec 'escapement.test.runner/run-paths!)
+          :exec-args {:paths ["e2e"]}}}}
