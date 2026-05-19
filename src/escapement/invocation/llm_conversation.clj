@@ -22,6 +22,7 @@
    [clojure.string :as str]
    [escapement.chart.service :as service]
    [escapement.llm.catalog :as catalog]
+   [escapement.llm.needs :as needs]
    [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
    [com.fulcrologic.statecharts :as sc]
    [com.fulcrologic.statecharts.environment :as env-ns]
@@ -666,17 +667,47 @@
   [reason]
   (keyword (str "error.llm." (name reason))))
 
-(defn- params->policy
-  "The declarative model policy from conversation `params`.
+(defn- policy-nonempty?
+  "True when a canonical policy expresses at least one clause."
+  [pol]
+  (boolean (and pol (or (seq (:require pol)) (seq (:min pol)) (seq (:max pol))))))
 
-   `:model-policy` is a `catalog/satisfies-policy?` map (`:require`/`:min`
-   /`:max` over any objective or subjective info key — including
-   `:intelligence`, which is just one ratings key, not a special case).
-   Returns nil when no policy clause is expressed."
+(defn- params->policy
+  "The canonical declarative model policy from conversation `params`,
+   resolved from the chart-node surface keys.
+
+   * `:needs` — the ergonomic flat `fact → constraint` map (bare value,
+     `[:>= n]`, `[:<= n]`). Translated to the canonical
+     `{:require/:min/:max}` shape via `escapement.llm.needs/needs->policy`.
+   * `:model-policy` — DEPRECATED alias accepting the canonical nested
+     shape verbatim (`:require`/`:min`/`:max` over any objective or
+     subjective info key). Kept working for one cycle so existing charts
+     don't break; `:needs` wins when both are present.
+
+   Returns nil when no policy clause is expressed. A malformed `:needs`
+   throws (see `needs->policy`)."
   [params]
-  (let [pol (:model-policy params)]
-    (when (or (seq (:require pol)) (seq (:min pol)) (seq (:max pol)))
+  (let [needs-pol (when (contains? params :needs)
+                    (needs/needs->policy (:needs params)))
+        legacy    (:model-policy params)
+        pol       (if (policy-nonempty? needs-pol)
+                    needs-pol
+                    legacy)]
+    (when (policy-nonempty? pol)
       pol)))
+
+(defn- deprecated-model-policy?
+  "True when the conversation `params` rely on the deprecated
+   `:model-policy` alias for the *effective* policy — i.e. `:model-policy`
+   is present and `:needs` did not supply a non-empty policy that
+   superseded it. Used to emit a one-time deprecation transcript event."
+  [params]
+  (boolean
+   (and (contains? params :model-policy)
+        (policy-nonempty? (:model-policy params))
+        (not (policy-nonempty?
+              (when (contains? params :needs)
+                (needs/needs->policy (:needs params))))))))
 
 (defn- candidate-models
   "Decide the ordered list of models to try for the next turn.
@@ -685,10 +716,13 @@
      1. `params :models`    — explicit ordered preference (no auto-substitution)
      2. `params :model`     — explicit single pick (no fallback)
      3. `default-models`    — processor-level auto-detected fallback list. When
-                              a model policy is expressed (`params
-                              :model-policy`) the list is filtered to
-                              entries satisfying it via
-                              `escapement.llm.catalog/satisfies-policy?`.
+                              an eligibility gate is expressed (`params
+                              :needs`, or the deprecated `:model-policy`
+                              alias) the list is filtered to entries
+                              satisfying it via
+                              `escapement.llm.catalog/satisfies-policy?`,
+                              with subjective ratings resolved from the
+                              injected `catalog-ratings` value.
                               If the filter empties the list, the
                               unfiltered default-models is used so the
                               conversation still runs (the gap is surfaced
@@ -701,10 +735,10 @@
 
    Always filters out anything marked `:down` in `model-status` AFTER the
    resolution above; `nil` (case 4) is preserved unconditionally."
-  [params default-models model-status]
+  [params default-models model-status catalog-ratings]
   (let [policy    (params->policy params)
         defaults  (if (and policy (seq default-models))
-                    (let [filtered (filterv #(catalog/satisfies-policy? % policy) default-models)]
+                    (let [filtered (filterv #(catalog/satisfies-policy? % policy catalog-ratings) default-models)]
                       (if (seq filtered) filtered default-models))
                     default-models)
         requested (cond
@@ -741,20 +775,53 @@
      {:interrupted t}       — worker is dying / thread was interrupted
      {:exhausted attempts}  — every candidate failed; caller should post
                               :error.llm.backend. `attempts` is a vector of
-                              `{:model :error}` pairs (oldest first)."
-  [{:keys [backend transcript-fn worker-state model-status default-models parent-ctx]} params messages tools]
+                              `{:model :error}` pairs (oldest first).
+     {:eligibility-empty …} — fail-closed: `:llm/eligibility-strict?` was
+                              set in the injected config and the
+                              eligibility gate excluded every fallback
+                              model; the caller fails the node with a
+                              categorized error rather than silently
+                              running an ineligible model.
+
+   `catalog-ratings` is the subjective ratings table the invocation
+   context resolved ONCE (CLI: from disk config at startup; lib: from
+   injected `:config`). It is passed explicitly to every
+   `catalog/satisfies-policy?` call — the Step-1 2-arg disk-resolving
+   arity is intentionally not relied on here. `eligibility-strict?` is
+   the injected fail-closed flag."
+  [{:keys [backend transcript-fn worker-state model-status default-models
+           parent-ctx catalog-ratings eligibility-strict?]}
+   params messages tools]
   (let [{:keys [max-retries backoff-ms]} (params->resilience params)
         policy        (params->policy params)
+        _              (when (deprecated-model-policy? params)
+                         (transcript! transcript-fn
+                                      {:event :llm/model-policy-deprecated
+                                       :ts    (now-ms)
+                                       :data  {:invokeid (:invokeid parent-ctx)
+                                               :note (str "`:model-policy` is deprecated; "
+                                                          "use the flat `:needs` key. "
+                                                          "The canonical nested form still "
+                                                          "works for one cycle.")}}))
         auto-fallback? (and (not (seq (:models params)))
                             (nil? (:model params)))
-        _              (when (and auto-fallback? policy (seq default-models)
-                                  (not-any? #(catalog/satisfies-policy? % policy) default-models))
+        gate-empties?  (and auto-fallback? policy (seq default-models)
+                            (not-any? #(catalog/satisfies-policy? % policy catalog-ratings)
+                                      default-models))
+        _              (when gate-empties?
                          (transcript! transcript-fn
                                       {:event :llm/model-policy-empty
                                        :ts    (now-ms)
                                        :data  {:policy         policy
-                                               :default-models (vec default-models)}}))
-        candidates    (candidate-models params default-models model-status)]
+                                               :default-models (vec default-models)
+                                               :strict?        (boolean eligibility-strict?)}}))]
+    (if (and gate-empties? eligibility-strict?)
+      ;; Fail-closed: a webapp/lib host opted into never running an
+      ;; ineligible model. Surface a categorized error so the node fails
+      ;; instead of proceeding on the unfiltered fallback list.
+      {:eligibility-empty {:policy         policy
+                           :default-models (vec default-models)}}
+      (let [candidates (candidate-models params default-models model-status catalog-ratings)]
     (loop [[m & more] candidates
            attempts   []]
       (let [request  (build-request
@@ -844,7 +911,7 @@
                :last-throwable t}))
 
           :else
-          {:ok response :model-used m})))))
+          {:ok response :model-used m})))))))
 
 (defn- drive-turn!
   "Issue one logical assistant turn. A `stop_reason :max_tokens` means the API
@@ -915,6 +982,25 @@
    post-error! on-end-turn-event]
   (let [outcome (drive-turn! ctx params @messages-atom tool-defs)]
     (cond
+      (:eligibility-empty outcome)
+      (let [{:keys [policy default-models]} (:eligibility-empty outcome)]
+        (transcript! transcript-fn
+                     {:event :llm/error :ts (now-ms)
+                      :data  {:reason         :invalid-request
+                              :detail         :eligibility-empty-strict
+                              :policy         policy
+                              :default-models default-models}})
+        ;; Fail-closed: the eligibility gate excluded every fallback
+        ;; model and `:llm/eligibility-strict?` is set. Categorize as
+        ;; :invalid-request so the chart's :error.llm.* / .invalid-request
+        ;; transitions fire — the node fails rather than run a model the
+        ;; host declared ineligible.
+        (post-error! :invalid-request {:detail         :eligibility-empty-strict
+                                       :policy         policy
+                                       :default-models default-models})
+        (reset! worker-state :dying)
+        :error-and-die)
+
       (:no-progress outcome)
       (do
         (transcript! transcript-fn
@@ -1173,7 +1259,8 @@
       (when-let [^Thread t (:thread entry)] (.interrupt t))
       (catch Throwable _ nil))))
 
-(defrecord LlmConversationProcessor [backend tool-registry transcript-fn workers model-status default-models]
+(defrecord LlmConversationProcessor [backend tool-registry transcript-fn workers model-status default-models
+                                     catalog-ratings eligibility-strict?]
   sp/InvocationProcessor
   (supports-invocation-type? [_ typ]
     (= typ :llm-conversation))
@@ -1229,6 +1316,8 @@
                                        :retry-counts       retry-counts
                                        :model-status       model-status
                                        :default-models     default-models
+                                       :catalog-ratings     (or catalog-ratings {})
+                                       :eligibility-strict? (boolean eligibility-strict?)
                                        :params             params
                                        :parent-ctx         parent-ctx}
           runnable                    (fn [] (run-worker! ctx))
@@ -1314,12 +1403,27 @@
    * `:transcript-fn` (optional) — `(fn [event-map] ...)` for observability; default no-op
    * `:default-models` (optional) — ordered vector of model id strings to try
      when a chart's invocation params don't specify `:model`/`:models`. Used
-     for cross-backend fallback when only some credentials are healthy."
-  [{:keys [backend tool-registry transcript-fn default-models]}]
+     for cross-backend fallback when only some credentials are healthy.
+   * `:catalog-ratings` (optional) — the subjective ratings table
+     (`id → opinion-map`, the shape `escapement.llm.ratings/ratings`
+     returns) resolved ONCE by the invocation/env builder and threaded
+     explicitly to every `catalog/satisfies-policy?` call. Defaults to
+     `{}` (a subjective `:needs` clause then matches nothing). The CLI
+     path resolves this from disk config at startup; the lib facade
+     (Step 4) will feed it from injected `:config`. This is the clean
+     injection seam — the processor never reads disk or a global.
+   * `:eligibility-strict?` (optional, default false) — fail-closed
+     flag. When true, an eligibility gate (`:needs`/`:model-policy`)
+     that excludes every auto-fallback model fails the node with a
+     categorized `:error.llm.invalid-request` instead of silently
+     proceeding on the unfiltered list (fail-open, the default)."
+  [{:keys [backend tool-registry transcript-fn default-models
+           catalog-ratings eligibility-strict?]}]
   (assert backend "backend is required")
   (assert tool-registry "tool-registry is required")
   (->LlmConversationProcessor backend tool-registry (or transcript-fn (fn [_] nil))
-                              (atom {}) (atom {}) (vec default-models)))
+                              (atom {}) (atom {}) (vec default-models)
+                              (or catalog-ratings {}) (boolean eligibility-strict?)))
 
 (>defn active-worker-count
        "Returns the number of workers whose state is not `:dying`. Used by the runner

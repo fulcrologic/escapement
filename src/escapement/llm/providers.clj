@@ -147,3 +147,122 @@
     :opencode-go-openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :opencode-go-anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
     :codex      (build-codex-backend {:default-model (:default-model c)})))
+
+;; --- Hermetic explicit-credentials assembly -------------------------------
+;;
+;; The map below is the provider→backend matrix for the *injection* path.
+;; It MIRRORS — fact for fact — the descriptor `detect-available-credentials`
+;; emits for the same provider (`:kind`, `:base-url`, `:default-model`,
+;; `:auth-mode`, `:route`). Both paths feed the same `build-credential-backend`
+;; constructor, so the provider matrix cannot drift between CLI auto-detection
+;; and explicit injection: changing a provider's wire shape means changing it
+;; in BOTH `detect-available-credentials` and here, and the equivalence is
+;; covered by tests. This path NEVER reads `System/getenv` and NEVER touches
+;; disk — every value is supplied by the caller's descriptor or the static
+;; template below.
+(def ^:private provider-templates
+  "Static, env-free defaults per provider keyword. Keys match the provider
+   keyword used in `:llm/preferences` / injected descriptors. Each value is
+   the env-independent half of the descriptor `detect-available-credentials`
+   builds for that provider (the `:api-key` / overrides come from the caller)."
+  {:anthropic    {:kind :anthropic :base-url "https://api.anthropic.com"
+                  :default-model "claude-sonnet-4-6" :auth-mode :x-api-key
+                  :route #"^claude-"}
+   :z-ai         {:kind :zai :base-url "https://api.z.ai/api/anthropic"
+                  :default-model "glm-4.6" :auth-mode :bearer
+                  :route #"^glm-"}
+   ;; `:z-ai-plan` is the subscription-billed face of z.ai used in
+   ;; `default-preferences`; same wire backend as metered `:z-ai`.
+   :z-ai-plan    {:kind :zai :base-url "https://api.z.ai/api/anthropic"
+                  :default-model "glm-4.6" :auth-mode :bearer
+                  :route #"^glm-"}
+   :openai       {:kind :openai :base-url "https://api.openai.com/v1"
+                  :default-model "gpt-4o-mini"
+                  :route #"^gpt-"}
+   :openrouter   {:kind :openrouter :base-url "https://openrouter.ai/api/v1"
+                  :default-model "openai/gpt-4o-mini"
+                  :route #".+/.+"}
+   :ollama       {:kind :ollama :base-url "https://ollama.com/v1"
+                  :default-model "kimi-k2.5"
+                  :route #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}
+   :opencode-go  {:kind :opencode-go-openai :base-url "https://opencode.ai/zen/go/v1"
+                  :default-model "glm-5"
+                  :route #"^(glm-|kimi-|mimo-)"}
+   :opencode-go-anthropic {:kind :opencode-go-anthropic :base-url "https://opencode.ai/zen/go"
+                           :default-model "minimax-m2.7" :auth-mode :x-api-key
+                           :route #"^minimax-"}
+   ;; ChatGPT-subscription: no api-key/base-url; OAuth token is loaded by the
+   ;; codex backend itself at send time, not here.
+   :codex        {:kind :codex :default-model "gpt-5.1-codex"
+                  :route #"^gpt-5"}
+   :openai-codex {:kind :codex :default-model "gpt-5.1-codex"
+                  :route #"^gpt-5"}})
+
+(defn- descriptor->credential
+  "Resolve one injected credential descriptor into a full
+   `build-credential-backend`-shaped map by merging the static provider
+   template with the caller-supplied overrides (`:api-key`, `:base-url`,
+   `:default-model`, `:model`). Pure: no env, no disk. Returns nil for an
+   unknown provider so the caller can drop it cleanly."
+  [{:keys [provider] :as desc}]
+  (when-let [tmpl (get provider-templates provider)]
+    (let [overrides (-> desc
+                        (select-keys [:api-key :base-url :default-model :auth-mode])
+                        (cond-> (:model desc) (assoc :default-model (:model desc))))]
+      (merge tmpl (into {} (remove (comp nil? val)) overrides)))))
+
+(defn- preference-rank
+  "Map of provider-keyword → its first index in `preferences` (lower = higher
+   priority). Providers absent from `preferences` sort last (stable)."
+  [preferences]
+  (->> preferences
+       (map :provider)
+       (reduce (fn [m p] (if (contains? m p) m (assoc m p (count m)))) {})))
+
+(defn build-injected-credentials-backend
+  "Assemble a `multi` routing backend purely from explicitly injected
+   credential descriptors — HERMETIC: never calls
+   `detect-available-credentials`, never reads `System/getenv`, never touches
+   disk. Every credential value comes from `descriptors`; everything else
+   comes from the static `provider-templates` matrix (which mirrors what
+   `detect-available-credentials` would emit, so the provider matrix never
+   drifts).
+
+   - `descriptors` — ordered vector of
+     `[{:provider :z-ai-plan :subscription true}
+       {:provider :anthropic :api-key \"sk-...\"}
+       {:provider :openai :api-key \"sk-...\" :base-url \"...\"}]`.
+     Each is resolved to a concrete sub-backend via
+     `build-credential-backend`. Descriptors with an unknown `:provider`
+     are dropped.
+   - `preferences` — the injected `:llm/preferences` (sorted
+     `[{:provider :model} …]`, highest priority first). Used ONLY to ORDER
+     the routing table: routes for providers appearing earlier in
+     `preferences` are tried first; providers absent from `preferences` keep
+     their descriptor order, after the ranked ones. No new selection
+     behavior — pure assembly over `multi/new-backend`.
+
+   The first resolvable descriptor's backend becomes the `:default-backend`
+   so a model that matches no route still runs (consistent with
+   `escapement.llm.multi` semantics). Returns nil when no descriptor
+   resolves."
+  [descriptors preferences]
+  (let [creds (->> descriptors
+                   (keep (fn [d] (some-> (descriptor->credential d)
+                                         (assoc ::provider (:provider d)))))
+                   vec)]
+    (when (seq creds)
+      (let [rank   (preference-rank preferences)
+            n      (count creds)
+            ;; stable sort by preference rank; unranked keep descriptor order
+            sorted (->> (map-indexed vector creds)
+                        (sort-by (fn [[i c]]
+                                   [(get rank (::provider c) (+ n i)) i]))
+                        (mapv second))
+            routes (mapv (fn [c]
+                           [(:route c)
+                            (build-credential-backend (dissoc c ::provider :route))])
+                         sorted)
+            default (build-credential-backend
+                     (dissoc (first creds) ::provider :route))]
+        (build-multi-backend {:routes routes :default-backend default})))))

@@ -238,7 +238,12 @@
 
       :llm/model-policy-empty
       [{:source :error :glyph \⚠ :ev ev
-        :summary (str "model policy " (pr-str (:policy data)) " filter empty")}]
+        :summary (str "model policy " (pr-str (:policy data)) " filter empty"
+                      (when (:strict? data) " (strict: node failed)"))}]
+
+      :llm/model-policy-deprecated
+      [{:source :system :glyph \i :ev ev
+        :summary "`:model-policy` is deprecated — use the flat `:needs` key"}]
 
       :human-input/start
       [{:source :human :glyph \? :ev ev

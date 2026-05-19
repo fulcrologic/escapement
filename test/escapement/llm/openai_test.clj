@@ -1,10 +1,13 @@
 (ns escapement.llm.openai-test
   (:require
+   [babashka.http-client]
    [cheshire.core :as json]
+   [clojure.string :as str]
    [escapement.llm.openai :as oai]
    [escapement.llm.protocol :as proto]
    [escapement.llm.types :as types]
-   [fulcro-spec.core :refer [specification assertions component =>]]))
+   [fulcro-spec.core :refer [specification assertions component =>]])
+  (:import (java.io BufferedReader StringReader)))
 
 (def sample-request
   {:model     "gpt-5"
@@ -185,4 +188,135 @@
                   "only a single tool_use block"
                   (count (:content resp)) => 1
                   (get-in resp [:content 0 :type]) => :tool_use)))
+
+;;; ---------------------------------------------------------------------------
+;;; Streaming (SSE)
+
+(defn- sse
+  "Render a vector of Chat Completions chunk maps into an OpenAI-style
+   `data:`/`[DONE]` SSE stream (blank lines and a comment line interleaved to
+   exercise the parser's non-data line handling)."
+  [chunks]
+  (->> (concat
+        (mapcat (fn [c] [(str "data: " (json/generate-string c)) ""]) chunks)
+        [": keep-alive comment" "data: [DONE]" ""])
+       (str/join "\n")))
+
+;; A representative stream: id/model on the first chunk, two content deltas,
+;; an indexed tool_call assembled from name + two argument fragments, a finish
+;; chunk, then a usage-only chunk (stream_options.include_usage).
+(def streamed-chunks
+  [{"id" "chatcmpl-s1" "model" "gpt-5"
+    "choices" [{"index" 0 "delta" {"role" "assistant" "content" ""}}]}
+   {"choices" [{"index" 0 "delta" {"content" "Hel"}}]}
+   {"choices" [{"index" 0 "delta" {"content" "lo"}}]}
+   {"choices" [{"index" 0
+                "delta" {"tool_calls" [{"index" 0 "id" "call_1"
+                                        "type" "function"
+                                        "function" {"name" "get_weather"
+                                                    "arguments" "{\"loc"}}]}}]}
+   {"choices" [{"index" 0
+                "delta" {"tool_calls" [{"index" 0
+                                        "function" {"arguments" "ation\":\"Paris\"}"}}]}}]}
+   {"choices" [{"index" 0 "delta" {} "finish_reason" "tool_calls"}]}
+   {"choices" []
+    "usage" {"prompt_tokens" 12 "completion_tokens" 8
+             "prompt_tokens_details" {"cached_tokens" 100}}}])
+
+(specification "parse-openai-sse! reconstructs a Response and emits deltas"
+               (let [deltas (atom [])
+                     reader (BufferedReader. (StringReader. (sse streamed-chunks)))
+                     resp   (oai/parse-openai-sse! reader "fallback-model"
+                                                   #(swap! deltas conj %))]
+                 (assertions
+                  "final Response is Malli-valid"
+                  (types/validate-response resp) => nil
+                  "text deltas were streamed in order"
+                  (mapv :text (filter #(= :text-delta (:type %)) @deltas))
+                  => ["Hel" "lo"]
+                  "all surfaced deltas are :text-delta (no tool-arg leakage)"
+                  (every? #(= :text-delta (:type %)) @deltas) => true
+                  "accumulated text block then tool_use block"
+                  (count (:content resp)) => 2
+                  (get-in resp [:content 0]) => {:type :text :text "Hello"}
+                  (get-in resp [:content 1 :type]) => :tool_use
+                  (get-in resp [:content 1 :id])   => "call_1"
+                  (get-in resp [:content 1 :name]) => "get_weather"
+                  "tool args reassembled from fragments + keywordized"
+                  (get-in resp [:content 1 :input]) => {:location "Paris"}
+                  "finish_reason -> stop-reason"
+                  (:stop-reason resp) => :tool_use
+                  "usage from the include_usage final chunk"
+                  (get-in resp [:usage :input-tokens])            => 12
+                  (get-in resp [:usage :output-tokens])           => 8
+                  (get-in resp [:usage :cache-read-input-tokens]) => 100
+                  "model + message-id taken from the stream"
+                  (:model resp) => "gpt-5"
+                  (get-in resp [:backend-metadata :message-id]) => "chatcmpl-s1")))
+
+(specification "streamed Response == buffered translator output (equivalence)"
+  ;; The fully-assembled equivalent buffered OpenAI body run through the SAME
+  ;; openai-json->response translator must produce an identical Response.
+               (let [reader   (BufferedReader. (StringReader. (sse streamed-chunks)))
+                     streamed (oai/parse-openai-sse! reader "gpt-5" nil)
+                     buffered (oai/openai-json->response
+                               {"id"      "chatcmpl-s1"
+                                "model"   "gpt-5"
+                                "choices" [{"index"         0
+                                            "finish_reason" "tool_calls"
+                                            "message"
+                                            {"role"       "assistant"
+                                             "content"    "Hello"
+                                             "tool_calls"
+                                             [{"index"    0
+                                               "id"       "call_1"
+                                               "type"     "function"
+                                               "function" {"name" "get_weather"
+                                                           "arguments"
+                                                           "{\"location\":\"Paris\"}"}}]}}]
+                                "usage"   {"prompt_tokens"         12
+                                           "completion_tokens"     8
+                                           "prompt_tokens_details" {"cached_tokens" 100}}}
+                               "gpt-5")]
+                 (assertions
+                  "blocks + usage + metadata structurally identical"
+                  streamed => buffered)))
+
+(specification "OpenAI backend advertises streaming capability"
+               (let [b (oai/new-backend {:api-key "k" :base-url "http://x/v1"})]
+                 (assertions
+                  "(streaming? openai) => true"
+                  (proto/streaming? b) => true)))
+
+(specification "stream-turn drives the SSE seam and returns the final Response"
+  ;; Stub the HTTP layer (same babashka.http-client/post seam the buffered
+  ;; path uses) so no network call is made; stream-turn must emit deltas and
+  ;; return the finalized Response.
+               (let [deltas (atom [])
+                     b      (oai/new-backend {:api-key "k" :base-url "http://x/v1"})
+                     req    {:model "gpt-5"
+                             :messages [{:role :user
+                                         :content [{:type :text :text "hi"}]}]
+                             :max-tokens 64}]
+                 (with-redefs
+                  [babashka.http-client/post
+                   (fn [_url _opts]
+                     {:status 200
+                      :body   (java.io.ByteArrayInputStream.
+                               (.getBytes ^String (sse streamed-chunks) "UTF-8"))})]
+                   (let [resp (proto/stream-turn b req #(swap! deltas conj %))]
+                     (assertions
+                      "deltas emitted during the stream"
+                      (mapv :text (filter #(= :text-delta (:type %)) @deltas))
+                      => ["Hel" "lo"]
+                      "final Response is the finalized translator output"
+                      (types/validate-response resp) => nil
+                      (get-in resp [:content 0]) => {:type :text :text "Hello"}
+                      (:stop-reason resp) => :tool_use
+                      (get-in resp [:usage :input-tokens]) => 12)
+                     (assertions
+                      "send-turn* routes to streaming when on-delta present"
+                      (let [d2 (atom [])]
+                        (proto/send-turn* b req #(swap! d2 conj %))
+                        (count @d2)) => 2)))))
 
