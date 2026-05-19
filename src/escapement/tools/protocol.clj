@@ -15,6 +15,16 @@
    [malli.error :as me]
    [malli.json-schema :as mjs]))
 
+(def ^:dynamic *base-dir*
+  "Directory that path-taking builtin tools resolve RELATIVE paths against.
+   Bound by `dispatch` for the duration of a tool `invoke`. `nil` means
+   \"use the process working directory\" (back-compat default).
+
+   The base-dir is sourced (in order): the explicit `base-dir` arg to
+   `dispatch`, then `(:escapement/base-dir (meta reg))` (set by the CLI
+   from `:escapement/session-dir` when it builds the registry), else nil."
+  nil)
+
 (defprotocol Tool
   "A tool the LLM may invoke. Implementations are typically `defrecord`s."
   (tool-name [t] "Returns the tool's keyword name, e.g. `:fs/read`.")
@@ -81,18 +91,28 @@
 (>defn dispatch
        "Look up `tool-kw` in `reg` and `invoke` it with `input` after validating against
        the tool's input schema. Returns `{:result <string> :is-error <bool>}`. Unknown
-       tool names and validation failures are returned as error results."
-       [reg tool-kw input]
-       [any? :keyword any? => [:map [:result :string] [:is-error :boolean]]]
-       (if-let [t (lookup reg tool-kw)]
-         (let [schema (input-schema t)]
-           (if (m/validate schema input)
-             (try
-               (invoke t input)
-               (catch Throwable ex
-                 {:result   (str "Tool threw: " (.getMessage ex))
-                  :is-error true}))
-             {:result   (humanize-error schema input)
-              :is-error true}))
-         {:result   (str "No such tool: " tool-kw)
-          :is-error true}))
+       tool names and validation failures are returned as error results.
+
+       `base-dir` (optional) is the directory that path-taking builtin tools resolve
+       RELATIVE paths against; absolute paths pass through untouched. When omitted,
+       it falls back to `(:escapement/base-dir (meta reg))` (set by the CLI from
+       `:escapement/session-dir`) and finally to the process working directory
+       (back-compat: existing 3-arg callers keep their previous behaviour)."
+       ([reg tool-kw input]
+        [any? :keyword any? => [:map [:result :string] [:is-error :boolean]]]
+        (dispatch reg tool-kw input (:escapement/base-dir (meta reg))))
+       ([reg tool-kw input base-dir]
+        [any? :keyword any? [:maybe :string] => [:map [:result :string] [:is-error :boolean]]]
+        (if-let [t (lookup reg tool-kw)]
+          (let [schema (input-schema t)]
+            (if (m/validate schema input)
+              (binding [*base-dir* base-dir]
+                (try
+                  (invoke t input)
+                  (catch Throwable ex
+                    {:result   (str "Tool threw: " (.getMessage ex))
+                     :is-error true})))
+              {:result   (humanize-error schema input)
+               :is-error true}))
+          {:result   (str "No such tool: " tool-kw)
+           :is-error true})))

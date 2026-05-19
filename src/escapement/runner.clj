@@ -215,6 +215,30 @@
          * `:max-iterations` (default 100000) — safety bound on the pump loop
          * `:quiescent-sleep-ms` (default 50) — how long to sleep when queue is empty
                                                 but live invocations exist
+         * `:max-frozen-cycles` (default 200) — number of *consecutive*
+                                                quiescent cycles (queue empty,
+                                                no progress) tolerated while
+                                                live invocations exist before
+                                                the pump declares the config
+                                                wedged and terminates with
+                                                `:runner/error {:reason
+                                                :frozen-config}`. Defaults to
+                                                ~200 which, at the default
+                                                50ms `:quiescent-sleep-ms`, is
+                                                a ~10s wall-clock budget —
+                                                generous enough to survive
+                                                legitimately slow invocations
+                                                (network turns, tool calls)
+                                                while still bounding the
+                                                statecharts eventless-transition
+                                                -loop frozen-config
+                                                wedge. The counter resets to 0
+                                                whenever the pump makes
+                                                progress OR no live
+                                                invocations remain, so only an
+                                                unbroken run of no-progress
+                                                cycles with live work can trip
+                                                it.
          * `:debug-controller` (optional) — `escapement.debug.controller`
                                             atom; when supplied, every event
                                             is gated through pause/step
@@ -229,13 +253,14 @@
                 session-dir backend backend-default-models
                 catalog-ratings eligibility-strict?
                 tool-registry initial-data resume? trace?
-                max-iterations quiescent-sleep-ms human-renderer
+                max-iterations max-frozen-cycles quiescent-sleep-ms human-renderer
                 on-env-ready transcript-tap prelude-events store run-id cancel
                 debug-controller human-input-active?]
          :or   {chart-id          ::chart
                 resume?           false
                 trace?            false
                 max-iterations    100000
+                max-frozen-cycles  200
                 quiescent-sleep-ms 50}}]
        [:map => :map]
        (assert chart "chart is required")
@@ -292,10 +317,13 @@
                  (transcript-fn {:event :runner/start-config
                                  :data  {:config (vec (::sc/configuration w0))}}))))
            ;; Pump. The loop returns a terminal status keyword:
-           ;;   :done      — quiescent with no live invocations (normal)
-           ;;   :aborted   — host cancel signal fired, or max-iterations hit
+           ;;   :done          — quiescent with no live invocations (normal)
+           ;;   :aborted        — host cancel signal fired, or max-iterations hit
+           ;;   :frozen-config  — config wedged: no progress with live work for
+           ;;                     `:max-frozen-cycles` consecutive cycles
            (let [status
-                 (loop [i max-iterations]
+                 (loop [i             max-iterations
+                        frozen-cycles 0]
                    (when trace?
                      (transcript-fn {:event :runner/tick :data {:i (- max-iterations i)}}))
                    (cond
@@ -321,17 +349,35 @@
                                                      :controller debug-controller
                                                      :human-input-active? human-input-active?})]
                        (if progressed?
-                         (recur (dec i))
+                         ;; Made progress this pass — the config is moving, so
+                         ;; the frozen-config counter resets.
+                         (recur (dec i) 0)
                          (let [live (count-live-invocations env)]
                            (transcript-fn {:event :runner/quiescent
-                                           :data  {:live-invocations live}})
+                                           :data  {:live-invocations live
+                                                   :_fc frozen-cycles
+                                                   :_max max-frozen-cycles}})
                            (cond
                              (zero? live)
-                             :done ;; done
+                             :done ;; done — no live work, counter is moot
+
+                             ;; No progress AND live invocations exist: this
+                             ;; quiescent cycle may be the frozen-config wedge.
+                             ;; Bump the counter; if it reaches the threshold
+                             ;; the configuration is wedged (the statecharts
+                             ;; eventless transition loop never advances) —
+                             ;; emit :runner/error and return a terminal status
+                             ;; (clean exit, no throw), mirroring :aborted.
+                             (>= (inc frozen-cycles) max-frozen-cycles)
+                             (do (transcript-fn {:event :runner/error
+                                                 :data  {:reason           :frozen-config
+                                                         :live-invocations live
+                                                         :cycles           (inc frozen-cycles)}})
+                                 :frozen-config)
 
                              :else
                              (do (Thread/sleep ^long quiescent-sleep-ms)
-                                 (recur (dec i)))))))))
+                                 (recur (dec i) (inc frozen-cycles)))))))))
                  final-wmem (sp/get-working-memory store env session-id)
                  cfg        (vec (::sc/configuration final-wmem #{}))]
              (transcript-fn {:event :runner/done

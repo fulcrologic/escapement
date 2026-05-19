@@ -1173,7 +1173,16 @@ When a response completes, Anthropic returns `stop_reason`:
   about turn boundaries.
 * `:tool_use` — the response contains at least one tool_use block. The
   worker dispatches the tools, appends results, and immediately POSTs
-  the next request. Chart-side scripts don't see this.
+  the next request. Chart-side scripts don't see this — *unless* one of
+  the dispatched blocks is an **event-tool**. Some models (notably the
+  glm class) batch the terminating `event__*` call into a `:tool_use`
+  response instead of emitting a separate `:end_turn`. When a block in a
+  `:tool_use` turn posts a chart event, the worker treats that turn as
+  the turn end: it fires `:on-end-turn-event` (default `:llm.idle`) with
+  the assembled final text and parks in `:awaiting-user`, exactly as the
+  `:end_turn` branch does — exactly once per logical turn. A **region-
+  tool** reply does NOT end the turn: it is a synchronous request/reply
+  fed back into the same conversation, and the worker keeps going.
 * `:max_tokens` — the API truncated the response at the model's catalog
   output cap mid-message. This is **not** an error and the chart never
   sees it: the worker keeps the partial content as prefill and continues
@@ -1566,9 +1575,14 @@ receives the message. Plain `tell-llm` continues to broadcast.
 
 === `:on-end-turn-event` payload
 
-Every `:end_turn` now fires the configured `:on-end-turn-event` (default
+Every turn end fires the configured `:on-end-turn-event` (default
 `:llm.idle`) with `{:text "<final assistant text>" :from "<invokeid>"}`
-in the data. That's the wire for routing one LLM's output to another:
+in the data. "Turn end" means either an `:end_turn` stop reason *or* a
+`:tool_use` response in which the model batched the terminating
+event-tool (the glm-class case — see *Stop reasons*); both fire the
+hook exactly once per logical turn, so a chart can rely on it regardless
+of which shape the model emits. That's the wire for routing one LLM's
+output to another:
 catch the event, inspect `:from`, format `:text` into a follow-up prompt,
 `tell-other-llm` it elsewhere.
 
@@ -2587,6 +2601,13 @@ Output paths:
   `--work-dir`, `--transcript`, or `--checkpoint-dir`. Artifacts produced by
   `capture-llm-output` / `forward-llm-output` land under
   `<session>/artifacts/` (see <<multi-agent>>).
+* Built-in path-taking tools (`fs_read`, `fs_write`, `fs_edit`,
+  `fs_multi_edit`, `fs_glob`, `fs_grep`) resolve **relative** paths
+  against the session work directory; absolute paths pass through
+  untouched. So an LLM that writes to `notes.md` lands inside the
+  session dir, not wherever the process was launched. Each tool's
+  `:llm/tool-result` transcript event carries a `:resolved-path` (the
+  absolute path it actually acted on).
 * `--resume` re-opens the latest checkpoint and skips `start!`.
 
 Initial data:
@@ -2710,6 +2731,11 @@ Other:
 * `--deps '{lib/x {:mvn/version "1.0.0"}}'` resolves additional runtime
   Maven/git coordinates via `babashka.deps/add-deps` before chart load.
 * `--trace` emits per-tick transcript events.
+* `--log-level debug|info|warn|error` sets logging verbosity
+  (case-insensitive). An explicit value always wins. With no explicit
+  value, headless (`--no-tui`) runs default to `info` so live archiving
+  stays cheap, while interactive runs keep the library default (`debug`).
+  An unrecognized value exits with usage error 2.
 
 [[project-config]]
 === Project configuration (`.escapement.edn`)

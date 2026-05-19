@@ -33,6 +33,12 @@
                                 top of `.escapement.edn` :deps. Same coordinate
                                 shape as deps.edn's :deps map.
         --trace                 Emit per-tick transcript events.
+        --log-level <lvl>       Logging verbosity: debug|info|warn|error
+                                (case-insensitive). Defaults to INFO for
+                                headless (--no-tui) runs so live archiving
+                                is cheap; interactive runs keep the library
+                                default (DEBUG). An explicit value always
+                                wins.
         --no-tui                Force-disable the TUI (overrides
                                 ^{:interactive? true} chart metadata).
         --debug                 Enable debug mode: forces the TUI on (even
@@ -57,7 +63,8 @@
    [escapement.llm.providers :as providers]
    [escapement.runner :as runner]
    [escapement.transcript :as transcript]
-   [escapement.tui :as tui]))
+   [escapement.tui :as tui]
+   [taoensso.timbre :as timbre]))
 
 (def ^:const version "0.1.0")
 
@@ -100,6 +107,37 @@
                  (die! (str "Flag " a " requires a value")))))
            :else
            (recur (rest args) (conj pos a) opts)))))))
+
+(def ^:private log-levels
+  "Accepted --log-level values mapped to timbre min-level keywords."
+  {"debug" :debug "info" :info "warn" :warn "error" :error})
+
+(defn resolve-log-level
+  "Pure resolution of the effective timbre min-level for a run.
+
+   `opts` is the parsed `--flag` map (expects optional `:log-level` string
+   and boolean `:no-tui`).
+
+   Rules:
+   * An explicit `--log-level` always wins (case-insensitive; one of
+     debug|info|warn|error). An unrecognized value returns
+     `[:error <msg>]` so the caller can `die!` with usage exit 2.
+   * No explicit value + headless (`--no-tui`) → `:info` (cheap archiving).
+   * No explicit value + interactive → `nil` (preserve the library default,
+     i.e. don't touch timbre's min-level).
+
+   Returns `[:level <kw-or-nil>]` on success or `[:error <msg>]` on a bad
+   explicit value."
+  [opts]
+  (let [raw (:log-level opts)]
+    (if (some? raw)
+      (if-let [lvl (get log-levels (str/lower-case (str/trim (str raw))))]
+        [:level lvl]
+        [:error (str "Invalid --log-level " (pr-str raw)
+                     "; expected one of debug|info|warn|error")])
+      (if (boolean (:no-tui opts))
+        [:level :info]
+        [:level nil]))))
 
 (defn- read-edn-file [path]
   (with-open [r (java.io.PushbackReader. (io/reader path))]
@@ -434,6 +472,10 @@
 (defn- cmd-run [args]
   (let [{:keys [positional opts]}
         (parse-args args #{:resume :trace :no-tui :debug} #{:param :tools-ns})
+        _ (let [[tag v] (resolve-log-level opts)]
+            (if (= tag :error)
+              (die! v 2)
+              (when v (timbre/set-min-level! v))))
         project-cfg-info (try (config/load-project-config)
                               (catch clojure.lang.ExceptionInfo e
                                 (die! (str (.getMessage e) "\n"
@@ -534,6 +576,12 @@
                               _       (assert reg-var "escapement.tools.builtin/default-registry not found")
                               reg     (deref reg-var)]
                           (require-tools-nses! all-tools-ns reg)
+                          ;; R3: builtin path-taking tools resolve RELATIVE paths
+                          ;; against the session work-dir. `tp/dispatch` reads
+                          ;; `:escapement/base-dir` off the registry's metadata
+                          ;; when no explicit base-dir arg is given.
+                          (when session-dir
+                            (alter-meta! reg assoc :escapement/base-dir session-dir))
                           reg))]
     (try
       (let [session-kw (keyword "session" session)

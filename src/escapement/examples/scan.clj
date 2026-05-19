@@ -52,11 +52,20 @@
                                                          :data-schema [:map [:total_findings :int]]}]
                                  :initial-user-message (user-message data)})})
                  ;; Accumulate findings without leaving :scanning (internal transition).
+                 ;; An event-tool turn ends the LLM turn (the worker parks in
+                 ;; :awaiting-user — see system-prompt "and end your turn"), so we
+                 ;; must re-drive the still-bound conversation to elicit the next
+                 ;; finding or the terminating :scan-complete.
                  (transition {:event :found-bug :type :internal}
                              (script {:expr (fn [_env data]
                                               [(ops/assign :findings
                                                            (conj (vec (:findings data))
-                                                                 (-> data :_event :data)))])}))
+                                                                 (-> data :_event :data)))])})
+                             (h/tell-llm
+                              {:expr (fn [_env _data]
+                                       (str "Finding recorded. Continue: report another "
+                                            "finding via event__found_bug, or call "
+                                            "event__scan_complete if you are done."))}))
                  (transition {:event :scan-complete :target :finished}
                              (script {:expr (fn [_env data]
                                               [(ops/assign :total-findings

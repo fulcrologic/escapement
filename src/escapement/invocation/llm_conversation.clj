@@ -526,21 +526,25 @@
   (let [{:keys [id name input]} block
         retries (get @retry-counts id 0)
         post-tool-result!
-        (fn [tool-label is-error result-content]
-          (when transcript-fn
-            (transcript! transcript-fn
-                         {:event :llm/tool-result :ts (now-ms)
-                          :data  {:tool_use_id     id
-                                  :tool            tool-label
-                                  :input           input
-                                  :is-error        (boolean is-error)
-                                  :content-preview (truncate-for-transcript result-content)
-                                  :invokeid        (:invokeid parent-ctx)}})))]
+        (fn post-tool-result!
+          ([tool-label is-error result-content]
+           (post-tool-result! tool-label is-error result-content nil))
+          ([tool-label is-error result-content resolved-path]
+           (when transcript-fn
+             (transcript! transcript-fn
+                          {:event :llm/tool-result :ts (now-ms)
+                           :data  (cond-> {:tool_use_id     id
+                                           :tool            tool-label
+                                           :input           input
+                                           :is-error        (boolean is-error)
+                                           :content-preview (truncate-for-transcript result-content)
+                                           :invokeid        (:invokeid parent-ctx)}
+                                    resolved-path (assoc :resolved-path resolved-path))}))))]
     (cond
       ;; Real tool
       (contains? name->tool-kw name)
       (let [tool-kw (get name->tool-kw name)
-            {:keys [result is-error]} (tp/dispatch tool-registry tool-kw (or input {}))]
+            {:keys [result is-error resolved-path]} (tp/dispatch tool-registry tool-kw (or input {}))]
         ;; `tp/dispatch` validates; treat validation failures as bad-tool-use for retry semantics.
         (if (and is-error (str/includes? (or result "") "failed validation"))
           (do
@@ -558,7 +562,7 @@
                 {:result-block {:type :tool_result :tool_use_id id
                                 :content result :is-error true}})))
           (do
-            (post-tool-result! tool-kw is-error (or result ""))
+            (post-tool-result! tool-kw is-error (or result "") resolved-path)
             {:result-block {:type :tool_result :tool_use_id id
                             :content (or result "") :is-error (boolean is-error)}})))
 
@@ -570,7 +574,8 @@
           (do
             (post-event-to-parent! parent-ctx event (or input {}))
             (post-tool-result! event false "ok")
-            {:result-block {:type :tool_result :tool_use_id id :content "ok"}})
+            {:result-block  {:type :tool_result :tool_use_id id :content "ok"}
+             :posted-event? true})
           (let [err (humanize-malli-errors schema input)]
             (post-tool-result! event true err)
             (if (>= retries 1)
@@ -615,13 +620,21 @@
             (if reply
               (do
                 (post-tool-result! event-kw (boolean (:is-error reply)) (str (:result reply)))
-                {:result-block {:type :tool_result :tool_use_id id
-                                :content (str (:result reply))
-                                :is-error (boolean (:is-error reply))}})
+                ;; A region-tool is a synchronous request/reply *within* the
+                ;; turn — the reply is fed back into the SAME conversation as a
+                ;; tool_result and the LLM continues. It is NOT an end-of-turn
+                ;; signal (unlike an event-tool). Do NOT set :posted-event?
+                ;; here or the worker parks in :awaiting-user mid-turn and the
+                ;; region/service/repl/scan flows break (R1 is event-tool only).
+                {:result-block  {:type :tool_result :tool_use_id id
+                                 :content (str (:result reply))
+                                 :is-error (boolean (:is-error reply))}})
               (let [msg (str name " timed out after " timeout-ms "ms")]
                 (post-tool-result! event-kw true msg)
-                {:result-block {:type :tool_result :tool_use_id id
-                                :content msg :is-error true}})))
+                ;; Timeout still yields a tool_result the conversation
+                ;; continues from — same rationale as above; not end-of-turn.
+                {:result-block  {:type :tool_result :tool_use_id id
+                                 :content msg :is-error true}})))
           (let [err (humanize-malli-errors schema input)]
             (post-tool-result! event-kw true err)
             (if (>= retries 1)
@@ -1058,10 +1071,12 @@
           :tool_use
           (let [tool-use-blocks (find-tool-uses content)
                 results         (atom [])
-                fatal           (atom nil)]
+                fatal           (atom nil)
+                posted-event?   (atom false)]
             (doseq [b tool-use-blocks
                     :while (nil? @fatal)]
-              (let [{:keys [result-block fatal? error-data]}
+              (let [{:keys [result-block fatal? error-data]
+                     :as   block-res}
                     (handle-tool-use-block
                      {:tool-registry     tool-registry
                       :name->tool-kw     name->tool-kw
@@ -1073,13 +1088,44 @@
                       :transcript-fn     transcript-fn}
                      parent-ctx b)]
                 (swap! results conj result-block)
+                (when (:posted-event? block-res) (reset! posted-event? true))
                 (when fatal? (reset! fatal error-data))))
             (swap! messages-atom conj (user-tool-results-message @results))
-            (if-let [err @fatal]
+            (cond
+              @fatal
               (do
-                (post-error! :tool-validation err)
+                (post-error! :tool-validation @fatal)
                 (reset! worker-state :dying)
                 :error-and-die)
+
+              ;; glm-class models batch the terminating event-tool
+              ;; (event__done / event__tick) into a :tool_use response
+              ;; instead of emitting a separate :end_turn turn. When a
+              ;; block posted a chart event, mirror the :end_turn branch:
+              ;; fire on-end-turn-event with the assembled final text and
+              ;; park the worker in :awaiting-user.
+              ;;
+              ;; De-dupe: only post when the worker is not already
+              ;; :awaiting-user/:dying. `transition-state!` then moves the
+              ;; worker to :awaiting-user, which makes a stray later real
+              ;; :end_turn for the same logical turn impossible — the outer
+              ;; loop parks in :awaiting-user and won't drive another turn
+              ;; (and transition-state! is a no-op once :dying), so the
+              ;; :end_turn post-path cannot run again. Hence: exactly one
+              ;; on-end-turn-event per logical turn.
+              (and @posted-event?
+                   (not (#{:awaiting-user :dying} @worker-state)))
+              (let [final-text (->> content
+                                    (filter #(= :text (:type %)))
+                                    (map :text)
+                                    (apply str))]
+                (post-event-to-parent! parent-ctx on-end-turn-event
+                                       {:text final-text
+                                        :from (->id-str (:invokeid parent-ctx))})
+                (transition-state! worker-state :awaiting-user)
+                :idle)
+
+              :else
               :continue))
 
           ;; max_tokens / stop_sequence / pause_turn / refusal — anything else.

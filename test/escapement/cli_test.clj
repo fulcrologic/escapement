@@ -183,3 +183,27 @@
                                (< (index-of kinds :zai)
                                   (index-of kinds :opencode-go-openai)
                                   (index-of kinds :ollama)) => true)))))
+
+(specification "resolve-log-level (R4)"
+               (component "explicit --log-level wins (case-insensitive)"
+                          (assertions
+                           "debug"
+                           (cli/resolve-log-level {:log-level "debug"}) => [:level :debug]
+                           "INFO upper-case"
+                           (cli/resolve-log-level {:log-level "INFO"}) => [:level :info]
+                           "warn with surrounding whitespace"
+                           (cli/resolve-log-level {:log-level " warn "}) => [:level :warn]
+                           "error"
+                           (cli/resolve-log-level {:log-level "Error"}) => [:level :error]
+                           "explicit wins even under --no-tui"
+                           (cli/resolve-log-level {:log-level "debug" :no-tui true}) => [:level :debug]
+                           "unrecognized value -> :error tag"
+                           (first (cli/resolve-log-level {:log-level "loud"})) => :error))
+               (component "defaults"
+                          (assertions
+                           "headless (--no-tui) with no explicit flag -> INFO"
+                           (cli/resolve-log-level {:no-tui true}) => [:level :info]
+                           "interactive with no explicit flag -> nil (library default preserved)"
+                           (cli/resolve-log-level {}) => [:level nil]
+                           "explicit flag overrides headless default"
+                           (cli/resolve-log-level {:no-tui true :log-level "warn"}) => [:level :warn])))
