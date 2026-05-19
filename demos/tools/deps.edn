@@ -1,0 +1,18 @@
+{:paths ["src"]
+
+ :deps  {org.clojure/clojure        {:mvn/version "1.12.0"}
+         criterium/criterium        {:mvn/version "0.4.6"}
+         io.github.tonsky/clj-reload {:mvn/version "0.9.0"}}
+
+ :aliases
+ {:test
+  {:extra-paths ["test"]}
+
+  ;; Start a real nREPL with `clojure -M:nrepl`. The matrix-team chart's
+  ;; experimenter and tester each launch one of these and pass `--port 0` so
+  ;; the OS picks a free port; the bootstrap script captures stdout to get the
+  ;; port and writes it into the chart's input EDN.
+  :nrepl
+  {:extra-paths ["test"]
+   :extra-deps  {nrepl/nrepl {:mvn/version "1.5.1"}}
+   :main-opts   ["-m" "nrepl.cmdline" "--port" "0" "--interactive" "false"]}}}

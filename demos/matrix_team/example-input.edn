@@ -1,0 +1,8 @@
+{;; Absolute path to demos/tools, edited for your checkout. The chart spawns
+ ;; one `clojure -M:nrepl` per agent against this directory and discovers
+ ;; the ports from each process's stdout — you do NOT need to start any
+ ;; REPLs yourself.
+ :project-dir    "/Users/tonykay/fulcrologic/escapement/demos/tools"
+
+ ;; Advisory only — the experimenter sees this in its prompt as a soft cap.
+ :max-iterations 5}
