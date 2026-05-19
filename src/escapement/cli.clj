@@ -584,35 +584,46 @@
                             (alter-meta! reg assoc :escapement/base-dir session-dir))
                           reg))]
     (try
-      (let [session-kw (keyword "session" session)
+      (let [session-kw         (keyword "session" session)
+            parse-pos-int      (fn [k]
+                                 (when-let [s (get opts k)]
+                                   (let [n (try (Long/parseLong s) (catch Throwable _ nil))]
+                                     (when (or (nil? n) (not (pos? n)))
+                                       (die! (str "--" (name k) " must be a positive integer (got: " s ")")
+                                             2))
+                                     n)))
+            max-frozen-cycles  (parse-pos-int :max-frozen-cycles)
+            quiescent-sleep-ms (parse-pos-int :quiescent-sleep-ms)
             summary    (runner/run!
-                        {:chart           chart
-                         :session-id      session-kw
-                         :transcript-path transcript
-                         :checkpoint-dir  checkpoint-dir
-                         :session-dir     session-dir
-                         :backend         backend
-                         :backend-default-models backend-default-models
-                         :catalog-ratings catalog-ratings
-                         :eligibility-strict? eligibility-strict?
-                         :tool-registry   tool-registry
-                         :human-renderer  human-renderer
-                         :initial-data    initial-data
-                         :resume?         (boolean (:resume opts))
-                         :trace?          (boolean (:trace opts))
-                         :prelude-events  prelude-events
-                         :transcript-tap  (when tui-handle
-                                            (fn [ev] (tui/event! tui-handle ev)))
-                         :debug-controller debug-controller
-                         :human-input-active? (when tui-handle
-                                                (fn [] (tui/human-input-active? tui-handle)))
-                         :on-env-ready    (when tui-handle
-                                            (fn [env]
-                                              (tui/attach-session!
-                                               tui-handle
-                                               session-kw
-                                               (::sc/event-queue env))
-                                              (tui/attach-env! tui-handle env chart)))})]
+                        (cond-> {:chart                  chart
+                                 :session-id             session-kw
+                                 :transcript-path        transcript
+                                 :checkpoint-dir         checkpoint-dir
+                                 :session-dir            session-dir
+                                 :backend                backend
+                                 :backend-default-models backend-default-models
+                                 :catalog-ratings        catalog-ratings
+                                 :eligibility-strict?    eligibility-strict?
+                                 :tool-registry          tool-registry
+                                 :human-renderer         human-renderer
+                                 :initial-data           initial-data
+                                 :resume?                (boolean (:resume opts))
+                                 :trace?                 (boolean (:trace opts))
+                                 :prelude-events         prelude-events
+                                 :transcript-tap         (when tui-handle
+                                                           (fn [ev] (tui/event! tui-handle ev)))
+                                 :debug-controller       debug-controller
+                                 :human-input-active?    (when tui-handle
+                                                           (fn [] (tui/human-input-active? tui-handle)))
+                                 :on-env-ready           (when tui-handle
+                                                           (fn [env]
+                                                             (tui/attach-session!
+                                                              tui-handle
+                                                              session-kw
+                                                              (::sc/event-queue env))
+                                                             (tui/attach-env! tui-handle env chart)))}
+                          max-frozen-cycles  (assoc :max-frozen-cycles max-frozen-cycles)
+                          quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)))]
         ;; In debug mode, hold the TUI open after the chart finishes so the
         ;; user can keep browsing the inspector (artifacts, history, viz).
         ;; Ctrl-C from the input thread breaks await-quit!.
@@ -676,6 +687,14 @@ Common `run` flags:
   --source-paths <p[:p…]>       Extra classpath roots.
   --deps <edn>                  Inline EDN deps merged on top of .escapement.edn.
   --trace                       Emit per-tick transcript events.
+  --max-frozen-cycles <n>       Override the runner's frozen-config guard
+                                (default 200 cycles × 50ms = ~10s). Raise
+                                for charts whose LLM workers take longer
+                                than 10s between chart-visible events
+                                (e.g. multi-step REPL evals).
+  --quiescent-sleep-ms <ms>     Override the runner's idle-sleep (default
+                                50ms). Increases per-cycle wall-clock so
+                                --max-frozen-cycles N covers more time.
   --no-tui                      Force-disable the TUI (overrides ^:interactive?).
   --debug                       Force the TUI on, enable inspector (`?`), and
                                 pause before the first event so you can step.

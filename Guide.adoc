@@ -1586,6 +1586,80 @@ output to another:
 catch the event, inspect `:from`, format `:text` into a follow-up prompt,
 `tell-other-llm` it elsewhere.
 
+When the invocation declares `:verdict-schema`, the event data also
+carries `:verdict <validated-payload>` — see <<verdicts>> below.
+
+[[verdicts]]
+=== Verdicts: typed payloads on `:on-end-turn-event`
+
+Set `:verdict-schema <malli>` on the invocation's `params-fn` and the
+worker will run one extra inference at every turn end with
+`:tool-choice {:type "tool" :name "submit_verdict"}`. The model's
+structured input becomes `:verdict` in the `:on-end-turn-event` data —
+alongside the existing `:text` and `:from`. The chart can then guard
+transitions on `:verdict :status` (or any other key) without parsing
+free text.
+
+[source,clojure]
+----
+;; In the invocation's params-fn:
+{:verdict-schema [:map
+                  [:status [:enum :proposed-new-version :done :stuck]]
+                  [:summary :string]
+                  [:approach {:optional true} :string]]}
+
+;; In the chart:
+(transition {:event :llm.idle
+             :target :tester-turn
+             :cond  (fn [_env data]
+                      (and (= "experimenter" (get-in data [:_event :data :from]))
+                           (= :proposed-new-version
+                              (get-in data [:_event :data :verdict :status]))))}
+            ...)
+----
+
+When the model fails to call `submit_verdict` or returns input that
+violates the schema, the worker fires `:error.llm.verdict-validation`
+instead of `:on-end-turn-event` and exits. Unset (`nil`)
+`:verdict-schema` preserves prior behavior: no wrap-up inference,
+free-text idle.
+
+Region-tool replies (mid-turn `:tool_use` cycles) do NOT trigger the
+wrap-up — only end-of-turn does. Reserved tool name: `submit_verdict`.
+Do not declare an `:allowed-events` or `:real-tools` entry that would
+collide.
+
+**Prompt-writing note**: `submit_verdict` is NOT in the LLM's tool list
+during normal turns — it appears only at the wrap-up inference. Tell
+the LLM to "end your turn by ceasing tool calls; the framework will
+prompt you for `submit_verdict`". Otherwise the model may keep using
+tools indefinitely looking for the verdict tool, which the runner's
+`:max-frozen-cycles` guard will eventually abort as a frozen config.
+
+The transcript records `:llm/verdict-inference` when the wrap-up call
+starts and `:llm/verdict {:invokeid ... :verdict ...}` when it
+succeeds.
+
+=== `h/tell-other-llm!` — direct calls from inside handlers
+
+`h/tell-other-llm` returns a chart `script` element, which is the right
+shape when you're _building_ the chart. When you need to send a
+user-message from _inside_ a handler lambda (the body of `handle-tool`,
+the `:expr` of an inline `script`), use `h/tell-other-llm!`:
+
+[source,clojure]
+----
+(h/handle-tool :placement-help
+  (fn [env req]
+    ;; ... compute reply from req's :data ...
+    (h/tell-other-llm! env "implementer" "Placement decided.")
+    {:result "ok" :is-error false}))
+----
+
+Same wire as `tell-other-llm`; just a synchronous fn call instead of
+returning a chart element. Chart-side only — never expose to the LLM as
+a tool.
+
 === File-backed artifact helpers
 
 For agent pipelines that produce text artifacts to be embedded in later
@@ -1960,6 +2034,60 @@ Reply, fired by the handler helper::
 Replies are hard-routed by `:reply-to`, not broadcast: the conversation
 processor's `forward-event!` only delivers when the calling invocation's
 own invokeid equals `:reply-to`.
+
+=== `escapement.chart.consult` — specialist LLMs as consultation tools
+
+Same pattern as the service regions above, but the region's
+tool-implementation _is another LLM_. Useful for the "specialist
+consultation" shape: an implementer LLM needs to ask a focused expert
+("where should this function go?", "is this name idiomatic?") without
+polluting its own context window.
+
+[source,clojure]
+----
+(require '[escapement.chart.consult :as consult])
+
+;; Inside a parallel region, alongside the asker conversation:
+(consult/declare-consultation
+  {:state-id            :placement-consult
+   :tool-name           :placement-help
+   :description         "Ask the placement specialist where to put a function."
+   :specialist-invokeid :placer
+   :input-schema        [:map [:name :string] [:body :string]]
+   :verdict-schema      [:map [:file :string] [:rationale :string]]
+   :system              "You are an expert at file/namespace placement..."})
+
+;; And on the asker's params-fn:
+{:chart-tools [{:owner :placement-consult}]
+ :real-tools  [...]
+ ...}
+----
+
+The asker calls `region__placement_help` like any other region tool.
+Under the hood the consult state forwards the asker's input to a sibling
+specialist `:llm-conversation` as a targeted user-message, waits for the
+specialist to idle with a `:verdict` (driven by the specialist's own
+`:verdict-schema`), JSON-encodes the verdict, and posts it back as the
+asker's `tool_result`. The asker sees JSON in, JSON out — no awareness
+it's talking to another LLM, no awareness of chart events.
+
+`declare-consultation` reuses the existing region-tool transport
+(`tool-reply-queue`, `:escapement.tool/reply-id` correlation) — see the
+sections above for the wire.
+
+Limitations and tips:
+
+* Exactly one consultation per consult state at a time. A second
+  concurrent call lands in a per-state FIFO queue and is serviced after
+  the first replies.
+* Specialist failure (`:error.llm.verdict-validation`,
+  `:error.llm.backend`, ...) is delivered to the asker as an error
+  `tool_result`, so the asker doesn't hang until timeout.
+* For a peer-loop pattern (two LLMs that hand off back-and-forth as
+  equals, not as asker→specialist), use the chart-driven routing
+  pattern instead — see `demos/matrix_team/chart.clj` for a worked
+  example using `:verdict-schema` on both regions and chart-level
+  `:llm.idle` transitions guarded on `:from` and `:verdict :status`.
 
 [[backends]]
 == LLM backends
