@@ -1,249 +1,279 @@
 # Changelog
 
-## [unreleased] — feat/llm-backend-resilience — 2026-05-19
+## [unreleased] — feat/hermetic-hosted-library — 2026-05-19
 
-Hardens the LLM backend layer end to end: structured error categories,
-SSE token streaming on both backend families, conversations that
-self-recover from transient failures and output-cap truncation,
-multi-provider catalog-driven dispatch, a normalized hosted-library
-event-sink API, and cooperative runner cancellation. Purely additive at
-the API level — the CLI path is byte-for-byte unchanged and any omitted
-new option preserves prior behavior. The only removal is the obsolete
-`:max-tokens` chart param (now catalog-driven).
+Makes Escapement embeddable as a hermetic library and replaces the
+chart-facing model-policy DSL with an ergonomic `:needs` gate. All
+additive over the now-merged backend-resilience work — the CLI path is
+byte-for-byte unchanged; every new option preserves prior behavior when
+omitted, and `:model-policy` keeps working for one deprecation cycle.
 
 ### Added
-- **Structured backend error categories.**
-  `escapement.llm.protocol` exports `error-categories`
-  (`#{:rate-limited :overloaded :auth :invalid-request :context-length
-  :timeout :transport}`), an `llm-error` constructor, and an
-  `error-category` accessor (walks the `ex-cause` chain). A backend
-  throw with a known category is mapped to a finer
-  `:error.llm.<category>` chart event (e.g. `:error.llm.rate-limited`)
-  so a statechart can branch "rate-limited → wait & resume" vs
-  "invalid-request → fail". `:llm/error` / `:llm/model-down` transcript
-  events gained an additive `:category` key. The Anthropic `api`
-  backend now categorizes non-2xx HTTP (429→`:rate-limited`,
-  529→`:overloaded`, 401/403→`:auth`, 400/422→`:invalid-request` or
-  `:context-length`, timeouts→`:timeout`, else `:transport`) and SSE
-  `error` events, preserving the legacy message/`:status`/`:body`/`:url`
-  ex-data.
-- **SSE token streaming on both backend families.** New optional
-  `escapement.llm.protocol/StreamingLLMBackend` (`stream-turn`) plus
-  `streaming?` / `send-turn*` capability helpers. The Anthropic `api`
-  backend streams via the Messages SSE wire; the OpenAI/OpenRouter
-  backend streams via Chat Completions (`stream:true` +
-  `stream_options.include_usage`). Both accumulate then finalize
-  through the same translator as the buffered path, so a streamed turn
-  yields a `Response` structurally identical (blocks + usage) to a
-  buffered one. The `escapement.llm.multi` dispatcher now also
-  implements `StreamingLLMBackend` iff every selectable sub-backend
-  streams, delegating via the same routing logic as `send-turn`.
-  Charts opt in per state with the `:stream?` `llm-conversation` param;
-  incremental output surfaces as `:llm/delta` transcript events
-  (`{:type :text-delta|:thinking-delta :text … :model … :invokeid …}`),
-  each carrying an optional cumulative `:usage` key for live UX (the
-  finalized `Response` usage stays the billing source of truth). Chart
-  semantics and the final Response are unchanged; no-op on backends
-  without streaming.
-- **Image (vision) content blocks.** A new `:image` content block
-  (`escapement.llm.types/ImageBlock`) is accepted on `:user` messages
-  with `:base64` (inline data + media-type) or `:url` sources. The
-  Anthropic backend serializes it to the Messages API `image`/`source`
-  wire shape and parses it back symmetrically (survives a streamed
-  turn); the OpenAI/OpenRouter backend serializes the same block to the
-  Chat Completions multimodal `image_url` shape (`:url` verbatim,
-  `:base64` as a `data:` URI). Enables vision-model steps on either
-  backend family at the protocol level with no invocation-code changes.
-- **`:initial-messages` `llm-conversation` param.** An optional vector
-  of pre-built message maps to seed a conversation with (e.g. a
-  multi-block first user message carrying an `:image`, or a short prior
-  exchange). When non-empty it takes precedence over
-  `:initial-user-message` and the worker starts in `:running`.
-- **Self-recovering conversations.** Driven by the error categories:
-  *transient* failures (`:rate-limited` / `:overloaded` / `:timeout` /
-  `:transport`) auto-retry on the same model with exponential backoff
-  (honoring an explicit `:retry-after-ms` from ex-data) before any
-  model fallback; *terminal* failures (`:auth` / `:invalid-request` /
-  `:context-length`) fail fast so a bad key or oversized prompt cannot
-  burn quota in a loop. Tunable per state via a new `:resilience
-  {:max-retries N :backoff-ms MS}` param (defaults
-  `{:max-retries 3 :backoff-ms 500}`, on by default; `:max-retries 0`
-  restores fail-fast). A `:llm/retry` transcript event is emitted per
-  attempt.
-- **Unbounded `:max_tokens` continuation.** A turn the API truncates at
-  the output cap (`stop_reason :max_tokens`) is no longer an error:
-  the partial assistant content is used as prefill and the turn is
-  continued until a genuine terminal stop, then segments are stitched
-  into one coherent Response (text merged across the boundary, usage
-  summed). No tool runs and no chart event fires until the message is
-  complete. There is no continuation limit; the only guard is forward
-  progress — a continuation that adds nothing (a stuck model) aborts
-  with `:error.llm.unexpected-stop` (`:detail :no-forward-progress`)
-  rather than looping. A `:llm/continuation` transcript event is
-  emitted per segment.
-- **`escapement.lib/run` hosted facade.** A thin additive delegation
-  over the runner for embedding Escapement in your own process: a
-  **closed** Malli option schema (`escapement.lib/Options`, unknown
-  keys rejected, `validate-options` previews errors without running), a
-  generated stable `:run-id` (returned and emitted on
-  `:runner/started`), temp-dir defaulting for
+- **`escapement.lib/run` hosted facade.** Embed Escapement in your own
+  process without the CLI. A **closed** Malli option schema
+  (`escapement.lib/Options`, unknown keys rejected; `validate-options`
+  previews errors without running), a generated stable `:run-id`
+  (returned and emitted on `:runner/started`), temp-dir defaulting for
   transcript/checkpoint/session, an optional `:session-dir` for artifact
-  output (`<session-dir>/artifacts/<name>`, defaulting to the run temp
-  dir and echoed back in the result map), an optional `:store`
-  passthrough, and quiet-by-default logging (`:quiet?`). The CLI does
-  not use the facade and is unchanged.
-- **Hermetic library configuration & credentials.** The
-  `escapement.lib/run` facade is now fully hermetic: it never reads
-  `.escapement.edn` from disk and never sniffs credential env vars. Two
-  new schema keys carry everything as explicit data:
+  output (`<session-dir>/artifacts/<name>`, echoed back in the result
+  map), an optional `:store` passthrough, and quiet-by-default logging
+  (`:quiet?`). The CLI does not use the facade.
+- **Hermetic library configuration & credentials.** `escapement.lib/run`
+  never reads `.escapement.edn` from disk and never sniffs credential
+  env vars. Two schema keys carry everything as explicit data:
   `:credentials` — **required**, an ordered vector of provider
   descriptor maps (`{:provider :anthropic :api-key "…"}`,
-  `{:provider :z-ai-plan :subscription true}`, …) from which the
-  backend is assembled (an explicit `:backend` remains an escape hatch
-  that wins verbatim); and `:config` — optional, the
-  `.escapement.edn`-shaped map (`:llm/preferences`, `:llm/ratings`,
-  `:llm/eligibility-strict?`). Absent `:config` ⇒ an empty ratings
-  table plus the built-in `default-preferences` order, never a disk
-  fallback. Two `run` calls in one process with different `:config`
-  ratings resolve eligibility independently — there is no process
-  global. The CLI path is unchanged (it keeps its own disk/env
-  sniffing via `runner/run!`).
-- **`:needs` eligibility-gate surface.** A new ergonomic
-  `llm-conversation` `params-fn` key, `:needs`: a **flat**
+  `{:provider :z-ai-plan :subscription true}`, …) from which the backend
+  is assembled (an explicit `:backend` remains an escape hatch that wins
+  verbatim); and `:config` — optional, the `.escapement.edn`-shaped map
+  (`:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`).
+  Absent `:config` ⇒ an empty ratings table plus the built-in
+  `default-preferences` order, never a disk fallback. Two `run` calls in
+  one process with different `:config` ratings resolve eligibility
+  independently — there is no process global. The injected
+  provider→backend matrix mirrors CLI auto-detection fact-for-fact, so
+  the two paths cannot drift.
+- **`escapement.lib.event-sink` normalized public events.** A pure
+  normalization adapter over `:transcript-tap` exposing a closed, stable
+  public Malli event union (`PublicEvent`) with
+  `:session-id`/`:run-id`/`:invokeid` correlation; synthesizes the tool
+  call/result/validation split and model-fallback events and drops
+  internal rows. Entry points `make-adapter` / `feed!` / `normalize` /
+  `valid-event?`.
+- **`:needs` eligibility-gate `llm-conversation` param.** A **flat**
   `fact → constraint` map (one nesting level) translated at the
   invocation boundary into the canonical
   `escapement.llm.catalog/satisfies-policy?` policy by the new
   `escapement.llm.needs` namespace. A bare value means exact equality,
-  `[:>= n]` an inclusive numeric floor, `[:<= n]` an inclusive ceiling
-  — only those two comparators (no `:>`/`:<`/`:=`); a malformed entry
-  throws an `ex-info` naming the offending key. The gate **filters**;
-  it never ranks. **All ordering comes from the sorted
-  `:llm/preferences` list** — a model rated `7` and one rated `10` are
-  interchangeable under `[:>= 6]`; preference order alone decides which
-  survivor runs.
+  `[:>= n]` an inclusive numeric floor, `[:<= n]` an inclusive ceiling —
+  only those two comparators (no `:>`/`:<`/`:=`); a malformed entry
+  throws an `ex-info` naming the offending key. The gate **filters**, it
+  never ranks: all ordering still comes from the sorted
+  `:llm/preferences` list (a model rated 7 and one rated 10 are
+  interchangeable under `[:>= 6]`).
 - **Documented objective fact vocabulary.** `escapement.llm.catalog`
-  now publishes `eligibility-facts` — the stable, enumerated set of
+  publishes `eligibility-facts` — the stable, enumerated set of
   objective `:needs`/policy keys (`:vision?`, `:tool-call?`,
   `:reasoning?`, `:context-tokens`, `:max-output-tokens`, `:company`,
   `:family`, `:knowledge`) with one-line meanings. Subjective rating
   keys from `:llm/ratings` mix into the same keyspace and are
   deliberately not enumerated (host-defined, free-form).
 - **`:llm/eligibility-strict?` fail-closed option.** When every
-  candidate is filtered out the default remains **fail-open** (proceed
-  on the unfiltered list, a `:llm/model-policy-empty` transcript event
+  candidate is filtered out the default is still **fail-open** (proceed
+  on the unfiltered list; a `:llm/model-policy-empty` transcript event
   records the gap — the CLI bias). Setting
-  `:config :llm/eligibility-strict? true` makes the lib path
+  `:config :llm/eligibility-strict? true` on the lib path makes it
   **fail-closed**: error the node rather than silently run an
   unintended model.
-- **`escapement.lib.event-sink` normalized public events.** A pure
-  normalization adapter over `:transcript-tap` exposing a closed,
-  stable public Malli event union (`PublicEvent`) with
-  `:session-id`/`:run-id`/`:invokeid` correlation; synthesizes the tool
-  call/result/validation split and model-fallback events; drops
-  internal rows. Entry points `make-adapter` / `feed!` / `normalize` /
-  `valid-event?`.
+- **`:initial-messages` `llm-conversation` param.** An optional vector
+  of pre-built message maps to seed a conversation with (e.g. a
+  multi-block first user message carrying an `:image`, or a short prior
+  exchange). When non-empty it takes precedence over
+  `:initial-user-message` and the worker starts in `:running`.
 - **Cooperative runner cancellation.** A new optional `:cancel` runner
-  option (atom/`IDeref`, or a delivered promise/future/delay) requests
-  a prompt abort at a safe pump-loop boundary (between events, never
+  option (atom/`IDeref`, or a delivered promise/future/delay) requests a
+  prompt abort at a safe pump-loop boundary (between events, never
   mid-write), emitting `:runner/aborted` `{:reason :cancelled}` and a
   new additive `:status` (`:done` | `:aborted`) on `:runner/done` and
   the summary map. `runner/run!` also gained additive `:store` and
   `:run-id` options. Omitting any of these preserves prior behavior.
-- **`escapement.llm.providers`** — the env→provider→backend matrix
-  (`detect-available-credentials`, `build-credential-backend`, the
-  backend builders) extracted into a public namespace and now the
-  single source of truth shared by the CLI's auto-detection and the
-  e2e suite.
-- **`bb test:e2e`** — a live end-to-end suite (`e2e/escapement/e2e/`)
-  that, for every provider credential present in the environment,
-  exercises the real wire: a basic turn, streaming, vision,
-  `:max_tokens` truncation detection, and (credential-independently)
-  the `:transport` / `:timeout` / `:auth` error categories plus catalog
-  freshness. Credential-less providers report SKIP, never a failure;
-  secrets are never printed. NOT run by `bb test`.
-- Docs: a hosted-library quickstart in `README.md` (the CLI quickstart
-  is unchanged) and a **Hosted library** section in `Guide.adoc`
-  (option/result schema, public event union, locked design decisions,
-  migration notes, known limitations), plus streaming/error-category/
-  resilience/cancellation coverage in the LLM-backends, `:llm-conversation`,
-  and Runner sections.
+- **Runnable embedding example.** `demos/lib/embed_example.clj` (plus
+  `demos/lib/README.md`) shows end-to-end use of `escapement.lib/run`
+  with explicit `:credentials`/`:config` and the event-sink adapter. A
+  hosted-library quickstart was added to `README.md` (the CLI
+  quickstart is unchanged) and a **Hosted library** section to
+  `Guide.adoc` (option/result schema, public event union, locked design
+  decisions, migration notes, known limitations), plus `:needs` and
+  cooperative-cancellation coverage in the `:llm-conversation` and
+  Runner sections.
 
 ### Changed
-- A backend error in a transient category now triggers a bounded retry
-  **before** surfacing as `:error.llm.<category>`; charts that
-  previously saw an immediate `:error.llm.rate-limited` now see it only
-  after retries are exhausted (set `:resilience {:max-retries 0}` to
-  restore fail-fast).
-- `stop_reason :max_tokens` no longer maps to
-  `:error.llm.unexpected-stop`; it is continued transparently. Only a
-  no-forward-progress continuation still surfaces
-  `:error.llm.unexpected-stop` (now carrying
-  `:detail :no-forward-progress`).
-- The per-turn output cap (`max_tokens` on the wire) is now purely
-  catalog-driven: it is always the resolved model's
-  `catalog/max-output-tokens` (`models-api.json` `limit.output`), with
-  the api backend's wire default (8192) for models the catalog doesn't
-  know. To give a state more output room, pick a model with a larger
-  output limit rather than tuning a param.
-- An uncategorized backend throwable still collapses to exactly
-  `:error.llm.backend` with `:reason :backend`, unchanged (back-compat
-  for existing `:error.llm.backend` consumers).
 - The `:model-policy` `llm-conversation` node key is **deprecated in
   favor of `:needs`**. It still works as an alias for one cycle: the
   canonical nested `{:require {…} :min {…} :max {…}}` shape is still
   accepted so existing charts (including the bundled
   `escapement.examples.clj-refactor`, now ported to `:needs`) do not
-  break. Prefer `:needs` for new charts.
+  break. Prefer `:needs` for new charts. A
+  `:llm/model-policy-deprecated` transcript notice is emitted when the
+  legacy key is used.
 - `escapement.llm.catalog/satisfies-policy?` now takes the subjective
-  ratings table as an explicit argument (3-arity). The catalog no
+  ratings table as an explicit argument (new 3-arity). The catalog no
   longer carries a process-global ratings cache
-  (`def`-of-`delay` over `config/load-config`): ratings flow as a
-  plain value threaded through the invocation context, resolved once
-  per run (from `:config` on the lib path, from disk at startup on the
-  CLI path — same seam, different source). `catalog/info` and the
-  objective accessors are opinion-free (ratings are no longer merged
-  into `info`). The 2-arity remains as a backward-compatible CLI seam
-  that resolves ratings from `.escapement.edn` per call.
-
-### Removed
-- The `:max-tokens` `llm-conversation` param. It is no longer a chart
-  concern (see Changed above) and was dropped from all bundled example
-  charts; setting it in `params-fn` now has no effect. It remains only
-  on the low-level `escapement.llm.types/Request` for backend wire
-  translation.
+  (`def`-of-`delay` over `config/load-config`): ratings flow as a plain
+  value threaded through the invocation context, resolved once per run
+  (from `:config` on the lib path, from disk at startup on the CLI
+  path — same seam, different source). `catalog/info` and the objective
+  accessors are now opinion-free (ratings are no longer merged into
+  `info`). The 2-arity remains as a backward-compatible CLI seam that
+  resolves ratings from `.escapement.edn` per call.
 
 ### Notes
-- Resilience (backoff, `:retry-after-ms` honoring, fail-fast on
-  terminal categories, `:max-retries 0` disable), the unbounded
-  `:max_tokens` continuation (segment stitching, usage summing,
-  no-forward-progress abort), SSE reconstruction for both backends,
-  `send-turn*` capability dispatch, image-block round-trip,
-  `effective-max-tokens`, the status→category mapping, the hosted
-  facade option schema, the event-sink normalization, and runner
-  cancellation are all unit-covered offline under `bb test` with a mock
-  backend — none require a credential.
-- `bb test:e2e` is the only credential-gated surface: its live
-  per-provider sweep (basic turn, streaming, vision, `:max_tokens`
-  truncation detection) runs only for providers whose API key is
-  present (`ANTHROPIC_API_KEY` / `ZAI_API_KEY` / `OPENAI_API_KEY` /
-  `OPENROUTER_API_KEY` / `OLLAMA_API_KEY` / `OPENCODE_GO_API_KEY`, or a
-  saved Codex OAuth token) and reports credential-less providers as
-  SKIP. The credential-independent checks (`:transport` / `:timeout` /
-  `:auth` categories, catalog freshness) always run. A reviewer with
-  real keys should run `bb test:e2e` to verify the live wire; the
-  harness cannot exercise it without secrets.
-- Known limitation: billing usage is captured on successful turns only
-  (see the Hosted library "known limitations" in `Guide.adoc`).
+- The hosted-facade option schema, hermetic credential/config assembly,
+  event-sink normalization, `:needs`→policy translation,
+  `eligibility-facts`, the `satisfies-policy?` 3-arity, `:initial-messages`
+  seeding, and cooperative runner cancellation are all unit-covered
+  offline under `bb test` with a mock backend — none require a
+  credential.
+- This branch adds no new credential-gated surface. The `bb test:e2e`
+  live wire suite is unchanged from the merged backend-resilience work;
+  a reviewer with real keys may still run it to re-verify the live
+  providers.
 - Accepted debt (Gate 3, cosmetic, non-blocking): the
   `:llm/model-policy-deprecated` transcript warning is emitted from the
   per-turn conversation path, so a node that takes multiple turns or
   triggers `:max_tokens` continuation segments repeats the same
-  deprecation notice per segment rather than once per node. A docstring
-  describes it as a per-node notice (an overclaim). Behavior is
+  deprecation notice per segment rather than once per node. Behavior is
   unaffected — `:model-policy` still works as the documented one-cycle
   `:needs` alias; only the warning's emission frequency is noisier than
   the docstring implies. Slated for de-duplication when `:model-policy`
   is removed.
+
+---
+
+
+## [unreleased] — feat/lib-compat — 2026-05-19
+
+Resilience + a live end-to-end harness on top of the structured error
+categories: conversations now recover from transient backend failures and
+output-cap truncation on their own, and a new `bb test:e2e` exercises the
+real provider wire.
+
+### Added
+- Automatic recovery in `:llm-conversation`, driven by the error
+  categories. **Transient failures auto-retry**: a backend throw
+  categorized `:rate-limited` / `:overloaded` / `:timeout` / `:transport`
+  is retried on the same model with exponential backoff (honoring an
+  explicit `:retry-after-ms` from the throwable's ex-data) before any
+  model fallback. **Terminal failures fail fast**: `:auth` /
+  `:invalid-request` / `:context-length` are never retried, so a bad key
+  or oversized prompt cannot burn quota in a loop. Tunable per state via a
+  new `:resilience {:max-retries N :backoff-ms MS}` param (defaults
+  `{:max-retries 3 :backoff-ms 500}`, on by default; `:max-retries 0`
+  disables retry). A `:llm/retry` transcript event is emitted per attempt.
+- **Unbounded `:max_tokens` continuation.** A turn the API truncates at the
+  output cap (`stop_reason :max_tokens`) is no longer an error — the
+  partial assistant content is used as prefill and the turn is continued
+  until a genuine terminal stop, then the segments are stitched into one
+  coherent Response (text merged across the boundary, usage summed). No
+  tool runs and no chart event fires until the message is actually
+  complete. There is no continuation limit; the only guard is forward
+  progress — a continuation that adds nothing (a stuck model) aborts with
+  `:error.llm.unexpected-stop` rather than looping. A `:llm/continuation`
+  transcript event is emitted per segment.
+- `escapement.llm.providers` — the env→provider→backend matrix
+  (`detect-available-credentials`, `build-credential-backend`, the backend
+  builders) extracted into a public namespace and now the single source of
+  truth shared by the CLI's auto-detection and the e2e suite.
+- `bb test:e2e` — a live end-to-end suite (`e2e/escapement/e2e/`) that, for
+  every provider credential present in the environment, checks the real
+  wire: a basic turn, streaming, vision, `:max_tokens` truncation
+  detection, and (credential-independently) the `:transport` / `:timeout`
+  / `:auth` error categories, plus catalog freshness. Providers without a
+  credential are reported as SKIP, never a failure; secrets are never
+  printed. It is NOT run by `bb test`.
+
+### Changed
+- A backend error categorized as a transient category now triggers a
+  bounded retry **before** surfacing as `:error.llm.<category>`; charts
+  that previously saw an immediate `:error.llm.rate-limited` will now see
+  it only after retries are exhausted (set `:resilience {:max-retries 0}`
+  to restore fail-fast).
+- `stop_reason :max_tokens` no longer maps to
+  `:error.llm.unexpected-stop`; it is continued transparently. Only a
+  no-forward-progress continuation still surfaces
+  `:error.llm.unexpected-stop` (now carrying `:detail :no-forward-progress`).
+
+### Notes
+- Transient-retry (backoff, `:retry-after-ms` honoring, fail-fast on
+  terminal categories, `:max-retries 0` disable) and the unbounded
+  `:max_tokens` continuation (segment stitching, usage summing,
+  no-forward-progress abort) are unit-covered offline under `bb test`
+  with a mock backend — they do not require any credential.
+- `bb test:e2e` is the only credential-gated surface here: its live
+  per-provider sweep (basic turn, streaming, vision, `:max_tokens`
+  truncation detection) runs only for providers whose API key is present
+  in the environment (`ANTHROPIC_API_KEY` / `ZAI_API_KEY` /
+  `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `OLLAMA_API_KEY` /
+  `OPENCODE_GO_API_KEY`, or a saved Codex OAuth token) and reports
+  credential-less providers as SKIP. The credential-independent checks
+  (`:transport` / `:timeout` / `:auth` categories, catalog freshness)
+  always run. A reviewer with real keys should run `bb test:e2e` to
+  verify the live wire; the harness cannot exercise it without secrets.
+
+---
+
+## [unreleased] — feat/lib-compat — 2026-05-18
+
+Builds on the now-merged LLM catalog work: SSE token streaming with a
+catalog-driven per-turn output cap, plus image content blocks in the LLM
+request protocol.
+
+### Added
+- Structured backend error categories in the LLM protocol contract.
+  `escapement.llm.protocol` now exports `error-categories`
+  (`#{:rate-limited :overloaded :auth :invalid-request :context-length
+  :timeout :transport}`), an `llm-error` constructor, and an
+  `error-category` accessor (walks the `ex-cause` chain). Backends SHOULD
+  throw `(protocol/llm-error category msg ...)`; the `llm-conversation`
+  consumer now maps a known category to a finer
+  `:error.llm.<category>` chart event (e.g. `:error.llm.rate-limited`) so a
+  statechart can branch "rate-limited → wait & resume" vs
+  "invalid-request → fail". The `:llm/error` and `:llm/model-down`
+  transcript events gained an additive `:category` key. **Back-compat: an
+  uncategorized throwable still collapses to exactly `:error.llm.backend`
+  with `:reason :backend`, unchanged.** The native Anthropic api backend
+  now participates: non-2xx HTTP maps status→category (429 →
+  `:rate-limited`, 529/overloaded → `:overloaded`, 401/403 → `:auth`,
+  400/422 → `:invalid-request` or `:context-length`, timeouts →
+  `:timeout`, else `:transport`) and the SSE `error` event categorizes as
+  `:overloaded`/`:transport`, all preserving the legacy message text and
+  `:status`/`:body`/`:url` ex-data.
+- Token streaming. New optional
+  `escapement.llm.protocol/StreamingLLMBackend` (`stream-turn`) plus
+  `streaming?` / `send-turn*` capability helpers. The Anthropic api
+  backend implements SSE streaming (`"stream": true`), rebuilding a
+  byte-identical Response from `content_block_*` events. A new
+  `:stream?` `llm-conversation` param opts a state in: incremental output
+  is published as `:llm/delta` transcript events
+  (`{:type :text-delta|:thinking-delta :text … :model … :invokeid …}`)
+  for relay to a UI while the turn is in flight. Chart semantics and the
+  final Response are unchanged; no-op on backends without streaming.
+- Image (vision) attachments in the LLM request protocol: a new `:image`
+  content block (`escapement.llm.types/ImageBlock`) accepted on `:user`
+  messages, with `:base64` (inline data + media-type) or `:url` sources.
+  The Anthropic backend serializes it to the Messages API
+  `image`/`source` wire shape and parses it back symmetrically (survives
+  a streamed turn). Enables vision-model steps (e.g. reference-image →
+  description pipelines) at the protocol level without invocation-code
+  changes.
+
+### Changed
+- The per-turn output cap (`max_tokens` on the wire) is now purely
+  catalog-driven: it is always the resolved model's
+  `catalog/max-output-tokens` (models-api.json `limit.output`), with the
+  api backend's wire default (8192) for models the catalog doesn't know.
+  To give a state more output room, pick a model with a larger output
+  limit rather than tuning a param.
+
+### Removed
+- The `:max-tokens` `llm-conversation` param. It is no longer a chart
+  concern (see Changed above) and was dropped from all bundled example
+  charts; setting it in `params-fn` now has no effect. It remains only on
+  the low-level `escapement.llm.types/Request` for backend wire
+  translation.
+
+### Notes
+- Protocol/translation logic is unit-covered offline: SSE
+  reconstruction (`parse-anthropic-sse!`), `send-turn*` capability
+  dispatch, image-block round-trip, `effective-max-tokens`, the
+  status→category mapping, and the categorized vs uncategorized
+  `:error.llm.*` consumer behavior all run green under `bb test`. The
+  end-to-end paths that need a live Anthropic-compatible endpoint —
+  a real streamed HTTP turn, a real non-2xx status producing a
+  categorized throw, and a real vision request — are credential-gated
+  (`ANTHROPIC_API_KEY` / `ZAI_API_KEY`) and exercised only by the
+  offline simulations above; a reviewer with a key should smoke one
+  live streamed + one vision turn.
 
 ## [unreleased] — feat/llm-catalog-and-merge-playbook — 2026-05-18
 

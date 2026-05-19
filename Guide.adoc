@@ -3083,17 +3083,22 @@ Prompts and token caps are deliberately tiny.
 `src/escapement/`::
   `transcript` (single-writer JSONL sink), `runner` (top-level pump loop),
   `cli` (bb entry), `prompts` (file-based prompt loading with
-  `{{VAR}}` substitution).
+  `{{VAR}}` substitution), `lib` (the hermetic <<hosted-library,hosted
+  library>> facade), and `lib/event_sink` (the normalized public-event
+  adapter).
 
 `demos/`::
   Larger, multi-state worked examples that live outside `src/` because
   they bring their own non-Clojure artifacts (prompt markdown, sample
-  input EDN, READMEs). The current resident is `demos/unit_test/` — a
-  parallel chart that drives an LLM through behaviors → abstraction →
-  (write|gap-analysis) → (critique|patch) → refine to author and seal
-  `fulcro-spec` tests for a target function, with a sibling REPL-manager
-  region that establishes a project nREPL via shared `:nrepl-port` data
-  + a single `:repl/available` event.
+  input EDN, READMEs). `demos/unit_test/` — a parallel chart that
+  drives an LLM through behaviors → abstraction → (write|gap-analysis)
+  → (critique|patch) → refine to author and seal `fulcro-spec` tests
+  for a target function, with a sibling REPL-manager region that
+  establishes a project nREPL via shared `:nrepl-port` data + a single
+  `:repl/available` event. `demos/lib/` — a runnable
+  `escapement.lib/run` embedding example (`embed_example.clj` +
+  `README.md`) that wires explicit `:credentials`/`:config` and the
+  event-sink adapter.
 
 `test/`::
   Unit tests (fulcro-spec). Run with `bb test`.
