@@ -121,7 +121,6 @@ Two ways for a chart to influence the auto-fallback list:
   (the lib facade can opt into fail-closed instead; see
   <<hosted-config>>). The legacy `:intelligence N` shorthand still
   works and is folded into the gate as `:needs {:intelligence [:>= N]}`.
-  The older nested `:model-policy {...}` form is a deprecated alias.
 
 ==== Manual configuration
 
@@ -661,13 +660,6 @@ makes `tell-llm` work).
   The legacy `:intelligence N` key is still accepted on the node and is
   equivalent to `:needs {:intelligence [:>= N]}`.
 
-`:model-policy`::
-  **Deprecated alias for `:needs`** (still accepted for one cycle so
-  existing charts do not break). It is the canonical *nested* shape —
-  `{:require {…} :min {…} :max {…}}` — that `:needs` translates into:
-  `:require` ⇔ bare value, `:min` ⇔ `[:>= n]`, `:max` ⇔ `[:<= n]`.
-  Prefer `:needs` for new charts; `:model-policy` will be removed in a
-  later cycle.
 
 `:max-tokens`::
   **Not a chart param.** The per-turn output cap is resolved automatically
@@ -1093,7 +1085,7 @@ ratings from `.escapement.edn` per call. `cat/eligibility-facts` is
 the stable, published vocabulary of objective gate keys (`:vision?`,
 `:tool-call?`, `:reasoning?`, `:context-tokens`, `:max-output-tokens`,
 `:company`, `:family`, `:knowledge`); this backs the `:needs` node
-option (the deprecated `:model-policy` is its canonical nested alias).
+option.
 Subscription providers (`:z-ai-plan`, `:ollama`, `:openai-codex`)
 report zero marginal per-token cost.
 
@@ -3323,8 +3315,7 @@ the offending key. The keyspace mixes two sources uniformly:
   `:llm/ratings`. These mix into the *same* keyspace; the invocation
   layer never special-cases a key.
 
-`:needs` is the ergonomic surface; `:model-policy` is its deprecated
-canonical-nested alias (still accepted for one cycle). See
+`:needs` is the ergonomic eligibility-gate surface. See
 <<params-fn,the `params-fn` map>> for the full reference.
 
 ==== Fail-open vs fail-closed
@@ -3526,8 +3517,7 @@ human-approval checkpoint and is the public API contract):
 . **`:needs` is an eligibility *gate*, not a ranker.** It filters the
   preference-ordered candidate list; *all* ordering comes from the
   sorted `:llm/preferences`. Only `=` / `[:>= n]` / `[:<= n]` are
-  supported. `:model-policy` is a deprecated alias for one cycle.
-  Fail-open by default; `:llm/eligibility-strict? true` opts the lib
+  supported. Fail-open by default; `:llm/eligibility-strict? true` opts the lib
   path into fail-closed.
 . **Explicitly deferred:** a `TranscriptSink` protocol, DB-backed
   stores beyond the `:store` passthrough, a broader lifecycle-hook

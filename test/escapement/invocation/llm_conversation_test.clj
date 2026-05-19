@@ -848,14 +848,14 @@
                                      (count escapement.invocation.llm-conversation/transcript-truncate-marker)))))
 
 ;; ---------------------------------------------------------------------------
-;; Declarative :model-policy wiring (params->policy / candidate-models /
+;; Declarative :needs wiring (params->policy / candidate-models /
 ;; the :llm/model-policy-empty transcript event). The decision core
 ;; (catalog/satisfies-policy?) is covered in catalog_test.clj; this covers
-;; the invocation-layer glue that reads :model-policy from params, filters
+;; the invocation-layer glue that reads :needs from params, filters
 ;; the auto-fallback list, and surfaces the empty-result event.
 ;; ---------------------------------------------------------------------------
 
-(specification "params->policy reads :needs (canonicalized) and the deprecated :model-policy alias"
+(specification "params->policy canonicalizes the :needs gate"
   (assertions
    "no key → nil"
    (#'llmc/params->policy {}) => nil
@@ -869,28 +869,7 @@
    => {:require {} :min {:context-tokens 200000} :max {}}
    ":needs [:<= n] → :max clause"
    (#'llmc/params->policy {:needs {:max-output-tokens [:<= 64000]}})
-   => {:require {} :min {} :max {:max-output-tokens 64000}}
-   "deprecated :model-policy alias is taken verbatim (canonical nested shape)"
-   (#'llmc/params->policy {:model-policy {:min {:context-tokens 200000}}})
-   => {:min {:context-tokens 200000}}
-   "empty :model-policy → nil"
-   (#'llmc/params->policy {:model-policy {}}) => nil
-   ":needs wins when both keys are present"
-   (#'llmc/params->policy {:needs {:clojure [:>= 8]}
-                           :model-policy {:min {:context-tokens 200000}}})
-   => {:require {} :min {:clojure 8} :max {}}))
-
-(specification "deprecated-model-policy? detects effective use of the legacy alias"
-  (assertions
-   "no :model-policy → false"
-   (#'llmc/deprecated-model-policy? {:needs {:clojure [:>= 8]}}) => false
-   ":model-policy alone in effect → true"
-   (#'llmc/deprecated-model-policy? {:model-policy {:min {:clojure 8}}}) => true
-   ":needs supersedes a present :model-policy → false (not the effective policy)"
-   (#'llmc/deprecated-model-policy? {:needs {:clojure [:>= 8]}
-                                     :model-policy {:min {:clojure 8}}}) => false
-   "empty :model-policy → false"
-   (#'llmc/deprecated-model-policy? {:model-policy {}}) => false))
+   => {:require {} :min {} :max {:max-output-tokens 64000}}))
 
 (specification "candidate-models applies the eligibility gate to the fallback list"
   (let [defaults ["gpt-4o-mini" "claude-sonnet-4-5" "claude-opus-4-1"]]
@@ -898,11 +877,6 @@
       (assertions
        ":context-tokens [:>= 200000] drops gpt-4o-mini (128k window)"
        (#'llmc/candidate-models {:needs {:context-tokens [:>= 200000]}}
-                                defaults (atom {}) {})
-       => ["claude-sonnet-4-5" "claude-opus-4-1"]))
-    (component "the deprecated :model-policy alias still filters"
-      (assertions
-       (#'llmc/candidate-models {:model-policy {:min {:context-tokens 200000}}}
                                 defaults (atom {}) {})
        => ["claude-sonnet-4-5" "claude-opus-4-1"]))
     (component "an explicit :model pick is never silently switched"
@@ -1075,45 +1049,6 @@
      "the :eligibility-empty shape is returned for the caller to fail the node"
      (some? (:eligibility-empty result)) => true
      (get-in result [:eligibility-empty :default-models]) => ["gpt-4o-mini"])))
-
-(specification "try-models! emits :llm/model-policy-deprecated when the legacy :model-policy alias is in effect"
-  (let [captured (atom [])
-        backend  (mock-backend [(end-turn-response "ok")])
-        _        (#'llmc/try-models!
-                  {:backend        backend
-                   :transcript-fn  (fn [ev] (swap! captured conj ev))
-                   :worker-state   (atom :running)
-                   :model-status   (atom {})
-                   :default-models ["gpt-4o-mini"]
-                   :catalog-ratings {}
-                   :parent-ctx     {:invokeid "iv"}}
-                  {:model-policy {:min {:context-tokens 1}}}
-                  [{:role :user :content [{:type :text :text "hi"}]}]
-                  [])
-        dep      (filter #(= :llm/model-policy-deprecated (:event %)) @captured)]
-    (assertions
-     "the deprecation transcript event fired once"
-     (count dep) => 1
-     "it carries the invokeid and a note"
-     (get-in (first dep) [:data :invokeid]) => "iv"
-     (string? (get-in (first dep) [:data :note])) => true))
-
-  (let [captured (atom [])
-        backend  (mock-backend [(end-turn-response "ok")])
-        _        (#'llmc/try-models!
-                  {:backend        backend
-                   :transcript-fn  (fn [ev] (swap! captured conj ev))
-                   :worker-state   (atom :running)
-                   :model-status   (atom {})
-                   :default-models ["gpt-4o-mini"]
-                   :catalog-ratings {}
-                   :parent-ctx     {:invokeid "iv"}}
-                  {:needs {:context-tokens [:>= 1]}}
-                  [{:role :user :content [{:type :text :text "hi"}]}]
-                  [])]
-    (assertions
-     "no deprecation event when :needs is used"
-     (filter #(= :llm/model-policy-deprecated (:event %)) @captured) => '())))
 
 (specification "try-models! ratings come from the injected context value (two tables, one process)"
   (let [run (fn [ratings]

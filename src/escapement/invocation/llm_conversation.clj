@@ -674,40 +674,18 @@
 
 (defn- params->policy
   "The canonical declarative model policy from conversation `params`,
-   resolved from the chart-node surface keys.
-
-   * `:needs` — the ergonomic flat `fact → constraint` map (bare value,
-     `[:>= n]`, `[:<= n]`). Translated to the canonical
-     `{:require/:min/:max}` shape via `escapement.llm.needs/needs->policy`.
-   * `:model-policy` — DEPRECATED alias accepting the canonical nested
-     shape verbatim (`:require`/`:min`/`:max` over any objective or
-     subjective info key). Kept working for one cycle so existing charts
-     don't break; `:needs` wins when both are present.
+   resolved from the `:needs` chart-node surface key — the ergonomic flat
+   `fact → constraint` map (bare value, `[:>= n]`, `[:<= n]`). Translated
+   to the canonical `{:require/:min/:max}` shape via
+   `escapement.llm.needs/needs->policy`.
 
    Returns nil when no policy clause is expressed. A malformed `:needs`
    throws (see `needs->policy`)."
   [params]
-  (let [needs-pol (when (contains? params :needs)
-                    (needs/needs->policy (:needs params)))
-        legacy    (:model-policy params)
-        pol       (if (policy-nonempty? needs-pol)
-                    needs-pol
-                    legacy)]
+  (let [pol (when (contains? params :needs)
+              (needs/needs->policy (:needs params)))]
     (when (policy-nonempty? pol)
       pol)))
-
-(defn- deprecated-model-policy?
-  "True when the conversation `params` rely on the deprecated
-   `:model-policy` alias for the *effective* policy — i.e. `:model-policy`
-   is present and `:needs` did not supply a non-empty policy that
-   superseded it. Used to emit a one-time deprecation transcript event."
-  [params]
-  (boolean
-   (and (contains? params :model-policy)
-        (policy-nonempty? (:model-policy params))
-        (not (policy-nonempty?
-              (when (contains? params :needs)
-                (needs/needs->policy (:needs params))))))))
 
 (defn- candidate-models
   "Decide the ordered list of models to try for the next turn.
@@ -717,8 +695,7 @@
      2. `params :model`     — explicit single pick (no fallback)
      3. `default-models`    — processor-level auto-detected fallback list. When
                               an eligibility gate is expressed (`params
-                              :needs`, or the deprecated `:model-policy`
-                              alias) the list is filtered to entries
+                              :needs`) the list is filtered to entries
                               satisfying it via
                               `escapement.llm.catalog/satisfies-policy?`,
                               with subjective ratings resolved from the
@@ -794,15 +771,6 @@
    params messages tools]
   (let [{:keys [max-retries backoff-ms]} (params->resilience params)
         policy        (params->policy params)
-        _              (when (deprecated-model-policy? params)
-                         (transcript! transcript-fn
-                                      {:event :llm/model-policy-deprecated
-                                       :ts    (now-ms)
-                                       :data  {:invokeid (:invokeid parent-ctx)
-                                               :note (str "`:model-policy` is deprecated; "
-                                                          "use the flat `:needs` key. "
-                                                          "The canonical nested form still "
-                                                          "works for one cycle.")}}))
         auto-fallback? (and (not (seq (:models params)))
                             (nil? (:model params)))
         gate-empties?  (and auto-fallback? policy (seq default-models)
@@ -1414,7 +1382,7 @@
      (Step 4) will feed it from injected `:config`. This is the clean
      injection seam — the processor never reads disk or a global.
    * `:eligibility-strict?` (optional, default false) — fail-closed
-     flag. When true, an eligibility gate (`:needs`/`:model-policy`)
+     flag. When true, an eligibility gate (`:needs`)
      that excludes every auto-fallback model fails the node with a
      categorized `:error.llm.invalid-request` instead of silently
      proceeding on the unfiltered list (fail-open, the default)."

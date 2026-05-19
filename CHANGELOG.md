@@ -3,10 +3,11 @@
 ## [unreleased] — feat/hermetic-hosted-library — 2026-05-19
 
 Makes Escapement embeddable as a hermetic library and replaces the
-chart-facing model-policy DSL with an ergonomic `:needs` gate. All
-additive over the now-merged backend-resilience work — the CLI path is
-byte-for-byte unchanged; every new option preserves prior behavior when
-omitted, and `:model-policy` keeps working for one deprecation cycle.
+chart-facing model-policy DSL with an ergonomic `:needs` gate. Additive
+over the now-merged backend-resilience work — the CLI path is
+byte-for-byte unchanged and every new option preserves prior behavior
+when omitted. The one breaking change is the removal of the unreleased
+`:model-policy` node key (never shipped in a release): use `:needs`.
 
 ### Added
 - **`escapement.lib/run` hosted facade.** Embed Escapement in your own
@@ -87,15 +88,16 @@ omitted, and `:model-policy` keeps working for one deprecation cycle.
   cooperative-cancellation coverage in the `:llm-conversation` and
   Runner sections.
 
+### Removed
+- The unreleased `:model-policy` `llm-conversation` node key. It only
+  ever lived on the now-merged backend-resilience branch and was never
+  part of a release, so it is removed outright (no alias, no
+  `:llm/model-policy-deprecated` transcript notice) rather than carried
+  as deprecated. The ergonomic flat `:needs` gate fully replaces it;
+  charts express eligibility solely via `:needs` (the bundled
+  `escapement.examples.clj-refactor` already does).
+
 ### Changed
-- The `:model-policy` `llm-conversation` node key is **deprecated in
-  favor of `:needs`**. It still works as an alias for one cycle: the
-  canonical nested `{:require {…} :min {…} :max {…}}` shape is still
-  accepted so existing charts (including the bundled
-  `escapement.examples.clj-refactor`, now ported to `:needs`) do not
-  break. Prefer `:needs` for new charts. A
-  `:llm/model-policy-deprecated` transcript notice is emitted when the
-  legacy key is used.
 - `escapement.llm.catalog/satisfies-policy?` now takes the subjective
   ratings table as an explicit argument (new 3-arity). The catalog no
   longer carries a process-global ratings cache
@@ -118,15 +120,6 @@ omitted, and `:model-policy` keeps working for one deprecation cycle.
   live wire suite is unchanged from the merged backend-resilience work;
   a reviewer with real keys may still run it to re-verify the live
   providers.
-- Accepted debt (Gate 3, cosmetic, non-blocking): the
-  `:llm/model-policy-deprecated` transcript warning is emitted from the
-  per-turn conversation path, so a node that takes multiple turns or
-  triggers `:max_tokens` continuation segments repeats the same
-  deprecation notice per segment rather than once per node. Behavior is
-  unaffected — `:model-policy` still works as the documented one-cycle
-  `:needs` alias; only the warning's emission frequency is noisier than
-  the docstring implies. Slated for de-duplication when `:model-policy`
-  is removed.
 
 ---
 
