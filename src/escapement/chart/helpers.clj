@@ -244,6 +244,26 @@
                          :data              {:text text}})
               nil))}))
 
+(defn tell-other-llm!
+  "Direct-call form of [[tell-other-llm]] for use INSIDE a handler lambda
+   (e.g. the body of [[handle-tool]] or a `script` `:expr`). Whereas
+   [[tell-other-llm]] returns a chart `script` element to embed at chart-
+   authoring time, this function performs the send! immediately against the
+   `env` passed in.
+
+   Call only from chart-side code (transition handlers, onentry/onexit,
+   handle-tool handlers). Never expose to the LLM as a tool."
+  [env target text]
+  (let [target' (llmc/->id-str target)
+        queue   (::sc/event-queue env)
+        sid     (env-ns/session-id env)]
+    (sp/send! queue env
+              {:target            sid
+               :source-session-id sid
+               :event             :llm.user-message
+               :data              {:text text :target target'}})
+    nil))
+
 (defn tell-other-llm
   "Like `tell-llm` but targets a specific conversation by its `invokeid`. The
    underlying `:llm.user-message` event carries `{:text … :target <invokeid>}`;
@@ -257,23 +277,17 @@
     * `:target` (required) — invokeid string of the destination conversation.
                              May also be a function `(fn [env data] invokeid)`
                              so the target can be computed from chart state.
-    * `:expr`   (required) — `(fn [env data] text-string)`."
+    * `:expr`   (required) — `(fn [env data] text-string)`.
+
+   For direct calls from inside a handler lambda, see [[tell-other-llm!]]."
   [{:keys [target expr]}]
   (assert target "tell-other-llm requires :target")
   (assert (fn? expr) "tell-other-llm requires :expr")
   (elt/script
    {:expr (fn [env data]
-            (let [text    (expr env data)
-                  target  (if (fn? target) (target env data) target)
-                  target' (llmc/->id-str target)
-                  queue   (::sc/event-queue env)
-                  sid     (env-ns/session-id env)]
-              (sp/send! queue env
-                        {:target            sid
-                         :source-session-id sid
-                         :event             :llm.user-message
-                         :data              {:text text :target target'}})
-              nil))}))
+            (let [text   (expr env data)
+                  target (if (fn? target) (target env data) target)]
+              (tell-other-llm! env target text)))}))
 
 ;; ===========================================================================
 ;; Artifact helpers — file-backed LLM outputs

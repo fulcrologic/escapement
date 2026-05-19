@@ -991,69 +991,69 @@
 ;; ---------------------------------------------------------------------------
 
 (specification "params->policy canonicalizes the :needs gate"
-  (assertions
-   "no key → nil"
-   (#'llmc/params->policy {}) => nil
-   "empty :needs → nil (admits everything; no clause expressed)"
-   (#'llmc/params->policy {:needs {}}) => nil
-   ":needs bare value → :require clause"
-   (#'llmc/params->policy {:needs {:vision? true}})
-   => {:require {:vision? true} :min {} :max {}}
-   ":needs [:>= n] → :min clause"
-   (#'llmc/params->policy {:needs {:context-tokens [:>= 200000]}})
-   => {:require {} :min {:context-tokens 200000} :max {}}
-   ":needs [:<= n] → :max clause"
-   (#'llmc/params->policy {:needs {:max-output-tokens [:<= 64000]}})
-   => {:require {} :min {} :max {:max-output-tokens 64000}}))
+               (assertions
+                "no key → nil"
+                (#'llmc/params->policy {}) => nil
+                "empty :needs → nil (admits everything; no clause expressed)"
+                (#'llmc/params->policy {:needs {}}) => nil
+                ":needs bare value → :require clause"
+                (#'llmc/params->policy {:needs {:vision? true}})
+                => {:require {:vision? true} :min {} :max {}}
+                ":needs [:>= n] → :min clause"
+                (#'llmc/params->policy {:needs {:context-tokens [:>= 200000]}})
+                => {:require {} :min {:context-tokens 200000} :max {}}
+                ":needs [:<= n] → :max clause"
+                (#'llmc/params->policy {:needs {:max-output-tokens [:<= 64000]}})
+                => {:require {} :min {} :max {:max-output-tokens 64000}}))
 
 (specification "candidate-models applies the eligibility gate to the fallback list"
-  (let [defaults ["gpt-4o-mini" "claude-sonnet-4-5" "claude-opus-4-1"]]
-    (component "auto-fallback list is filtered by :needs (objective fact)"
-      (assertions
-       ":context-tokens [:>= 200000] drops gpt-4o-mini (128k window)"
-       (#'llmc/candidate-models {:needs {:context-tokens [:>= 200000]}}
-                                defaults (atom {}) {})
-       => ["claude-sonnet-4-5" "claude-opus-4-1"]))
-    (component "an explicit :model pick is never silently switched"
-      (assertions
-       "policy is ignored when the user names a model"
-       (#'llmc/candidate-models {:model "gpt-4o-mini"
-                                 :needs {:context-tokens [:>= 200000]}}
-                                defaults (atom {}) {})
-       => ["gpt-4o-mini"]))
-    (component "an unsatisfiable gate falls back to the unfiltered list"
-      (assertions
-       "so the conversation still runs (fail-open)"
-       (#'llmc/candidate-models {:needs {:context-tokens [:>= 999999999]}}
-                                defaults (atom {}) {})
-       => defaults))
-    (component ":down models are removed after gate filtering"
-      (assertions
-       "claude-sonnet-4-5 marked :down → only claude-opus-4-1 survives"
-       (#'llmc/candidate-models {:needs {:context-tokens [:>= 200000]}}
-                                defaults
-                                (atom {"claude-sonnet-4-5" :down})
-                                {})
-       => ["claude-opus-4-1"]))
-    (component "subjective ratings come from the injected catalog-ratings arg"
-      (assertions
-       "with ratings keeping only claude-sonnet-4-5, gpt-4o-mini/opus drop"
-       (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
-                                defaults (atom {})
-                                {"claude-sonnet-4-5" {:clojure 9}})
-       => ["claude-sonnet-4-5"]
-       "a DIFFERENT injected ratings table → different survivors (same process)"
-       (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
-                                defaults (atom {})
-                                {"claude-opus-4-1" {:clojure 10}})
-       => ["claude-opus-4-1"]
-       "empty injected ratings → subjective clause matches nothing → unfiltered (fail-open)"
-       (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
-                                defaults (atom {}) {})
-       => defaults))
-    (component "no gate → default-models verbatim"
-      (assertions
-       (#'llmc/candidate-models {} defaults (atom {}) {}) => defaults))))
+               (let [defaults ["gpt-4o-mini" "claude-sonnet-4-5" "claude-opus-4-1"]]
+                 (component "auto-fallback list is filtered by :needs (objective fact)"
+                            (assertions
+                             ":context-tokens [:>= 200000] drops gpt-4o-mini (128k window)"
+                             (#'llmc/candidate-models {:needs {:context-tokens [:>= 200000]}}
+                                                      defaults (atom {}) {})
+                             => ["claude-sonnet-4-5" "claude-opus-4-1"]))
+                 (component "an explicit :model pick is never silently switched"
+                            (assertions
+                             "policy is ignored when the user names a model"
+                             (#'llmc/candidate-models {:model "gpt-4o-mini"
+                                                       :needs {:context-tokens [:>= 200000]}}
+                                                      defaults (atom {}) {})
+                             => ["gpt-4o-mini"]))
+                 (component "an unsatisfiable gate falls back to the unfiltered list"
+                            (assertions
+                             "so the conversation still runs (fail-open)"
+                             (#'llmc/candidate-models {:needs {:context-tokens [:>= 999999999]}}
+                                                      defaults (atom {}) {})
+                             => defaults))
+                 (component ":down models are removed after gate filtering"
+                            (assertions
+                             "claude-sonnet-4-5 marked :down → only claude-opus-4-1 survives"
+                             (#'llmc/candidate-models {:needs {:context-tokens [:>= 200000]}}
+                                                      defaults
+                                                      (atom {"claude-sonnet-4-5" :down})
+                                                      {})
+                             => ["claude-opus-4-1"]))
+                 (component "subjective ratings come from the injected catalog-ratings arg"
+                            (assertions
+                             "with ratings keeping only claude-sonnet-4-5, gpt-4o-mini/opus drop"
+                             (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
+                                                      defaults (atom {})
+                                                      {"claude-sonnet-4-5" {:clojure 9}})
+                             => ["claude-sonnet-4-5"]
+                             "a DIFFERENT injected ratings table → different survivors (same process)"
+                             (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
+                                                      defaults (atom {})
+                                                      {"claude-opus-4-1" {:clojure 10}})
+                             => ["claude-opus-4-1"]
+                             "empty injected ratings → subjective clause matches nothing → unfiltered (fail-open)"
+                             (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
+                                                      defaults (atom {}) {})
+                             => defaults))
+                 (component "no gate → default-models verbatim"
+                            (assertions
+                             (#'llmc/candidate-models {} defaults (atom {}) {}) => defaults))))
 
 ;; ---------------------------------------------------------------------------
 ;; Categorized backend errors → finer :error.llm.<category> chart events,
@@ -1133,77 +1133,77 @@
                   => :backend)))
 
 (specification "try-models! surfaces :llm/model-policy-empty when the gate excludes every fallback model (fail-open)"
-  (let [captured (atom [])
-        backend  (mock-backend [(end-turn-response "ok")])
-        result   (#'llmc/try-models!
-                  {:backend        backend
-                   :transcript-fn  (fn [ev] (swap! captured conj ev))
-                   :worker-state   (atom :running)
-                   :model-status   (atom {})
-                   :default-models ["gpt-4o-mini"]
-                   :catalog-ratings {}
-                   :parent-ctx     {:invokeid "iv"}}
-                  {:needs {:context-tokens [:>= 999999999]}}
-                  [{:role :user :content [{:type :text :text "hi"}]}]
-                  [])
-        ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
-    (assertions
-     "the event was emitted"
-     (some? ev) => true
-     "it carries the resolved (canonical) policy"
-     (get-in ev [:data :policy]) => {:require {} :min {:context-tokens 999999999} :max {}}
-     "it carries the default-models that all failed the gate"
-     (get-in ev [:data :default-models]) => ["gpt-4o-mini"]
-     "strict? is false by default"
-     (get-in ev [:data :strict?]) => false
-     "the turn still completes via the unfiltered fallback model (fail-open)"
-     (some? (:ok result)) => true
-     (:model-used result) => "gpt-4o-mini")))
+               (let [captured (atom [])
+                     backend  (mock-backend [(end-turn-response "ok")])
+                     result   (#'llmc/try-models!
+                               {:backend        backend
+                                :transcript-fn  (fn [ev] (swap! captured conj ev))
+                                :worker-state   (atom :running)
+                                :model-status   (atom {})
+                                :default-models ["gpt-4o-mini"]
+                                :catalog-ratings {}
+                                :parent-ctx     {:invokeid "iv"}}
+                               {:needs {:context-tokens [:>= 999999999]}}
+                               [{:role :user :content [{:type :text :text "hi"}]}]
+                               [])
+                     ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
+                 (assertions
+                  "the event was emitted"
+                  (some? ev) => true
+                  "it carries the resolved (canonical) policy"
+                  (get-in ev [:data :policy]) => {:require {} :min {:context-tokens 999999999} :max {}}
+                  "it carries the default-models that all failed the gate"
+                  (get-in ev [:data :default-models]) => ["gpt-4o-mini"]
+                  "strict? is false by default"
+                  (get-in ev [:data :strict?]) => false
+                  "the turn still completes via the unfiltered fallback model (fail-open)"
+                  (some? (:ok result)) => true
+                  (:model-used result) => "gpt-4o-mini")))
 
 (specification "try-models! fail-closed: :eligibility-strict? true → :eligibility-empty (no turn issued)"
-  (let [captured (atom [])
-        backend  (mock-backend [(end-turn-response "ok")])
-        result   (#'llmc/try-models!
-                  {:backend        backend
-                   :transcript-fn  (fn [ev] (swap! captured conj ev))
-                   :worker-state   (atom :running)
-                   :model-status   (atom {})
-                   :default-models ["gpt-4o-mini"]
-                   :catalog-ratings {}
-                   :eligibility-strict? true
-                   :parent-ctx     {:invokeid "iv"}}
-                  {:needs {:context-tokens [:>= 999999999]}}
-                  [{:role :user :content [{:type :text :text "hi"}]}]
-                  [])
-        ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
-    (assertions
-     "the gap event still records strict?=true"
-     (get-in ev [:data :strict?]) => true
-     "no turn was issued (fail-closed)"
-     (:ok result) => nil
-     "the :eligibility-empty shape is returned for the caller to fail the node"
-     (some? (:eligibility-empty result)) => true
-     (get-in result [:eligibility-empty :default-models]) => ["gpt-4o-mini"])))
+               (let [captured (atom [])
+                     backend  (mock-backend [(end-turn-response "ok")])
+                     result   (#'llmc/try-models!
+                               {:backend        backend
+                                :transcript-fn  (fn [ev] (swap! captured conj ev))
+                                :worker-state   (atom :running)
+                                :model-status   (atom {})
+                                :default-models ["gpt-4o-mini"]
+                                :catalog-ratings {}
+                                :eligibility-strict? true
+                                :parent-ctx     {:invokeid "iv"}}
+                               {:needs {:context-tokens [:>= 999999999]}}
+                               [{:role :user :content [{:type :text :text "hi"}]}]
+                               [])
+                     ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
+                 (assertions
+                  "the gap event still records strict?=true"
+                  (get-in ev [:data :strict?]) => true
+                  "no turn was issued (fail-closed)"
+                  (:ok result) => nil
+                  "the :eligibility-empty shape is returned for the caller to fail the node"
+                  (some? (:eligibility-empty result)) => true
+                  (get-in result [:eligibility-empty :default-models]) => ["gpt-4o-mini"])))
 
 (specification "try-models! ratings come from the injected context value (two tables, one process)"
-  (let [run (fn [ratings]
-              (let [backend (mock-backend [(end-turn-response "ok")])]
-                (#'llmc/try-models!
-                 {:backend         backend
-                  :transcript-fn   (fn [_] nil)
-                  :worker-state    (atom :running)
-                  :model-status    (atom {})
-                  :default-models  ["gpt-4o-mini" "claude-opus-4-1"]
-                  :catalog-ratings ratings
-                  :parent-ctx      {:invokeid "iv"}}
-                 {:needs {:clojure [:>= 8]}}
-                 [{:role :user :content [{:type :text :text "hi"}]}]
-                 [])))]
-    (assertions
-     "ratings favoring gpt-4o-mini → it is the model used"
-     (:model-used (run {"gpt-4o-mini" {:clojure 9}})) => "gpt-4o-mini"
-     "a DIFFERENT injected ratings table in the same process → different pick"
-     (:model-used (run {"claude-opus-4-1" {:clojure 9}})) => "claude-opus-4-1")))
+               (let [run (fn [ratings]
+                           (let [backend (mock-backend [(end-turn-response "ok")])]
+                             (#'llmc/try-models!
+                              {:backend         backend
+                               :transcript-fn   (fn [_] nil)
+                               :worker-state    (atom :running)
+                               :model-status    (atom {})
+                               :default-models  ["gpt-4o-mini" "claude-opus-4-1"]
+                               :catalog-ratings ratings
+                               :parent-ctx      {:invokeid "iv"}}
+                              {:needs {:clojure [:>= 8]}}
+                              [{:role :user :content [{:type :text :text "hi"}]}]
+                              [])))]
+                 (assertions
+                  "ratings favoring gpt-4o-mini → it is the model used"
+                  (:model-used (run {"gpt-4o-mini" {:clojure 9}})) => "gpt-4o-mini"
+                  "a DIFFERENT injected ratings table in the same process → different pick"
+                  (:model-used (run {"claude-opus-4-1" {:clojure 9}})) => "claude-opus-4-1")))
 
 ;; ---------------------------------------------------------------------------
 ;; Resilience: unbounded :max_tokens continuation + transient-error retry
@@ -1329,3 +1329,145 @@
                   @cnt => 1
                   "no :llm/retry transcript event"
                   (count (filter #(= :llm/retry (:event %)) @captured)) => 0)))
+
+;; ---------------------------------------------------------------------------
+;; #11: :verdict-schema wrap-up inference
+;; ---------------------------------------------------------------------------
+
+(defn- verdict-tool-use-response
+  "Build a tool_use response whose only block is a submit_verdict tool_use."
+  [input]
+  {:stop-reason :tool_use
+   :content     [{:type :tool_use :id "v1" :name "submit_verdict" :input input}]
+   :usage       {:input-tokens 1 :output-tokens 1}
+   :model       "mock"})
+
+(specification ":verdict-schema triggers a forced submit_verdict inference at idle"
+               (let [verdict-payload {:status :ok :note "all-clear"}
+                     backend         (mock-backend
+                                      [(end-turn-response "done")
+                                       (verdict-tool-use-response verdict-payload)])
+                     seen-idle       (atom nil)
+                     captured        (atom [])
+                     chart           (chart/statechart
+                                      {:initial :wrap}
+                                      (state {:id :wrap :initial :work}
+                                             (state {:id :work}
+                                                    (h/llm-conversation
+                                                     {:id        "judge"
+                                                      :params-fn (fn [_ _]
+                                                                   {:initial-user-message "go"
+                                                                    :verdict-schema       [:map
+                                                                                           [:status :keyword]
+                                                                                           [:note :string]]})})
+                                                    (transition {:event :llm.idle :target :done}
+                                                                (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
+                                             (final {:id :done})))
+                     t               (new-llm-test-env
+                                      {:statechart    chart
+                                       :backend       backend
+                                       :transcript-fn (fn [ev] (swap! captured conj ev))})
+                     t               (await-config! t :done 3000)
+                     last-request    (last @(:call-log backend))]
+                 (assertions
+                  "chart reached :done"
+                  (dct/in? t :done) => true
+                  "backend was called exactly twice (turn + wrap-up forced inference)"
+                  (count @(:call-log backend)) => 2
+                  "wrap-up request forced submit_verdict tool-choice"
+                  (:tool-choice last-request) => {:type "tool" :name "submit_verdict"}
+                  "wrap-up request tools list contains only submit_verdict"
+                  (mapv :name (:tools last-request)) => ["submit_verdict"]
+                  ":on-end-turn-event data carries the validated :verdict"
+                  (get-in @seen-idle [:data :verdict]) => verdict-payload
+                  ":llm/verdict transcript event was emitted"
+                  (boolean (some #(= :llm/verdict (:event %)) @captured)) => true)))
+
+(specification "nil :verdict-schema is identical to today's behavior"
+               (let [backend   (mock-backend [(end-turn-response "free text")])
+                     seen-idle (atom nil)
+                     chart     (chart/statechart
+                                {:initial :wrap}
+                                (state {:id :wrap :initial :work}
+                                       (state {:id :work}
+                                              (h/llm-conversation
+                                               {:id        "free"
+                                                :params-fn (fn [_ _]
+                                                             {:initial-user-message "go"})})
+                                              (transition {:event :llm.idle :target :done}
+                                                          (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
+                                       (final {:id :done})))
+                     t         (new-llm-test-env {:statechart chart :backend backend})
+                     t         (await-config! t :done 3000)]
+                 (assertions
+                  "chart reached :done"
+                  (dct/in? t :done) => true
+                  "backend was called exactly once (no wrap-up inference)"
+                  (count @(:call-log backend)) => 1
+                  ":on-end-turn-event data carries the free text but no :verdict"
+                  (get-in @seen-idle [:data :text]) => "free text"
+                  "no :verdict key on idle event"
+                  (contains? (:data @seen-idle) :verdict) => false)))
+
+(specification "verdict validation failure posts :error.llm.verdict-validation"
+               (let [;; Wrap-up returns a payload that violates the schema (missing :note).
+                     backend   (mock-backend
+                                [(end-turn-response "done")
+                                 (verdict-tool-use-response {:status :wrong-shape})])
+                     seen-err  (atom nil)
+                     chart     (chart/statechart
+                                {:initial :wrap}
+                                (state {:id :wrap :initial :work}
+                                       (state {:id :work}
+                                              (h/llm-conversation
+                                               {:id        "judge"
+                                                :params-fn (fn [_ _]
+                                                             {:initial-user-message "go"
+                                                              :verdict-schema       [:map
+                                                                                     [:status :keyword]
+                                                                                     [:note :string]]})})
+                                              (transition {:event :error.llm.verdict-validation :target :failed}
+                                                          (script {:expr (fn [_ d] (reset! seen-err (:_event d)) nil)})))
+                                       (final {:id :failed})))
+                     t         (new-llm-test-env {:statechart chart :backend backend})
+                     t         (await-config! t :failed 3000)]
+                 (assertions
+                  "chart reached :failed via :error.llm.verdict-validation"
+                  (dct/in? t :failed) => true
+                  "error data includes :reason :verdict-validation"
+                  (get-in @seen-err [:data :reason]) => :verdict-validation
+                  "error data includes humanized :errors"
+                  (string? (get-in @seen-err [:data :errors])) => true)))
+
+(specification "verdict-schema also fires on glm batched-event-tool turn-end"
+  ;; The glm-class path posts an end-turn event from the :tool_use branch
+  ;; when an event-tool was fired. The wrap-up should run there too.
+               (let [verdict {:done? true}
+                     backend (mock-backend
+                              [(tool-use-response
+                                [{:id "e1" :name "event__finish" :input {}}])
+                               (verdict-tool-use-response verdict)])
+                     seen    (atom nil)
+                     chart   (chart/statechart
+                              {:initial :wrap}
+                              (state {:id :wrap :initial :work}
+                                     (state {:id :work}
+                                            (h/llm-conversation
+                                             {:id        "glm"
+                                              :params-fn (fn [_ _]
+                                                           {:initial-user-message "go"
+                                                            :allowed-events [{:event :finish :data-schema [:map]}]
+                                                            :verdict-schema [:map [:done? :boolean]]})})
+                                            (transition {:event :llm.idle :target :done}
+                                                        (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
+                                     (final {:id :done})))
+                     t       (new-llm-test-env {:statechart chart :backend backend})
+                     t       (await-config! t :done 3000)]
+                 (assertions
+                  "chart reached :done"
+                  (dct/in? t :done) => true
+                  "second backend call was the verdict wrap-up"
+                  (count @(:call-log backend)) => 2
+                  ":verdict was attached to the idle event"
+                  (get-in @seen [:data :verdict]) => verdict)))
+

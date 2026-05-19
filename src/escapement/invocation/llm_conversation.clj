@@ -101,6 +101,27 @@
    allowed-events))
 
 ;; ---------------------------------------------------------------------------
+;; Verdict wrap-up (submit_verdict forced-tool inference at idle boundary)
+;; ---------------------------------------------------------------------------
+
+(def ^:const submit-verdict-tool-name
+  "Anthropic-tool name for the `submit_verdict` wrap-up inference. Reserved;
+   chart-authors must not declare an `:allowed-events`/`:real-tools` entry
+   that would collide with this name."
+  "submit_verdict")
+
+(defn- submit-verdict-tool-def
+  "Build the Anthropic tool definition for the wrap-up `submit_verdict` call.
+   `verdict-schema` is the chart-supplied Malli schema describing the
+   structured payload the LLM must produce."
+  [verdict-schema]
+  {:name         submit-verdict-tool-name
+   :description  (str "Submit your final structured verdict for this turn. "
+                      "Call this tool exactly once. Your input becomes the "
+                      "chart's typed verdict payload.")
+   :input-schema (llm-types/malli->json-schema (or verdict-schema [:map]))})
+
+;; ---------------------------------------------------------------------------
 ;; Region-tool palette (chart-tools)
 ;; ---------------------------------------------------------------------------
 
@@ -844,7 +865,7 @@
                 ;; through to model fallback / :exhausted.
                 response (loop [retry 0]
                            (let [r (try (llm/send-turn* backend request on-delta)
-                                         (catch Throwable t {:_throw t}))
+                                        (catch Throwable t {:_throw t}))
                                  t (:_throw r)
                                  cat (when t (llm/error-category t))]
                              (if (and t
@@ -948,6 +969,112 @@
                                     :usage    (or usage {})
                                     :invokeid (:invokeid parent-ctx)}})
               (recur merged merged-usage (inc seg)))))))))
+
+(defn- run-verdict-inference!
+  "Run a single forced-tool inference asking the model to call `submit_verdict`
+   with a payload matching `verdict-schema` (Malli). Returns one of:
+
+     {:verdict <validated-input>}              — happy path
+     {:validation-failed <humanized-errors>}   — model returned a tool_use whose
+                                                  input doesn't match the schema
+     {:no-tool-use <stop-reason>}              — model didn't emit a submit_verdict
+                                                  tool_use block (e.g. model
+                                                  ignored the forced tool-choice)
+     {:exhausted ...} / {:interrupted ...} /
+     {:eligibility-empty ...} / {:no-progress ...}
+                                                — pass-through from `drive-turn!`
+
+   Tools are restricted to ONLY the `submit_verdict` tool def — real-tools,
+   event-tools, and region-tools are dropped for this wrap-up call so the
+   model has exactly one path to satisfy the forced tool-choice. `params` is
+   the original conversation params merged with `:tool-choice` and (because
+   the wrap-up is itself the terminating step) thinking off; everything else
+   (system, model, temperature, ...) is carried verbatim."
+  [{:keys [transcript-fn parent-ctx] :as ctx} params messages verdict-schema]
+  (let [tool-def    (submit-verdict-tool-def verdict-schema)
+        wrap-params (assoc params
+                           :tool-choice {:type "tool" :name submit-verdict-tool-name})
+        _           (transcript! transcript-fn
+                                 {:event :llm/verdict-inference :ts (now-ms)
+                                  :data  {:invokeid (:invokeid parent-ctx)}})
+        outcome     (drive-turn! ctx wrap-params messages [tool-def])]
+    (cond
+      (not (:ok outcome)) outcome
+
+      :else
+      (let [resp        (:ok outcome)
+            {:keys [stop-reason content]} resp
+            tool-uses   (find-tool-uses content)
+            verdict-blk (some (fn [b]
+                                (when (= submit-verdict-tool-name (:name b)) b))
+                              tool-uses)]
+        (cond
+          (nil? verdict-blk)
+          {:no-tool-use stop-reason}
+
+          (not (m/validate (or verdict-schema [:map]) (or (:input verdict-blk) {})))
+          {:validation-failed (humanize-malli-errors (or verdict-schema [:map])
+                                                     (or (:input verdict-blk) {}))
+           :input             (:input verdict-blk)}
+
+          :else
+          {:verdict (:input verdict-blk)})))))
+
+(defn- maybe-run-verdict-and-finalize-idle!
+  "When `verdict-schema` is set, run a forced `submit_verdict` inference and
+   return a map `{:idle-data <map>}` carrying the verdict (or `{:error
+   <reason> <data>}` on failure). When `verdict-schema` is nil, returns
+   `{:idle-data <base-idle-data>}` immediately — preserving today's behavior."
+  [{:keys [transcript-fn parent-ctx] :as ctx} params base-messages verdict-schema base-idle-data]
+  (if (nil? verdict-schema)
+    {:idle-data base-idle-data}
+    (let [outcome (run-verdict-inference! ctx params base-messages verdict-schema)]
+      (cond
+        (:verdict outcome)
+        (do
+          (transcript! transcript-fn
+                       {:event :llm/verdict :ts (now-ms)
+                        :data  {:invokeid (->id-str (:invokeid parent-ctx))
+                                :verdict  (:verdict outcome)}})
+          {:idle-data (assoc base-idle-data :verdict (:verdict outcome))})
+
+        (:validation-failed outcome)
+        {:error :verdict-validation
+         :data  {:reason     :verdict-validation
+                 :errors     (:validation-failed outcome)
+                 :raw-input  (:input outcome)}}
+
+        (:no-tool-use outcome)
+        {:error :verdict-validation
+         :data  {:reason      :verdict-validation
+                 :stop-reason (:no-tool-use outcome)
+                 :detail      :no-submit-verdict-tool-use}}
+
+        (:exhausted outcome)
+        {:error :backend
+         :data  {:reason :backend
+                 :detail :verdict-inference-failed
+                 :attempts (:exhausted outcome)}}
+
+        (:interrupted outcome)
+        {:error :interrupted}
+
+        (:eligibility-empty outcome)
+        {:error :invalid-request
+         :data  (assoc (:eligibility-empty outcome)
+                       :reason :invalid-request
+                       :detail :verdict-eligibility-empty)}
+
+        (:no-progress outcome)
+        {:error :unexpected-stop
+         :data  {:reason :unexpected-stop
+                 :stop-reason :max_tokens
+                 :detail :verdict-no-progress}}
+
+        :else
+        {:error :backend
+         :data  {:reason :backend
+                 :detail :verdict-inference-unknown}}))))
 
 (defn- handle-running-turn!
   "Issue one LLM round-trip and process its response. Returns one of:
@@ -1054,19 +1181,27 @@
         (swap! messages-atom conj (assistant-message content))
         (case stop-reason
           :end_turn
-          (do
-            ;; Carry the assistant's final text + invokeid so chart authors
-            ;; can route the answer back to another invocation (advisor /
-            ;; team pattern). Backward compatible: data was previously {}.
-            (let [final-text (->> content
-                                  (filter #(= :text (:type %)))
-                                  (map :text)
-                                  (apply str))]
-              (post-event-to-parent! parent-ctx on-end-turn-event
-                                     {:text final-text
-                                      :from (->id-str (:invokeid parent-ctx))}))
-            (transition-state! worker-state :awaiting-user)
-            :idle)
+          (let [final-text  (->> content
+                                 (filter #(= :text (:type %)))
+                                 (map :text)
+                                 (apply str))
+                base-data   {:text final-text
+                             :from (->id-str (:invokeid parent-ctx))}
+                verdict-schema (:verdict-schema params)
+                wrap        (maybe-run-verdict-and-finalize-idle!
+                             ctx params @messages-atom verdict-schema base-data)]
+            (cond
+              (:idle-data wrap)
+              (do
+                (post-event-to-parent! parent-ctx on-end-turn-event (:idle-data wrap))
+                (transition-state! worker-state :awaiting-user)
+                :idle)
+
+              (:error wrap)
+              (do
+                (post-error! (:error wrap) (or (:data wrap) {}))
+                (reset! worker-state :dying)
+                :error-and-die)))
 
           :tool_use
           (let [tool-use-blocks (find-tool-uses content)
@@ -1115,15 +1250,27 @@
               ;; on-end-turn-event per logical turn.
               (and @posted-event?
                    (not (#{:awaiting-user :dying} @worker-state)))
-              (let [final-text (->> content
-                                    (filter #(= :text (:type %)))
-                                    (map :text)
-                                    (apply str))]
-                (post-event-to-parent! parent-ctx on-end-turn-event
-                                       {:text final-text
-                                        :from (->id-str (:invokeid parent-ctx))})
-                (transition-state! worker-state :awaiting-user)
-                :idle)
+              (let [final-text     (->> content
+                                        (filter #(= :text (:type %)))
+                                        (map :text)
+                                        (apply str))
+                    base-data      {:text final-text
+                                    :from (->id-str (:invokeid parent-ctx))}
+                    verdict-schema (:verdict-schema params)
+                    wrap           (maybe-run-verdict-and-finalize-idle!
+                                    ctx params @messages-atom verdict-schema base-data)]
+                (cond
+                  (:idle-data wrap)
+                  (do
+                    (post-event-to-parent! parent-ctx on-end-turn-event (:idle-data wrap))
+                    (transition-state! worker-state :awaiting-user)
+                    :idle)
+
+                  (:error wrap)
+                  (do
+                    (post-error! (:error wrap) (or (:data wrap) {}))
+                    (reset! worker-state :dying)
+                    :error-and-die)))
 
               :else
               :continue))
