@@ -13,17 +13,18 @@
       local wins.
 
    3. The subjective overlay — `escapement.llm.ratings` — supplies
-      `:intelligence` and any other opinion keys, layered from
-      `.escapement.edn`. Merged into `info` so callers see one map, but the
-      objective tables stay opinion-free.
+      `:intelligence` and any other opinion keys. It is **not** a process
+      global and is **not** merged into `info`; it flows as an explicit
+      ratings value passed to `satisfies-policy?` (the only fn that needs
+      opinion). `info` and the objective accessors stay opinion-free.
 
    Pricing lives ONLY on the provider side. The id-only `pricing` arity is
    backward-compat and answers \"cheapest metered list price\". Unknown
    ids/providers return `nil` rather than throwing.
 
    There is no `intelligence` accessor: intelligence is just one key in
-   the ratings overlay, surfaced through `info` and filtered like any
-   other via `satisfies-policy?` — callers never name it directly."
+   the ratings overlay, filtered like any other via `satisfies-policy?`
+   (which takes ratings explicitly) — callers never name it directly."
   (:require
    [clojure.string :as str]
    [escapement.config :as config]
@@ -38,9 +39,10 @@
   "Intrinsic facts for ids the models.dev dump doesn't carry yet but that
    the project still wants reachable. Keep this as small as possible."
   {"claude-sonnet-4-7" {:context-tokens 1000000 :max-output-tokens 64000
-                        :vision? true :tool-call? true :reasoning? true
-                        :family "claude" :company "Anthropic"
-                        :name "Claude Sonnet 4.7"}})
+                         :vision? true :tool-call? true :reasoning? true
+                         :family "claude" :company "Anthropic"
+                         :name "Claude Sonnet 4.7"}
+   "deepseek-v4-flash" {:max-output-tokens 65536}})
 
 (def local-providers
   "Provider entries / model rows not present in the dump:
@@ -71,9 +73,6 @@
   (let [{:keys [providers]} (src/load-catalog)]
     (config/deep-merge providers local-providers)))
 
-;; Subjective overlay is config-driven; resolve+cache once per process.
-(def ^:private ratings-cache (delay (ratings/ratings (config/load-config))))
-
 (defn- prefix-lookup
   "Exact key match in `table`, else longest-prefix match so dated ids like
    `claude-opus-4-7-20260101` resolve to the family entry."
@@ -89,14 +88,18 @@
 ;; =============================================================================
 
 (defn info
-  "Intrinsic fact map for `model`, with the subjective ratings overlay
-   merged in (so `:intelligence` and any configured opinion keys appear),
-   or nil when the id is unknown to the objective catalog.
+  "Intrinsic *objective* fact map for `model` (context window, output cap,
+   vision, tool-call, company, …) drawn solely from the models.dev-backed
+   catalog tables — no ratings, no config, no disk. nil when the id is
+   unknown to the objective catalog.
+
+   The subjective ratings overlay is intentionally NOT merged here: it
+   flows as an explicit value through `satisfies-policy?`, not a process
+   global. Callers that need an opinion key pass ratings to the policy fn.
 
    Exact match first; otherwise longest-prefix match."
   [model]
-  (when-let [base (prefix-lookup models model)]
-    (merge base (prefix-lookup @ratings-cache model))))
+  (prefix-lookup models model))
 
 (defn context-window
   "Known INPUT context window (tokens) for `model`, or nil. Everything the
@@ -128,31 +131,81 @@
 ;; Declarative model policy
 ;; =============================================================================
 
+(def eligibility-facts
+  "The stable, published vocabulary of **objective** facts a chart node's
+   eligibility gate may reference. These come from the models.dev-backed
+   catalog (never ratings, never config). A gate clause may also reference
+   any *subjective* rating key supplied via `:llm/ratings` — those are
+   host-defined and free-form, so they are deliberately NOT enumerated
+   here; this constant lists only the objective half.
+
+   This is data + docs, not enforcement: nothing rejects an unknown key,
+   but this is the contract embedders should treat as supported.
+
+     | key                  | meaning                                  |
+     |----------------------|------------------------------------------|
+     | `:vision?`           | accepts image input (boolean)            |
+     | `:tool-call?`        | supports tool/function calling (boolean) |
+     | `:reasoning?`        | reasoning / extended-thinking (boolean)  |
+     | `:context-tokens`    | input context window, in tokens          |
+     | `:max-output-tokens` | per-response output cap, in tokens       |
+     | `:company`           | vendor / maker string                    |
+     | `:family`            | model family string                      |
+     | `:knowledge`         | knowledge-cutoff string                  |"
+  {:vision?           "accepts image input (boolean)"
+   :tool-call?        "supports tool/function calling (boolean)"
+   :reasoning?        "reasoning / extended-thinking (boolean)"
+   :context-tokens    "input context window, in tokens"
+   :max-output-tokens "per-response output cap, in tokens"
+   :company           "vendor / maker string"
+   :family            "model family string"
+   :knowledge         "knowledge-cutoff string"})
+
+(defn- merged-info
+  "Objective `info` for `model` with the subjective `ratings` overlay
+   merged on top (prefix-resolved against `ratings` so dated ids reach the
+   family entry). nil when the id is unknown to the objective catalog."
+  [model ratings]
+  (when-let [base (info model)]
+    (merge base (prefix-lookup (or ratings {}) model))))
+
 (defn satisfies-policy?
-  "True when `model`'s merged `info` satisfies `policy`. The policy is a
-   declarative map over *any* info key — objective (`:vision?`,
-   `:tool-call?`, `:context-tokens`, …) or subjective (`:intelligence`
-   and anything else a chart configures via `:llm/ratings`). The
-   invocation layer never names a specific key, so new opinion keys are
-   filterable with zero code change.
+  "True when `model` satisfies `policy`, where facts are resolved from the
+   objective catalog plus an explicit subjective `ratings` table merged on
+   top. The policy is a declarative map over *any* fact key — objective
+   (`:vision?`, `:tool-call?`, `:context-tokens`, … see
+   `eligibility-facts`) or subjective (anything the host configures via
+   `:llm/ratings`). The invocation layer never names a specific key, so
+   new opinion keys are filterable with zero code change.
+
+   `ratings` is a plain id → opinion-map value (the shape
+   `escapement.llm.ratings/ratings` returns). It is resolved locally with
+   the same longest-prefix logic the catalog uses for dated ids; an empty
+   `{}` means a subjective clause matches nothing.
 
    Clauses (all optional, all must hold):
-   * `:require {k v …}` — exact equality, `(= (info k) v)`.
-   * `:min     {k n …}` — numeric floor, `(>= (info k) n)`.
-   * `:max     {k n …}` — numeric ceiling, `(<= (info k) n)`.
+   * `:require {k v …}` — exact equality, `(= (fact k) v)`.
+   * `:min     {k n …}` — numeric floor, `(>= (fact k) n)`.
+   * `:max     {k n …}` — numeric ceiling, `(<= (fact k) n)`.
 
    An empty/nil policy admits everything (including ids the catalog
    doesn't know). A non-empty policy rejects an unknown id — there are no
-   facts to vouch for it."
-  [model policy]
-  (let [{:keys [require min max]} policy]
-    (if (and (empty? require) (empty? min) (empty? max))
-      true
-      (if-let [i (info model)]
-        (and (every? (fn [[k v]] (= (get i k) v)) require)
-             (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (>= x n)))) min)
-             (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (<= x n)))) max))
-        false))))
+   facts to vouch for it.
+
+   The 2-arg arity is a backward-compatible CLI seam: it resolves ratings
+   from the merged `.escapement.edn` on each call (no process global, no
+   `def`-of-`delay`). New callers thread ratings explicitly via 3-arg."
+  ([model policy]
+   (satisfies-policy? model policy (ratings/ratings (config/load-config))))
+  ([model policy ratings]
+   (let [{:keys [require min max]} policy]
+     (if (and (empty? require) (empty? min) (empty? max))
+       true
+       (if-let [i (merged-info model ratings)]
+         (and (every? (fn [[k v]] (= (get i k) v)) require)
+              (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (>= x n)))) min)
+              (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (<= x n)))) max))
+         false)))))
 
 ;; =============================================================================
 ;; Provider accessors

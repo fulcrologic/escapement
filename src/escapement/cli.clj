@@ -52,6 +52,7 @@
    [com.fulcrologic.statecharts :as sc]
    [escapement.config :as config]
    [escapement.debug.controller :as dbg]
+   [escapement.llm.ratings :as ratings]
    [escapement.invocation.human-input :as human-input]
    [escapement.llm.providers :as providers]
    [escapement.runner :as runner]
@@ -486,6 +487,17 @@
         backend-info  (make-backend opts)
         backend       (:backend backend-info)
         backend-default-models (:default-models backend-info)
+        ;; Resolve the subjective ratings table + fail-closed flag ONCE
+        ;; from the merged `.escapement.edn` at startup, then inject them
+        ;; as explicit values into the invocation context (same code path
+        ;; the lib facade — Step 4 — feeds from injected `:config`). The
+        ;; processor no longer relies on the Step-1 disk-resolving 2-arg
+        ;; `satisfies-policy?` seam.
+        run-cfg          (config/load-config)
+        catalog-ratings  (ratings/ratings run-cfg)
+        eligibility-strict? (boolean
+                             (or (:llm/eligibility-strict? run-cfg)
+                                 (get-in run-cfg [:llm :eligibility-strict?])))
         ;; Load the chart FIRST. Its require-graph may include namespaces
         ;; whose top-level forms call
         ;; `(tp/register! escapement.tools.builtin/default-registry ...)`.
@@ -533,6 +545,8 @@
                          :session-dir     session-dir
                          :backend         backend
                          :backend-default-models backend-default-models
+                         :catalog-ratings catalog-ratings
+                         :eligibility-strict? eligibility-strict?
                          :tool-registry   tool-registry
                          :human-renderer  human-renderer
                          :initial-data    initial-data

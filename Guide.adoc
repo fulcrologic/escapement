@@ -108,17 +108,19 @@ Two ways for a chart to influence the auto-fallback list:
   explicit pick(s). When set, the auto-list is *not* consulted; only
   your strings are tried (with the same `:down`-marking fallback when
   you give a multi-element list).
-* `:model-policy {...}` on the `:llm-conversation` node — a declarative
-  filter over the auto-list (see <<params-fn,the `params-fn` map>>).
-  It accepts `:require`/`:min`/`:max` clauses over *any* model fact in
-  the catalog — objective (`:vision?`, `:tool-call?`,
-  `:context-tokens`, …) or subjective (`:intelligence` plus any
-  opinion key defined via `:llm/ratings`). Useful when a state
-  genuinely requires, say, vision plus Sonnet-class reasoning. If the
-  policy excludes every reachable model the unfiltered list is used as
-  a best-effort fallback and an `:llm/model-policy-empty` warning is
-  emitted to the transcript. The legacy `:intelligence N` shorthand
-  still works and is folded into the policy as `:min {:intelligence N}`.
+* `:needs {...}` on the `:llm-conversation` node — a declarative
+  **eligibility gate** over the auto-list (see <<params-fn,the
+  `params-fn` map>>). A flat `fact → constraint` map over *any* model
+  fact — objective (`:vision?`, `:tool-call?`, `:context-tokens`, …)
+  or subjective (`:intelligence` plus any opinion key defined via
+  `:llm/ratings`). Useful when a state genuinely requires, say, vision
+  plus Sonnet-class reasoning. The gate **filters**; it never reorders
+  — ranking is the sole job of `:llm/preferences`. If it excludes every
+  reachable model the unfiltered list is used as a best-effort fallback
+  and an `:llm/model-policy-empty` warning is emitted to the transcript
+  (the lib facade can opt into fail-closed instead; see
+  <<hosted-config>>). The legacy `:intelligence N` shorthand still
+  works and is folded into the gate as `:needs {:intelligence [:>= N]}`.
 
 ==== Manual configuration
 
@@ -568,6 +570,13 @@ makes `tell-llm` work).
   this as the first user turn. Otherwise it starts in `:awaiting-user` and
   parks until a `:llm.user-message` event arrives via `tell-llm`.
 
+`:initial-messages`::
+  Optional vector of pre-built message maps to seed the conversation
+  with (e.g. a multi-block first user message carrying an `:image`, or a
+  short prior exchange). When non-empty it takes precedence over
+  `:initial-user-message` and the worker starts in `:running`. Use it
+  when the opening turn is more than a single plain-text string.
+
 `:model`::
   Optional string passed through to the backend. Examples:
   `"claude-opus-4-7"`, `"claude-sonnet-4-6"`, `"claude-haiku-4-5"`,
@@ -587,36 +596,70 @@ makes `tell-llm` work).
   `:model`, an explicit list disables the auto-detected default
   fallback list — only the strings you name are tried.
 
-`:model-policy`::
-  Optional declarative filter over the auto-detected fallback list.
-  Only meaningful when neither `:model` nor `:models` is set. The map
-  takes three optional clauses, all of which must hold for a model to
-  survive:
+`:needs`::
+  Optional **eligibility gate** over the auto-detected fallback list —
+  the ergonomic chart-node surface. Only meaningful when neither
+  `:model` nor `:models` is set. It is a **flat** `fact → constraint`
+  map (one nesting level); each entry states its own rule by shape:
 +
 [source,clojure]
 ----
-{:require {:vision? true}        ; exact equality on a model fact
- :min     {:intelligence 8}      ; numeric floor
- :max     {:context-tokens 200000}} ; numeric ceiling
+:needs {:tool-call?        true        ; bare value ⇒ exact equality
+        :clojure           [:>= 7]     ; [:>= n]    ⇒ inclusive floor
+        :context-tokens    [:>= 200000]
+        :max-output-tokens [:<= 64000]} ; [:<= n]   ⇒ inclusive ceiling
 ----
 +
-  Keys may be any fact in the catalog (`escapement.llm.catalog`):
-  objective ones from the bundled models.dev data (`:vision?`,
-  `:tool-call?`, `:reasoning?`, `:context-tokens`, `:max-output-tokens`,
-  …) or subjective ones supplied via `:llm/ratings` in
-  `.escapement.edn` (`:intelligence` plus any opinion key you define —
-  e.g. `:clojure`, `:tool-calling`). The invocation layer never names a
-  specific key, so a brand-new opinion dimension is filterable with no
-  code change. Use this to say "this state needs vision and at least
-  Sonnet-class reasoning; if you only have a cheap text model wired up,
-  complain rather than silently downgrade." If the policy removes every
-  candidate, the unfiltered list is used as a best-effort fallback and
-  an `:llm/model-policy-empty` warning (carrying the resolved `:policy`
-  and the rejected `:default-models`) is emitted to the transcript so
-  you can spot the gap.
+  Only the two comparators `:>=` and `:<=` are accepted (there is
+  deliberately no `:>` / `:<` / `:=`); a bare value is exact equality.
+  All clauses must hold (logical AND). Empty/absent `:needs` admits
+  everything. A malformed entry (unknown operator, not a 2-element
+  `[op n]` pair, non-numeric bound) throws an `ExceptionInfo` naming
+  the offending key. `:needs` is translated at the invocation boundary
+  by `escapement.llm.needs/needs->policy` into the canonical
+  `{:require {…} :min {…} :max {…}}` policy the catalog consumes.
++
+  Keys range over **one uniform keyspace** mixing two sources (the
+  invocation layer never names a specific key, so a brand-new dimension
+  is filterable with no code change):
++
+  * **Documented objective facts** — the stable, enumerated vocabulary
+    published as `escapement.llm.catalog/eligibility-facts`:
++
+[cols="1,3",options="header"]
+|===
+| Key | Meaning
+| `:vision?` | accepts image input (boolean)
+| `:tool-call?` | supports tool/function calling (boolean)
+| `:reasoning?` | reasoning / extended-thinking (boolean)
+| `:context-tokens` | input context window, in tokens
+| `:max-output-tokens` | per-response output cap, in tokens
+| `:company` | vendor / maker string
+| `:family` | model family string
+| `:knowledge` | knowledge-cutoff string
+|===
++
+  * **Subjective ratings** — any host-defined key from `:llm/ratings`
+    (`:intelligence`, `:clojure`, `:ux`, `:tier`, …). These mix into
+    the *same* keyspace; they are deliberately not enumerated (free-form,
+    host-owned). With no ratings configured, a subjective clause matches
+    nothing.
++
+  The gate **filters** the preference-ordered candidate list; it
+  **never reorders** — *all* ranking comes from the sorted
+  `:llm/preferences`. A model rated `:clojure 7` and one rated
+  `:clojure 10` are interchangeable under `[:>= 6]`; preference order
+  alone decides which survivor runs. If the gate removes every
+  candidate the default is **fail-open** (the unfiltered list is used
+  as a best-effort fallback and an `:llm/model-policy-empty` warning,
+  carrying the resolved `:policy` and the rejected `:default-models`,
+  is emitted to the transcript). The lib facade can opt into
+  **fail-closed** via `:config :llm/eligibility-strict? true` — see
+  <<hosted-config>>.
 +
   The legacy `:intelligence N` key is still accepted on the node and is
-  equivalent to `:model-policy {:min {:intelligence N}}`.
+  equivalent to `:needs {:intelligence [:>= N]}`.
+
 
 `:max-tokens`::
   **Not a chart param.** The per-turn output cap is resolved automatically
@@ -630,8 +673,9 @@ makes `tell-llm` work).
   with it.
 
 `:stream?`::
-  Optional boolean. When `true` AND the backend implements streaming (the
-  bundled Anthropic/z.ai api backend does), the turn is issued over SSE and
+  Optional boolean. When `true` AND the backend implements streaming (both
+  bundled backend families do: the Anthropic/z.ai api backend and the
+  OpenAI/OpenRouter backend), the turn is issued over SSE and
   incremental output is published as `:llm/delta` transcript events
   (`{:type :text-delta|:thinking-delta :text "…" :model … :invokeid …}`)
   while the turn is still in flight — relay these to a UI for live output.
@@ -1018,7 +1062,7 @@ dump doesn't carry yet, and a subjective `:llm/ratings` overlay from
 
 (cat/info "claude-opus-4-7")
 ;; => {:context-tokens 200000 :max-output-tokens 64000 :vision? true
-;;     :tool-call? true :intelligence 9 ...}  ; objective + ratings merged
+;;     :tool-call? true ...}  ; OBJECTIVE only — no ratings, no config
 
 (cat/context-window "claude-sonnet-4-6")          ; => 200000
 (cat/max-output-tokens "claude-haiku-4-5")        ; => 32000
@@ -1026,14 +1070,24 @@ dump doesn't carry yet, and a subjective `:llm/ratings` overlay from
 (cat/pricing :anthropic "claude-opus-4-7")        ; => {:input .. :output ..}
 (cat/pricing "claude-opus-4-7")                   ; cheapest metered list price
 (cat/satisfies-policy? "claude-opus-4-7"
-                       {:min {:intelligence 8}})  ; => true
+                       {:min {:intelligence 8}}
+                       {"claude-opus-4-7" {:intelligence 9}}) ; => true
 ----
 
-There is no `intelligence` accessor: intelligence is just one key in
-the subjective ratings overlay, surfaced through `info` and filtered
-like any other fact via `satisfies-policy?` (this is what backs the
-`:model-policy` node option). Subscription providers (`:z-ai-plan`,
-`:ollama`, `:openai-codex`) report zero marginal per-token cost.
+`cat/info` and the objective accessors are **opinion-free**: the
+subjective ratings overlay is no longer merged into `info` and the
+catalog carries no process-global ratings cache. Intelligence is just
+one key in that overlay, filtered like any other fact via
+`satisfies-policy?` — whose 3-arity takes the ratings table as an
+explicit argument (an empty `{}` ⇒ a subjective clause matches
+nothing). The 2-arity is a backward-compatible CLI seam that resolves
+ratings from `.escapement.edn` per call. `cat/eligibility-facts` is
+the stable, published vocabulary of objective gate keys (`:vision?`,
+`:tool-call?`, `:reasoning?`, `:context-tokens`, `:max-output-tokens`,
+`:company`, `:family`, `:knowledge`); this backs the `:needs` node
+option.
+Subscription providers (`:z-ai-plan`, `:ollama`, `:openai-codex`)
+report zero marginal per-token cost.
 
 Resolution is exact-match-first, then longest-prefix. Dated ids like
 `claude-opus-4-7-20260101` resolve to the `claude-opus-4-7` family
@@ -1146,7 +1200,7 @@ large ceiling (64K+), so most agent turns (short reasoning + a tool call
 back to the api backend's wire default of **8192**.
 
 To give a state more output room, **select a model with a larger output
-limit** (via `:model`, `:model-policy`, or `:llm/preferences`) — there is
+limit** (via `:model`, `:needs`, or `:llm/preferences`) — there is
 no per-state cap param to raise. If a state needs whole-file authoring or
 long markdown analysis, pick a high-output model for it. With extended
 thinking enabled, the resolved cap must accommodate BOTH the thinking
@@ -1896,8 +1950,11 @@ own invokeid equals `:reply-to`.
 [[backends]]
 == LLM backends
 
-The `LLMBackend` protocol is one method, `send-turn`. Defined in
-`src/escapement/llm/protocol.clj`. Four implementations ship.
+The core `LLMBackend` protocol is one method, `send-turn`. Defined in
+`src/escapement/llm/protocol.clj`, which also defines an optional
+`StreamingLLMBackend` (`stream-turn`) and the `send-turn*` capability
+dispatcher (see the SSE token streaming subsections below). Four
+implementations ship.
 
 === `escapement.llm.api` — Anthropic-compatible HTTP
 
@@ -1956,12 +2013,17 @@ inline base64 or a URL the provider fetches server-side:
 {:type :image :source {:type :url :url "https://…/ref.png"}}
 ----
 
-The api backend serializes this to the Messages API `image`/`source`
-wire shape and parses it back symmetrically; it survives a streamed turn
-identically. This is a **protocol-level capability** — it is consumed by
-any code constructing a `Request`/`Message` (e.g. a custom invocation or
-a chart that builds user content directly). Backends without vision
-support should reject or drop the block explicitly rather than silently.
+The api (Anthropic) backend serializes this to the Messages API
+`image`/`source` wire shape and parses it back symmetrically; it
+survives a streamed turn identically. The OpenAI/OpenRouter backend
+serializes the same `:image` block to the Chat Completions multimodal
+`image_url` content shape (a `:url` source passes through verbatim; a
+`:base64` source is encoded as a `data:` URI), so vision works on either
+backend family without invocation-code changes. This is a
+**protocol-level capability** — it is consumed by any code constructing
+a `Request`/`Message` (e.g. a custom invocation or a chart that builds
+user content directly). Backends without vision support should reject or
+drop the block explicitly rather than silently.
 Use it for reference-image → description pipelines without changing
 invocation code.
 
@@ -2027,6 +2089,22 @@ CLI auto-detect: `OPENAI_API_KEY` routes to the OpenAI base URL,
 `OPENROUTER_API_KEY` routes through the OpenAI backend at OpenRouter's
 endpoint. `OPENAI_MODEL` / `OPENROUTER_MODEL` env vars override the default
 model strings.
+
+==== SSE token streaming
+
+Like the Anthropic `api` backend, the OpenAI backend also implements the
+optional `escapement.llm.protocol/StreamingLLMBackend` (`stream-turn`).
+It uses the Chat Completions SSE wire (`"stream": true` with
+`stream_options.include_usage`), accumulates the `choices[].delta`
+content/`tool_calls` fragments and the trailing usage chunk, then
+finalizes through the *same* `openai-json->response` translator the
+buffered path uses — so a streamed turn yields a `Response` structurally
+identical (blocks + usage) to a buffered one. Charts opt in per state
+with `:stream?` (see <<params-fn>>); incremental content surfaces as
+`:llm/delta` transcript events. Each delta may carry an optional
+cumulative `:usage` key for live UX — OpenAI only emits usage on the
+final chunk, so most deltas carry none; the finalized `Response` usage
+remains the billing source of truth.
 
 === `escapement.llm.openai-codex` — ChatGPT subscription via OAuth
 
@@ -2136,6 +2214,17 @@ Matchers may be a regex, a set of exact-match strings, or a predicate
 `(fn [model-string] boolean)`. Routes are tried in order; first match
 wins. If no route matches, `:default-backend` handles the request, or an
 `ex-info` is thrown when no default is configured.
+
+`new-backend` returns a dispatcher that **also implements
+`StreamingLLMBackend`** iff every selectable sub-backend (all routed
+backends plus any `:default-backend`) supports streaming, so the
+request-less `protocol/streaming?` faithfully reflects the sub-backend
+that would be picked. When it streams, `stream-turn` selects the
+sub-backend via the *same* routing logic as `send-turn` (no duplicate
+selection, no re-counting) and forwards deltas + the final Response
+through. If a mixed route set has any non-streaming sub-backend the
+dispatcher is non-streaming and callers transparently get buffered
+turns.
 
 The CLI assembles this dispatcher automatically when more than one
 credential is available — see <<cli>> for the default route table.
@@ -2444,16 +2533,41 @@ jq -c 'select(.event=="checkpoint/written") | .seq' \
 `src/escapement/runner.clj` exposes `run!`. Required keys:
 `:chart`, `:session-id`, `:transcript-path`, `:checkpoint-dir`. Optional:
 `:backend`, `:tool-registry`, `:initial-data`, `:resume?`, `:trace?`,
-`:max-iterations` (default 100000), `:quiescent-sleep-ms` (default 50).
+`:max-iterations` (default 100000), `:quiescent-sleep-ms` (default 50),
+plus these additive keys (all default to prior behavior when omitted):
+
+* `:store` — working-memory store override, threaded to
+  `engine.env/new-env`; `nil` ⇒ the default file-backed store
+  (CLI behavior unchanged).
+* `:session-dir` — artifact/session directory threaded to
+  `engine.env/new-env` as `:escapement/session-dir` (backs
+  `<session-dir>/artifacts/<name>`); omitted ⇒ the engine default.
+* `:run-id` — opaque correlation id; when supplied it is echoed
+  (stringified) on the `:runner/started` transcript event.
+* `:cancel` — a host-supplied cancel handle: an atom (or any `IDeref`)
+  whose truthy current value, or a promise/future/delay whose
+  *delivered* value is truthy, requests a prompt abort. An undelivered
+  promise never blocks the pump.
+
+`run!` returns a summary map that now also carries `:status` —
+`:done` on normal quiescence, `:aborted` if `:cancel` fired or
+`:max-iterations` was hit. The same `:status` is included on the
+`:runner/done` transcript event.
 
 The pump loop:
 
-1. Drain currently-deliverable events through the processor.
-2. After each event, save working memory to the checkpoint store.
-3. When the queue is empty, ask each `InvocationProcessor` how many live
-   workers it has. If zero, terminate. Otherwise sleep `:quiescent-sleep-ms`
-   and try again. This is what lets the chart park while the LLM is
-   thinking.
+1. **At the top of each iteration (a safe boundary between events,
+   never mid-transcript- or mid-checkpoint-write), check `:cancel`.**
+   If it is requesting abort, emit `:runner/aborted`
+   `{:reason :cancelled}` and stop with `:status :aborted`. (The
+   pre-existing max-iterations bound emits the same `:runner/aborted`
+   event with `{:reason :max-iterations}`.)
+2. Drain currently-deliverable events through the processor.
+3. After each event, save working memory to the checkpoint store.
+4. When the queue is empty, ask each `InvocationProcessor` how many live
+   workers it has. If zero, terminate with `:status :done`. Otherwise
+   sleep `:quiescent-sleep-ms` and try again. This is what lets the
+   chart park while the LLM is thinking.
 
 [[cli]]
 === CLI
@@ -2630,7 +2744,10 @@ Schema (validated with Malli on load; unknown keys are rejected):
  :llm/ratings   {"claude-opus-4-7" {:intelligence 10 :clojure 10}}}
  ;; ^ subjective opinion overlay; there is no built-in opinion, so the
  ;;   table comes entirely from config. Any key here becomes filterable
- ;;   via :model-policy. Dated ids resolve to the family entry.
+ ;;   via a node's :needs gate. Dated ids resolve to the family entry.
+ ;; :llm/eligibility-strict? false}
+ ;; ^ honored by the hermetic lib facade only (see Hosted library):
+ ;;   true ⇒ fail-closed when a :needs gate empties; default fail-open.
 ----
 
 ==== Viewers — opening artifacts and the live chart URL
@@ -2927,9 +3044,11 @@ Prompts and token caps are deliberately tiny.
   (content-addressed disk cache), and the model
   catalog trio — `catalog_source` (loads the bundled
   `models-api.json` models.dev dump), `catalog` (the three-layer
-  objective+local+ratings model facts and `:model-policy` filtering),
-  `preferences` (`:llm/preferences` ordering), and `ratings`
-  (`:llm/ratings` subjective overlay).
+  objective+local model facts and `satisfies-policy?` filtering with
+  the published `eligibility-facts` vocabulary), `needs` (the flat
+  `:needs` → canonical-policy translation), `preferences`
+  (`:llm/preferences` ordering), and `ratings` (`:llm/ratings`
+  subjective overlay, threaded explicitly — no process global).
 
 `src/escapement/tools/`::
   `protocol` (`Tool` + registry + `dispatch`) and `builtin` (the ship
@@ -2948,7 +3067,7 @@ Prompts and token caps are deliberately tiny.
   Demo charts: `hello`, `scan`, `parallel_demo`, `iterate` (the four
   walkthrough exemplars covered in <<authoring>>), plus `ask` (a minimal
   interactive `:human-input` demo), `clj_refactor` (declarative
-  `:model-policy` model auto-selection gated on per-dimension ratings),
+  `:needs` model auto-selection gated on per-dimension ratings),
   and `artifacts_demo` (the
   `capture-llm-output` / `render-template` pipeline used in
   <<multi-agent>>).
@@ -2956,17 +3075,22 @@ Prompts and token caps are deliberately tiny.
 `src/escapement/`::
   `transcript` (single-writer JSONL sink), `runner` (top-level pump loop),
   `cli` (bb entry), `prompts` (file-based prompt loading with
-  `{{VAR}}` substitution).
+  `{{VAR}}` substitution), `lib` (the hermetic <<hosted-library,hosted
+  library>> facade), and `lib/event_sink` (the normalized public-event
+  adapter).
 
 `demos/`::
   Larger, multi-state worked examples that live outside `src/` because
   they bring their own non-Clojure artifacts (prompt markdown, sample
-  input EDN, READMEs). The current resident is `demos/unit_test/` — a
-  parallel chart that drives an LLM through behaviors → abstraction →
-  (write|gap-analysis) → (critique|patch) → refine to author and seal
-  `fulcro-spec` tests for a target function, with a sibling REPL-manager
-  region that establishes a project nREPL via shared `:nrepl-port` data
-  + a single `:repl/available` event.
+  input EDN, READMEs). `demos/unit_test/` — a parallel chart that
+  drives an LLM through behaviors → abstraction → (write|gap-analysis)
+  → (critique|patch) → refine to author and seal `fulcro-spec` tests
+  for a target function, with a sibling REPL-manager region that
+  establishes a project nREPL via shared `:nrepl-port` data + a single
+  `:repl/available` event. `demos/lib/` — a runnable
+  `escapement.lib/run` embedding example (`embed_example.clj` +
+  `README.md`) that wires explicit `:credentials`/`:config` and the
+  event-sink adapter.
 
 `test/`::
   Unit tests (fulcro-spec). Run with `bb test`.
@@ -2974,6 +3098,451 @@ Prompts and token caps are deliberately tiny.
 `bb_test/`::
   Babashka-runnable scripts: sanity checks and live smoke runs.
 
+
+[[hosted-library]]
+== Hosted library
+
+Escapement supports three usage modes:
+
+CLI::
+  `escapement run …` — see <<quickstart>>. Unchanged by this slice.
+
+Hosted library::
+  `escapement.lib/run` — embed Escapement in your own JVM/bb process.
+  This section.
+
+Future daemon direction::
+  A long-lived, multi-session HTTP/socket service is an intended
+  *future* direction (process-resident run registry, remote cancel,
+  streamed events over the wire). It is **deferred — not in this
+  slice**. No daemon namespace, endpoint, or API exists yet; the shape
+  above is described only so the facade design does not foreclose it.
+  Do not depend on a daemon API; there is none.
+
+=== `escapement.lib/run`
+
+`escapement.lib/run` is a thin, additive facade over the runner. It
+validates its single option map against a **closed Malli schema**
+(unknown keys are rejected — invalid options throw `ExceptionInfo`
+with `ex-data` `{:errors <humanized> :provided-keys [...]}` and the
+chart is never run), generates a stable `:run-id`, defaults the
+transcript + checkpoint to a fresh temp dir when omitted, threads an
+optional `:store` through to the engine env, and raises log min-level
+to `:warn` for the run (quiet by default). It is **hermetic**: it
+reads no `.escapement.edn` and no credential env var — providers and
+config are injected as explicit data via `:credentials` / `:config`
+(see <<hosted-config>>).
+
+Companion vars/fns in the same namespace:
+
+* `escapement.lib/Options` — the closed Malli schema value.
+* `(escapement.lib/validate-options opts)` — returns `nil` when valid,
+  a humanized error map otherwise. No side effects, never runs a chart.
+
+==== Closed option schema (`escapement.lib/Options`)
+
+`[:map {:closed true} …]`. Only these keys are accepted:
+
+[cols="1,1,1,2",options="header"]
+|===
+| Key | Optional? | Default | Notes
+| `:chart` | **required** | — | statechart value (from `chart/statechart`)
+| `:session-id` | **required** | — | session id (keyword / string / uuid)
+| `:credentials` | **required** | — | ordered vector of provider descriptor maps; the backend is assembled from these hermetically (no env/disk). See <<hosted-config>>
+| `:config` | optional | `{}` ⇒ empty ratings + default preferences | `.escapement.edn`-shaped map (`:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`); never a disk fallback. See <<hosted-config>>
+| `:backend` | optional | none | an `LLMBackend`; an escape hatch that wins verbatim over `:credentials` assembly
+| `:tool-registry` | optional | none | tool registry atom. **Required in practice for any chart containing an `:llm-conversation`**: the facade registers the LLM invocation processor only when *both* a backend (from `:credentials`) and a `:tool-registry` are present — omit it and the invocation cannot start (`No processor for :llm-conversation`, chart quiesces early). Pass `(escapement.tools.protocol/new-registry)` for an empty registry or `(escapement.tools.builtin/new-builtin-registry)` for one with the fs/shell/repl built-ins.
+| `:initial-data` | optional | none | data-model seed (`[:maybe :map]`)
+| `:transcript-tap` | optional | none | `(fn [event])` — receives every transcript row in-process
+| `:on-env-ready` | optional | none | `(fn [env])` — called once env is built, before chart start
+| `:transcript-path` | optional | `<tmp>/transcript.jsonl` | when omitted, a fresh temp dir is created
+| `:checkpoint-dir` | optional | `<tmp>/checkpoints` | when omitted, a fresh temp dir is created
+| `:session-dir` | optional | `<tmp>` | artifact/session dir (`<session-dir>/artifacts/<name>`); defaults to the same temp dir
+| `:store` | optional | engine default file store | threaded to `engine.env/new-env`
+| `:quiet?` | optional | `true` | suppress statecharts-impl DEBUG/INFO stderr (restored after the run)
+| `:cancel` | optional | none | atom/volatile/ref/agent (truthy current value) **or** delivered promise/future/delay; truthy ⇒ abort
+| `:chart-id` | optional | runner default | passthrough
+| `:resume?` | optional | `false` | passthrough
+| `:trace?` | optional | `false` | passthrough
+| `:max-iterations` | optional | runner default (100000) | passthrough
+| `:quiescent-sleep-ms` | optional | runner default (50) | passthrough
+|===
+
+A single temp dir (`escapement-run-…`) is created **only if**
+`:transcript-path` *or* `:checkpoint-dir` is missing; the missing
+one(s) are placed inside it. Supplying both explicitly creates no
+temp dir.
+
+==== Result map
+
+`run` returns the runner summary map with these keys:
+
+[cols="1,1,3",options="header"]
+|===
+| Key | Type | Value
+| `:run-id` | string | generated 36-char UUID string, stable within the run, unique across runs
+| `:status` | keyword | `:done` (normal quiescence) or `:aborted` (cancel fired, or max-iterations hit)
+| `:transcript` | string | transcript path actually used (temp or explicit)
+| `:checkpoint-dir` | string | checkpoint dir actually used (temp or explicit)
+| `:session-dir` | string | session/artifact dir actually used (temp or explicit)
+| `:session-id` | any | echoed session id
+| `:final-config` | vector | final statechart configuration
+| `:env` | map | the live `::sc/env`
+|===
+
+`:run-id` is also emitted (stringified) on the `:runner/started`
+transcript event, so a host can correlate logs by it. Hosts read
+`(:status result)`; `(= :aborted (:status result))` means the run was
+cancelled or hit the iteration bound. Omitting `:cancel` always yields
+`:status :done` for a normal run.
+
+==== Cancellation
+
+Pass `:cancel` an atom/volatile/ref/agent (cancels when its current
+value is truthy) **or** a promise/future/delay (cancels only when
+delivered *and* truthy — an un-delivered promise never aborts and
+never blocks the pump). When fired, the run terminates at a safe
+pump-loop boundary *between* events (never mid-transcript- or
+mid-checkpoint-write, so no torn row), emits a `:runner/aborted`
+`{:reason :cancelled}` lifecycle row, then still falls through to a
+clean `:runner/done` `{:status :aborted}`. The pre-existing
+max-iterations abort is the same `:runner/aborted` event with
+`{:reason :max-iterations}`.
+
+[[hosted-config]]
+=== Hermetic configuration and credentials
+
+The CLI sniffs credential env vars and walks up the filesystem for
+`.escapement.edn`. The hosted facade does **neither**: `escapement.lib/run`
+never reads disk and never reads env. A host (e.g. a webapp) configures
+providers, preference order, and ratings **once** at startup and injects
+them as explicit data on **every** invocation — like passing a DB pool,
+not like sourcing a dotfile. This makes a run fully reproducible per
+request, with no ambient state and no cross-thread global: two `run`
+calls in one process with different `:config` ratings resolve the
+`:needs` gate independently.
+
+==== `:credentials` — required provider descriptors
+
+`:credentials` is a **required** key (a closed-schema violation if
+omitted): an ordered vector of provider descriptor maps. Each names a
+`:provider` keyword (matching `escapement.llm.providers`) plus the
+env-free secrets/overrides that provider needs:
+
+[source,clojure]
+----
+;; app-lifetime, built once at startup
+(def llm-credentials
+  [{:provider :z-ai-plan :subscription true}
+   {:provider :anthropic :api-key (System/getenv "ANTHROPIC_API_KEY")}
+   {:provider :openai    :api-key (System/getenv "OPENAI_API_KEY")}])
+----
+
+Per-descriptor keys: `:provider` (required keyword), and any of
+`:api-key`, `:base-url`, `:model`, `:default-model`, `:auth-mode`,
+`:subscription`. The backend is assembled from this vector via
+`escapement.llm.providers/build-injected-credentials-backend` (zero env,
+zero disk), ordered by the resolved preference list. An explicit
+`:backend` is an escape hatch that wins verbatim over `:credentials`
+assembly.
+
+==== `:config` — the `.escapement.edn`-shaped map
+
+`:config` is **optional** and mirrors the `.escapement.edn` shape
+(see <<project-config>>) — but read from the host, never disk:
+
+[source,clojure]
+----
+(def llm-config
+  {:llm/preferences                       ; THE ranking — sorted, priority-first
+   [{:provider :z-ai-plan :model "glm-5.1"}
+    {:provider :anthropic :model "claude-opus-4-7"}
+    {:provider :openai    :model "gpt-5"}]
+
+   :llm/ratings                           ; subjective opinion — host-owned scale
+   {"glm-5.1"         {:clojure 7 :ux 5}
+    "claude-opus-4-7" {:clojure 9 :ux 4}
+    "gpt-5"           {:clojure 5 :ux 8}}
+
+   :llm/eligibility-strict? true})        ; webapp: error a node, never run wrong model
+----
+
+Absent `:config` ⇒ an empty ratings table (`{}`) and the built-in
+`escapement.llm.preferences/default-preferences` order — never a disk
+fallback.
+
+==== Three orthogonal pieces, each with one job
+
+`:llm/preferences` — **the only ranking.** A sorted vector of
+`{:provider P :model M}` pairs, highest priority first. Nothing else
+reorders. Absent ⇒ `default-preferences`.
+
+The `:needs` gate (a chart-node `params-fn` key; see
+<<params-fn,`:needs`>>) — **filters, never ranks.** It removes
+ineligible models from the preference-ordered list; the survivors stay
+in preference order. A model rated `:clojure 7` and one rated
+`:clojure 10` are interchangeable under `[:>= 6]` — preference order
+alone decides which survivor runs. Do **not** expect "higher rating
+wins."
+
+`:llm/ratings` — **subjective, optional.** A host-owned `id → opinion`
+table whose keys (`:clojure`, `:ux`, `:tier`, …) mix into the same
+keyspace as the objective `eligibility-facts`. With nothing configured,
+a subjective `:needs` clause matches nothing.
+
+==== `:needs` syntax and the fact vocabulary
+
+At a chart node the `:needs` key holds a **flat** `fact → constraint`
+map (one nesting level). Each entry states its own rule by shape:
+
+* bare value `v` ⇒ exact equality
+* `[:>= n]` ⇒ inclusive numeric floor
+* `[:<= n]` ⇒ inclusive numeric ceiling
+
+Only `:>=` and `:<=` are accepted — there is deliberately no `:>` /
+`:<` / `:=`. All clauses must hold (logical AND); empty/absent `:needs`
+admits everything; a malformed entry throws an `ExceptionInfo` naming
+the offending key. The keyspace mixes two sources uniformly:
+
+* **Documented objective facts** — the stable vocabulary published as
+  `escapement.llm.catalog/eligibility-facts`: `:vision?`,
+  `:tool-call?`, `:reasoning?` (booleans), `:context-tokens`,
+  `:max-output-tokens` (token counts), `:company`, `:family`,
+  `:knowledge` (strings). "Min context window 20000" is just
+  `:context-tokens [:>= 20000]` — the fact keys *are* the vocabulary,
+  no special syntax.
+* **Subjective rating keys** — any key the host invents in
+  `:llm/ratings`. These mix into the *same* keyspace; the invocation
+  layer never special-cases a key.
+
+`:needs` is the ergonomic eligibility-gate surface. See
+<<params-fn,the `params-fn` map>> for the full reference.
+
+==== Fail-open vs fail-closed
+
+When the `:needs` gate filters out *every* candidate, the default is
+**fail-open**: the run proceeds on the unfiltered preference list and a
+`:llm/model-policy-empty` transcript event records the gap (the CLI
+bias — keep running). A webapp usually wants the opposite: setting
+`:config :llm/eligibility-strict? true` makes the lib path
+**fail-closed** — the node errors rather than silently run a model the
+gate rejected.
+
+==== Reference example
+
+A host configures `llm-credentials` / `llm-config` (above) once at
+startup. A two-node chart expresses a different `:needs` gate per node,
+mixing an objective fact with a subjective rating:
+
+[source,clojure]
+----
+(ns escapement.examples.skill-routed
+  (:require
+   [com.fulcrologic.statecharts.chart :as chart]
+   [com.fulcrologic.statecharts.elements :refer [state transition final]]
+   [escapement.chart.helpers :as h]))
+
+(def agent
+  (chart/statechart
+   {:initial :refactor}
+
+   ;; NODE 1 — Clojure refactor. :needs mixes an OBJECTIVE fact
+   ;; (:tool-call?, from models-api.json) with a SUBJECTIVE rating
+   ;; (:clojure, from :llm/ratings). Filter, not rank.
+   (state {:id :refactor}
+          (h/llm-conversation
+           {:id        "refactor"
+            :params-fn (fn [_env _data]
+                         {:system "You are a Clojure refactoring agent."
+                          :needs  {:tool-call? true
+                                   :clojure    [:>= 7]}
+                          :real-tools []
+                          :allowed-events [{:event :refactor-done}]
+                          :initial-user-message
+                          "Rename `foo` to `bar` across src/, then emit :refactor-done."})})
+          (transition {:event :refactor-done :target :design-review}))
+
+   ;; NODE 2 — Design review. :needs mixes the OBJECTIVE fact :vision?
+   ;; with the SUBJECTIVE rating :ux. Same chart, different gate.
+   (state {:id :design-review}
+          (h/llm-conversation
+           {:id        "design-review"
+            :params-fn (fn [_env _data]
+                         {:system "You are a UX/design reviewer."
+                          :needs  {:vision? true
+                                   :ux      [:>= 6]}
+                          :real-tools []
+                          :allowed-events [{:event :review-done}]
+                          :initial-user-message
+                          "Critique the attached mockups, then emit :review-done."})})
+          (transition {:event :review-done :target :finished}))
+
+   (final {:id :finished})))
+----
+
+Resolution against the config above:
+
+[cols="1,2,3,2,1",options="header"]
+|===
+| Node | `:needs` | Clears gate | Preferences pick | Provider
+| `:refactor`
+| `:tool-call? true` + `:clojure [:>= 7]`
+| `glm-5.1` (clj 7 ✓), `claude-opus-4-7` (clj 9 ✓) — `gpt-5` dropped (clj 5)
+| **`glm-5.1`** (first in preferences)
+| `:z-ai-plan`
+| `:design-review`
+| `:vision? true` + `:ux [:>= 6]`
+| only `gpt-5` (ux 8 ✓, vision ✓) — `glm-5.1`/`opus` dropped (ux 5 / 4)
+| **`gpt-5`** (only survivor)
+| `:openai`
+|===
+
+The gate **never reordered** anything — it removed ineligible models;
+the sorted `:llm/preferences` chose among survivors. Node 2 shows the
+gate overriding preference *priority*: `gpt-5` is last in preferences
+yet selected because it is the only model clearing its gate.
+
+The host invokes it with everything injected as data:
+
+[source,clojure]
+----
+(require '[escapement.lib :as escapement])
+
+(escapement/run
+  {:chart       escapement.examples.skill-routed/agent
+   :session-id  :req-42
+   :credentials llm-credentials
+   :config      llm-config})
+;; zero disk reads, zero env sniffing — fully reproducible per request
+----
+
+=== Normalized public events: `escapement.lib.event-sink`
+
+The raw transcript is internal and unstable. `escapement.lib.event-sink`
+is a **pure normalization adapter** over `:transcript-tap` that maps
+raw rows to a closed, stable public Malli event union and drops
+internal/unmapped rows. Attach it via the host closure:
+
+[source,clojure]
+----
+(let [adapter (escapement.lib.event-sink/make-adapter)]
+  (escapement.lib/run
+    {:chart c :session-id sid
+     :transcript-tap (fn [row]
+                       (doseq [e (escapement.lib.event-sink/feed! adapter row)]
+                         (handle-public-event e)))}))
+----
+
+Streaming assistant text to a UI is the `:text-delta` variant — this
+is the **supported** way; do not match raw `:llm/delta` transcript rows
+by hand. Filter by `:invokeid` to stream one conversation:
+
+[source,clojure]
+----
+:transcript-tap
+(fn [row]
+  (doseq [e (escapement.lib.event-sink/feed! adapter row)]
+    (when (and (= :text-delta (:type e))
+               (= "pitch" (some-> (:invokeid e) name)))
+      (print (get-in e [:delta :text])) (flush))))
+----
+
+A complete runnable host example — two LLM phases authored with
+`escapement.chart.helpers`, artifact-shared context, injected
+`:credentials`/`:config`/`:initial-data`/`:session-dir`, and this
+`:text-delta` streaming tap — is in `demos/lib/` (`bb -m
+lib.embed-example`; see `demos/lib/README.md`). For vision input, gate
+the node with `:needs {:vision? true}` and pass the base64 image
+content block documented in *The `:llm-conversation` invocation*.
+
+Entry points:
+
+* `(escapement.lib.event-sink/make-adapter)` ⇒
+  `{:feed (fn [row] -> [event …]) :ctx (fn [] -> ctx-map)}`. Stateful
+  but instance-local — no globals, no producer mutation.
+* `(escapement.lib.event-sink/feed! adapter row)` ⇒ `[event …]`
+  (0, 1, or 2 events).
+* `(escapement.lib.event-sink/normalize ctx row)` ⇒ `[event …]` —
+  the pure transform (does not capture state).
+* `(escapement.lib.event-sink/valid-event? event)` ⇒ boolean.
+* `escapement.lib.event-sink/PublicEvent` — the closed Malli schema
+  value (`[:multi {:dispatch :type}]`).
+
+Every public event is a closed map with `:type` plus the correlation
+triple `:session-id`, `:run-id` (captured from `:runner/started`),
+and `:invokeid` (present only on LLM/tool events). Variants include
+`:run-started`, `:chart-config`, `:run-done`, `:run-aborted`,
+`:run-error`, `:chart-event`, `:chart-checkpoint`, `:llm-request`,
+`:text-delta`, `:llm-response`, `:llm-retry`, `:llm-fallback`,
+`:llm-error`, `:llm-continuation`, `:tool-call`, `:tool-result`, and
+`:tool-validation-failure`. There is no native tool-call transcript
+row, so the tool call/result/validation split is **synthesized** from
+`:llm/tool-result` plus tool-attributed `:llm/error`/`:llm/retry`
+rows; a categorized `:llm/error` with both `:category` and `:attempts`
+yields a `:llm-fallback` then an `:llm-error`. Internal rows
+(`:runner/tick`, `:llm/start`, …) normalize to `[]`.
+
+=== Locked design decisions
+
+These decisions are locked for the slice (the option schema passed a
+human-approval checkpoint and is the public API contract):
+
+. **Facade with a closed Malli schema.** `escapement.lib/run` is the
+  single hosted entry point; `Options` is `{:closed true}`; unknown
+  keys are rejected before any chart runs.
+. **Pure-adapter event sink over `:transcript-tap`.**
+  `escapement.lib.event-sink` is a normalization adapter only — no
+  processor/runner/producer is modified; raw transcript-internal keys
+  are normalized, not leaked.
+. **OpenAI via Chat Completions SSE.** OpenAI/OpenRouter streaming
+  uses the Chat Completions API with `stream:true`, accumulated then
+  finalized so the buffered and streamed `Response` are equivalent.
+. **Correlation in the host closure.** No host domain identifier is
+  put into facade or event payloads. The host captures
+  `:run-id`/`:session-id` in its own closure and correlates there.
+. **Optional cumulative-usage delta field.** Streamed deltas may carry
+  an optional running cumulative-usage field for live UX only. It is
+  **not** a billing source — the final `Response` usage is
+  authoritative.
+. **`:run-id` and `:store` formalized now.** `:run-id` is generated by
+  the facade, returned, and emitted on `:runner/started`; `:store` is
+  an optional passthrough to `engine.env/new-env`.
+. **Hermetic config + credentials are explicit data.** The facade
+  reads no disk and no env. `:credentials` is a required closed-schema
+  key (app-lifetime injection, like a DB pool); `:config` is optional
+  and mirrors `.escapement.edn` but is host-supplied, never a disk
+  fallback. Ratings/preferences flow as plain values threaded through
+  the invocation context — no dynamic var, no process global — so
+  concurrent runs with different `:config` resolve independently.
+. **`:needs` is an eligibility *gate*, not a ranker.** It filters the
+  preference-ordered candidate list; *all* ordering comes from the
+  sorted `:llm/preferences`. Only `=` / `[:>= n]` / `[:<= n]` are
+  supported. Fail-open by default; `:llm/eligibility-strict? true` opts the lib
+  path into fail-closed.
+. **Explicitly deferred:** a `TranscriptSink` protocol, DB-backed
+  stores beyond the `:store` passthrough, a broader lifecycle-hook
+  taxonomy, and the daemon API. These are *not* available; do not
+  depend on them.
+
+=== Migration notes
+
+This slice is **purely additive** — no caller changes are required:
+
+* A new namespace (`escapement.lib`) and a new adapter namespace
+  (`escapement.lib.event-sink`); no existing namespace's public
+  signature changed.
+* `escapement.runner/run!` still takes a single opts map
+  (`:map => :map`); it gained only *optional* `:store`, `:run-id`, and
+  `:cancel` destructuring and additive `:status` keys on
+  `:runner/done` / the summary map. Existing consumers that ignore the
+  new keys are unaffected; the CLI path is byte-for-byte unchanged
+  (omitted `:run-id`/`:store`/`:cancel` ⇒ prior behavior).
+* No `Options` schema change was needed for cancellation — `:cancel`
+  was reserved in the locked schema up front.
+* **Out of slice scope, flagged for the release step:** the embed
+  smoke alias uses a `:local/root` dependency coordinate; a published
+  release will need a `:git/url` + `:sha` (or Maven) coordinate
+  instead. This is a packaging concern only, not a code change.
 
 [[known-limitations]]
 == Known limitations and roadmap
@@ -2995,6 +3564,13 @@ Prompts and token caps are deliberately tiny.
   a param); prompt for brevity, pick an appropriately-sized model, and
   watch the `:context-used-frac` field on `:llm/response` transcript
   events (see <<context-tracking>>).
+
+* **Billing on successful turns only.** Token usage is authoritative
+  only from the **final** `Response` of a completed turn. Usage from a
+  partial, failed, or cancelled streamed turn is **discarded** — out
+  of slice scope. The optional cumulative-usage delta field on
+  streamed deltas is for live UX only and is **not** a billing
+  source. Bill on successful turns only.
 
 [[contributing]]
 == Contributing and running tests

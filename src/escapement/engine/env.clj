@@ -24,9 +24,16 @@
     * `:invocation-processors` (optional, default `[]`) - vector of `InvocationProcessor` instances
     * `:registry` (optional) - statechart registry; defaults to a fresh `LocalMemoryRegistry`
     * `:queue` (optional) - event queue; defaults to a fresh in-process queue
-    * `:store` (optional) - working-memory store; defaults to a file-backed store at `:checkpoint-dir`"
+    * `:store` (optional) - working-memory store; defaults to a file-backed store at `:checkpoint-dir`
+    * `:llm-catalog-ratings` (optional) - subjective ratings table threaded
+      to the llm-conversation processor's eligibility gate. Resolved ONCE by
+      the caller (CLI: from disk config at startup; lib facade Step 4: from
+      injected `:config`). Defaults to `{}` in the processor.
+    * `:llm-eligibility-strict?` (optional) - fail-closed flag for the
+      eligibility gate (see `escapement.invocation.llm-conversation/new-processor`)."
   [{:keys [checkpoint-dir invocation-processors registry queue store
-           llm-backend llm-default-models tool-registry transcript-fn human-renderer
+           llm-backend llm-default-models llm-catalog-ratings llm-eligibility-strict?
+           tool-registry transcript-fn human-renderer
            session-dir]
     :or   {invocation-processors []}}]
   (let [registry  (or registry (lmr/new-registry))
@@ -35,10 +42,12 @@
         dm        (wmdm/new-flat-model)
         exec      (exec/new-execution-model dm queue)
         llm-procs (if (and llm-backend tool-registry)
-                    [(llm-conv/new-processor {:backend        llm-backend
-                                              :tool-registry  tool-registry
-                                              :transcript-fn  transcript-fn
-                                              :default-models llm-default-models})]
+                    [(llm-conv/new-processor {:backend             llm-backend
+                                              :tool-registry       tool-registry
+                                              :transcript-fn       transcript-fn
+                                              :default-models      llm-default-models
+                                              :catalog-ratings     llm-catalog-ratings
+                                              :eligibility-strict? llm-eligibility-strict?})]
                     [])
         hi-procs  (if human-renderer
                     [(human-input/new-processor {:renderer      human-renderer

@@ -848,57 +848,77 @@
                                      (count escapement.invocation.llm-conversation/transcript-truncate-marker)))))
 
 ;; ---------------------------------------------------------------------------
-;; Declarative :model-policy wiring (params->policy / candidate-models /
+;; Declarative :needs wiring (params->policy / candidate-models /
 ;; the :llm/model-policy-empty transcript event). The decision core
 ;; (catalog/satisfies-policy?) is covered in catalog_test.clj; this covers
-;; the invocation-layer glue that reads :model-policy from params, filters
+;; the invocation-layer glue that reads :needs from params, filters
 ;; the auto-fallback list, and surfaces the empty-result event.
 ;; ---------------------------------------------------------------------------
 
-(specification "params->policy extracts a usable policy or nil"
-               (assertions
-                "no :model-policy key → nil"
-                (#'llmc/params->policy {}) => nil
-                "empty policy map (no :require/:min/:max) → nil"
-                (#'llmc/params->policy {:model-policy {}}) => nil
-                "a :min clause is returned verbatim"
-                (#'llmc/params->policy {:model-policy {:min {:context-tokens 200000}}})
-                => {:min {:context-tokens 200000}}
-                "a :require clause counts as expressed"
-                (#'llmc/params->policy {:model-policy {:require {:vision? true}}})
-                => {:require {:vision? true}}))
+(specification "params->policy canonicalizes the :needs gate"
+  (assertions
+   "no key → nil"
+   (#'llmc/params->policy {}) => nil
+   "empty :needs → nil (admits everything; no clause expressed)"
+   (#'llmc/params->policy {:needs {}}) => nil
+   ":needs bare value → :require clause"
+   (#'llmc/params->policy {:needs {:vision? true}})
+   => {:require {:vision? true} :min {} :max {}}
+   ":needs [:>= n] → :min clause"
+   (#'llmc/params->policy {:needs {:context-tokens [:>= 200000]}})
+   => {:require {} :min {:context-tokens 200000} :max {}}
+   ":needs [:<= n] → :max clause"
+   (#'llmc/params->policy {:needs {:max-output-tokens [:<= 64000]}})
+   => {:require {} :min {} :max {:max-output-tokens 64000}}))
 
-(specification "candidate-models applies :model-policy to the fallback list"
-               (let [defaults ["gpt-4o-mini" "claude-sonnet-4-5" "claude-opus-4-1"]]
-                 (component "auto-fallback list is filtered by the policy"
-                            (assertions
-                             ":min {:context-tokens 200000} drops gpt-4o-mini (128k window)"
-                             (#'llmc/candidate-models {:model-policy {:min {:context-tokens 200000}}}
-                                                      defaults (atom {}))
-                             => ["claude-sonnet-4-5" "claude-opus-4-1"]))
-                 (component "an explicit :model pick is never silently switched"
-                            (assertions
-                             "policy is ignored when the user names a model"
-                             (#'llmc/candidate-models {:model "gpt-4o-mini"
-                                                       :model-policy {:min {:context-tokens 200000}}}
-                                                      defaults (atom {}))
-                             => ["gpt-4o-mini"]))
-                 (component "an unsatisfiable policy falls back to the unfiltered list"
-                            (assertions
-                             "so the conversation still runs"
-                             (#'llmc/candidate-models {:model-policy {:min {:context-tokens 999999999}}}
-                                                      defaults (atom {}))
-                             => defaults))
-                 (component ":down models are removed after policy filtering"
-                            (assertions
-                             "claude-sonnet-4-5 marked :down → only claude-opus-4-1 survives"
-                             (#'llmc/candidate-models {:model-policy {:min {:context-tokens 200000}}}
-                                                      defaults
-                                                      (atom {"claude-sonnet-4-5" :down}))
-                             => ["claude-opus-4-1"]))
-                 (component "no policy → default-models verbatim"
-                            (assertions
-                             (#'llmc/candidate-models {} defaults (atom {})) => defaults))))
+(specification "candidate-models applies the eligibility gate to the fallback list"
+  (let [defaults ["gpt-4o-mini" "claude-sonnet-4-5" "claude-opus-4-1"]]
+    (component "auto-fallback list is filtered by :needs (objective fact)"
+      (assertions
+       ":context-tokens [:>= 200000] drops gpt-4o-mini (128k window)"
+       (#'llmc/candidate-models {:needs {:context-tokens [:>= 200000]}}
+                                defaults (atom {}) {})
+       => ["claude-sonnet-4-5" "claude-opus-4-1"]))
+    (component "an explicit :model pick is never silently switched"
+      (assertions
+       "policy is ignored when the user names a model"
+       (#'llmc/candidate-models {:model "gpt-4o-mini"
+                                 :needs {:context-tokens [:>= 200000]}}
+                                defaults (atom {}) {})
+       => ["gpt-4o-mini"]))
+    (component "an unsatisfiable gate falls back to the unfiltered list"
+      (assertions
+       "so the conversation still runs (fail-open)"
+       (#'llmc/candidate-models {:needs {:context-tokens [:>= 999999999]}}
+                                defaults (atom {}) {})
+       => defaults))
+    (component ":down models are removed after gate filtering"
+      (assertions
+       "claude-sonnet-4-5 marked :down → only claude-opus-4-1 survives"
+       (#'llmc/candidate-models {:needs {:context-tokens [:>= 200000]}}
+                                defaults
+                                (atom {"claude-sonnet-4-5" :down})
+                                {})
+       => ["claude-opus-4-1"]))
+    (component "subjective ratings come from the injected catalog-ratings arg"
+      (assertions
+       "with ratings keeping only claude-sonnet-4-5, gpt-4o-mini/opus drop"
+       (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
+                                defaults (atom {})
+                                {"claude-sonnet-4-5" {:clojure 9}})
+       => ["claude-sonnet-4-5"]
+       "a DIFFERENT injected ratings table → different survivors (same process)"
+       (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
+                                defaults (atom {})
+                                {"claude-opus-4-1" {:clojure 10}})
+       => ["claude-opus-4-1"]
+       "empty injected ratings → subjective clause matches nothing → unfiltered (fail-open)"
+       (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
+                                defaults (atom {}) {})
+       => defaults))
+    (component "no gate → default-models verbatim"
+      (assertions
+       (#'llmc/candidate-models {} defaults (atom {}) {}) => defaults))))
 
 ;; ---------------------------------------------------------------------------
 ;; Categorized backend errors → finer :error.llm.<category> chart events,
@@ -977,30 +997,78 @@
                   (->> transcript (filter #(= :llm/error (:event %))) first :data :reason)
                   => :backend)))
 
-(specification "try-models! surfaces :llm/model-policy-empty when the policy excludes every fallback model"
-               (let [captured (atom [])
-                     backend  (mock-backend [(end-turn-response "ok")])
-                     result   (#'llmc/try-models!
-                               {:backend        backend
-                                :transcript-fn  (fn [ev] (swap! captured conj ev))
-                                :worker-state   (atom :running)
-                                :model-status   (atom {})
-                                :default-models ["gpt-4o-mini"]
-                                :parent-ctx     {:invokeid "iv"}}
-                               {:model-policy {:min {:context-tokens 999999999}}}
-                               [{:role :user :content [{:type :text :text "hi"}]}]
-                               [])
-                     ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
-                 (assertions
-                  "the renamed event was emitted"
-                  (some? ev) => true
-                  "it carries the resolved policy"
-                  (get-in ev [:data :policy]) => {:min {:context-tokens 999999999}}
-                  "it carries the default-models that all failed the policy"
-                  (get-in ev [:data :default-models]) => ["gpt-4o-mini"]
-                  "the turn still completes via the unfiltered fallback model"
-                  (some? (:ok result)) => true
-                  (:model-used result) => "gpt-4o-mini")))
+(specification "try-models! surfaces :llm/model-policy-empty when the gate excludes every fallback model (fail-open)"
+  (let [captured (atom [])
+        backend  (mock-backend [(end-turn-response "ok")])
+        result   (#'llmc/try-models!
+                  {:backend        backend
+                   :transcript-fn  (fn [ev] (swap! captured conj ev))
+                   :worker-state   (atom :running)
+                   :model-status   (atom {})
+                   :default-models ["gpt-4o-mini"]
+                   :catalog-ratings {}
+                   :parent-ctx     {:invokeid "iv"}}
+                  {:needs {:context-tokens [:>= 999999999]}}
+                  [{:role :user :content [{:type :text :text "hi"}]}]
+                  [])
+        ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
+    (assertions
+     "the event was emitted"
+     (some? ev) => true
+     "it carries the resolved (canonical) policy"
+     (get-in ev [:data :policy]) => {:require {} :min {:context-tokens 999999999} :max {}}
+     "it carries the default-models that all failed the gate"
+     (get-in ev [:data :default-models]) => ["gpt-4o-mini"]
+     "strict? is false by default"
+     (get-in ev [:data :strict?]) => false
+     "the turn still completes via the unfiltered fallback model (fail-open)"
+     (some? (:ok result)) => true
+     (:model-used result) => "gpt-4o-mini")))
+
+(specification "try-models! fail-closed: :eligibility-strict? true → :eligibility-empty (no turn issued)"
+  (let [captured (atom [])
+        backend  (mock-backend [(end-turn-response "ok")])
+        result   (#'llmc/try-models!
+                  {:backend        backend
+                   :transcript-fn  (fn [ev] (swap! captured conj ev))
+                   :worker-state   (atom :running)
+                   :model-status   (atom {})
+                   :default-models ["gpt-4o-mini"]
+                   :catalog-ratings {}
+                   :eligibility-strict? true
+                   :parent-ctx     {:invokeid "iv"}}
+                  {:needs {:context-tokens [:>= 999999999]}}
+                  [{:role :user :content [{:type :text :text "hi"}]}]
+                  [])
+        ev       (first (filter #(= :llm/model-policy-empty (:event %)) @captured))]
+    (assertions
+     "the gap event still records strict?=true"
+     (get-in ev [:data :strict?]) => true
+     "no turn was issued (fail-closed)"
+     (:ok result) => nil
+     "the :eligibility-empty shape is returned for the caller to fail the node"
+     (some? (:eligibility-empty result)) => true
+     (get-in result [:eligibility-empty :default-models]) => ["gpt-4o-mini"])))
+
+(specification "try-models! ratings come from the injected context value (two tables, one process)"
+  (let [run (fn [ratings]
+              (let [backend (mock-backend [(end-turn-response "ok")])]
+                (#'llmc/try-models!
+                 {:backend         backend
+                  :transcript-fn   (fn [_] nil)
+                  :worker-state    (atom :running)
+                  :model-status    (atom {})
+                  :default-models  ["gpt-4o-mini" "claude-opus-4-1"]
+                  :catalog-ratings ratings
+                  :parent-ctx      {:invokeid "iv"}}
+                 {:needs {:clojure [:>= 8]}}
+                 [{:role :user :content [{:type :text :text "hi"}]}]
+                 [])))]
+    (assertions
+     "ratings favoring gpt-4o-mini → it is the model used"
+     (:model-used (run {"gpt-4o-mini" {:clojure 9}})) => "gpt-4o-mini"
+     "a DIFFERENT injected ratings table in the same process → different pick"
+     (:model-used (run {"claude-opus-4-1" {:clojure 9}})) => "claude-opus-4-1")))
 
 ;; ---------------------------------------------------------------------------
 ;; Resilience: unbounded :max_tokens continuation + transient-error retry

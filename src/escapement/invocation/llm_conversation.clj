@@ -22,6 +22,7 @@
    [clojure.string :as str]
    [escapement.chart.service :as service]
    [escapement.llm.catalog :as catalog]
+   [escapement.llm.needs :as needs]
    [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
    [com.fulcrologic.statecharts :as sc]
    [com.fulcrologic.statecharts.environment :as env-ns]
@@ -666,16 +667,24 @@
   [reason]
   (keyword (str "error.llm." (name reason))))
 
-(defn- params->policy
-  "The declarative model policy from conversation `params`.
+(defn- policy-nonempty?
+  "True when a canonical policy expresses at least one clause."
+  [pol]
+  (boolean (and pol (or (seq (:require pol)) (seq (:min pol)) (seq (:max pol))))))
 
-   `:model-policy` is a `catalog/satisfies-policy?` map (`:require`/`:min`
-   /`:max` over any objective or subjective info key — including
-   `:intelligence`, which is just one ratings key, not a special case).
-   Returns nil when no policy clause is expressed."
+(defn- params->policy
+  "The canonical declarative model policy from conversation `params`,
+   resolved from the `:needs` chart-node surface key — the ergonomic flat
+   `fact → constraint` map (bare value, `[:>= n]`, `[:<= n]`). Translated
+   to the canonical `{:require/:min/:max}` shape via
+   `escapement.llm.needs/needs->policy`.
+
+   Returns nil when no policy clause is expressed. A malformed `:needs`
+   throws (see `needs->policy`)."
   [params]
-  (let [pol (:model-policy params)]
-    (when (or (seq (:require pol)) (seq (:min pol)) (seq (:max pol)))
+  (let [pol (when (contains? params :needs)
+              (needs/needs->policy (:needs params)))]
+    (when (policy-nonempty? pol)
       pol)))
 
 (defn- candidate-models
@@ -685,10 +694,12 @@
      1. `params :models`    — explicit ordered preference (no auto-substitution)
      2. `params :model`     — explicit single pick (no fallback)
      3. `default-models`    — processor-level auto-detected fallback list. When
-                              a model policy is expressed (`params
-                              :model-policy`) the list is filtered to
-                              entries satisfying it via
-                              `escapement.llm.catalog/satisfies-policy?`.
+                              an eligibility gate is expressed (`params
+                              :needs`) the list is filtered to entries
+                              satisfying it via
+                              `escapement.llm.catalog/satisfies-policy?`,
+                              with subjective ratings resolved from the
+                              injected `catalog-ratings` value.
                               If the filter empties the list, the
                               unfiltered default-models is used so the
                               conversation still runs (the gap is surfaced
@@ -701,10 +712,10 @@
 
    Always filters out anything marked `:down` in `model-status` AFTER the
    resolution above; `nil` (case 4) is preserved unconditionally."
-  [params default-models model-status]
+  [params default-models model-status catalog-ratings]
   (let [policy    (params->policy params)
         defaults  (if (and policy (seq default-models))
-                    (let [filtered (filterv #(catalog/satisfies-policy? % policy) default-models)]
+                    (let [filtered (filterv #(catalog/satisfies-policy? % policy catalog-ratings) default-models)]
                       (if (seq filtered) filtered default-models))
                     default-models)
         requested (cond
@@ -741,110 +752,134 @@
      {:interrupted t}       — worker is dying / thread was interrupted
      {:exhausted attempts}  — every candidate failed; caller should post
                               :error.llm.backend. `attempts` is a vector of
-                              `{:model :error}` pairs (oldest first)."
-  [{:keys [backend transcript-fn worker-state model-status default-models parent-ctx]} params messages tools]
+                              `{:model :error}` pairs (oldest first).
+     {:eligibility-empty …} — fail-closed: `:llm/eligibility-strict?` was
+                              set in the injected config and the
+                              eligibility gate excluded every fallback
+                              model; the caller fails the node with a
+                              categorized error rather than silently
+                              running an ineligible model.
+
+   `catalog-ratings` is the subjective ratings table the invocation
+   context resolved ONCE (CLI: from disk config at startup; lib: from
+   injected `:config`). It is passed explicitly to every
+   `catalog/satisfies-policy?` call — the Step-1 2-arg disk-resolving
+   arity is intentionally not relied on here. `eligibility-strict?` is
+   the injected fail-closed flag."
+  [{:keys [backend transcript-fn worker-state model-status default-models
+           parent-ctx catalog-ratings eligibility-strict?]}
+   params messages tools]
   (let [{:keys [max-retries backoff-ms]} (params->resilience params)
         policy        (params->policy params)
         auto-fallback? (and (not (seq (:models params)))
                             (nil? (:model params)))
-        _              (when (and auto-fallback? policy (seq default-models)
-                                  (not-any? #(catalog/satisfies-policy? % policy) default-models))
+        gate-empties?  (and auto-fallback? policy (seq default-models)
+                            (not-any? #(catalog/satisfies-policy? % policy catalog-ratings)
+                                      default-models))
+        _              (when gate-empties?
                          (transcript! transcript-fn
                                       {:event :llm/model-policy-empty
                                        :ts    (now-ms)
                                        :data  {:policy         policy
-                                               :default-models (vec default-models)}}))
-        candidates    (candidate-models params default-models model-status)]
-    (loop [[m & more] candidates
-           attempts   []]
-      (let [request  (build-request
-                      {:system               (:system params)
-                       :messages             messages
-                       :tools                tools
-                       :model                m
-                       :max-tokens           (effective-max-tokens m)
-                       :temperature          (:temperature params)
-                       :top-p                (:top-p params)
-                       :top-k                (:top-k params)
-                       :stop-sequences       (:stop-sequences params)
-                       :thinking             (:thinking params)
-                       :tool-choice          (:tool-choice params)
-                       :metadata             (:metadata params)
-                       :system-cache-control (:system-cache-control params)
-                       :tools-cache-control  (:tools-cache-control params)
-                       :auto-cache?          (get params :auto-cache? true)
-                       :conv-id              (:conversation/id params)})
-            _        (transcript! transcript-fn
-                                  {:event :llm/request :ts (now-ms)
-                                   :data  (cond-> {:n-messages (count (:messages request))
-                                                   :user-blocks (trailing-user-blocks messages)
-                                                   :system-preview (truncate-for-transcript (:system params))
-                                                   :invokeid (:invokeid parent-ctx)}
-                                            m (assoc :model m))})
-            on-delta (when (:stream? params)
-                       (fn [d]
-                         (transcript! transcript-fn
-                                      {:event :llm/delta :ts (now-ms)
-                                       :data  (assoc d
-                                                     :model    m
-                                                     :invokeid (:invokeid parent-ctx))})))
-            ;; Bounded same-model retry for *transient* categories
-            ;; (rate-limited/overloaded/timeout/transport) with exponential
-            ;; backoff before falling back to the next candidate. Terminal
-            ;; categories (auth/invalid-request/context-length) and
-            ;; uncategorized throws are NOT retried here — they fall straight
-            ;; through to model fallback / :exhausted.
-            response (loop [retry 0]
-                       (let [r (try (llm/send-turn* backend request on-delta)
-                                     (catch Throwable t {:_throw t}))
-                             t (:_throw r)
-                             cat (when t (llm/error-category t))]
-                         (if (and t
-                                  (contains? transient-error-categories cat)
-                                  (< retry (long max-retries))
-                                  (not (instance? InterruptedException t))
-                                  (not (instance? InterruptedException (ex-cause t)))
-                                  (not= :dying @worker-state))
-                           (do
+                                               :default-models (vec default-models)
+                                               :strict?        (boolean eligibility-strict?)}}))]
+    (if (and gate-empties? eligibility-strict?)
+      ;; Fail-closed: a webapp/lib host opted into never running an
+      ;; ineligible model. Surface a categorized error so the node fails
+      ;; instead of proceeding on the unfiltered fallback list.
+      {:eligibility-empty {:policy         policy
+                           :default-models (vec default-models)}}
+      (let [candidates (candidate-models params default-models model-status catalog-ratings)]
+        (loop [[m & more] candidates
+               attempts   []]
+          (let [request  (build-request
+                          {:system               (:system params)
+                           :messages             messages
+                           :tools                tools
+                           :model                m
+                           :max-tokens           (effective-max-tokens m)
+                           :temperature          (:temperature params)
+                           :top-p                (:top-p params)
+                           :top-k                (:top-k params)
+                           :stop-sequences       (:stop-sequences params)
+                           :thinking             (:thinking params)
+                           :tool-choice          (:tool-choice params)
+                           :metadata             (:metadata params)
+                           :system-cache-control (:system-cache-control params)
+                           :tools-cache-control  (:tools-cache-control params)
+                           :auto-cache?          (get params :auto-cache? true)
+                           :conv-id              (:conversation/id params)})
+                _        (transcript! transcript-fn
+                                      {:event :llm/request :ts (now-ms)
+                                       :data  (cond-> {:n-messages (count (:messages request))
+                                                       :user-blocks (trailing-user-blocks messages)
+                                                       :system-preview (truncate-for-transcript (:system params))
+                                                       :invokeid (:invokeid parent-ctx)}
+                                                m (assoc :model m))})
+                on-delta (when (:stream? params)
+                           (fn [d]
                              (transcript! transcript-fn
-                                          {:event :llm/retry :ts (now-ms)
-                                           :data  {:model     m
-                                                   :category  cat
-                                                   :attempt   (inc retry)
-                                                   :max-retries max-retries
-                                                   :invokeid  (:invokeid parent-ctx)}})
-                             (sleep-unless-dying!
-                              (backoff-delay-ms backoff-ms retry t) worker-state)
-                             (recur (inc retry)))
-                           r)))]
-        (cond
-          (and (:_throw response)
-               (or (instance? InterruptedException (:_throw response))
-                   (instance? InterruptedException (ex-cause (:_throw response)))
-                   (= :dying @worker-state)))
-          {:interrupted (:_throw response)}
+                                          {:event :llm/delta :ts (now-ms)
+                                           :data  (assoc d
+                                                         :model    m
+                                                         :invokeid (:invokeid parent-ctx))})))
+                ;; Bounded same-model retry for *transient* categories
+                ;; (rate-limited/overloaded/timeout/transport) with exponential
+                ;; backoff before falling back to the next candidate. Terminal
+                ;; categories (auth/invalid-request/context-length) and
+                ;; uncategorized throws are NOT retried here — they fall straight
+                ;; through to model fallback / :exhausted.
+                response (loop [retry 0]
+                           (let [r (try (llm/send-turn* backend request on-delta)
+                                         (catch Throwable t {:_throw t}))
+                                 t (:_throw r)
+                                 cat (when t (llm/error-category t))]
+                             (if (and t
+                                      (contains? transient-error-categories cat)
+                                      (< retry (long max-retries))
+                                      (not (instance? InterruptedException t))
+                                      (not (instance? InterruptedException (ex-cause t)))
+                                      (not= :dying @worker-state))
+                               (do
+                                 (transcript! transcript-fn
+                                              {:event :llm/retry :ts (now-ms)
+                                               :data  {:model     m
+                                                       :category  cat
+                                                       :attempt   (inc retry)
+                                                       :max-retries max-retries
+                                                       :invokeid  (:invokeid parent-ctx)}})
+                                 (sleep-unless-dying!
+                                  (backoff-delay-ms backoff-ms retry t) worker-state)
+                                 (recur (inc retry)))
+                               r)))]
+            (cond
+              (and (:_throw response)
+                   (or (instance? InterruptedException (:_throw response))
+                       (instance? InterruptedException (ex-cause (:_throw response)))
+                       (= :dying @worker-state)))
+              {:interrupted (:_throw response)}
 
-          (:_throw response)
-          (let [^Throwable t (:_throw response)
-                details      (throwable->details t)
-                category     (llm/error-category t)
-                ;; Only mark a real model id down. nil (backend's default
-                ;; pick) is not a routable identifier.
-                _            (when m (swap! model-status assoc m :down))
-                _            (transcript! transcript-fn
-                                          {:event :llm/model-down :ts (now-ms)
-                                           :data  {:model m
-                                                   :message (:message details)
-                                                   :category category
-                                                   :remaining (vec more)}})
-                attempts'    (conj attempts {:model m :error (select-keys details [:message :class])})]
-            (if (seq more)
-              (recur more attempts')
-              {:exhausted attempts'
-               :last-throwable t}))
+              (:_throw response)
+              (let [^Throwable t (:_throw response)
+                    details      (throwable->details t)
+                    category     (llm/error-category t)
+                    ;; Only mark a real model id down. nil (backend's default
+                    ;; pick) is not a routable identifier.
+                    _            (when m (swap! model-status assoc m :down))
+                    _            (transcript! transcript-fn
+                                              {:event :llm/model-down :ts (now-ms)
+                                               :data  {:model m
+                                                       :message (:message details)
+                                                       :category category
+                                                       :remaining (vec more)}})
+                    attempts'    (conj attempts {:model m :error (select-keys details [:message :class])})]
+                (if (seq more)
+                  (recur more attempts')
+                  {:exhausted attempts'
+                   :last-throwable t}))
 
-          :else
-          {:ok response :model-used m})))))
+              :else
+              {:ok response :model-used m})))))))
 
 (defn- drive-turn!
   "Issue one logical assistant turn. A `stop_reason :max_tokens` means the API
@@ -915,6 +950,25 @@
    post-error! on-end-turn-event]
   (let [outcome (drive-turn! ctx params @messages-atom tool-defs)]
     (cond
+      (:eligibility-empty outcome)
+      (let [{:keys [policy default-models]} (:eligibility-empty outcome)]
+        (transcript! transcript-fn
+                     {:event :llm/error :ts (now-ms)
+                      :data  {:reason         :invalid-request
+                              :detail         :eligibility-empty-strict
+                              :policy         policy
+                              :default-models default-models}})
+        ;; Fail-closed: the eligibility gate excluded every fallback
+        ;; model and `:llm/eligibility-strict?` is set. Categorize as
+        ;; :invalid-request so the chart's :error.llm.* / .invalid-request
+        ;; transitions fire — the node fails rather than run a model the
+        ;; host declared ineligible.
+        (post-error! :invalid-request {:detail         :eligibility-empty-strict
+                                       :policy         policy
+                                       :default-models default-models})
+        (reset! worker-state :dying)
+        :error-and-die)
+
       (:no-progress outcome)
       (do
         (transcript! transcript-fn
@@ -1173,7 +1227,8 @@
       (when-let [^Thread t (:thread entry)] (.interrupt t))
       (catch Throwable _ nil))))
 
-(defrecord LlmConversationProcessor [backend tool-registry transcript-fn workers model-status default-models]
+(defrecord LlmConversationProcessor [backend tool-registry transcript-fn workers model-status default-models
+                                     catalog-ratings eligibility-strict?]
   sp/InvocationProcessor
   (supports-invocation-type? [_ typ]
     (= typ :llm-conversation))
@@ -1192,7 +1247,7 @@
           _                 (when-let [old (get @workers k)]
                               (reset! (:worker-state old) :dying))
           queue             (::sc/event-queue env)
-          {:keys [real-tools allowed-events chart-tools initial-user-message]} params
+          {:keys [real-tools allowed-events chart-tools initial-messages initial-user-message]} params
           [real-defs name->tool-kw]   (resolve-real-tools tool-registry real-tools)
           [event-defs name->event]    (event-tool-defs (or allowed-events []))
           ;; Palette snapshot for region tools — built once at start. Late
@@ -1204,11 +1259,12 @@
                                                            chart-tools
                                                            region-tool-default-timeout-ms)
           tool-defs                   (into [] (concat real-defs event-defs region-defs))
-          initial-msgs                (if initial-user-message
-                                        [(text-user-message initial-user-message)]
-                                        [])
+          initial-msgs                (cond
+                                        (seq initial-messages) (vec initial-messages)
+                                        initial-user-message [(text-user-message initial-user-message)]
+                                        :else [])
           messages-atom               (atom initial-msgs)
-          worker-state                (atom (if initial-user-message :running :awaiting-user))
+          worker-state                (atom (if (seq initial-msgs) :running :awaiting-user))
           user-msg-queue              (ArrayBlockingQueue. 256)
           tool-reply-queue            (ArrayBlockingQueue. 64)
           retry-counts                (atom {})
@@ -1229,6 +1285,8 @@
                                        :retry-counts       retry-counts
                                        :model-status       model-status
                                        :default-models     default-models
+                                       :catalog-ratings     (or catalog-ratings {})
+                                       :eligibility-strict? (boolean eligibility-strict?)
                                        :params             params
                                        :parent-ctx         parent-ctx}
           runnable                    (fn [] (run-worker! ctx))
@@ -1314,12 +1372,27 @@
    * `:transcript-fn` (optional) — `(fn [event-map] ...)` for observability; default no-op
    * `:default-models` (optional) — ordered vector of model id strings to try
      when a chart's invocation params don't specify `:model`/`:models`. Used
-     for cross-backend fallback when only some credentials are healthy."
-  [{:keys [backend tool-registry transcript-fn default-models]}]
+     for cross-backend fallback when only some credentials are healthy.
+   * `:catalog-ratings` (optional) — the subjective ratings table
+     (`id → opinion-map`, the shape `escapement.llm.ratings/ratings`
+     returns) resolved ONCE by the invocation/env builder and threaded
+     explicitly to every `catalog/satisfies-policy?` call. Defaults to
+     `{}` (a subjective `:needs` clause then matches nothing). The CLI
+     path resolves this from disk config at startup; the lib facade
+     (Step 4) will feed it from injected `:config`. This is the clean
+     injection seam — the processor never reads disk or a global.
+   * `:eligibility-strict?` (optional, default false) — fail-closed
+     flag. When true, an eligibility gate (`:needs`)
+     that excludes every auto-fallback model fails the node with a
+     categorized `:error.llm.invalid-request` instead of silently
+     proceeding on the unfiltered list (fail-open, the default)."
+  [{:keys [backend tool-registry transcript-fn default-models
+           catalog-ratings eligibility-strict?]}]
   (assert backend "backend is required")
   (assert tool-registry "tool-registry is required")
   (->LlmConversationProcessor backend tool-registry (or transcript-fn (fn [_] nil))
-                              (atom {}) (atom {}) (vec default-models)))
+                              (atom {}) (atom {}) (vec default-models)
+                              (or catalog-ratings {}) (boolean eligibility-strict?)))
 
 (>defn active-worker-count
        "Returns the number of workers whose state is not `:dying`. Used by the runner

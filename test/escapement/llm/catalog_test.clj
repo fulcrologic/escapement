@@ -70,6 +70,62 @@
                               {:require {:vision? true} :min {:context-tokens 500000}})
    => true))
 
+(specification "catalog — satisfies-policy? resolves subjective facts from the PASSED ratings"
+  (assertions
+   "empty ratings ⇒ a non-empty subjective :min clause matches nothing"
+   (catalog/satisfies-policy? "claude-opus-4-7" {:min {:clojure 7}} {}) => false
+   (catalog/satisfies-policy? "claude-opus-4-7" {:require {:tier "A"}} {}) => false
+   "populated ratings ⇒ :require / :min / :max behave as before"
+   (catalog/satisfies-policy? "claude-opus-4-7" {:require {:tier "A"}}
+                              {"claude-opus-4-7" {:tier "A" :clojure 9}}) => true
+   (catalog/satisfies-policy? "claude-opus-4-7" {:min {:clojure 7}}
+                              {"claude-opus-4-7" {:clojure 9}}) => true
+   (catalog/satisfies-policy? "claude-opus-4-7" {:min {:clojure 7}}
+                              {"claude-opus-4-7" {:clojure 5}}) => false
+   (catalog/satisfies-policy? "claude-opus-4-7" {:max {:clojure 7}}
+                              {"claude-opus-4-7" {:clojure 5}}) => true
+   "dated ids resolve subjective ratings via longest-prefix"
+   (catalog/satisfies-policy? "claude-opus-4-7-20260101" {:min {:clojure 7}}
+                              {"claude-opus-4-7" {:clojure 9}}) => true
+   "longest-prefix picks the more specific rating entry"
+   (catalog/satisfies-policy? "claude-opus-4-7-20260101" {:require {:clojure 1}}
+                              {"claude"               {:clojure 0}
+                               "claude-opus-4-7"      {:clojure 1}}) => true
+   "objective clauses still work with an EMPTY ratings map (facts from the catalog)"
+   (catalog/satisfies-policy? "gpt-5" {:require {:vision? true}} {}) => true
+   (catalog/satisfies-policy? "claude-opus-4-7" {:min {:context-tokens 200000}} {}) => true
+   (catalog/satisfies-policy? "claude-haiku-4-5" {:min {:context-tokens 300000}} {}) => false
+   "subjective + objective in one policy, both must hold"
+   (catalog/satisfies-policy? "gpt-5"
+                              {:require {:vision? true} :min {:clojure 7}}
+                              {"gpt-5" {:clojure 8}}) => true
+   (catalog/satisfies-policy? "gpt-5"
+                              {:require {:vision? true} :min {:clojure 7}}
+                              {"gpt-5" {:clojure 3}}) => false))
+
+(specification "catalog — no process global: passed ratings decide, per call"
+  (assertions
+   "two calls in one process with different ratings give different results"
+   (catalog/satisfies-policy? "gpt-5" {:min {:clojure 7}} {"gpt-5" {:clojure 9}}) => true
+   (catalog/satisfies-policy? "gpt-5" {:min {:clojure 7}} {"gpt-5" {:clojure 1}}) => false
+   "no catalog var holds a Delay (no load-time config-bound global)"
+   (->> (ns-interns 'escapement.llm.catalog)
+        vals
+        (filter (fn [v] (instance? clojure.lang.Delay (deref v))))
+        seq)
+   => nil
+   "info is objective-only — ratings never leak into it"
+   (contains? (catalog/info "gpt-5") :clojure) => false))
+
+(specification "catalog — eligibility-facts is the documented objective vocabulary"
+  (assertions
+   "enumerates exactly the documented keys"
+   (set (keys catalog/eligibility-facts))
+   => #{:vision? :tool-call? :reasoning? :context-tokens
+        :max-output-tokens :company :family :knowledge}
+   "each key carries a one-line meaning string"
+   (every? string? (vals catalog/eligibility-facts)) => true))
+
 (specification "catalog — default preferences stay reachable"
   (assertions
    "every built-in default preference validates against the catalog"

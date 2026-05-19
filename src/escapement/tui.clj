@@ -238,7 +238,8 @@
 
       :llm/model-policy-empty
       [{:source :error :glyph \⚠ :ev ev
-        :summary (str "model policy " (pr-str (:policy data)) " filter empty")}]
+        :summary (str "model policy " (pr-str (:policy data)) " filter empty"
+                      (when (:strict? data) " (strict: node failed)"))}]
 
       :human-input/start
       [{:source :human :glyph \? :ev ev

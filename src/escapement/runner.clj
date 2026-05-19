@@ -137,6 +137,36 @@
      {:session-id session-id})
     @progressed?))
 
+(defn- cancel-requested?
+  "True when the optional host-supplied cancel `signal` is requesting abort.
+
+   Additive, defensive, and safe to call at any pump-loop boundary:
+
+   * `nil` signal  → never cancels (omitting `:cancel` preserves prior behavior).
+   * promise / future / delay (anything `realized?` accepts) → cancels only
+     once it is *delivered* and its delivered value is truthy. An undelivered
+     promise never blocks here (we check `realized?` first).
+   * IDeref (atom / volatile / ref / agent) → cancels when its current value
+     is truthy.
+   * any other truthy value → treated as cancel (caller passed a raw flag).
+
+   Never throws: any failure to inspect the signal is treated as \"not
+   cancelled\" so a malformed handle cannot wedge the runner."
+  [signal]
+  (when (some? signal)
+    (try
+      (cond
+        ;; Promise/future/delay: only consult the value once realized so an
+        ;; un-delivered promise does not block the pump loop.
+        (instance? clojure.lang.IPending signal)
+        (and (realized? signal) (boolean (deref signal)))
+
+        (instance? clojure.lang.IDeref signal)
+        (boolean (deref signal))
+
+        :else (boolean signal))
+      (catch Throwable _ false))))
+
 (defn- final-config? [env session-id]
   ;; Heuristic: if the configuration is empty, the chart has terminated via top-level final.
   (let [store (::sc/working-memory-store env)
@@ -152,8 +182,33 @@
          * `:session-id` (required) — the session id for this run
          * `:transcript-path` (required) — JSONL output file path
          * `:checkpoint-dir` (required) — directory for atomic checkpoint files
+         * `:catalog-ratings` (optional) — subjective ratings table
+                                  (`id → opinion-map`) threaded to the
+                                  llm-conversation eligibility gate.
+                                  Resolved ONCE by the caller (CLI: from
+                                  disk config at startup). Defaults to `{}`.
+         * `:eligibility-strict?` (optional) — fail-closed flag for the
+                                  eligibility gate; default fail-open.
          * `:backend` (optional) — an `LLMBackend`; required only if chart uses `:llm-conversation`
          * `:tool-registry` (optional) — tool registry atom
+         * `:store` (optional) — working-memory store override; threaded to
+                                 `engine.env/new-env`. When omitted (`nil`) the
+                                 default file-backed store is used (CLI behavior
+                                 unchanged).
+         * `:run-id` (optional) — opaque correlation id. When supplied it is
+                                  echoed on the `:runner/started` event so
+                                  callers can correlate every transcript row.
+         * `:cancel` (optional) — a host-supplied cancellation handle: an atom
+                                  (or any `IDeref`) whose truthy value, or a
+                                  promise/future/delay whose delivered value is
+                                  truthy, requests a prompt abort. Checked at a
+                                  safe pump-loop boundary (between events, never
+                                  mid-write); on cancel the run emits a
+                                  `:runner/aborted` event with
+                                  `{:reason :cancelled}`, stops pumping cleanly,
+                                  and the summary map carries
+                                  `:status :aborted`. Omitting it (`nil`)
+                                  preserves prior behavior exactly.
          * `:initial-data` (optional) — initial chart data (passed as data-model seed)
          * `:resume?` (default false) — if true and a checkpoint exists, do not call `start!`
          * `:trace?` (default false) — write `:runner/tick` events on every loop turn
@@ -171,9 +226,11 @@
                                                without the debugger stealing
                                                focus."
        [{:keys [chart chart-id session-id transcript-path checkpoint-dir
-                session-dir backend backend-default-models tool-registry initial-data resume? trace?
+                session-dir backend backend-default-models
+                catalog-ratings eligibility-strict?
+                tool-registry initial-data resume? trace?
                 max-iterations quiescent-sleep-ms human-renderer
-                on-env-ready transcript-tap prelude-events
+                on-env-ready transcript-tap prelude-events store run-id cancel
                 debug-controller human-input-active?]
          :or   {chart-id          ::chart
                 resume?           false
@@ -194,8 +251,11 @@
                              jsonl-fn)
              env           (engine-env/new-env {:checkpoint-dir     checkpoint-dir
                                                 :session-dir        session-dir
+                                                :store              store
                                                 :llm-backend        backend
                                                 :llm-default-models backend-default-models
+                                                :llm-catalog-ratings catalog-ratings
+                                                :llm-eligibility-strict? eligibility-strict?
                                                 :tool-registry      tool-registry
                                                 :human-renderer     human-renderer
                                                 :transcript-fn      transcript-fn})
@@ -212,9 +272,10 @@
          (doseq [ev prelude-events]
            (transcript-fn ev))
          (transcript-fn {:event :runner/started
-                         :data  {:session-id (str session-id)
-                                 :chart-id   (str chart-id)
-                                 :resume?    (boolean resume?)}})
+                         :data  (cond-> {:session-id (str session-id)
+                                         :chart-id   (str chart-id)
+                                         :resume?    (boolean resume?)}
+                                  run-id (assoc :run-id (str run-id)))})
          (try
            ;; Start or resume
            (let [existing (sp/get-working-memory store env session-id)]
@@ -230,38 +291,54 @@
                  (sp/save-working-memory! store env session-id w0)
                  (transcript-fn {:event :runner/start-config
                                  :data  {:config (vec (::sc/configuration w0))}}))))
-           ;; Pump
-           (loop [i max-iterations]
-             (when trace?
-               (transcript-fn {:event :runner/tick :data {:i (- max-iterations i)}}))
-             (cond
-               (zero? i)
-               (transcript-fn {:event :runner/aborted
-                               :data {:reason :max-iterations}})
+           ;; Pump. The loop returns a terminal status keyword:
+           ;;   :done      — quiescent with no live invocations (normal)
+           ;;   :aborted   — host cancel signal fired, or max-iterations hit
+           (let [status
+                 (loop [i max-iterations]
+                   (when trace?
+                     (transcript-fn {:event :runner/tick :data {:i (- max-iterations i)}}))
+                   (cond
+                     ;; Cancellation is checked FIRST, at the top of the
+                     ;; iteration — a safe boundary between events, never
+                     ;; mid-transcript-write or mid-checkpoint-write — so an
+                     ;; abort can never tear a partial transcript/checkpoint
+                     ;; row. "Promptly" = by the next pump iteration.
+                     (cancel-requested? cancel)
+                     (do (transcript-fn {:event :runner/aborted
+                                         :data  {:reason :cancelled}})
+                         :aborted)
 
-               :else
-               (let [progressed? (drain-once! {:env env
-                                               :session-id session-id
-                                               :transcript-fn transcript-fn
-                                               :controller debug-controller
-                                               :human-input-active? human-input-active?})]
-                 (if progressed?
-                   (recur (dec i))
-                   (let [live (count-live-invocations env)]
-                     (transcript-fn {:event :runner/quiescent
-                                     :data  {:live-invocations live}})
-                     (cond
-                       (zero? live)
-                       nil ;; done
+                     (zero? i)
+                     (do (transcript-fn {:event :runner/aborted
+                                         :data {:reason :max-iterations}})
+                         :aborted)
 
-                       :else
-                       (do (Thread/sleep ^long quiescent-sleep-ms)
-                           (recur (dec i)))))))))
-           (let [final-wmem (sp/get-working-memory store env session-id)
+                     :else
+                     (let [progressed? (drain-once! {:env env
+                                                     :session-id session-id
+                                                     :transcript-fn transcript-fn
+                                                     :controller debug-controller
+                                                     :human-input-active? human-input-active?})]
+                       (if progressed?
+                         (recur (dec i))
+                         (let [live (count-live-invocations env)]
+                           (transcript-fn {:event :runner/quiescent
+                                           :data  {:live-invocations live}})
+                           (cond
+                             (zero? live)
+                             :done ;; done
+
+                             :else
+                             (do (Thread/sleep ^long quiescent-sleep-ms)
+                                 (recur (dec i)))))))))
+                 final-wmem (sp/get-working-memory store env session-id)
                  cfg        (vec (::sc/configuration final-wmem #{}))]
              (transcript-fn {:event :runner/done
-                             :data  {:final-config cfg}})
+                             :data  {:final-config cfg
+                                     :status       status}})
              {:final-config cfg
+              :status       status
               :session-id   session-id
               :transcript   transcript-path
               :checkpoint-dir checkpoint-dir

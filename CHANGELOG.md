@@ -1,5 +1,129 @@
 # Changelog
 
+## [unreleased] — feat/hermetic-hosted-library — 2026-05-19
+
+Makes Escapement embeddable as a hermetic library and replaces the
+chart-facing model-policy DSL with an ergonomic `:needs` gate. Additive
+over the now-merged backend-resilience work — the CLI path is
+byte-for-byte unchanged and every new option preserves prior behavior
+when omitted. The one breaking change is the removal of the unreleased
+`:model-policy` node key (never shipped in a release): use `:needs`.
+
+### Added
+- **`escapement.lib/run` hosted facade.** Embed Escapement in your own
+  process without the CLI. A **closed** Malli option schema
+  (`escapement.lib/Options`, unknown keys rejected; `validate-options`
+  previews errors without running), a generated stable `:run-id`
+  (returned and emitted on `:runner/started`), temp-dir defaulting for
+  transcript/checkpoint/session, an optional `:session-dir` for artifact
+  output (`<session-dir>/artifacts/<name>`, echoed back in the result
+  map), an optional `:store` passthrough, and quiet-by-default logging
+  (`:quiet?`). The CLI does not use the facade.
+- **Hermetic library configuration & credentials.** `escapement.lib/run`
+  never reads `.escapement.edn` from disk and never sniffs credential
+  env vars. Two schema keys carry everything as explicit data:
+  `:credentials` — **required**, an ordered vector of provider
+  descriptor maps (`{:provider :anthropic :api-key "…"}`,
+  `{:provider :z-ai-plan :subscription true}`, …) from which the backend
+  is assembled (an explicit `:backend` remains an escape hatch that wins
+  verbatim); and `:config` — optional, the `.escapement.edn`-shaped map
+  (`:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`).
+  Absent `:config` ⇒ an empty ratings table plus the built-in
+  `default-preferences` order, never a disk fallback. Two `run` calls in
+  one process with different `:config` ratings resolve eligibility
+  independently — there is no process global. The injected
+  provider→backend matrix mirrors CLI auto-detection fact-for-fact, so
+  the two paths cannot drift.
+- **`escapement.lib.event-sink` normalized public events.** A pure
+  normalization adapter over `:transcript-tap` exposing a closed, stable
+  public Malli event union (`PublicEvent`) with
+  `:session-id`/`:run-id`/`:invokeid` correlation; synthesizes the tool
+  call/result/validation split and model-fallback events and drops
+  internal rows. Entry points `make-adapter` / `feed!` / `normalize` /
+  `valid-event?`.
+- **`:needs` eligibility-gate `llm-conversation` param.** A **flat**
+  `fact → constraint` map (one nesting level) translated at the
+  invocation boundary into the canonical
+  `escapement.llm.catalog/satisfies-policy?` policy by the new
+  `escapement.llm.needs` namespace. A bare value means exact equality,
+  `[:>= n]` an inclusive numeric floor, `[:<= n]` an inclusive ceiling —
+  only those two comparators (no `:>`/`:<`/`:=`); a malformed entry
+  throws an `ex-info` naming the offending key. The gate **filters**, it
+  never ranks: all ordering still comes from the sorted
+  `:llm/preferences` list (a model rated 7 and one rated 10 are
+  interchangeable under `[:>= 6]`).
+- **Documented objective fact vocabulary.** `escapement.llm.catalog`
+  publishes `eligibility-facts` — the stable, enumerated set of
+  objective `:needs`/policy keys (`:vision?`, `:tool-call?`,
+  `:reasoning?`, `:context-tokens`, `:max-output-tokens`, `:company`,
+  `:family`, `:knowledge`) with one-line meanings. Subjective rating
+  keys from `:llm/ratings` mix into the same keyspace and are
+  deliberately not enumerated (host-defined, free-form).
+- **`:llm/eligibility-strict?` fail-closed option.** When every
+  candidate is filtered out the default is still **fail-open** (proceed
+  on the unfiltered list; a `:llm/model-policy-empty` transcript event
+  records the gap — the CLI bias). Setting
+  `:config :llm/eligibility-strict? true` on the lib path makes it
+  **fail-closed**: error the node rather than silently run an
+  unintended model.
+- **`:initial-messages` `llm-conversation` param.** An optional vector
+  of pre-built message maps to seed a conversation with (e.g. a
+  multi-block first user message carrying an `:image`, or a short prior
+  exchange). When non-empty it takes precedence over
+  `:initial-user-message` and the worker starts in `:running`.
+- **Cooperative runner cancellation.** A new optional `:cancel` runner
+  option (atom/`IDeref`, or a delivered promise/future/delay) requests a
+  prompt abort at a safe pump-loop boundary (between events, never
+  mid-write), emitting `:runner/aborted` `{:reason :cancelled}` and a
+  new additive `:status` (`:done` | `:aborted`) on `:runner/done` and
+  the summary map. `runner/run!` also gained additive `:store` and
+  `:run-id` options. Omitting any of these preserves prior behavior.
+- **Runnable embedding example.** `demos/lib/embed_example.clj` (plus
+  `demos/lib/README.md`) shows end-to-end use of `escapement.lib/run`
+  with explicit `:credentials`/`:config` and the event-sink adapter. A
+  hosted-library quickstart was added to `README.md` (the CLI
+  quickstart is unchanged) and a **Hosted library** section to
+  `Guide.adoc` (option/result schema, public event union, locked design
+  decisions, migration notes, known limitations), plus `:needs` and
+  cooperative-cancellation coverage in the `:llm-conversation` and
+  Runner sections.
+
+### Removed
+- The unreleased `:model-policy` `llm-conversation` node key. It only
+  ever lived on the now-merged backend-resilience branch and was never
+  part of a release, so it is removed outright (no alias, no
+  `:llm/model-policy-deprecated` transcript notice) rather than carried
+  as deprecated. The ergonomic flat `:needs` gate fully replaces it;
+  charts express eligibility solely via `:needs` (the bundled
+  `escapement.examples.clj-refactor` already does).
+
+### Changed
+- `escapement.llm.catalog/satisfies-policy?` now takes the subjective
+  ratings table as an explicit argument (new 3-arity). The catalog no
+  longer carries a process-global ratings cache
+  (`def`-of-`delay` over `config/load-config`): ratings flow as a plain
+  value threaded through the invocation context, resolved once per run
+  (from `:config` on the lib path, from disk at startup on the CLI
+  path — same seam, different source). `catalog/info` and the objective
+  accessors are now opinion-free (ratings are no longer merged into
+  `info`). The 2-arity remains as a backward-compatible CLI seam that
+  resolves ratings from `.escapement.edn` per call.
+
+### Notes
+- The hosted-facade option schema, hermetic credential/config assembly,
+  event-sink normalization, `:needs`→policy translation,
+  `eligibility-facts`, the `satisfies-policy?` 3-arity, `:initial-messages`
+  seeding, and cooperative runner cancellation are all unit-covered
+  offline under `bb test` with a mock backend — none require a
+  credential.
+- This branch adds no new credential-gated surface. The `bb test:e2e`
+  live wire suite is unchanged from the merged backend-resilience work;
+  a reviewer with real keys may still run it to re-verify the live
+  providers.
+
+---
+
+
 ## [unreleased] — feat/lib-compat — 2026-05-19
 
 Resilience + a live end-to-end harness on top of the structured error

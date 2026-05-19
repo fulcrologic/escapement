@@ -196,7 +196,10 @@
 ;;; `event:` lines are redundant with the JSON `type`. Blocks are rebuilt by
 ;;; index from content_block_start/_delta/_stop; the final assembly reuses the
 ;;; same `wire->block` / `wire->usage` translators as the non-streaming path,
-;;; so a streamed turn yields a byte-identical Response to a buffered one.
+;;; so a streamed turn yields a Response whose blocks + usage are structurally
+;;; identical to a buffered one. That equivalence is no longer asserted by
+;;; prose: it is proven, regression-gated, by the executable equivalence test
+;;; `escapement.llm.stream-equivalence-test` (Anthropic + OpenAI backends).
 
 (defn stream-acc-init []
   {:blocks (sorted-map) :model nil :usage {} :stop-reason nil})
@@ -223,10 +226,24 @@
                                      {}))}
     {"type" "text" "text" (or (:text b) "")}))
 
+(defn- with-running-usage
+  "Attach the cumulative usage already folded into `acc` onto a delta map as
+   the OPTIONAL `:usage` key, using the same `{:input-tokens :output-tokens ...}`
+   shape as the finalized `Response` `:usage`. Omitted entirely when no usage
+   has been accumulated yet (optional means absent, not a zero placeholder).
+   Purely informational live-progress; the finalized `Response` usage stays the
+   billing source of truth and is independent of this running total."
+  [delta acc]
+  (let [u (:usage acc)]
+    (cond-> delta
+      (seq u) (assoc :usage u))))
+
 (defn stream-acc-step
   "Fold one parsed SSE `data:` payload into accumulator `acc`. Calls
    `(on-delta {:type :text-delta|:thinking-delta :text s})` for incremental
-   text/thinking. Pure except for the supplied callback."
+   text/thinking (with an optional cumulative `:usage` key sourced from the
+   running fold — see `with-running-usage`). Pure except for the supplied
+   callback."
   [acc {:strs [type index] :as ev} on-delta]
   (case type
     "message_start"
@@ -242,10 +259,14 @@
     (let [d (get ev "delta")]
       (case (get d "type")
         "text_delta"
-        (do (when on-delta (on-delta {:type :text-delta :text (get d "text")}))
+        (do (when on-delta (on-delta (with-running-usage
+                                      {:type :text-delta :text (get d "text")}
+                                      acc)))
             (update-in acc [:blocks index :text] str (get d "text")))
         "thinking_delta"
-        (do (when on-delta (on-delta {:type :thinking-delta :text (get d "thinking")}))
+        (do (when on-delta (on-delta (with-running-usage
+                                      {:type :thinking-delta :text (get d "thinking")}
+                                      acc)))
             (update-in acc [:blocks index :thinking] str (get d "thinking")))
         "signature_delta"
         (update-in acc [:blocks index :signature] str (get d "signature"))

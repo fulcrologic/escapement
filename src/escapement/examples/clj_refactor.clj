@@ -2,17 +2,24 @@
   "Example: a chart that gates model auto-selection on *per-dimension*
    ratings rather than a single intelligence number.
 
-   The `:model-policy` below is a declarative
-   `escapement.llm.catalog/satisfies-policy?` map. It is applied only to
-   the processor's auto-detected `default-models` fallback list — if a
+   The `:needs` below is the ergonomic eligibility-gate surface: a flat
+   `fact → constraint` map (translated at the invocation boundary into
+   the canonical `catalog/satisfies-policy?` policy). It is applied only
+   to the processor's auto-detected `default-models` fallback list — if a
    chart pins `:model`/`:models` that is honored verbatim. Here we demand
    a model that scores well on Clojure *and* has usable tool-calling:
 
-     {:min {:clojure 8 :tool-calling 6}}
+     {:clojure [:>= 8] :tool-calling [:>= 6]}
+
+   (`[:>= n]` is an inclusive numeric floor; a bare value would mean
+   exact equality; `[:<= n]` an inclusive ceiling. Those are the only
+   forms.) The gate **filters** the preference-ordered list; it never
+   reorders — ordering is the sole job of `:llm/preferences`.
 
    Those keys come from the subjective overlay in
-   `escapement.llm.ratings` (merged into `catalog/info`), so the filter is
-   pure data — no invocation code knows the word \"clojure\".
+   `escapement.llm.ratings`, resolved from the injected ratings table, so
+   the filter is pure data — no invocation code knows the word
+   \"clojure\".
 
    There is **no built-in opinion**: ratings are entirely user-defined.
    This policy filters nothing until you supply the keys it gates on in
@@ -51,11 +58,11 @@
                   {:id        "clj-refactor"
                    :params-fn (fn [_env _data]
                                 {:system       system-prompt
-                                 ;; Multi-dimensional gate over the ratings
-                                 ;; overlay: strong Clojure AND usable
-                                 ;; tool-calling, or this model is not
-                                 ;; eligible for the auto-fallback list.
-                                 :model-policy {:min {:clojure 8 :tool-calling 6}}
+                                 ;; Multi-dimensional eligibility gate over
+                                 ;; the ratings overlay: strong Clojure AND
+                                 ;; usable tool-calling, or this model is
+                                 ;; not eligible for the auto-fallback list.
+                                 :needs {:clojure [:>= 8] :tool-calling [:>= 6]}
                                  :real-tools   []
                                  :allowed-events
                                  [{:event       :done

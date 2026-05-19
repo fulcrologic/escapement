@@ -67,6 +67,102 @@ Expected `final-config`: `[:run :finished]`.
 
 Drop an optional `.escapement.edn` at the root of any project to pin its layout once. Keys: `:source-paths` (extra classpath roots for chart utility namespaces), `:deps` (runtime Maven/git coordinates resolved via `babashka.deps/add-deps`), `:tools-ns` (registration fn symbol or vector), `:work-dir` (default transcript/checkpoint location), `:default-chart` (used when `escapement run` is invoked without a chart symbol). Escapement walks up from the current directory to find the file, so invocation is location-independent. See the *Project configuration* section of [`Guide.adoc`](Guide.adoc) for the full schema and precedence rules.
 
+## Embedding Escapement as a library
+
+Escapement has **three usage modes**:
+
+1. **CLI** — the `escapement run …` flow above (see [Quickstart](#quickstart)). Unchanged.
+2. **Hosted library** — call `escapement.lib/run` from your own JVM/bb process. The facade validates a closed option map, generates a stable `:run-id`, defaults transcript + checkpoint to a fresh temp dir, and quiets statecharts-impl logging by default. It is **hermetic**: it never reads `.escapement.edn` from disk and never sniffs credential env vars — a host injects providers and config as explicit data on every call. This section.
+3. **Future daemon direction** — a long-lived multi-session HTTP/socket service is an intended later direction. It is **deferred / not in this slice**; no daemon API exists yet. Described for orientation only in [`Guide.adoc`](Guide.adoc).
+
+### Hosted-library quickstart
+
+`escapement.lib/run` takes a closed option map and returns a summary map. The only required keys are `:chart` and `:session-id`; everything else is optional and defaults sensibly (no `:transcript-path`/`:checkpoint-dir` needed — a fresh temp dir is created). Attach `escapement.lib.event-sink` to `:transcript-tap` to receive a stable, normalized public event stream. Correlation stays in **your** closure — capture `:run-id`/`:session-id` yourself; no host identifiers go into payloads.
+
+Copy-run as written (from a clone of this repo):
+
+```clojure
+;; bb -e "$(cat this-snippet.clj)"   (or paste into a bb REPL)
+(require '[escapement.lib :as lib]
+         '[escapement.lib.event-sink :as sink]
+         '[com.fulcrologic.statecharts.chart :as chart]
+         '[com.fulcrologic.statecharts.data-model.operations :as ops])
+(import '[com.fulcrologic.statecharts.elements])
+(refer 'com.fulcrologic.statecharts.elements :only '[state transition final script on-entry])
+
+;; A tiny chart: assign into the data model, then transition to a final state.
+(def greet
+  (chart/statechart
+   {:initial :run}
+   (state {:id :run :initial :go}
+          (state {:id :go}
+                 (on-entry {} (script {:expr (fn [_ _]
+                                               [(ops/assign :msg "hi from embedded escapement")])}))
+                 (transition {:target :done}))
+          (final {:id :done}))))
+
+;; Correlation stays in the HOST closure: collect normalized public events,
+;; tag them with whatever the host already knows. No host id is put in payloads.
+(let [events  (atom [])
+      adapter (sink/make-adapter)
+      result  (lib/run {:chart          greet
+                        :session-id     "demo-session"
+                        :transcript-tap (fn [row]
+                                          (doseq [e (sink/feed! adapter row)]
+                                            (swap! events conj e)))})]
+  (println "run-id      :" (:run-id result))
+  (println "status      :" (:status result))
+  (println "final-config:" (:final-config result))
+  (println "transcript  :" (:transcript result))
+  (println "public events:")
+  (doseq [e @events]
+    (println "  " (:type e) "run-id=" (:run-id e)))
+  (println "all events carry run-id? :"
+           (every? #(= (:run-id result) (:run-id %)) @events)))
+```
+
+Output (the `:run-id` and temp path differ each run; stderr is quiet by default):
+
+```
+run-id      : 3d8e6cb3-7e0f-4bcb-a687-6c19a550aa0d
+status      : :done
+final-config: [:run :done]
+transcript  : /tmp/escapement-run-13211622512067290675/transcript.jsonl
+public events:
+   :run-started run-id= 3d8e6cb3-7e0f-4bcb-a687-6c19a550aa0d
+   :chart-config run-id= 3d8e6cb3-7e0f-4bcb-a687-6c19a550aa0d
+   :run-done run-id= 3d8e6cb3-7e0f-4bcb-a687-6c19a550aa0d
+all events carry run-id? : true
+```
+
+### Hermetic config and credentials
+
+A chart with an LLM conversation is driven entirely by injected data — no disk, no env on the lib path. A host configures everything once at startup and passes it on every `run`:
+
+- **`:credentials`** — **required**: an ordered vector of provider descriptor maps. Each names a `:provider` keyword plus the env-free secret/override it needs (`:api-key`, `:base-url`, `:model`, or `:subscription true`). The backend is assembled from these (an explicit `:backend` is an escape hatch that wins verbatim).
+- **`:config`** — optional: the `.escapement.edn`-shaped map (`:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`). Absent ⇒ an empty ratings table and the built-in default preference order, never a disk fallback.
+
+```clojure
+(lib/run
+  {:chart       my.app.charts/agent
+   :session-id  :req-42
+   ;; REQUIRED for any chart with an :llm-conversation — the facade wires the
+   ;; LLM processor only when BOTH a backend and a :tool-registry are present.
+   :tool-registry (escapement.tools.protocol/new-registry)   ; or new-builtin-registry
+   :credentials [{:provider :z-ai-plan :subscription true}
+                 {:provider :anthropic :api-key (System/getenv "ANTHROPIC_API_KEY")}]
+   :config      {:llm/preferences [{:provider :z-ai-plan :model "glm-4.6"}
+                                   {:provider :anthropic :model "claude-opus-4-7"}]
+                 :llm/ratings     {"claude-opus-4-7" {:clojure 9}}
+                 :llm/eligibility-strict? true}})
+```
+
+A chart node expresses what it `:needs` (a flat eligibility gate that **filters**; ranking is the sole job of the sorted `:llm/preferences`). Two `run` calls in one process with different `:config` ratings resolve independently — there is no process global. The full worked reference example (host config + a two-node statechart + the resolution walk-through) is in the **Hosted library** section of [`Guide.adoc`](Guide.adoc).
+
+The snippet above is deliberately a *no-LLM* chart so it runs with zero secrets. For a **realistic embedded LLM chart** — authored with `escapement.chart.helpers`, sharing context between phases via file-backed artifacts, injecting `:credentials`/`:config`/`:initial-data`/`:session-dir`, and **streaming assistant tokens live via the public `:text-delta` event** (the supported alternative to hand-matching raw `:llm/delta` rows) — see the runnable [`demos/lib/`](demos/lib/) example (`bb -m lib.embed-example`).
+
+A run is made cancellable by passing `:cancel` an atom (or a delivered promise/future/delay); when it becomes truthy the run aborts promptly at a safe boundary and the result map's `:status` is `:aborted` (omitting `:cancel` always yields `:status :done` for a normal run). The full closed option schema, result-map keys, the public event union, the locked design decisions, migration notes, and known limitations are in the **Hosted library** section of [`Guide.adoc`](Guide.adoc).
+
 ## See [`Guide.adoc`](Guide.adoc) for the full guide
 
 The guide covers:
@@ -127,12 +223,13 @@ Small worked examples under `src/escapement/examples/`:
 - [`scan.clj`](src/escapement/examples/scan.clj) — real tool (`:fs/read`) plus fan-out of multiple event-tool calls
 - [`parallel_demo.clj`](src/escapement/examples/parallel_demo.clj) — two parallel regions, independent conversations, join on compound final
 - [`iterate.clj`](src/escapement/examples/iterate.clj) — non-trivial coding loop with `tell-llm` mid-binding, `:max-iterations` cap, retry, and give-up paths
-- [`clj_refactor.clj`](src/escapement/examples/clj_refactor.clj) — gates model auto-selection on per-dimension ratings via a declarative `:model-policy` (`:min {:clojure 8 :tool-calling 6}`)
+- [`clj_refactor.clj`](src/escapement/examples/clj_refactor.clj) — gates model auto-selection on per-dimension ratings via a declarative `:needs` eligibility gate (`{:clojure [:>= 8] :tool-calling [:>= 6]}`)
 - [`artifacts_demo.clj`](src/escapement/examples/artifacts_demo.clj) — sequential LLM phases sharing context through file-backed artifacts and `{{name}}` template rendering
 - [`ask.clj`](src/escapement/examples/ask.clj) — `:human-input` invocation patterns (text / confirm) plus Esc-based `:ui.interrupt`
 
 End-to-end demo under `demos/`:
 
+- [`demos/lib/`](demos/lib/) — **embedding Escapement as a library**: a two-phase LLM chart driven via `escapement.lib/run` with injected credentials/config/initial-data, artifact-shared context, and live `:text-delta` streaming via `escapement.lib.event-sink`. The example a host project should read first.
 - [`demos/unit_test/`](demos/unit_test/) — port of the pi `unit_test` extension. Drives an LLM through behaviors → abstraction → (write|gap-analysis) → (critique|patch) → refine to author and seal `fulcro-spec` tests for a target function. Includes a sibling **REPL-manager parallel region** that establishes a project nREPL (cheap scripted discovery first; LLM-driven `deps.edn` inspection on miss) and hands the port to refine via shared data + one coordination event. Tested end-to-end against [`fulcrologic/fulcro`](https://github.com/fulcrologic/fulcro): generated and sealed a 52-assertion test file for `resolve-tempids`.
 
 See [`plan.md`](plan.md) for design history.
