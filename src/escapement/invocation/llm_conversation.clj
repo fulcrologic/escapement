@@ -13,6 +13,12 @@
     input as event data) and a synthetic `tool_result` `\"ok\"` is appended. On failure the
     LLM gets one corrective retry; a second failure aborts with `:error.llm.tool-validation`.
 
+    An event-tool entry may carry an `:awaits` key declaring that the tool is a
+    deferred-reply call: the worker defers the `tool_result` until a matching chart
+    event fires `escapement.chart.helpers/complete-call` (an alias for
+    `escapement.chart.deferred-reply/complete-call`). See [[handle-tool-use-block]]'s
+    `:awaits` branch and the analogous region-tool branch.
+
   When the assistant returns `:end_turn`, the worker fires `:on-end-turn-event` to the
   parent and parks until either `:llm.user-message` arrives via `forward-event!` (continues
   the conversation with a new user message) or the invocation is stopped.
@@ -20,6 +26,7 @@
   See `plan.md` for the design."
   (:require
    [clojure.string :as str]
+   [escapement.chart.deferred-reply :as-alias deferred-reply]
    [escapement.chart.service :as service]
    [escapement.llm.catalog :as catalog]
    [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
@@ -478,37 +485,91 @@
    handler is slow."
   200)
 
+(def ^:const default-steering-grace-ms
+  "Default value for `:steering-grace-ms` when the conversation's
+   `:params` does not specify one. See [[drain-steering-queue!]] for
+   why a brief grace exists in the first place."
+  50)
+
+(defn- drain-steering-queue!
+  "Drain `steering-queue` into `messages-atom`, one `:role :user` text
+   message per pending entry. Emits `:llm/steering-injected` on the
+   transcript per delivered message.
+
+   `grace-ms` is the initial-poll wait (in ms). Pass a non-zero value
+   directly after a `:tool_use` cycle to give the chart engine time to
+   process events the worker just posted (the engine runs on a separate
+   thread; without the grace, a `tell-llm :when :after-roundtrip` that
+   fires from a transition reacting to the just-finished roundtrip
+   would consistently miss the immediately-following drain). Pass `0`
+   when no events were just posted — e.g. when entering `:running`
+   after popping a user-message from `:awaiting-user`."
+  [^ArrayBlockingQueue steering-queue messages-atom transcript-fn invokeid grace-ms]
+  (when steering-queue
+    (when-let [first-text (.poll steering-queue (long grace-ms) TimeUnit/MILLISECONDS)]
+      (swap! messages-atom conj (text-user-message first-text))
+      (transcript! transcript-fn
+                   {:event :llm/steering-injected
+                    :ts    (now-ms)
+                    :data  {:text first-text :invokeid invokeid}})
+      (loop []
+        (when-let [text (.poll steering-queue 0 TimeUnit/MILLISECONDS)]
+          (swap! messages-atom conj (text-user-message text))
+          (transcript! transcript-fn
+                       {:event :llm/steering-injected
+                        :ts    (now-ms)
+                        :data  {:text text :invokeid invokeid}})
+          (recur))))))
+
 (defn- poll-reply-queue!
   "Wait on the worker's `tool-reply-queue` until a reply for `reply-id`
    arrives, until `deadline-ms` passes, or until `worker-state` flips to
    `:dying`.
 
-   Mis-correlated replies (for a different `reply-id`) are dropped with
-   a transcript-log entry, NOT stashed: the worker has at most one
-   outstanding region call at a time, so any other reply is a strict
-   straggler."
-  [^ArrayBlockingQueue queue reply-id deadline-ms worker-state transcript-fn invokeid]
-  (loop []
-    (let [now      (now-ms)
-          remain   (- deadline-ms now)]
-      (cond
-        (= :dying @worker-state) nil
-        (<= remain 0)            nil
-        :else
-        (let [wait (min (long remain) (long region-tool-poll-step-ms))
-              msg  (.poll queue wait TimeUnit/MILLISECONDS)]
-          (cond
-            (nil? msg) (recur)
-            (= reply-id (:escapement.tool/reply-id msg)) msg
-            :else
-            (do
-              (transcript! transcript-fn
-                           {:event :llm/region-tool-late-reply
-                            :ts    (now-ms)
-                            :data  {:invokeid invokeid
-                                    :expected reply-id
-                                    :got      (:escapement.tool/reply-id msg)}})
-              (recur))))))))
+   Optional `accept?` is a predicate `(fn [msg] -> bool)` applied AFTER
+   the reply-id matches; useful for the deferred-reply (`:awaits`) path
+   where we constrain to a declared `:on` set of answering event keywords.
+   When nil, any reply-id match is accepted (region-tool default).
+
+   Optional `log-event` is the transcript keyword used when a
+   mis-correlated reply is dropped. Defaults to
+   `:llm/region-tool-late-reply` for back-compat with the original
+   region-tool dispatch path; the `:awaits` branch passes
+   `:llm/awaited-tool-late-reply` so transcripts can tell the two
+   sources apart.
+
+   Mis-correlated replies (for a different `reply-id`, or for the right
+   `reply-id` but rejected by `accept?`) are dropped with a transcript
+   log entry; not stashed."
+  ([^ArrayBlockingQueue queue reply-id deadline-ms worker-state transcript-fn invokeid]
+   (poll-reply-queue! queue reply-id deadline-ms worker-state transcript-fn invokeid nil nil))
+  ([^ArrayBlockingQueue queue reply-id deadline-ms worker-state transcript-fn invokeid accept?]
+   (poll-reply-queue! queue reply-id deadline-ms worker-state transcript-fn invokeid accept? nil))
+  ([^ArrayBlockingQueue queue reply-id deadline-ms worker-state transcript-fn invokeid accept? log-event]
+   (let [log-kw (or log-event :llm/region-tool-late-reply)]
+     (loop []
+       (let [now      (now-ms)
+             remain   (- deadline-ms now)]
+         (cond
+           (= :dying @worker-state) nil
+           (<= remain 0)            nil
+           :else
+           (let [wait (min (long remain) (long region-tool-poll-step-ms))
+                 msg  (.poll queue wait TimeUnit/MILLISECONDS)]
+             (cond
+               (nil? msg) (recur)
+               (and (= reply-id (:escapement.tool/reply-id msg))
+                    (or (nil? accept?) (accept? msg))) msg
+               :else
+               (do
+                 (transcript! transcript-fn
+                              {:event log-kw
+                               :ts    (now-ms)
+                               :data  {:invokeid invokeid
+                                       :expected reply-id
+                                       :got      (:escapement.tool/reply-id msg)
+                                       :rejected (some? accept?)}})
+                 (recur))))))))))
 
 (defn- handle-tool-use-block
   "Process a single tool_use block. Returns a map:
@@ -563,27 +624,108 @@
 
       ;; Event tool
       (contains? name->event-entry name)
-      (let [{:keys [event data-schema]} (get name->event-entry name)
+      (let [{:keys [event data-schema awaits]} (get name->event-entry name)
             schema (or data-schema [:map])]
-        (if (m/validate schema (or input {}))
-          (do
-            (post-event-to-parent! parent-ctx event (or input {}))
-            (post-tool-result! event false "ok")
-            {:result-block {:type :tool_result :tool_use_id id :content "ok"}})
+        (cond
+          (not (m/validate schema (or input {})))
           (let [err (humanize-malli-errors schema input)]
             (post-tool-result! event true err)
             (if (>= retries 1)
-              {:fatal?     true
-               :error-data {:reason :tool-validation-failed
-                            :tool   event
-                            :errors err
-                            :tool_use_id id}
-               :result-block {:type :tool_result :tool_use_id id
+              {:fatal?       true
+               :error-data   {:reason      :tool-validation-failed
+                              :tool        event
+                              :errors      err
+                              :tool_use_id id}
+               :result-block {:type    :tool_result :tool_use_id id
                               :content err :is-error true}}
               (do
                 (swap! retry-counts assoc id (inc retries))
-                {:result-block {:type :tool_result :tool_use_id id
-                                :content err :is-error true}})))))
+                {:result-block {:type    :tool_result :tool_use_id id
+                                :content err :is-error true}})))
+
+          ;; Deferred-reply event-tool: defer the tool_result until a
+          ;; matching chart event fires `h/complete-call`. Mirrors the
+          ;; region-tool branch below; reuses the same `:tool-reply-queue`.
+          (some? awaits)
+          (let [{:keys [on error-events timeout-ms result-fn]} awaits
+                reply-id     (str "tr_" (java.util.UUID/randomUUID))
+                requester    (->id-str (:invokeid parent-ctx))
+                effective-tm (or (get input :timeout-ms) timeout-ms
+                                 region-tool-default-timeout-ms)
+                payload      (-> (or input {})
+                                 (dissoc :timeout-ms)
+                                 (assoc :escapement.tool/reply-id   reply-id
+                                        :escapement.tool/reply-to   requester
+                                        :escapement.tool/timeout-ms effective-tm
+                                        :escapement.tool/awaits     {:on           on
+                                                                     :error-events error-events}))
+                in-flight    (some-> (:env parent-ctx) ::deferred-reply/in-flight)
+                slot-entry   {:reply-id            reply-id
+                              :reply-to            requester
+                              :requesting-event-kw event
+                              :on                  on
+                              :error-events        error-events
+                              :issued-at           (now-ms)}
+                accept?      (fn [msg]
+                               (let [ae (:escapement.tool/answering-event msg)]
+                                 (or (nil? on) (contains? on ae))))]
+            ;; Register the in-flight RPC under EACH event-kw that could
+            ;; answer it, so `complete-call` (which only knows the firing
+            ;; event-kw) can find the matching slot. Empty :on means
+            ;; "any reply with the right reply-id wins"; in that case we
+            ;; register a wildcard slot keyed by :escapement.tool/any.
+            (when in-flight
+              (swap! in-flight
+                     (fn [m]
+                       (reduce
+                        (fn [acc k] (update acc k (fnil conj []) slot-entry))
+                        m
+                        (or (seq on) [:escapement.tool/any])))))
+            (post-event-to-parent! parent-ctx event payload)
+            (let [deadline (+ (now-ms) (long effective-tm))
+                  reply    (poll-reply-queue! tool-reply-queue reply-id deadline
+                                              worker-state transcript-fn
+                                              (:invokeid parent-ctx) accept?
+                                              :llm/awaited-tool-late-reply)]
+              ;; Clear our slot entries unconditionally so a late reply
+              ;; doesn't accidentally complete the wrong future request.
+              (when in-flight
+                (swap! in-flight
+                       (fn [m]
+                         (reduce-kv
+                          (fn [acc k entries]
+                            (let [filtered (filterv #(not= (:reply-id %) reply-id)
+                                                    entries)]
+                              (if (seq filtered) (assoc acc k filtered) acc)))
+                          {} m))))
+              (if reply
+                (let [ae       (:escapement.tool/answering-event reply)
+                      err?     (or (boolean (:is-error reply))
+                                   (boolean (and (seq error-events)
+                                                 (contains? error-events ae))))
+                      raw-data (:data reply)
+                      content  (if result-fn
+                                 (try
+                                   (str (result-fn (assoc reply
+                                                          :answering-event ae
+                                                          :data            raw-data)))
+                                   (catch Throwable t
+                                     (str ":result-fn threw: " (.getMessage t))))
+                                 (pr-str raw-data))]
+                  (post-tool-result! event err? content)
+                  {:result-block {:type     :tool_result :tool_use_id id
+                                  :content  content
+                                  :is-error err?}})
+                (let [msg (str name " timed out after " effective-tm "ms")]
+                  (post-tool-result! event true msg)
+                  {:result-block {:type     :tool_result :tool_use_id id
+                                  :content  msg :is-error true}}))))
+
+          :else
+          (do
+            (post-event-to-parent! parent-ctx event (or input {}))
+            (post-tool-result! event false "ok")
+            {:result-block {:type :tool_result :tool_use_id id :content "ok"}})))
 
       ;; Region tool — dispatch synchronously: post the request event,
       ;; poll the worker's `tool-reply-queue` until a matching reply
@@ -796,7 +938,7 @@
             ;; through to model fallback / :exhausted.
             response (loop [retry 0]
                        (let [r (try (llm/send-turn* backend request on-delta)
-                                     (catch Throwable t {:_throw t}))
+                                    (catch Throwable t {:_throw t}))
                              t (:_throw r)
                              cat (when t (llm/error-category t))]
                          (if (and t
@@ -910,7 +1052,7 @@
                         in :awaiting-user."
   [{:keys [tool-registry transcript-fn
            name->tool-kw name->event-entry tool-defs
-           worker-state messages-atom retry-counts
+           worker-state messages-atom retry-counts steering-queue
            params parent-ctx] :as ctx}
    post-error! on-end-turn-event]
   (let [outcome (drive-turn! ctx params @messages-atom tool-defs)]
@@ -1021,6 +1163,13 @@
                 (swap! results conj result-block)
                 (when fatal? (reset! fatal error-data))))
             (swap! messages-atom conj (user-tool-results-message @results))
+            ;; :after-roundtrip drain WITH grace. We just posted events to
+            ;; the chart queue; wait briefly for the engine to process them
+            ;; so a tell-llm fired by a transition reacting to those events
+            ;; lands in THIS round-trip rather than the next.
+            (drain-steering-queue! steering-queue messages-atom
+                                   transcript-fn (:invokeid parent-ctx)
+                                   (:steering-grace-ms params default-steering-grace-ms))
             (if-let [err @fatal]
               (do
                 (post-error! :tool-validation err)
@@ -1081,10 +1230,12 @@
    `category` ∈ `protocol/error-categories` to `:error.llm.<category>`."
   [{:keys [backend tool-registry transcript-fn
            name->tool-kw name->event-entry tool-defs
-           worker-state messages-atom user-msg-queue retry-counts
+           worker-state messages-atom user-msg-queue steering-queue retry-counts
            params parent-ctx] :as ctx}]
-  (let [{:keys [on-end-turn-event max-turns max-conversation-duration-ms]
-         :or   {on-end-turn-event :llm.idle}} params
+  (let [{:keys [on-end-turn-event max-turns max-conversation-duration-ms
+                steering-grace-ms]
+         :or   {on-end-turn-event :llm.idle
+                steering-grace-ms default-steering-grace-ms}} params
         started-at  (now-ms)
         turn-count  (atom 0)
         post-error! (fn [reason data]
@@ -1139,6 +1290,15 @@
 
               :else
               (do
+                ;; Non-blocking pickup of any :after-roundtrip steering
+                ;; messages that landed while we were parked in
+                ;; :awaiting-user (or otherwise idle). The blocking-with-
+                ;; grace drain happens INSIDE handle-running-turn!'s
+                ;; :tool_use branch, where it's needed for chart-engine
+                ;; catch-up. Here we just want a free pickup at zero cost.
+                (drain-steering-queue! steering-queue messages-atom
+                                       transcript-fn (:invokeid parent-ctx)
+                                       0)
                 (swap! turn-count inc)
                 (case (handle-running-turn! ctx post-error! on-end-turn-event)
                   ;; All three outcomes just re-enter the loop; the inner
@@ -1210,6 +1370,7 @@
           messages-atom               (atom initial-msgs)
           worker-state                (atom (if initial-user-message :running :awaiting-user))
           user-msg-queue              (ArrayBlockingQueue. 256)
+          steering-queue              (ArrayBlockingQueue. 64)
           tool-reply-queue            (ArrayBlockingQueue. 64)
           retry-counts                (atom {})
           parent-ctx                  {:env env :queue queue
@@ -1226,6 +1387,7 @@
                                        :worker-state       worker-state
                                        :messages-atom      messages-atom
                                        :user-msg-queue     user-msg-queue
+                                       :steering-queue     steering-queue
                                        :retry-counts       retry-counts
                                        :model-status       model-status
                                        :default-models     default-models
@@ -1240,6 +1402,7 @@
               :worker-state     worker-state
               :messages-atom    messages-atom
               :user-msg-queue   user-msg-queue
+              :steering-queue   steering-queue
               :tool-reply-queue tool-reply-queue
               :retry-counts     retry-counts
               :params           params})
@@ -1294,11 +1457,18 @@
             (.offer ^ArrayBlockingQueue (:tool-reply-queue entry) ev-data)))
 
         (and entry accept? (= :llm.user-message ev-name))
-        (let [text (:text ev-data)]
+        (let [text (:text ev-data)
+              ;; Steering mode: :at-idle (default, queue until :end_turn) vs
+              ;; :after-roundtrip (deliver between the next tool_use cycle and
+              ;; the next LLM call). See `escapement.chart.helpers/tell-llm`'s
+              ;; `:when` option.
+              when' (:when ev-data)]
           (when (string? text)
-            ;; Just enqueue; the worker's :awaiting-user branch will pick it up,
-            ;; append it to messages, and switch to :running itself.
-            (.offer ^ArrayBlockingQueue (:user-msg-queue entry) text))))
+            (case when'
+              :after-roundtrip
+              (.offer ^ArrayBlockingQueue (:steering-queue entry) text)
+              ;; Default / :at-idle / unknown — preserve historical behavior.
+              (.offer ^ArrayBlockingQueue (:user-msg-queue entry) text)))))
       true)))
 
 ;; ---------------------------------------------------------------------------

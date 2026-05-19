@@ -20,6 +20,7 @@
    [com.fulcrologic.statecharts.elements :as elt]
    [com.fulcrologic.statecharts.environment :as env-ns]
    [com.fulcrologic.statecharts.protocols :as sp]
+   [escapement.chart.deferred-reply :as deferred-reply]
    [escapement.chart.service :as service]
    [escapement.invocation.llm-conversation :as llmc])
   (:import
@@ -40,6 +41,13 @@
   deferred reply for a region-tool request whose handler returned `nil`
   (slow-work pattern). See that ns for the full contract."}
   post-reply service/post-reply)
+
+(def ^{:doc "Alias for `escapement.chart.deferred-reply/complete-call`.
+  Returns a `script` element that, when placed inside a `transition` on a
+  reply event, fulfils the in-flight deferred-reply tool call (the
+  matching `event__*` invocation that declared `:awaits`). See
+  `escapement.chart.deferred-reply/complete-call` for the full contract."}
+  complete-call deferred-reply/complete-call)
 
 (defn llm-conversation
   "Returns an `invoke` element of type `:llm-conversation`.
@@ -229,8 +237,16 @@
    `tell-other-llm` for that case.
 
    `opts`:
-    * `:expr` (required) — `(fn [env data] text-string)` returning the user text."
-  [{:keys [expr]}]
+    * `:expr` (required) — `(fn [env data] text-string)` returning the user text.
+    * `:when` (optional, default `:at-idle`) — steering mode:
+       `:at-idle` (queue until the worker's next `:end_turn`, current
+       behavior), or `:after-roundtrip` (deliver between the next
+       tool_use cycle and the next LLM call — useful for nudging a
+       worker that's chaining tool calls without ever parking). The
+       `:after-roundtrip` worker-side wait can be tuned per
+       conversation via the `:steering-grace-ms` param (default 50ms);
+       see `escapement.invocation.llm-conversation`."
+  [{:keys [expr when]}]
   (assert (fn? expr) "tell-llm requires :expr")
   (elt/script
    {:expr (fn [env data]
@@ -241,7 +257,8 @@
                         {:target            sid
                          :source-session-id sid
                          :event             :llm.user-message
-                         :data              {:text text}})
+                         :data              (cond-> {:text text}
+                                              when (assoc :when when))})
               nil))}))
 
 (defn tell-other-llm
@@ -257,8 +274,9 @@
     * `:target` (required) — invokeid string of the destination conversation.
                              May also be a function `(fn [env data] invokeid)`
                              so the target can be computed from chart state.
-    * `:expr`   (required) — `(fn [env data] text-string)`."
-  [{:keys [target expr]}]
+    * `:expr`   (required) — `(fn [env data] text-string)`.
+    * `:when`   (optional, default `:at-idle`) — see [[tell-llm]]."
+  [{:keys [target expr when]}]
   (assert target "tell-other-llm requires :target")
   (assert (fn? expr) "tell-other-llm requires :expr")
   (elt/script
@@ -272,7 +290,8 @@
                         {:target            sid
                          :source-session-id sid
                          :event             :llm.user-message
-                         :data              {:text text :target target'}})
+                         :data              (cond-> {:text text :target target'}
+                                              when (assoc :when when))})
               nil))}))
 
 ;; ===========================================================================

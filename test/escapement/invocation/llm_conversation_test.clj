@@ -10,43 +10,10 @@
    [escapement.invocation.llm-conversation :as llmc]
    [escapement.llm.protocol :as llm]
    [escapement.test-support :as ts]
+   [escapement.test-support-llm :refer [mock-backend end-turn-response tool-use-response]]
    [escapement.tools.builtin :as builtin]
    [escapement.tools.protocol :as tp]
    [fulcro-spec.core :refer [specification component assertions =>]]))
-
-;; ---------------------------------------------------------------------------
-;; Mock LLMBackend
-;; ---------------------------------------------------------------------------
-
-(defrecord MockBackend [responses call-log]
-  llm/LLMBackend
-  (send-turn [_ request]
-    (swap! call-log conj request)
-    (let [r (ts/pop-first! responses)]
-      (when (nil? r)
-        (throw (ex-info "Mock backend out of canned responses" {:n-calls (count @call-log)})))
-      r)))
-
-(defn mock-backend
-  "Build a mock backend whose `send-turn` will return canned responses in order."
-  [responses]
-  (->MockBackend (ts/queue responses) (atom [])))
-
-(defn end-turn-response [text]
-  {:stop-reason :end_turn
-   :content     [{:type :text :text (or text "done")}]
-   :usage       {:input-tokens 1 :output-tokens 1}
-   :model       "mock"})
-
-(defn tool-use-response
-  "Build an assistant `tool_use` response. `tool-uses` is a vector of `{:id :name :input}`."
-  [tool-uses]
-  {:stop-reason :tool_use
-   :content     (mapv (fn [{:keys [id name input]}]
-                        {:type :tool_use :id id :name name :input input})
-                      tool-uses)
-   :usage       {:input-tokens 1 :output-tokens 1}
-   :model       "mock"})
 
 (defrecord ThrowingBackend [throw-fn]
   llm/LLMBackend
@@ -589,6 +556,186 @@
 ;; ---------------------------------------------------------------------------
 ;; #8: Per-invocation budgets — :max-turns and :max-conversation-duration-ms
 ;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; #8b: steering mode :after-roundtrip
+;; ---------------------------------------------------------------------------
+
+(specification "tell-llm :when :after-roundtrip injects a user message between tool_use cycles"
+  ;; The worker chains a tool_use -> tool_result without ever parking. A
+  ;; transition on the fired event uses tell-llm with :when :after-roundtrip.
+  ;; The next LLM call's messages must contain a tool_result for the tool_use_id
+  ;; AND a separate :text user message with the steering text.
+               (let [backend (mock-backend
+                              [(tool-use-response [{:id "u1" :name "event__step"
+                                                    :input {:n 1}}])
+                               (end-turn-response "fine")])
+                     chart   (chart/statechart
+                              {:initial :wrap}
+                              (state {:id :wrap :initial :running}
+                                     (state {:id :running}
+                                            (h/llm-conversation
+                                             {:id        "main"
+                                              :params-fn (fn [_ _]
+                                                           {:allowed-events [{:event       :step
+                                                                              :data-schema [:map [:n :int]]}]
+                                                            :initial-user-message "go"})})
+                                            (transition {:event :step :type :internal}
+                                                        (h/tell-llm {:when :after-roundtrip
+                                                                     :expr (fn [_ _] "STOP NOW")}))
+                                            (transition {:event :llm.idle :target :done}))
+                                     (final {:id :done})))
+                     t       (new-llm-test-env {:statechart chart :backend backend})
+                     t       (await-config! t :done 3000)
+                     calls   @(:call-log backend)
+                     turn-2  (second calls)
+                     blocks  (->> (:messages turn-2)
+                                  (filter #(= :user (:role %)))
+                                  (mapcat :content)
+                                  vec)]
+                 (assertions
+                  "chart reached :done"
+                  (dct/in? t :done) => true
+                  "backend was called twice"
+                  (count calls) => 2
+                  "turn 2 user-side has a tool_result for u1"
+                  (boolean (some #(and (= :tool_result (:type %))
+                                       (= "u1" (:tool_use_id %))) blocks)) => true
+                  "turn 2 user-side carries the steering text"
+                  (boolean (some #(and (= :text (:type %))
+                                       (= "STOP NOW" (:text %))) blocks)) => true)))
+
+(specification "tell-llm without :when defaults to :at-idle (queued until end_turn)"
+  ;; The worker keeps emitting tool_use blocks; tell-llm with no :when (or
+  ;; explicit :at-idle) goes into user-msg-queue. Because the worker never
+  ;; returns to :awaiting-user, the steering text does NOT appear in turn 2.
+               (let [backend (mock-backend
+                              [(tool-use-response [{:id "u1" :name "event__step"
+                                                    :input {:n 1}}])
+                               (end-turn-response "fine")])
+                     chart   (chart/statechart
+                              {:initial :wrap}
+                              (state {:id :wrap :initial :running}
+                                     (state {:id :running}
+                                            (h/llm-conversation
+                                             {:id        "main"
+                                              :params-fn (fn [_ _]
+                                                           {:allowed-events [{:event       :step
+                                                                              :data-schema [:map [:n :int]]}]
+                                                            :initial-user-message "go"})})
+                                            (transition {:event :step :type :internal}
+                                                        (h/tell-llm {:expr (fn [_ _] "STOP NOW")}))
+                                            (transition {:event :llm.idle :target :done}))
+                                     (final {:id :done})))
+                     t       (new-llm-test-env {:statechart chart :backend backend})
+                     t       (await-config! t :done 3000)
+                     calls   @(:call-log backend)
+                     blocks  (->> (:messages (second calls))
+                                  (filter #(= :user (:role %)))
+                                  (mapcat :content)
+                                  vec)]
+                 (assertions
+                  "chart reached :done"
+                  (dct/in? t :done) => true
+                  "turn 2 user-side does NOT carry the steering text"
+                  (boolean (some #(and (= :text (:type %))
+                                       (= "STOP NOW" (:text %))) blocks)) => false)))
+
+;; ---------------------------------------------------------------------------
+;; #8c: steering :after-roundtrip that arrives while worker is parked
+;;
+;; Regression test for the silent-drop bug. Previously the steering-queue
+;; was drained ONLY in the :tool_use branch of handle-running-turn!. A
+;; worker parked in :awaiting-user that received an :after-roundtrip
+;; message would have it sit in the queue forever, because the worker
+;; never enters that branch from a :awaiting-user wake-up.
+;; ---------------------------------------------------------------------------
+
+(specification "tell-llm :when :after-roundtrip delivered after :awaiting-user wake-up"
+  ;; The worker starts in :awaiting-user (no :initial-user-message). A
+  ;; sibling state's on-entry fires tell-llm :after-roundtrip BEFORE the
+  ;; chart wakes the worker. Then a default-mode (:at-idle) tell-llm
+  ;; wakes the worker. On the next turn, BOTH messages must appear in
+  ;; the user-side messages (the queued :after-roundtrip drains via the
+  ;; non-blocking pickup at the top of :running).
+               (let [backend (mock-backend [(end-turn-response "ack")])
+                     chart   (chart/statechart
+                              {:initial :wrap}
+                              (state {:id :wrap :initial :seed}
+                                     ;; Conversation owned by the parent so it
+                                     ;; survives sibling transitions.
+                                     (h/llm-conversation
+                                      {:id        "main"
+                                       :params-fn (fn [_ _] {})})   ;; no :initial-user-message → starts in :awaiting-user
+                                     (state {:id :seed}
+                                            (on-entry {}
+                                                      (h/tell-llm {:when :after-roundtrip
+                                                                   :expr (fn [_ _] "STEERED")}))
+                                            ;; Immediately transition; the
+                                            ;; tell-llm above lands in the
+                                            ;; steering-queue while the worker
+                                            ;; is parked in :awaiting-user.
+                                            (transition {:target :wake-it}))
+                                     (state {:id :wake-it}
+                                            (on-entry {}
+                                                      (h/tell-llm {:expr (fn [_ _] "WAKE UP")}))
+                                            (transition {:event :llm.idle :target :done}))
+                                     (final {:id :done})))
+                     t       (new-llm-test-env {:statechart chart :backend backend})
+                     t       (await-config! t :done 3000)
+                     turn-1  (first @(:call-log backend))
+                     texts   (->> (:messages turn-1)
+                                  (filter #(= :user (:role %)))
+                                  (mapcat :content)
+                                  (filter #(= :text (:type %)))
+                                  (map :text)
+                                  set)]
+                 (assertions
+                  "chart reached :done"
+                  (dct/in? t :done) => true
+                  "backend was called exactly once"
+                  (count @(:call-log backend)) => 1
+                  "the wake-up text reached the user side"
+                  (contains? texts "WAKE UP") => true
+                  "the steering text that arrived while parked is also delivered"
+                  (contains? texts "STEERED") => true)))
+
+;; ---------------------------------------------------------------------------
+;; #8d: :steering-grace-ms is honored per-conversation
+;; ---------------------------------------------------------------------------
+
+(specification ":steering-grace-ms = 0 makes the steering-queue drain non-blocking"
+  ;; A worker that posts events via tool_use waits up to :steering-grace-ms
+  ;; on the steering-queue before each LLM call, to give the chart engine
+  ;; time to deliver any :after-roundtrip message triggered by those
+  ;; events. Setting :steering-grace-ms to 0 disables that wait — useful
+  ;; when chart authors know no steering is in play. Assertion: with
+  ;; :steering-grace-ms 0 and no steering messages, the gap between
+  ;; consecutive LLM calls is dominated by other costs, not by the grace.
+               (let [backend (mock-backend
+                              [(tool-use-response [{:id "u1" :name "event__step"
+                                                    :input {:n 1}}])
+                               (end-turn-response "fine")])
+                     chart   (chart/statechart
+                              {:initial :wrap}
+                              (state {:id :wrap :initial :running}
+                                     (state {:id :running}
+                                            (h/llm-conversation
+                                             {:id        "main"
+                                              :params-fn (fn [_ _]
+                                                           {:allowed-events     [{:event       :step
+                                                                                  :data-schema [:map [:n :int]]}]
+                                                            :steering-grace-ms  0
+                                                            :initial-user-message "go"})})
+                                            (transition {:event :llm.idle :target :done}))
+                                     (final {:id :done})))
+                     t       (new-llm-test-env {:statechart chart :backend backend})
+                     t       (await-config! t :done 3000)]
+                 (assertions
+                  "chart reached :done"
+                  (dct/in? t :done) => true
+                  "both LLM calls happened (turn 1 = tool_use, turn 2 = end_turn)"
+                  (count @(:call-log backend)) => 2)))
 
 (specification ":max-turns budget fires :error.llm.max-turns"
   ;; The model keeps emitting tool_use forever (infinite loop). Without a

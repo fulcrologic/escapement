@@ -9,6 +9,7 @@
    [com.fulcrologic.statecharts.algorithms.v20150901 :as alg]
    [com.fulcrologic.statecharts.data-model.working-memory-data-model :as wmdm]
    [com.fulcrologic.statecharts.registry.local-memory-registry :as lmr]
+   [escapement.chart.deferred-reply :as-alias deferred-reply]
    [escapement.chart.service :as-alias service]
    [escapement.engine.exec :as exec]
    [escapement.engine.queue :as queue]
@@ -55,6 +56,14 @@
              ;; Per-chart-run registry for service-region tool declarations.
              ;; See `escapement.chart.service`. Empty at start; populated by
              ;; on-entry actions calling `service/register-tool!`.
-             ::service/registry         (atom {})}
+             ::service/registry         (atom {})
+             ;; Per-chart-run table of in-flight deferred-reply requests,
+             ;; keyed by answering event-keyword. Populated by the
+             ;; llm-conversation worker when it issues an event-tool that
+             ;; declares `:awaits`, drained by
+             ;; `escapement.chart.deferred-reply/complete-call`
+             ;; (re-exported as `escapement.chart.helpers/complete-call`).
+             ;; See `escapement.chart.deferred-reply` for the wire shape.
+             ::deferred-reply/in-flight (atom {})}
       tool-registry (assoc :escapement/tool-registry tool-registry)
       session-dir   (assoc :escapement/session-dir session-dir))))
