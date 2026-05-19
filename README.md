@@ -146,6 +146,9 @@ A chart with an LLM conversation is driven entirely by injected data — no disk
 (lib/run
   {:chart       my.app.charts/agent
    :session-id  :req-42
+   ;; REQUIRED for any chart with an :llm-conversation — the facade wires the
+   ;; LLM processor only when BOTH a backend and a :tool-registry are present.
+   :tool-registry (escapement.tools.protocol/new-registry)   ; or new-builtin-registry
    :credentials [{:provider :z-ai-plan :subscription true}
                  {:provider :anthropic :api-key (System/getenv "ANTHROPIC_API_KEY")}]
    :config      {:llm/preferences [{:provider :z-ai-plan :model "glm-4.6"}
@@ -155,6 +158,8 @@ A chart with an LLM conversation is driven entirely by injected data — no disk
 ```
 
 A chart node expresses what it `:needs` (a flat eligibility gate that **filters**; ranking is the sole job of the sorted `:llm/preferences`). Two `run` calls in one process with different `:config` ratings resolve independently — there is no process global. The full worked reference example (host config + a two-node statechart + the resolution walk-through) is in the **Hosted library** section of [`Guide.adoc`](Guide.adoc).
+
+The snippet above is deliberately a *no-LLM* chart so it runs with zero secrets. For a **realistic embedded LLM chart** — authored with `escapement.chart.helpers`, sharing context between phases via file-backed artifacts, injecting `:credentials`/`:config`/`:initial-data`/`:session-dir`, and **streaming assistant tokens live via the public `:text-delta` event** (the supported alternative to hand-matching raw `:llm/delta` rows) — see the runnable [`demos/lib/`](demos/lib/) example (`bb -m lib.embed-example`).
 
 A run is made cancellable by passing `:cancel` an atom (or a delivered promise/future/delay); when it becomes truthy the run aborts promptly at a safe boundary and the result map's `:status` is `:aborted` (omitting `:cancel` always yields `:status :done` for a normal run). The full closed option schema, result-map keys, the public event union, the locked design decisions, migration notes, and known limitations are in the **Hosted library** section of [`Guide.adoc`](Guide.adoc).
 
@@ -224,6 +229,7 @@ Small worked examples under `src/escapement/examples/`:
 
 End-to-end demo under `demos/`:
 
+- [`demos/lib/`](demos/lib/) — **embedding Escapement as a library**: a two-phase LLM chart driven via `escapement.lib/run` with injected credentials/config/initial-data, artifact-shared context, and live `:text-delta` streaming via `escapement.lib.event-sink`. The example a host project should read first.
 - [`demos/unit_test/`](demos/unit_test/) — port of the pi `unit_test` extension. Drives an LLM through behaviors → abstraction → (write|gap-analysis) → (critique|patch) → refine to author and seal `fulcro-spec` tests for a target function. Includes a sibling **REPL-manager parallel region** that establishes a project nREPL (cheap scripted discovery first; LLM-driven `deps.edn` inspection on miss) and hands the port to refine via shared data + one coordination event. Tested end-to-end against [`fulcrologic/fulcro`](https://github.com/fulcrologic/fulcro): generated and sealed a 52-assertion test file for `resolve-tempids`.
 
 See [`plan.md`](plan.md) for design history.

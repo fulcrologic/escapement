@@ -571,6 +571,13 @@ makes `tell-llm` work).
   this as the first user turn. Otherwise it starts in `:awaiting-user` and
   parks until a `:llm.user-message` event arrives via `tell-llm`.
 
+`:initial-messages`::
+  Optional vector of pre-built message maps to seed the conversation
+  with (e.g. a multi-block first user message carrying an `:image`, or a
+  short prior exchange). When non-empty it takes precedence over
+  `:initial-user-message` and the worker starts in `:running`. Use it
+  when the opening turn is more than a single plain-text string.
+
 `:model`::
   Optional string passed through to the backend. Examples:
   `"claude-opus-4-7"`, `"claude-sonnet-4-6"`, `"claude-haiku-4-5"`,
@@ -674,8 +681,9 @@ makes `tell-llm` work).
   with it.
 
 `:stream?`::
-  Optional boolean. When `true` AND the backend implements streaming (the
-  bundled Anthropic/z.ai api backend does), the turn is issued over SSE and
+  Optional boolean. When `true` AND the backend implements streaming (both
+  bundled backend families do: the Anthropic/z.ai api backend and the
+  OpenAI/OpenRouter backend), the turn is issued over SSE and
   incremental output is published as `:llm/delta` transcript events
   (`{:type :text-delta|:thinking-delta :text "…" :model … :invokeid …}`)
   while the turn is still in flight — relay these to a UI for live output.
@@ -1950,8 +1958,11 @@ own invokeid equals `:reply-to`.
 [[backends]]
 == LLM backends
 
-The `LLMBackend` protocol is one method, `send-turn`. Defined in
-`src/escapement/llm/protocol.clj`. Four implementations ship.
+The core `LLMBackend` protocol is one method, `send-turn`. Defined in
+`src/escapement/llm/protocol.clj`, which also defines an optional
+`StreamingLLMBackend` (`stream-turn`) and the `send-turn*` capability
+dispatcher (see the SSE token streaming subsections below). Four
+implementations ship.
 
 === `escapement.llm.api` — Anthropic-compatible HTTP
 
@@ -2010,12 +2021,17 @@ inline base64 or a URL the provider fetches server-side:
 {:type :image :source {:type :url :url "https://…/ref.png"}}
 ----
 
-The api backend serializes this to the Messages API `image`/`source`
-wire shape and parses it back symmetrically; it survives a streamed turn
-identically. This is a **protocol-level capability** — it is consumed by
-any code constructing a `Request`/`Message` (e.g. a custom invocation or
-a chart that builds user content directly). Backends without vision
-support should reject or drop the block explicitly rather than silently.
+The api (Anthropic) backend serializes this to the Messages API
+`image`/`source` wire shape and parses it back symmetrically; it
+survives a streamed turn identically. The OpenAI/OpenRouter backend
+serializes the same `:image` block to the Chat Completions multimodal
+`image_url` content shape (a `:url` source passes through verbatim; a
+`:base64` source is encoded as a `data:` URI), so vision works on either
+backend family without invocation-code changes. This is a
+**protocol-level capability** — it is consumed by any code constructing
+a `Request`/`Message` (e.g. a custom invocation or a chart that builds
+user content directly). Backends without vision support should reject or
+drop the block explicitly rather than silently.
 Use it for reference-image → description pipelines without changing
 invocation code.
 
@@ -2526,11 +2542,14 @@ jq -c 'select(.event=="checkpoint/written") | .seq' \
 `:chart`, `:session-id`, `:transcript-path`, `:checkpoint-dir`. Optional:
 `:backend`, `:tool-registry`, `:initial-data`, `:resume?`, `:trace?`,
 `:max-iterations` (default 100000), `:quiescent-sleep-ms` (default 50),
-plus three additive keys (all default to prior behavior when omitted):
+plus these additive keys (all default to prior behavior when omitted):
 
 * `:store` — working-memory store override, threaded to
   `engine.env/new-env`; `nil` ⇒ the default file-backed store
   (CLI behavior unchanged).
+* `:session-dir` — artifact/session directory threaded to
+  `engine.env/new-env` as `:escapement/session-dir` (backs
+  `<session-dir>/artifacts/<name>`); omitted ⇒ the engine default.
 * `:run-id` — opaque correlation id; when supplied it is echoed
   (stringified) on the `:runner/started` transcript event.
 * `:cancel` — a host-supplied cancel handle: an atom (or any `IDeref`)
@@ -3135,12 +3154,13 @@ Companion vars/fns in the same namespace:
 | `:credentials` | **required** | — | ordered vector of provider descriptor maps; the backend is assembled from these hermetically (no env/disk). See <<hosted-config>>
 | `:config` | optional | `{}` ⇒ empty ratings + default preferences | `.escapement.edn`-shaped map (`:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`); never a disk fallback. See <<hosted-config>>
 | `:backend` | optional | none | an `LLMBackend`; an escape hatch that wins verbatim over `:credentials` assembly
-| `:tool-registry` | optional | none | tool registry atom
+| `:tool-registry` | optional | none | tool registry atom. **Required in practice for any chart containing an `:llm-conversation`**: the facade registers the LLM invocation processor only when *both* a backend (from `:credentials`) and a `:tool-registry` are present — omit it and the invocation cannot start (`No processor for :llm-conversation`, chart quiesces early). Pass `(escapement.tools.protocol/new-registry)` for an empty registry or `(escapement.tools.builtin/new-builtin-registry)` for one with the fs/shell/repl built-ins.
 | `:initial-data` | optional | none | data-model seed (`[:maybe :map]`)
 | `:transcript-tap` | optional | none | `(fn [event])` — receives every transcript row in-process
 | `:on-env-ready` | optional | none | `(fn [env])` — called once env is built, before chart start
 | `:transcript-path` | optional | `<tmp>/transcript.jsonl` | when omitted, a fresh temp dir is created
 | `:checkpoint-dir` | optional | `<tmp>/checkpoints` | when omitted, a fresh temp dir is created
+| `:session-dir` | optional | `<tmp>` | artifact/session dir (`<session-dir>/artifacts/<name>`); defaults to the same temp dir
 | `:store` | optional | engine default file store | threaded to `engine.env/new-env`
 | `:quiet?` | optional | `true` | suppress statecharts-impl DEBUG/INFO stderr (restored after the run)
 | `:cancel` | optional | none | atom/volatile/ref/agent (truthy current value) **or** delivered promise/future/delay; truthy ⇒ abort
@@ -3167,6 +3187,7 @@ temp dir.
 | `:status` | keyword | `:done` (normal quiescence) or `:aborted` (cancel fired, or max-iterations hit)
 | `:transcript` | string | transcript path actually used (temp or explicit)
 | `:checkpoint-dir` | string | checkpoint dir actually used (temp or explicit)
+| `:session-dir` | string | session/artifact dir actually used (temp or explicit)
 | `:session-id` | any | echoed session id
 | `:final-config` | vector | final statechart configuration
 | `:env` | map | the live `::sc/env`
@@ -3415,6 +3436,28 @@ internal/unmapped rows. Attach it via the host closure:
                        (doseq [e (escapement.lib.event-sink/feed! adapter row)]
                          (handle-public-event e)))}))
 ----
+
+Streaming assistant text to a UI is the `:text-delta` variant — this
+is the **supported** way; do not match raw `:llm/delta` transcript rows
+by hand. Filter by `:invokeid` to stream one conversation:
+
+[source,clojure]
+----
+:transcript-tap
+(fn [row]
+  (doseq [e (escapement.lib.event-sink/feed! adapter row)]
+    (when (and (= :text-delta (:type e))
+               (= "pitch" (some-> (:invokeid e) name)))
+      (print (get-in e [:delta :text])) (flush))))
+----
+
+A complete runnable host example — two LLM phases authored with
+`escapement.chart.helpers`, artifact-shared context, injected
+`:credentials`/`:config`/`:initial-data`/`:session-dir`, and this
+`:text-delta` streaming tap — is in `demos/lib/` (`bb -m
+lib.embed-example`; see `demos/lib/README.md`). For vision input, gate
+the node with `:needs {:vision? true}` and pass the base64 image
+content block documented in *The `:llm-conversation` invocation*.
 
 Entry points:
 

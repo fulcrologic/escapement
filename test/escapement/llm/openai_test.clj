@@ -46,9 +46,10 @@
                   "system becomes the leading message"
                   (get-in wire ["messages" 0 "role"])    => "system"
                   (get-in wire ["messages" 0 "content"]) => "You are helpful."
-                  "user text becomes a string-content user message"
+                  "user text becomes a single text content-block (uniform shape; the
+                   array form is OpenAI's superset that vision requires)"
                   (get-in wire ["messages" 1 "role"])    => "user"
-                  (get-in wire ["messages" 1 "content"]) => "Hello"
+                  (get-in wire ["messages" 1 "content"]) => [{"type" "text" "text" "Hello"}]
                   "assistant text+tool_use folds into one assistant message with tool_calls"
                   (get-in wire ["messages" 2 "role"])           => "assistant"
                   (get-in wire ["messages" 2 "content"])        => "Hi"
@@ -68,9 +69,9 @@
                   (get-in wire ["messages" 4 "tool_call_id"]) => "call_1b"
                   "is_error is surfaced inline since OpenAI has no flag for it"
                   (.startsWith ^String (get-in wire ["messages" 4 "content"]) "[error]") => true
-                  "later plain user message still translates"
+                  "later plain user message still translates to a text content-block"
                   (get-in wire ["messages" 5 "role"])    => "user"
-                  (get-in wire ["messages" 5 "content"]) => "Tell me a joke"
+                  (get-in wire ["messages" 5 "content"]) => [{"type" "text" "text" "Tell me a joke"}]
                   "tools become OpenAI function-tools with no cache_control"
                   (get-in wire ["tools" 0 "type"])                  => "function"
                   (get-in wire ["tools" 0 "function" "name"])       => "get_weather"

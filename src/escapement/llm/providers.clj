@@ -207,7 +207,7 @@
   [{:keys [provider] :as desc}]
   (when-let [tmpl (get provider-templates provider)]
     (let [overrides (-> desc
-                        (select-keys [:api-key :base-url :default-model :auth-mode])
+                         (select-keys [:api-key :base-url :default-model :auth-mode])
                         (cond-> (:model desc) (assoc :default-model (:model desc))))]
       (merge tmpl (into {} (remove (comp nil? val)) overrides)))))
 

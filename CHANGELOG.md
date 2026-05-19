@@ -50,8 +50,15 @@ new option preserves prior behavior. The only removal is the obsolete
   with `:base64` (inline data + media-type) or `:url` sources. The
   Anthropic backend serializes it to the Messages API `image`/`source`
   wire shape and parses it back symmetrically (survives a streamed
-  turn). Enables vision-model steps at the protocol level with no
-  invocation-code changes.
+  turn); the OpenAI/OpenRouter backend serializes the same block to the
+  Chat Completions multimodal `image_url` shape (`:url` verbatim,
+  `:base64` as a `data:` URI). Enables vision-model steps on either
+  backend family at the protocol level with no invocation-code changes.
+- **`:initial-messages` `llm-conversation` param.** An optional vector
+  of pre-built message maps to seed a conversation with (e.g. a
+  multi-block first user message carrying an `:image`, or a short prior
+  exchange). When non-empty it takes precedence over
+  `:initial-user-message` and the worker starts in `:running`.
 - **Self-recovering conversations.** Driven by the error categories:
   *transient* failures (`:rate-limited` / `:overloaded` / `:timeout` /
   `:transport`) auto-retry on the same model with exponential backoff
@@ -79,9 +86,12 @@ new option preserves prior behavior. The only removal is the obsolete
   **closed** Malli option schema (`escapement.lib/Options`, unknown
   keys rejected, `validate-options` previews errors without running), a
   generated stable `:run-id` (returned and emitted on
-  `:runner/started`), temp-dir defaulting for transcript/checkpoint, an
-  optional `:store` passthrough, and quiet-by-default logging
-  (`:quiet?`). The CLI does not use the facade and is unchanged.
+  `:runner/started`), temp-dir defaulting for
+  transcript/checkpoint/session, an optional `:session-dir` for artifact
+  output (`<session-dir>/artifacts/<name>`, defaulting to the run temp
+  dir and echoed back in the result map), an optional `:store`
+  passthrough, and quiet-by-default logging (`:quiet?`). The CLI does
+  not use the facade and is unchanged.
 - **Hermetic library configuration & credentials.** The
   `escapement.lib/run` facade is now fully hermetic: it never reads
   `.escapement.edn` from disk and never sniffs credential env vars. Two

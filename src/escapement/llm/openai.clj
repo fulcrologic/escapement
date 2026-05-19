@@ -37,6 +37,23 @@
                (str/join ""))]
     (when (seq s) s)))
 
+(defn- user-content-block->openai [block]
+  (case (:type block)
+    :text
+    (when-let [text (:text block)]
+      {"type" "text" "text" text})
+
+    :image
+    (let [source (:source block)
+          url    (case (:type source)
+                   :url (:url source)
+                   :base64 (str "data:" (:media-type source) ";base64," (:data source))
+                   nil)]
+      (when url
+        {"type" "image_url" "image_url" {"url" url}}))
+
+    nil))
+
 (defn- tool-use-blocks [blocks]
   (filterv #(= :tool_use (:type %)) blocks))
 
@@ -58,9 +75,14 @@
    caller flattens."
   [{:keys [content]}]
   (let [trs (tool-result-blocks content)
+        content-blocks (->> content
+                            (remove #(= :tool_result (:type %)))
+                            (keep user-content-block->openai)
+                            vec)
         txt (text-content content)
         msgs (cond-> []
-               txt (conj {"role" "user" "content" txt}))]
+               (seq content-blocks) (conj {"role" "user" "content" content-blocks})
+               (and (empty? content-blocks) txt) (conj {"role" "user" "content" txt}))]
     (into msgs
           (mapv (fn [{:keys [tool_use_id content is-error]}]
                   (cond-> {"role"         "tool"

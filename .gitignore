@@ -3,6 +3,7 @@
 .deep-cookie/
 .DS_Store
 .escapement/
+demos/lib/.session/
 .idea/
 .nrepl-dev-port
 .nrepl-port

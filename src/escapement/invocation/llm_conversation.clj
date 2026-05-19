@@ -822,96 +822,96 @@
       {:eligibility-empty {:policy         policy
                            :default-models (vec default-models)}}
       (let [candidates (candidate-models params default-models model-status catalog-ratings)]
-    (loop [[m & more] candidates
-           attempts   []]
-      (let [request  (build-request
-                      {:system               (:system params)
-                       :messages             messages
-                       :tools                tools
-                       :model                m
-                       :max-tokens           (effective-max-tokens m)
-                       :temperature          (:temperature params)
-                       :top-p                (:top-p params)
-                       :top-k                (:top-k params)
-                       :stop-sequences       (:stop-sequences params)
-                       :thinking             (:thinking params)
-                       :tool-choice          (:tool-choice params)
-                       :metadata             (:metadata params)
-                       :system-cache-control (:system-cache-control params)
-                       :tools-cache-control  (:tools-cache-control params)
-                       :auto-cache?          (get params :auto-cache? true)
-                       :conv-id              (:conversation/id params)})
-            _        (transcript! transcript-fn
-                                  {:event :llm/request :ts (now-ms)
-                                   :data  (cond-> {:n-messages (count (:messages request))
-                                                   :user-blocks (trailing-user-blocks messages)
-                                                   :system-preview (truncate-for-transcript (:system params))
-                                                   :invokeid (:invokeid parent-ctx)}
-                                            m (assoc :model m))})
-            on-delta (when (:stream? params)
-                       (fn [d]
-                         (transcript! transcript-fn
-                                      {:event :llm/delta :ts (now-ms)
-                                       :data  (assoc d
-                                                     :model    m
-                                                     :invokeid (:invokeid parent-ctx))})))
-            ;; Bounded same-model retry for *transient* categories
-            ;; (rate-limited/overloaded/timeout/transport) with exponential
-            ;; backoff before falling back to the next candidate. Terminal
-            ;; categories (auth/invalid-request/context-length) and
-            ;; uncategorized throws are NOT retried here — they fall straight
-            ;; through to model fallback / :exhausted.
-            response (loop [retry 0]
-                       (let [r (try (llm/send-turn* backend request on-delta)
-                                     (catch Throwable t {:_throw t}))
-                             t (:_throw r)
-                             cat (when t (llm/error-category t))]
-                         (if (and t
-                                  (contains? transient-error-categories cat)
-                                  (< retry (long max-retries))
-                                  (not (instance? InterruptedException t))
-                                  (not (instance? InterruptedException (ex-cause t)))
-                                  (not= :dying @worker-state))
-                           (do
+        (loop [[m & more] candidates
+               attempts   []]
+          (let [request  (build-request
+                          {:system               (:system params)
+                           :messages             messages
+                           :tools                tools
+                           :model                m
+                           :max-tokens           (effective-max-tokens m)
+                           :temperature          (:temperature params)
+                           :top-p                (:top-p params)
+                           :top-k                (:top-k params)
+                           :stop-sequences       (:stop-sequences params)
+                           :thinking             (:thinking params)
+                           :tool-choice          (:tool-choice params)
+                           :metadata             (:metadata params)
+                           :system-cache-control (:system-cache-control params)
+                           :tools-cache-control  (:tools-cache-control params)
+                           :auto-cache?          (get params :auto-cache? true)
+                           :conv-id              (:conversation/id params)})
+                _        (transcript! transcript-fn
+                                      {:event :llm/request :ts (now-ms)
+                                       :data  (cond-> {:n-messages (count (:messages request))
+                                                       :user-blocks (trailing-user-blocks messages)
+                                                       :system-preview (truncate-for-transcript (:system params))
+                                                       :invokeid (:invokeid parent-ctx)}
+                                                m (assoc :model m))})
+                on-delta (when (:stream? params)
+                           (fn [d]
                              (transcript! transcript-fn
-                                          {:event :llm/retry :ts (now-ms)
-                                           :data  {:model     m
-                                                   :category  cat
-                                                   :attempt   (inc retry)
-                                                   :max-retries max-retries
-                                                   :invokeid  (:invokeid parent-ctx)}})
-                             (sleep-unless-dying!
-                              (backoff-delay-ms backoff-ms retry t) worker-state)
-                             (recur (inc retry)))
-                           r)))]
-        (cond
-          (and (:_throw response)
-               (or (instance? InterruptedException (:_throw response))
-                   (instance? InterruptedException (ex-cause (:_throw response)))
-                   (= :dying @worker-state)))
-          {:interrupted (:_throw response)}
+                                          {:event :llm/delta :ts (now-ms)
+                                           :data  (assoc d
+                                                         :model    m
+                                                         :invokeid (:invokeid parent-ctx))})))
+                ;; Bounded same-model retry for *transient* categories
+                ;; (rate-limited/overloaded/timeout/transport) with exponential
+                ;; backoff before falling back to the next candidate. Terminal
+                ;; categories (auth/invalid-request/context-length) and
+                ;; uncategorized throws are NOT retried here — they fall straight
+                ;; through to model fallback / :exhausted.
+                response (loop [retry 0]
+                           (let [r (try (llm/send-turn* backend request on-delta)
+                                         (catch Throwable t {:_throw t}))
+                                 t (:_throw r)
+                                 cat (when t (llm/error-category t))]
+                             (if (and t
+                                      (contains? transient-error-categories cat)
+                                      (< retry (long max-retries))
+                                      (not (instance? InterruptedException t))
+                                      (not (instance? InterruptedException (ex-cause t)))
+                                      (not= :dying @worker-state))
+                               (do
+                                 (transcript! transcript-fn
+                                              {:event :llm/retry :ts (now-ms)
+                                               :data  {:model     m
+                                                       :category  cat
+                                                       :attempt   (inc retry)
+                                                       :max-retries max-retries
+                                                       :invokeid  (:invokeid parent-ctx)}})
+                                 (sleep-unless-dying!
+                                  (backoff-delay-ms backoff-ms retry t) worker-state)
+                                 (recur (inc retry)))
+                               r)))]
+            (cond
+              (and (:_throw response)
+                   (or (instance? InterruptedException (:_throw response))
+                       (instance? InterruptedException (ex-cause (:_throw response)))
+                       (= :dying @worker-state)))
+              {:interrupted (:_throw response)}
 
-          (:_throw response)
-          (let [^Throwable t (:_throw response)
-                details      (throwable->details t)
-                category     (llm/error-category t)
-                ;; Only mark a real model id down. nil (backend's default
-                ;; pick) is not a routable identifier.
-                _            (when m (swap! model-status assoc m :down))
-                _            (transcript! transcript-fn
-                                          {:event :llm/model-down :ts (now-ms)
-                                           :data  {:model m
-                                                   :message (:message details)
-                                                   :category category
-                                                   :remaining (vec more)}})
-                attempts'    (conj attempts {:model m :error (select-keys details [:message :class])})]
-            (if (seq more)
-              (recur more attempts')
-              {:exhausted attempts'
-               :last-throwable t}))
+              (:_throw response)
+              (let [^Throwable t (:_throw response)
+                    details      (throwable->details t)
+                    category     (llm/error-category t)
+                    ;; Only mark a real model id down. nil (backend's default
+                    ;; pick) is not a routable identifier.
+                    _            (when m (swap! model-status assoc m :down))
+                    _            (transcript! transcript-fn
+                                              {:event :llm/model-down :ts (now-ms)
+                                               :data  {:model m
+                                                       :message (:message details)
+                                                       :category category
+                                                       :remaining (vec more)}})
+                    attempts'    (conj attempts {:model m :error (select-keys details [:message :class])})]
+                (if (seq more)
+                  (recur more attempts')
+                  {:exhausted attempts'
+                   :last-throwable t}))
 
-          :else
-          {:ok response :model-used m})))))))
+              :else
+              {:ok response :model-used m})))))))
 
 (defn- drive-turn!
   "Issue one logical assistant turn. A `stop_reason :max_tokens` means the API
@@ -1279,7 +1279,7 @@
           _                 (when-let [old (get @workers k)]
                               (reset! (:worker-state old) :dying))
           queue             (::sc/event-queue env)
-          {:keys [real-tools allowed-events chart-tools initial-user-message]} params
+          {:keys [real-tools allowed-events chart-tools initial-messages initial-user-message]} params
           [real-defs name->tool-kw]   (resolve-real-tools tool-registry real-tools)
           [event-defs name->event]    (event-tool-defs (or allowed-events []))
           ;; Palette snapshot for region tools — built once at start. Late
@@ -1291,11 +1291,12 @@
                                                            chart-tools
                                                            region-tool-default-timeout-ms)
           tool-defs                   (into [] (concat real-defs event-defs region-defs))
-          initial-msgs                (if initial-user-message
-                                        [(text-user-message initial-user-message)]
-                                        [])
+          initial-msgs                (cond
+                                        (seq initial-messages) (vec initial-messages)
+                                        initial-user-message [(text-user-message initial-user-message)]
+                                        :else [])
           messages-atom               (atom initial-msgs)
-          worker-state                (atom (if initial-user-message :running :awaiting-user))
+          worker-state                (atom (if (seq initial-msgs) :running :awaiting-user))
           user-msg-queue              (ArrayBlockingQueue. 256)
           tool-reply-queue            (ArrayBlockingQueue. 64)
           retry-counts                (atom {})

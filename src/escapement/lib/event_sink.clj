@@ -179,8 +179,6 @@
        [ctx row]
        [:map :map => [:vector :map]]
        (let [{:keys [event data]} row
-             ev    (:event row)
-             event (or event ev)
              iid   (:invokeid data)]
          (case event
            ;; ---- run lifecycle ----
@@ -305,7 +303,7 @@
   `:llm/tool-result` so a later tool-attributed `:llm/error` / `:llm/retry`
   can be linked by `:invokeid`. State is local to the adapter instance."
   [ctx row]
-  (let [event (or (:event row) (:event row))
+  (let [event (:event row)
         data  (:data row)]
     (case event
       :runner/started

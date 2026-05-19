@@ -39,9 +39,10 @@
   "Intrinsic facts for ids the models.dev dump doesn't carry yet but that
    the project still wants reachable. Keep this as small as possible."
   {"claude-sonnet-4-7" {:context-tokens 1000000 :max-output-tokens 64000
-                        :vision? true :tool-call? true :reasoning? true
-                        :family "claude" :company "Anthropic"
-                        :name "Claude Sonnet 4.7"}})
+                         :vision? true :tool-call? true :reasoning? true
+                         :family "claude" :company "Anthropic"
+                         :name "Claude Sonnet 4.7"}
+   "deepseek-v4-flash" {:max-output-tokens 65536}})
 
 (def local-providers
   "Provider entries / model rows not present in the dump:

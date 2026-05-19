@@ -18,9 +18,9 @@
    * `:store` is threaded through to `engine.env/new-env`.
    * Quiet logging by default for hosted mode: the statecharts-impl Timbre
      DEBUG/INFO chatter is suppressed to stderr (CLI verbosity is untouched).
-   * A `:cancel` signal key is part of the closed contract. The runner-side
-     honoring of it is out of this task's scope (task-006); the key/shape is
-     defined here so the public contract is complete.
+   * A `:cancel` signal key (atom/promise) is part of the closed contract and
+     is honored: it is forwarded to `runner/run!`, which checks it at a safe
+     pump boundary and aborts cleanly, surfacing `:status :aborted`.
 
   ## Hermetic configuration & credentials (Step 4)
 
@@ -67,7 +67,7 @@
 (def Options
   "Closed Malli schema for the hosted facade options map. Unknown keys are
   rejected. This schema is the public API contract for embedding Escapement;
-  downstream tasks (event sink, docs, cancellation) build on it."
+  the event sink, docs, and cancellation all build on it."
   [:map {:closed true}
    ;; --- required ---
    [:chart       :any]                                  ; statechart value (from chart/statechart)
@@ -85,10 +85,10 @@
       [:provider     :keyword]                          ; e.g. :z-ai-plan :anthropic :openai
       [:api-key      {:optional true} [:maybe :string]]
       [:base-url     {:optional true} [:maybe :string]]
-      [:model        {:optional true} [:maybe :string]]
-      [:default-model {:optional true} [:maybe :string]]
-      [:auth-mode    {:optional true} :any]
-      [:subscription {:optional true} :any]]]]
+       [:model        {:optional true} [:maybe :string]]
+       [:default-model {:optional true} [:maybe :string]]
+       [:auth-mode    {:optional true} :any]
+       [:subscription {:optional true} :any]]]]
    ;; --- optional: hermetic config (`.escapement.edn`-shaped map) ---
    ;; `:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`. Kept
    ;; permissive (a plain map) — internal keys are not over-constrained. Absent
@@ -104,12 +104,13 @@
    ;; --- optional: transcript / checkpoint (default to a fresh temp dir) ---
    [:transcript-path {:optional true} :string]          ; JSONL output path; defaults to <tmp>/transcript.jsonl
    [:checkpoint-dir  {:optional true} :string]          ; checkpoint dir;   defaults to <tmp>/checkpoints
+   [:session-dir     {:optional true} :string]          ; artifact/session dir; defaults to <tmp>
    ;; --- optional: store passthrough ---
    [:store {:optional true} :any]                       ; working-memory store override → engine.env/new-env
    ;; --- optional: logging ---
    [:quiet? {:optional true} :boolean]                  ; default true — suppress statecharts-impl DEBUG stderr
-   ;; --- optional: cancellation (contract only here; honored in task-006) ---
-   [:cancel {:optional true} :any]                      ; atom/promise; truthy ⇒ request abort (runner-side: task-006)
+   ;; --- optional: cancellation (honored: forwarded to runner/run!) ---
+   [:cancel {:optional true} :any]                      ; atom/promise; truthy ⇒ runner aborts at a safe pump boundary
    ;; --- optional: passthrough knobs (forwarded verbatim to runner/run!) ---
    [:chart-id           {:optional true} :any]
    [:resume?            {:optional true} :boolean]
@@ -168,7 +169,7 @@
                          {:errors errs :provided-keys (vec (keys opts))})))
        (let [{:keys [chart session-id credentials config backend tool-registry
                      initial-data transcript-tap on-env-ready transcript-path
-                     checkpoint-dir store quiet? cancel chart-id resume? trace?
+                     checkpoint-dir session-dir store quiet? cancel chart-id resume? trace?
                      max-iterations quiescent-sleep-ms]
               :or   {quiet? true}} opts
              ;; --- Hermetic resolution: ONLY from injected `:config` /
@@ -195,10 +196,12 @@
                         (str (fs/create-temp-dir {:prefix "escapement-run-"})))
              t-path   (or transcript-path (str (fs/path tmp-dir "transcript.jsonl")))
              ckpt-dir (or checkpoint-dir  (str (fs/path tmp-dir "checkpoints")))
+             sess-dir (or session-dir tmp-dir)
              run-opts (cond-> {:chart                   chart
                                :session-id              session-id
                                :transcript-path         t-path
                                :checkpoint-dir          ckpt-dir
+                               :session-dir             sess-dir
                                :run-id                  run-id
                                :store                   store
                                ;; Step 2 injection seam: resolved ONCE here,
@@ -216,9 +219,9 @@
                         trace?             (assoc :trace? trace?)
                         max-iterations     (assoc :max-iterations max-iterations)
                         quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)
-                        ;; `:cancel` is part of the closed public contract; the
-                        ;; runner does not yet honor it (task-006). Forwarded so
-                        ;; task-006 can wire it without a schema change.
+                        ;; `:cancel` is part of the closed public contract and
+                        ;; is honored: forwarded to `runner/run!`, which aborts
+                        ;; at a safe pump boundary and returns `:status :aborted`.
                         cancel             (assoc :cancel cancel))
              do-run   (fn [] (runner/run! run-opts))
              result   (if quiet?
@@ -227,4 +230,5 @@
          (assoc result
                 :run-id         run-id
                 :transcript     t-path
-                :checkpoint-dir ckpt-dir)))
+                :checkpoint-dir ckpt-dir
+                :session-dir    sess-dir)))
