@@ -10,9 +10,10 @@ Two LLM regions — `experimenter` and `tester` — run in parallel:
 
 * Each gets a private JVM nREPL via a chart-owned service region
   (`:exp-repl` / `:test-repl`).
-* Each declares a `:verdict-schema`. At every inference boundary the
-  framework forces a `submit_verdict` tool call so the chart receives a
-  typed payload (no free-text parsing).
+* Each declares a `:verdict-schema`. The prompts are pure work-content;
+  at every inference boundary the framework runs a wrap-up inference
+  that produces the typed verdict (no free-text parsing, no
+  framework-mechanics leakage into the prompt).
 * The chart routes the payloads:
   - Experimenter idles with `:proposed-new-version` → chart `tell-other-llm!`s
     the tester with the summary+approach.
@@ -23,7 +24,9 @@ Two LLM regions — `experimenter` and `tester` — run in parallel:
 
 The LLMs themselves never fire chart events and have no awareness of each
 other; from each LLM's perspective the workflow is "react to user messages,
-end your turn with a verdict, get woken up with the next user message."
+finish your work, get woken up with the next user message." The framework
+runs a wrap-up inference behind the scenes that consolidates the LLM's
+conclusions into the typed verdict.
 
 ## What changed from the original (PR #5) design
 

@@ -1629,16 +1629,53 @@ wrap-up — only end-of-turn does. Reserved tool name: `submit_verdict`.
 Do not declare an `:allowed-events` or `:real-tools` entry that would
 collide.
 
-**Prompt-writing note**: `submit_verdict` is NOT in the LLM's tool list
-during normal turns — it appears only at the wrap-up inference. Tell
-the LLM to "end your turn by ceasing tool calls; the framework will
-prompt you for `submit_verdict`". Otherwise the model may keep using
-tools indefinitely looking for the verdict tool, which the runner's
-`:max-frozen-cycles` guard will eventually abort as a frozen config.
+**Prompt-writing note**: conversation prompts should contain only
+work-content (what to do, when the task is complete). Do **not** mention
+`submit_verdict`, "end your turn", or any framework mechanics — the
+framework owns the wrap-up. When the model produces a turn with no tool
+calls, the framework runs a second forced-tool inference with a standard
+nudge and the `submit_verdict` tool; the verdict arrives on
+`:on-end-turn-event` as `:verdict`. The model never sees the wrap-up
+tool until that inference, and at that point `tool-choice` forces the
+call.
 
 The transcript records `:llm/verdict-inference` when the wrap-up call
 starts and `:llm/verdict {:invokeid ... :verdict ...}` when it
 succeeds.
+
+[NOTE]
+.Future directions for the verdict mechanism
+====
+The framework already owns the wrap-up nudge (a final user message
+injected only for the forced-tool wrap-up inference) so prompt authors
+can write pure work-content. A handful of further improvements are on
+the table; we will reach for them as real usage exposes need.
+
+. **Per-conversation `:verdict-prompt` override.** Allow a node to
+supply a custom wrap-up nudge for domain-specific framing
+("Now consolidate the failing cases into your verdict"). Likely YAGNI
+until the default phrasing under-performs for a concrete case.
+
+. **Hide the `submit_verdict` name entirely.** Switch wrap-up to
+provider-native structured output (`response_format` JSON schema on the
+openai family, `tool_choice` is fine on anthropic). Removes the last
+bit of name leakage at the cost of a per-provider matrix. Since the
+name is already invisible to prompt authors, this has very little
+surface — only matters if we want to rename the tool without churn
+through the wrap-up nudge constant.
+
+. **Done-without-verdict outcome.** A separate stop-with-typed-
+non-verdict path (e.g. `:aborted`, `:deferred`) for conversations that
+legitimately end with no decision. Today the only escape hatches are
+`--max-frozen-cycles` (a frozen-config abort, not a real outcome) or
+`:error.llm.verdict-validation`. Defer until a concrete need arises.
+
+. **Consult `tool_result` encoding audit.** `escapement.chart.consult`
+JSON-encodes the specialist verdict back to the asker LLM as
+`tool_result` content. Worth a live-provider round-trip check across
+anthropic/openai/zai to confirm the encoding is uniform; add a smoke
+test if any provider disagrees.
+====
 
 === `h/tell-other-llm!` — direct calls from inside handlers
 

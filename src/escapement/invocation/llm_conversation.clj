@@ -111,6 +111,13 @@
    that would collide with this name."
   "submit_verdict")
 
+(def ^:private wrap-up-nudge-text
+  "Framework-owned final user message appended to the transcript ONLY for the
+   forced-tool wrap-up inference. Keeps prompt authors out of the business of
+   explaining framework mechanics — the model sees this nudge only when the
+   wrap-up runs, never during the normal work loop."
+  "Please summarize your conclusions for this turn by calling submit_verdict.")
+
 (defn- submit-verdict-tool-def
   "Build the Anthropic tool definition for the wrap-up `submit_verdict` call.
    `verdict-schema` is the chart-supplied Malli schema describing the
@@ -992,13 +999,18 @@
    the wrap-up is itself the terminating step) thinking off; everything else
    (system, model, temperature, ...) is carried verbatim."
   [{:keys [transcript-fn parent-ctx] :as ctx} params messages verdict-schema]
-  (let [tool-def    (submit-verdict-tool-def verdict-schema)
-        wrap-params (assoc params
-                           :tool-choice {:type :tool :name submit-verdict-tool-name})
-        _           (transcript! transcript-fn
-                                 {:event :llm/verdict-inference :ts (now-ms)
-                                  :data  {:invokeid (:invokeid parent-ctx)}})
-        outcome     (drive-turn! ctx wrap-params messages [tool-def])]
+  (let [tool-def       (submit-verdict-tool-def verdict-schema)
+        wrap-params    (assoc params
+                              :tool-choice {:type :tool :name submit-verdict-tool-name})
+        ;; Append a framework-owned user-message nudge so the model has clear
+        ;; context that it is being asked to consolidate, not continue
+        ;; working. This is wrap-up-local — the working transcript carried in
+        ;; `messages-atom` upstream is NOT mutated.
+        wrap-messages  (conj (vec messages) (text-user-message wrap-up-nudge-text))
+        _              (transcript! transcript-fn
+                                    {:event :llm/verdict-inference :ts (now-ms)
+                                     :data  {:invokeid (:invokeid parent-ctx)}})
+        outcome        (drive-turn! ctx wrap-params wrap-messages [tool-def])]
     (cond
       (not (:ok outcome)) outcome
 

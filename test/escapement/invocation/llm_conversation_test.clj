@@ -1369,12 +1369,16 @@
                                        :backend       backend
                                        :transcript-fn (fn [ev] (swap! captured conj ev))})
                      t               (await-config! t :done 3000)
-                     last-request    (last @(:call-log backend))]
+                     log             @(:call-log backend)
+                     base-request    (first log)
+                     last-request    (last log)
+                     nudge-text      @#'llmc/wrap-up-nudge-text
+                     last-user-msg   (peek (vec (:messages last-request)))]
                  (assertions
                   "chart reached :done"
                   (dct/in? t :done) => true
                   "backend was called exactly twice (turn + wrap-up forced inference)"
-                  (count @(:call-log backend)) => 2
+                  (count log) => 2
                   "wrap-up request forced submit_verdict tool-choice (keyword :type per ToolChoice schema)"
                   (:tool-choice last-request) => {:type :tool :name "submit_verdict"}
                   "wrap-up tool-choice passes ToolChoice schema validation"
@@ -1383,6 +1387,18 @@
                   => true
                   "wrap-up request tools list contains only submit_verdict"
                   (mapv :name (:tools last-request)) => ["submit_verdict"]
+                  "wrap-up request ends with a framework-owned user-message nudge"
+                  (:role last-user-msg) => :user
+                  (-> last-user-msg :content first :type) => :text
+                  (-> last-user-msg :content first :text) => nudge-text
+                  "base work-loop request does NOT contain the wrap-up nudge"
+                  (boolean
+                   (some (fn [m]
+                           (some #(and (= :text (:type %))
+                                       (= nudge-text (:text %)))
+                                 (:content m)))
+                         (:messages base-request)))
+                  => false
                   ":on-end-turn-event data carries the validated :verdict"
                   (get-in @seen-idle [:data :verdict]) => verdict-payload
                   ":llm/verdict transcript event was emitted"
@@ -1505,12 +1521,27 @@
                                                         (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
                                      (final {:id :done})))
                      t       (new-llm-test-env {:statechart chart :backend backend})
-                     t       (await-config! t :done 3000)]
+                     t       (await-config! t :done 3000)
+                     log     @(:call-log backend)
+                     base-request  (first log)
+                     last-request  (last log)
+                     nudge-text    @#'llmc/wrap-up-nudge-text
+                     last-user-msg (peek (vec (:messages last-request)))]
                  (assertions
                   "chart reached :done"
                   (dct/in? t :done) => true
                   "second backend call was the verdict wrap-up"
-                  (count @(:call-log backend)) => 2
+                  (count log) => 2
                   ":verdict was attached to the idle event"
-                  (get-in @seen [:data :verdict]) => verdict)))
+                  (get-in @seen [:data :verdict]) => verdict
+                  "glm-class wrap-up request also ends with the framework-owned nudge"
+                  (-> last-user-msg :content first :text) => nudge-text
+                  "glm-class base work-loop request does NOT contain the nudge"
+                  (boolean
+                   (some (fn [m]
+                           (some #(and (= :text (:type %))
+                                       (= nudge-text (:text %)))
+                                 (:content m)))
+                         (:messages base-request)))
+                  => false)))
 
