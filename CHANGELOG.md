@@ -1,5 +1,74 @@
 # Changelog
 
+## [unreleased] — feat/turn-primitive-correctness — 2026-05-19
+
+Makes the `:llm-conversation` turn primitive correct and observable
+end-to-end: turns now end reliably across model families, built-in file
+tools stay inside the session, a wedged run can no longer hang forever,
+and six runnable example charts demonstrate the behaviour.
+
+### Added
+- `--log-level debug|info|warn|error` CLI flag (case-insensitive). An
+  explicit value always wins; with no explicit value, headless
+  (`--no-tui`) runs default to `info` so live archiving stays cheap while
+  interactive runs keep the library default (`debug`). An unrecognized
+  value exits with usage error 2.
+- Built-in path-taking tools (`fs_read`, `fs_write`, `fs_edit`,
+  `fs_multi_edit`, `fs_glob`, `fs_grep`) now resolve **relative** paths
+  against the session work directory instead of the process working
+  directory; absolute paths are unchanged. An LLM that writes
+  `notes.md` lands inside the session dir.
+- Every built-in file tool's `:llm/tool-result` transcript event now
+  carries `:resolved-path` — the absolute path the tool actually acted
+  on — so transcripts and tests can assert where a tool wrote.
+- `runner` `:max-frozen-cycles` option (default 200, ≈10s at the default
+  50ms quiescent sleep). If the pump makes no progress for that many
+  consecutive quiescent cycles while live invocations remain, it emits
+  `:runner/error {:reason :frozen-config}` and exits cleanly instead of
+  spinning forever. The counter resets on any progress or when no live
+  invocations remain.
+- Example charts under `escapement.examples`: `turn-loop` (full
+  multi-tool turn driving real `fs_read`/`fs_write`), `steered-convo`
+  (between-turn steering via the `:llm.idle` hook), `steer-midturn`
+  (mid-turn steering via a region-tool reply, characterizing latency),
+  `supervisor` (one parallel chart that monitors, steers once, and
+  captures an artifact), `inspectable` (emits the full inspectable event
+  spectrum and captures the final answer), and `inspect-showcase`
+  (two-phase run producing ≥2 named artifacts with an offline inspection
+  recipe).
+
+### Changed
+- The turn primitive now ends the turn when a model batches the
+  terminating event-tool (`event__done` / `event__tick`) into a
+  `:tool_use` response instead of emitting a separate `:end_turn` (the
+  glm-class behaviour). Such a turn now fires `:on-end-turn-event`
+  (default `:llm.idle`) with the assembled final text and parks the
+  worker in `:awaiting-user`, exactly as a real `:end_turn` does —
+  guaranteed exactly once per logical turn. Charts that key off
+  `:llm.idle` for turn boundaries now work uniformly across model
+  families.
+- A region-tool reply is now explicitly NOT treated as end-of-turn: it
+  is a synchronous request/reply fed back into the same conversation and
+  the worker keeps going (previous behaviour, now made correct and
+  documented; region/service/repl/scan flows no longer risk parking
+  mid-turn).
+- `scan.clj` now re-drives the bound conversation after each recorded
+  finding (an event-tool turn ends the LLM turn), prompting the model
+  for the next finding or the terminating `:scan-complete` so the scan
+  loop actually progresses.
+
+### Notes
+- The glm batched-event-tool turn-end behaviour and the example charts
+  exercise live LLM backends (z.ai / glm-class via `ZAI_API_KEY`, etc.);
+  their end-to-end behaviour and steering-latency findings are
+  credential-gated and must be eyeballed against a live provider — they
+  cannot be asserted in the offline unit suite.
+- Repo-hygiene only (no behaviour): `CLAUDE.md` now documents (and inlines
+  the structure of) a `workingcontext.md` working-context convention;
+  `.gitignore` ignores `workingcontext.md`, `scratch/`, and `.session/`.
+
+---
+
 ## [unreleased] — feat/hermetic-hosted-library — 2026-05-19
 
 Makes Escapement embeddable as a hermetic library and replaces the
@@ -122,7 +191,6 @@ when omitted. The one breaking change is the removal of the unreleased
   providers.
 
 ---
-
 
 ## [unreleased] — feat/lib-compat — 2026-05-19
 

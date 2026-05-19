@@ -216,3 +216,81 @@
                                "result mentions timeout"
                                (boolean (re-find #"timed out" (:result r))) => true)))))
 
+
+(specification "R3: session-relative tool paths"
+               (let [reg         (builtin/new-builtin-registry)
+                     session-dir (tmp-dir)
+                     cwd         (System/getProperty "user.dir")
+                     rel         "notes/todo.txt"]
+                 (component "relative :fs/write lands under session-dir, NOT cwd, via 4-arg base-dir"
+                            (let [r          (tp/dispatch reg :fs/write
+                                                          {:path rel :content "session-relative"}
+                                                          session-dir)
+                                  under-sess (io/file session-dir rel)
+                                  under-cwd  (io/file cwd rel)]
+                              (assertions
+                               "non-error" (:is-error r) => false
+                               "file exists under session-dir" (.exists under-sess) => true
+                               "file does NOT exist under cwd" (.exists under-cwd) => false
+                               ":is-error false implies file present"
+                               (and (false? (:is-error r)) (.exists under-sess)) => true
+                               "resolved-path is the absolute session path"
+                               (:resolved-path r) => (.getAbsolutePath under-sess)
+                               "content written correctly" (slurp under-sess) => "session-relative")))
+                 (component "relative :fs/read resolves the same session path"
+                            (let [r (tp/dispatch reg :fs/read {:path rel} session-dir)]
+                              (assertions
+                               "non-error" (:is-error r) => false
+                               "content read back"
+                               (clojure.string/includes? (:result r) "session-relative") => true
+                               "resolved-path present"
+                               (:resolved-path r) => (.getAbsolutePath (io/file session-dir rel)))))
+                 (component "relative :fs/edit resolves under session-dir"
+                            (let [r (tp/dispatch reg :fs/edit
+                                                  {:path rel :old-string "session" :new-string "SESSION"}
+                                                  session-dir)]
+                              (assertions
+                               "non-error" (:is-error r) => false
+                               "edit applied to session file"
+                               (slurp (io/file session-dir rel)) => "SESSION-relative"
+                               "resolved-path is absolute session path"
+                               (:resolved-path r) => (.getAbsolutePath (io/file session-dir rel)))))
+                 (component "absolute paths are unaffected by base-dir"
+                            (let [abs-dir (tmp-dir)
+                                  abs     (.getAbsolutePath (io/file abs-dir "abs.txt"))
+                                  w       (tp/dispatch reg :fs/write {:path abs :content "absolute"}
+                                                       session-dir)
+                                  rd      (tp/dispatch reg :fs/read {:path abs} session-dir)]
+                              (assertions
+                               "write non-error" (:is-error w) => false
+                               "wrote to the absolute path verbatim" (slurp abs) => "absolute"
+                               "resolved-path is the absolute path verbatim, NOT under session-dir"
+                               (:resolved-path w) => abs
+                               "not nested under session-dir"
+                               (.exists (io/file session-dir "abs.txt")) => false
+                               "read resolves the absolute path"
+                               (clojure.string/includes? (:result rd) "absolute") => true)))
+                 (component "registry metadata supplies base-dir to 3-arg dispatch"
+                            (let [reg2 (builtin/new-builtin-registry)
+                                  sd   (tmp-dir)]
+                              (alter-meta! reg2 assoc :escapement/base-dir sd)
+                              (let [r (tp/dispatch reg2 :fs/write
+                                                   {:path "meta/x.txt" :content "via-meta"})]
+                                (assertions
+                                 "non-error" (:is-error r) => false
+                                 "resolved under metadata base-dir"
+                                 (.exists (io/file sd "meta/x.txt")) => true
+                                 "resolved-path reflects metadata base-dir"
+                                 (:resolved-path r) => (.getAbsolutePath (io/file sd "meta/x.txt"))))))
+                 (component "no base-dir falls back to process cwd (back-compat)"
+                            ;; With no 4-arg base-dir and no registry metadata,
+                            ;; a relative path resolves exactly as plain
+                            ;; `(io/file path)` does — i.e. against the process
+                            ;; working directory (back-compat behaviour).
+                            (let [r (tp/dispatch reg :fs/read {:path "deps.edn"})]
+                              (assertions
+                               "non-error reading a cwd-relative file" (:is-error r) => false
+                               "resolved-path matches plain io/file resolution"
+                               (:resolved-path r) => (.getAbsolutePath (io/file "deps.edn"))
+                               "resolved-path is absolute and ends with deps.edn"
+                               (boolean (re-find #"/deps\.edn$" (:resolved-path r))) => true)))))

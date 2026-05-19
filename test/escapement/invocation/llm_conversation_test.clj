@@ -590,14 +590,23 @@
 ;; #8: Per-invocation budgets — :max-turns and :max-conversation-duration-ms
 ;; ---------------------------------------------------------------------------
 
+(defrecord AlwaysOkTool []
+  tp/Tool
+  (tool-name    [_] :test/noop)
+  (description  [_] "always succeeds, posts no chart event")
+  (input-schema [_] [:map])
+  (invoke       [_ _] {:result "ok" :is-error false}))
+
 (specification ":max-turns budget fires :error.llm.max-turns"
   ;; The model keeps emitting tool_use forever (infinite loop). Without a
   ;; budget the worker would never stop; :max-turns 3 makes it self-cancel.
-               (let [;; A fake event-tool that always passes validation so the loop keeps
-        ;; running through tool dispatch.
-                     always-tool (tool-use-response
-                                  [{:id "u1" :name "event__noop" :input {:x 1}}])
-                     backend (mock-backend [always-tool always-tool always-tool always-tool])
+  ;; NB: under R1 an event-tool turn ends the turn (parks :awaiting-user),
+  ;; so the looping tool must be a REAL tool that posts no chart event —
+  ;; only then does the model keep emitting tool_use until the budget bites.
+               (let [always-tool (tool-use-response
+                                  [{:id "u1" :name "test_noop" :input {}}])
+                     backend  (mock-backend [always-tool always-tool always-tool always-tool])
+                     registry (tp/new-registry [(->AlwaysOkTool)])
                      err-seen (atom nil)
                      chart    (chart/statechart
                                {:initial :wrap}
@@ -607,14 +616,13 @@
                                               {:id        "p"
                                                :params-fn (fn [_ _]
                                                             {:max-turns            3
-                                                             :allowed-events       [{:event :noop
-                                                                                     :data-schema [:map [:x :int]]}]
+                                                             :real-tools           [:test/noop]
                                                              :initial-user-message "go"})})
                       ;; Catch-all per-family.
                                              (transition {:event :error.llm.* :target :failed}
                                                          (script {:expr (fn [_ d] (reset! err-seen (:_event d)) nil)})))
                                       (final {:id :failed})))
-                     t        (new-llm-test-env {:statechart chart :backend backend})
+                     t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
                      t        (await-config! t :failed 3000)]
                  (assertions
                   "chart reached :failed"
@@ -646,6 +654,85 @@
                   (get-in @seen [:data :text]) => "the answer is 42"
                   "and the speaker's invokeid"
                   (get-in @seen [:data :from]) => "advisor")))
+
+;; ---------------------------------------------------------------------------
+;; R1: event-tool inside a :tool_use turn fires on-end-turn-event (glm-class)
+;; ---------------------------------------------------------------------------
+
+(specification "R1: event-tool in a :tool_use turn fires on-end-turn-event exactly once"
+  ;; glm-class models batch the terminating event-tool into a :tool_use
+  ;; response and never emit a separate :end_turn. The worker must still
+  ;; fire on-end-turn-event (:llm.idle) and park in :awaiting-user.
+               (let [idle-count (atom 0)
+                     seen       (atom nil)
+                     backend    (mock-backend
+                                 [(tool-use-response
+                                   [{:id "e1" :name "event__done"
+                                     :input {}}])])
+                     chart      (chart/statechart
+                                 {:initial :wrap}
+                                 (state {:id :wrap :initial :work}
+                                        (state {:id :work}
+                                               (h/llm-conversation
+                                                {:id        "glm"
+                                                 :params-fn (fn [_ _]
+                                                              {:real-tools     []
+                                                               :allowed-events [{:event :done}]
+                                                               :initial-user-message "go"})})
+                                               (transition {:event :llm.idle :target :finished}
+                                                           (script {:expr (fn [_ d]
+                                                                            (swap! idle-count inc)
+                                                                            (reset! seen (:_event d))
+                                                                            nil)})))
+                                        (state {:id :finished})))
+                     t          (new-llm-test-env {:statechart chart :backend backend})
+                     t          (await-config! t :finished 3000)
+                     ;; Give any stray duplicate event time to land.
+                     _          (do (Thread/sleep 150) (dct/drain! t))]
+                 (assertions
+                  "chart reached :finished via :llm.idle"
+                  (dct/in? t :finished) => true
+                  "on-end-turn-event fired exactly once"
+                  @idle-count => 1
+                  "the idle event carries the speaker invokeid"
+                  (get-in @seen [:data :from]) => "glm"
+                  "backend was called exactly once (no continuation turn)"
+                  (count @(:call-log backend)) => 1)))
+
+(specification "R1 de-dupe: event-tool turn then a stray :end_turn does NOT double-post"
+  ;; The event-tool :tool_use turn parks the worker in :awaiting-user, so a
+  ;; second canned :end_turn response is never consumed and on-end-turn-event
+  ;; fires exactly once.
+               (let [idle-count (atom 0)
+                     backend    (mock-backend
+                                 [(tool-use-response
+                                   [{:id "e1" :name "event__done" :input {}}])
+                                  (end-turn-response "stray")])
+                     chart      (chart/statechart
+                                 {:initial :wrap}
+                                 (state {:id :wrap :initial :work}
+                                        (state {:id :work}
+                                               (h/llm-conversation
+                                                {:id        "glm"
+                                                 :params-fn (fn [_ _]
+                                                              {:real-tools     []
+                                                               :allowed-events [{:event :done}]
+                                                               :initial-user-message "go"})})
+                                               (transition {:event :llm.idle :target :finished}
+                                                           (script {:expr (fn [_ _]
+                                                                            (swap! idle-count inc)
+                                                                            nil)})))
+                                        (state {:id :finished})))
+                     t          (new-llm-test-env {:statechart chart :backend backend})
+                     t          (await-config! t :finished 3000)
+                     _          (do (Thread/sleep 200) (dct/drain! t))]
+                 (assertions
+                  "chart reached :finished"
+                  (dct/in? t :finished) => true
+                  "on-end-turn-event fired exactly once (no double-post)"
+                  @idle-count => 1
+                  "the stray :end_turn response was never consumed"
+                  (count @(:call-log backend)) => 1)))
 
 ;; ---------------------------------------------------------------------------
 ;; #9: :target routing for :llm.user-message (multi-LLM team pattern)
@@ -809,6 +896,54 @@
                          (= "ok" (get-in tr [:data :content-preview]))
                          (string? (get-in tr [:data :invokeid]))))
                   => true)))
+
+(specification "R3 transcript: relative :fs/write surfaces :resolved-path in :llm/tool-result data"
+               (let [session  (str (java.nio.file.Files/createTempDirectory
+                                    "llm-conv-r3" (make-array java.nio.file.attribute.FileAttribute 0)))
+                     captured (atom [])
+                     registry (builtin/new-builtin-registry)
+                     ;; CLI path: base-dir comes from the registry metadata.
+                     _        (alter-meta! registry assoc :escapement/base-dir session)
+                     backend  (mock-backend
+                               [(tool-use-response
+                                 [{:id "w1" :name "fs_write"
+                                   :input {:path "out/r3.txt" :content "hi-from-r3"}}])
+                                (tool-use-response
+                                 [{:id "e1" :name "event__done" :input {}}])
+                                (end-turn-response "ok")])
+                     chart    (chart/statechart
+                               {:initial :wrap}
+                               (state {:id :wrap :initial :work}
+                                      (state {:id :work}
+                                             (h/llm-conversation
+                                              {:id        "r3w"
+                                               :params-fn (fn [_ _]
+                                                            {:real-tools           [:fs/write]
+                                                             :allowed-events       [{:event :done :data-schema [:map]}]
+                                                             :initial-user-message "go"})})
+                                             (transition {:event :done :target :finished}))
+                                      (final {:id :finished})))
+                     t        (new-llm-test-env
+                               {:statechart    chart
+                                :backend       backend
+                                :tool-registry registry
+                                :transcript-fn (fn [ev] (swap! captured conj ev))})
+                     _        (await-config! t :finished 3000)
+                     tr       (->> @captured
+                                   (filter #(= :llm/tool-result (:event %)))
+                                   (filter #(= :fs/write (get-in % [:data :tool])))
+                                   first)
+                     resolved (get-in tr [:data :resolved-path])
+                     expected (.getAbsolutePath (java.io.File. session "out/r3.txt"))]
+                 (assertions
+                  "a :fs/write tool-result was captured"
+                  (some? tr) => true
+                  "transcript carries the resolved absolute path"
+                  resolved => expected
+                  "the file actually landed under the session dir"
+                  (.exists (java.io.File. session "out/r3.txt")) => true
+                  "and not under the process cwd"
+                  (.exists (java.io.File. "out/r3.txt")) => false)))
 
 (specification "transcript truncation caps oversized text/thinking blocks"
                (let [big      (apply str (repeat (+ 100 escapement.invocation.llm-conversation/transcript-block-cap)

@@ -66,4 +66,7 @@
              ;; on-entry actions calling `service/register-tool!`.
              ::service/registry         (atom {})}
       tool-registry (assoc :escapement/tool-registry tool-registry)
-      session-dir   (assoc :escapement/session-dir session-dir))))
+      session-dir   (assoc :escapement/session-dir session-dir)
+      ;; Surface the transcript fn on the env so chart actions (e.g.
+      ;; `helpers/capture-llm-output`) can emit `:artifact/captured`.
+      transcript-fn (assoc :escapement/transcript-fn transcript-fn))))

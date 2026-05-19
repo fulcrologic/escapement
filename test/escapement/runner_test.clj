@@ -7,11 +7,13 @@
    [com.fulcrologic.statecharts.data-model.operations :as ops]
    [com.fulcrologic.statecharts.elements :refer [state transition final script on-entry]]
    [com.fulcrologic.statecharts.protocols :as sp]
+   [escapement.chart.helpers :as h]
+   [escapement.invocation.human-input :as human-input]
    [escapement.runner :as runner]
    [fulcro-spec.core :refer [specification assertions =>]])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)
-           (java.util.concurrent TimeUnit)))
+           (java.util.concurrent CountDownLatch TimeUnit)))
 
 (defn- tmp-dir [prefix]
   (str (Files/createTempDirectory prefix (into-array FileAttribute []))))
@@ -205,6 +207,91 @@
         (swap! workers dissoc [sid invokeid])))
     true)
   (forward-event! [_ _ _] true))
+
+;; -- frozen-config wedge detection (R2) --------------------------------------
+
+;; A renderer whose `prompt-text` blocks forever (until an externally-held
+;; latch opens — which the test never does). This keeps the human-input
+;; worker thread alive (worker-state stays :running) so
+;; `count-live-invocations` reports a live invocation while the chart sits
+;; quiescent in the invoking state — exactly the frozen-config wedge.
+(defrecord BlockingRenderer [latch]
+  human-input/HumanRenderer
+  (prompt-text    [_ _] (.await ^CountDownLatch latch) "never")
+  (prompt-select  [_ _] (.await ^CountDownLatch latch) nil)
+  (prompt-multi   [_ _] (.await ^CountDownLatch latch) nil)
+  (prompt-confirm [_ _] (.await ^CountDownLatch latch) false)
+  (start-progress  [_ _] nil)
+  (update-progress [_ _ _ _] nil)
+  (end-progress    [_ _] nil)
+  (custom-render   [_ _ _ _] nil))
+
+(def frozen-chart
+  ;; Enters :ask, invokes :human-input, then waits for :human.answer that
+  ;; never arrives (the renderer blocks). The chart configuration is frozen
+  ;; while a live invocation exists.
+  (chart/statechart
+   {:initial :run}
+   (state {:id :run :initial :ask}
+          (state {:id :ask}
+                 (h/human-input
+                  {:id        "ask"
+                   :params-fn (fn [_env _data]
+                                {:kind          :text
+                                 :prompt        "blocks forever"
+                                 :answer-schema [:string {:min 1}]})})
+                 (transition {:event :human.answer :target :done}))
+          (final {:id :done}))))
+
+(specification "runner detects a frozen-config wedge and exits cleanly (R2)"
+               (let [dir        (tmp-dir "runner-frozen")
+                     transcript (str dir "/run.jsonl")
+                     chk        (str dir "/chk")
+                     latch      (CountDownLatch. 1)
+                     renderer   (->BlockingRenderer latch)
+                     result-p   (promise)
+                     ^Thread t  (Thread.
+                                 ^Runnable
+                                 (fn []
+                                   (try
+                                     (deliver result-p
+                                              (runner/run!
+                                               {:chart              frozen-chart
+                                                :session-id         :runner-test/frozen
+                                                :transcript-path    transcript
+                                                :checkpoint-dir     chk
+                                                :human-renderer     renderer
+                                                :max-iterations     5000
+                                                :max-frozen-cycles  5
+                                                :quiescent-sleep-ms 5}))
+                                     (catch Throwable e
+                                       (deliver result-p {:error e})))))]
+                 (.setDaemon t true)
+                 (.start t)
+                 ;; If frozen-config detection is broken the runner hangs
+                 ;; forever; bound the wait so the test fails fast instead.
+                 (.join t 5000)
+                 (.countDown latch) ;; release the blocked renderer thread
+                 (let [summary (deref result-p 100 ::timeout)]
+                   (assertions
+                    "run! returned (did not hang)"
+                    (not= ::timeout summary) => true
+                    "run! did not throw"
+                    (:error summary) => nil
+                    "run! returned a normal summary map"
+                    (contains? summary :final-config) => true))
+                 (let [rows  (read-jsonl transcript)
+                       err   (first (filter #(= "runner/error" (:event %)) rows))
+                       evs   (set (map :event rows))]
+                   (assertions
+                    "emitted :runner/error"
+                    (some? err) => true
+                    "with :reason :frozen-config"
+                    (get-in err [:data :reason]) => "frozen-config"
+                    "reporting the live invocation count"
+                    (get-in err [:data :live-invocations]) => 1
+                    "still reached the normal :runner/done path"
+                    (contains? evs "runner/done") => true))))
 
 ;; This test is omitted from the suite for now because hooking a custom invocation
 ;; processor into the runner requires the runner to accept arbitrary processors —

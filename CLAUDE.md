@@ -2,6 +2,31 @@
 
 Guidance for Claude Code when working in the **Escapement** repository.
 
+## Working context
+
+**Read `workingcontext.md` first** (it is gitignored — local, per-session,
+never committed). It holds the current goal, known issues, gotchas, and the
+focused list of files we're working on this session. If it does not exist,
+create it with these sections:
+
+- **Goal** — one paragraph: what we're trying to accomplish this session.
+- **Known Issues** — bugs/gaps in the area being worked on, grouped by
+  domain. Each bullet: terse fact + `file:line`. When resolved, strike
+  through with `~~…~~` and append **FIXED <date>** (keep the original line).
+- **Gotchas** — non-obvious things a future session will trip over (silent
+  no-ops, hot-reload caveats, sentinel values, wire-format quirks). One
+  line per fact, `file:line` when relevant.
+- **Relevant Files** — the focused subset this session is touching, grouped
+  by domain. Trim aggressively; this is not a codebase index.
+
+You may autonomously append to `workingcontext.md` whenever you discover
+anything that will save us time later — surprises, gotchas, non-obvious
+wiring, awkward patterns, undocumented conventions, or pointers to files
+we'd otherwise have to re-search for. Keep entries terse (one line per
+fact, with a file path + line number when relevant). Do not duplicate
+what's already there; do not turn it into prose. Only add facts that a
+future session would thank you for.
+
 ## Project shape
 
 Escapement is a statechart-driven autonomous coding agent. **Everything runs
@@ -30,20 +55,6 @@ avoid the namespaces that pull `promesa`/`core.async` (which crash SCI). Do
 
 Use `escapement.engine.env` to build the env and `escapement.engine.testing`
 as the test harness in place of the library's `testing`.
-
-## Skill loading
-
-- `clojure` skill — load when touching any `.clj`/`.cljs`/`.cljc` file.
-- `clojure-repl` skill — load when running code in a REPL. **Tests in this
-  project run via `bb test`, not kaocha**; the skill's general REPL guidance
-  is still useful for evaluation.
-- `fulcro-spec-tdd` skill — load when writing tests with fulcro-spec macros
-  (`specification`, `assertions`, `=>`, `=throws=>`, `provided!`,
-  `when-mocking!`).
-- `statechart` skill — load when authoring or editing charts.
-- `guardrails` skill — required for any function-spec work.
-- `bb-tui` skill — load when touching `src/escapement/tui.clj` or other TUI
-  bits.
 
 ## Test conventions
 

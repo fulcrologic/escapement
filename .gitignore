@@ -19,3 +19,6 @@ ai/scratch/
 .clj-kondo/.cache/
 .clj-kondo/imports/
 .lsp/
+workingcontext.md
+scratch/
+.session/

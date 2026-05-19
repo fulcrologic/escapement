@@ -37,29 +37,55 @@
        [any? => any?]
        (.toPath (io/file f)))
 
+(defn resolve-file
+  "Resolve `path` to a `java.io.File`. Absolute paths are returned as-is;
+   relative paths are resolved against `tp/*base-dir*` (the session work-dir,
+   bound by `tp/dispatch`) when set, else against the process working
+   directory. This is the single seam through which every path-taking
+   builtin tool resolves user-supplied paths."
+  ^java.io.File [path]
+  (let [f (io/file path)]
+    (if (.isAbsolute f)
+      f
+      (if-let [base tp/*base-dir*]
+        (io/file base path)
+        f))))
+
+(defn resolved-abs
+  "Absolute path string for `path` after `resolve-file`. Surfaced to callers
+   as `:resolved-path` so transcripts/tests can assert where a tool acted."
+  [path]
+  (.getAbsolutePath (resolve-file path)))
+
 (>defn ^:private atomic-write!
-       "Writes `content` (UTF-8) atomically to `path`: writes to `<path>.tmp`, then renames
-       over `path` with `ATOMIC_MOVE` + `REPLACE_EXISTING`. Creates parent dirs as needed.
-       Returns the number of bytes written."
+       "Writes `content` (UTF-8) atomically to `path` (resolved via `resolve-file`):
+       writes to `<resolved>.tmp`, then renames over the resolved file with
+       `ATOMIC_MOVE` + `REPLACE_EXISTING`. Creates parent dirs as needed.
+       Returns `{:bytes <n> :resolved <abs path string>}`. Throws if the
+       resolved file does not exist after the move (so `:is-error false`
+       callers can rely on the file being present)."
        [path content]
-       [:string :string => :int]
-       (let [f      (io/file path)
+       [:string :string => [:map [:bytes :int] [:resolved :string]]]
+       (let [f      (resolve-file path)
              parent (.getParentFile f)
              _      (when parent (.mkdirs parent))
-             tmp    (io/file (str path ".tmp"))
+             tmp    (io/file (str (.getAbsolutePath f) ".tmp"))
              bytes  (.getBytes ^String content StandardCharsets/UTF_8)]
          (with-open [out (io/output-stream tmp)]
            (.write out bytes))
          (Files/move ^Path (as-path tmp) ^Path (as-path f)
                      (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
                                              StandardCopyOption/REPLACE_EXISTING]))
-         (alength bytes)))
+         (when-not (.exists f)
+           (throw (ex-info "atomic-write! post-check failed: file absent after move"
+                           {:path path :resolved (.getAbsolutePath f)})))
+         {:bytes (alength bytes) :resolved (.getAbsolutePath f)}))
 
 (>defn ^:private read-utf8
-       "Reads the file at `path` as a UTF-8 string."
+       "Reads the file at `path` (resolved via `resolve-file`) as a UTF-8 string."
        [path]
        [:string => :string]
-       (slurp (io/file path) :encoding "UTF-8"))
+       (slurp (resolve-file path) :encoding "UTF-8"))
 
 (defn- deref-or-self
   "babashka.process exposes :out / :err as either delays or strings depending on
@@ -119,13 +145,14 @@
          max-read-bytes " bytes are byte-truncated up front."))
   (input-schema [_] fs-read-schema)
   (invoke [_ {:keys [path offset limit]}]
-    (let [f (io/file path)]
+    (let [f   (resolve-file path)
+          abs (.getAbsolutePath f)]
       (cond
         (not (.exists f))
-        {:result (str "No such file: " path) :is-error true}
+        {:result (str "No such file: " path) :is-error true :resolved-path abs}
 
         (.isDirectory f)
-        {:result (str "Path is a directory: " path) :is-error true}
+        {:result (str "Path is a directory: " path) :is-error true :resolved-path abs}
 
         :else
         (let [size       (.length f)
@@ -157,7 +184,7 @@
                                                  (when (> remaining 1) "s")
                                                  "; read with :offset " (inc end) "]")
                            :else "")]
-          {:result (str body footer) :is-error false})))))
+          {:result (str body footer) :is-error false :resolved-path abs})))))
 
 ;; ---------------------------------------------------------------------------
 ;; :fs/write
@@ -174,8 +201,9 @@
   (description  [_] "Atomically write UTF-8 `content` to `path`, creating parent directories.")
   (input-schema [_] fs-write-schema)
   (invoke [_ {:keys [path content]}]
-    (let [n (atomic-write! path content)]
-      {:result (str "wrote " n " bytes to " path) :is-error false})))
+    (let [{:keys [bytes resolved]} (atomic-write! path content)]
+      {:result (str "wrote " bytes " bytes to " resolved)
+       :is-error false :resolved-path resolved})))
 
 ;; ---------------------------------------------------------------------------
 ;; :fs/edit
@@ -226,20 +254,21 @@
          "Indentation in `old-string` must match the file exactly. Atomic write."))
   (input-schema [_] fs-edit-schema)
   (invoke [_ {:keys [path] :as input}]
-    (let [f (io/file path)]
+    (let [f   (resolve-file path)
+          abs (.getAbsolutePath f)]
       (cond
         (not (.exists f))
-        {:result (str "No such file: " path) :is-error true}
+        {:result (str "No such file: " path) :is-error true :resolved-path abs}
 
         :else
         (let [content (read-utf8 path)
               {:keys [ok content error replacements]} (apply-edit content input)]
           (if ok
-            (let [n (atomic-write! path content)]
-              {:result (str "edited " path " (" n " bytes, " replacements
+            (let [{:keys [bytes resolved]} (atomic-write! path content)]
+              {:result (str "edited " resolved " (" bytes " bytes, " replacements
                             " replacement" (when (> replacements 1) "s") ")")
-               :is-error false})
-            {:result (str error " in " path) :is-error true}))))))
+               :is-error false :resolved-path resolved})
+            {:result (str error " in " abs) :is-error true :resolved-path abs}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; :fs/multi-edit
@@ -264,10 +293,11 @@
          "as fs_edit (unique-match by default; replace_all opts in)."))
   (input-schema [_] fs-multi-edit-schema)
   (invoke [_ {:keys [path edits]}]
-    (let [f (io/file path)]
+    (let [f   (resolve-file path)
+          abs (.getAbsolutePath f)]
       (cond
         (not (.exists f))
-        {:result (str "No such file: " path) :is-error true}
+        {:result (str "No such file: " path) :is-error true :resolved-path abs}
 
         :else
         (let [start  (read-utf8 path)
@@ -284,14 +314,14 @@
           (if (:failed? result)
             {:result (str (:error result)
                           " (edit #" (inc (:failed-index result))
-                          " of " (count edits) " in " path
+                          " of " (count edits) " in " abs
                           "; no changes written).")
-             :is-error true}
-            (let [n (atomic-write! path (:content result))]
+             :is-error true :resolved-path abs}
+            (let [{:keys [bytes resolved]} (atomic-write! path (:content result))]
               {:result (str "applied " (count edits) " edit"
                             (when (> (count edits) 1) "s")
-                            " to " path " (" n " bytes)")
-               :is-error false})))))))
+                            " to " resolved " (" bytes " bytes)")
+               :is-error false :resolved-path resolved})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; :fs/glob
@@ -330,7 +360,7 @@
   (input-schema [_] fs-glob-schema)
   (invoke [_ {:keys [pattern cwd limit by-mtime?]
               :or   {by-mtime? true}}]
-    (let [root      (io/file (or cwd "."))
+    (let [root      (resolve-file (or cwd "."))
           _         (when-not (.exists root)
                       (throw (ex-info "glob root does not exist"
                                       {:cwd cwd})))
@@ -390,7 +420,7 @@
     (catch Throwable _ false)))
 
 (defn- run-grep [{:keys [pattern path glob output-mode ignore-case context limit]}]
-  (let [path       (or path ".")
+  (let [path       (.getAbsolutePath (resolve-file (or path ".")))
         mode       (or output-mode "files-with-matches")
         rg?        (rg-available?)
         cmd

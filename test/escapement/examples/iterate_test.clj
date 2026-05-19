@@ -86,10 +86,8 @@
                (let [be (mock-backend
                          [(tool-use [{:id "s" :name "event__spec_ready"
                                       :input {:summary "make square"}}])
-                          (end-turn)
                           (tool-use [{:id "p" :name "event__patch_applied"
-                                      :input {:rationale "wrote square"}}])
-                          (end-turn)])
+                                      :input {:rationale "wrote square"}}])])
                      {:keys [t shell-calls]}
                      (run-chart! {:backend be
                                   :shell-responses [{:result "ok" :is-error false}]
@@ -110,16 +108,12 @@
                (let [be (mock-backend
                          [(tool-use [{:id "s" :name "event__spec_ready"
                                       :input {:summary "make square"}}])
-                          (end-turn)
                           (tool-use [{:id "p1" :name "event__patch_applied"
                                       :input {:rationale "first attempt"}}])
-                          (end-turn)
                           (tool-use [{:id "r" :name "event__retry"
                                       :input {:reasoning "try again"}}])
-                          (end-turn)
                           (tool-use [{:id "p2" :name "event__patch_applied"
-                                      :input {:rationale "second attempt"}}])
-                          (end-turn)])
+                                      :input {:rationale "second attempt"}}])])
                      {:keys [t shell-calls]}
                      (run-chart! {:backend be
                                   :shell-responses [{:result "boom" :is-error true}
@@ -141,19 +135,14 @@
                (let [be (mock-backend
                          [(tool-use [{:id "s" :name "event__spec_ready"
                                       :input {:summary "make square"}}])
-                          (end-turn)
                           (tool-use [{:id "p1" :name "event__patch_applied"
                                       :input {:rationale "first"}}])
-                          (end-turn)
                           (tool-use [{:id "r1" :name "event__retry"
                                       :input {:reasoning "again"}}])
-                          (end-turn)
                           (tool-use [{:id "p2" :name "event__patch_applied"
                                       :input {:rationale "second"}}])
-                          (end-turn)
                           (tool-use [{:id "r2" :name "event__retry"
-                                      :input {:reasoning "yet again"}}])
-                          (end-turn)])
+                                      :input {:reasoning "yet again"}}])])
                      {:keys [t shell-calls]}
                      (run-chart! {:backend be
                                   :shell-responses [{:result "boom1" :is-error true}
@@ -175,13 +164,10 @@
                (let [be (mock-backend
                          [(tool-use [{:id "s" :name "event__spec_ready"
                                       :input {:summary "make square"}}])
-                          (end-turn)
                           (tool-use [{:id "p1" :name "event__patch_applied"
                                       :input {:rationale "first"}}])
-                          (end-turn)
                           (tool-use [{:id "g" :name "event__give_up"
-                                      :input {:reason "stuck"}}])
-                          (end-turn)])
+                                      :input {:reason "stuck"}}])])
                      {:keys [t shell-calls]}
                      (run-chart! {:backend be
                                   :shell-responses [{:result "boom" :is-error true}]

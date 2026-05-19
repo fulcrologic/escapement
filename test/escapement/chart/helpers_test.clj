@@ -65,19 +65,22 @@
                   => #{"bubble/conv" :bubble.converse :bubble.ask-choice :bubble.ask-text})))
 
 (specification "LLM ask-choice round-trips through human-input back to the conversation"
-  ;; Round-trip:
-  ;;   turn 1: LLM calls event__question_ask_choice  (tool_use)
-  ;;   chart routes to :ask-choice; stub renderer returns :b
-  ;;   turn 2: synthetic tool_result "ok" → LLM returns :end_turn (worker
-  ;;           parks in :awaiting-user)
-  ;;   chart tell-llm's "User chose: :b" → :llm.user-message wakes worker
-  ;;   turn 3: LLM returns :end_turn → :llm.idle → :exit-transitions fires
+  ;; Round-trip (R1 contract: an event-tool turn ENDS the turn — the worker
+  ;; fires :llm.idle and parks in :awaiting-user; it does NOT continue to a
+  ;; synthetic tool_result turn):
+  ;;   turn 1: LLM calls event__question_ask_choice (tool_use, event-tool).
+  ;;           The :question/ask-choice event is posted BEFORE :llm.idle, so
+  ;;           the chart leaves :converse for :ask-choice before the idle
+  ;;           exit-transition can fire. Worker parks in :awaiting-user.
+  ;;   chart routes to :ask-choice; stub renderer returns :b; chart tell-llm's
+  ;;           "User chose: :b" → :llm.user-message wakes the worker.
+  ;;   turn 2: LLM returns :end_turn → :llm.idle (now in :converse) →
+  ;;           :exit-transitions fires → :done.
                (let [backend  (mock-backend
                                [(tool-use "u1" "event__question_ask_choice"
                                           {:question "pick"
                                            :options  [{:label "A" :value :a}
                                                       {:label "B" :value :b}]})
-                                (end-turn "ok")
                                 (end-turn "ack")])
                      renderer (->StubRenderer (atom {:select :b}))
                      chart    (chart/statechart
@@ -101,10 +104,10 @@
                  (assertions
                   "chart reached :done"
                   (dct/in? t :done) => true
-                  "LLM was called three times (ask + tool-result + answer turn)"
-                  (count @(:call-log backend)) => 3
-                  "the third LLM turn carried 'User chose: :b' as a new user message"
-                  (let [third-req (nth @(:call-log backend) 2)
+                  "LLM was called twice (ask event-tool turn + answer turn)"
+                  (count @(:call-log backend)) => 2
+                  "the second LLM turn carried 'User chose: :b' as a new user message"
+                  (let [third-req (nth @(:call-log backend) 1)
                         msgs      (:messages third-req)
                         last-user (last (filter #(= :user (:role %)) msgs))
                         text      (->> (:content last-user)
