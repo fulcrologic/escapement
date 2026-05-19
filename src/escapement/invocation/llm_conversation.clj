@@ -993,7 +993,7 @@
   [{:keys [transcript-fn parent-ctx] :as ctx} params messages verdict-schema]
   (let [tool-def    (submit-verdict-tool-def verdict-schema)
         wrap-params (assoc params
-                           :tool-choice {:type "tool" :name submit-verdict-tool-name})
+                           :tool-choice {:type :tool :name submit-verdict-tool-name})
         _           (transcript! transcript-fn
                                  {:event :llm/verdict-inference :ts (now-ms)
                                   :data  {:invokeid (:invokeid parent-ctx)}})

@@ -9,6 +9,7 @@
    [escapement.engine.testing :as dct]
    [escapement.invocation.llm-conversation :as llmc]
    [escapement.llm.protocol :as llm]
+   [escapement.llm.types :as llm-types]
    [escapement.test-support :as ts]
    [escapement.tools.builtin :as builtin]
    [escapement.tools.protocol :as tp]
@@ -1374,8 +1375,12 @@
                   (dct/in? t :done) => true
                   "backend was called exactly twice (turn + wrap-up forced inference)"
                   (count @(:call-log backend)) => 2
-                  "wrap-up request forced submit_verdict tool-choice"
-                  (:tool-choice last-request) => {:type "tool" :name "submit_verdict"}
+                  "wrap-up request forced submit_verdict tool-choice (keyword :type per ToolChoice schema)"
+                  (:tool-choice last-request) => {:type :tool :name "submit_verdict"}
+                  "wrap-up tool-choice passes ToolChoice schema validation"
+                  (nil? (llm-types/validate-request
+                         (assoc last-request :model "mock" :messages [] :max-tokens 100)))
+                  => true
                   "wrap-up request tools list contains only submit_verdict"
                   (mapv :name (:tools last-request)) => ["submit_verdict"]
                   ":on-end-turn-event data carries the validated :verdict"

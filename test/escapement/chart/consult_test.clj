@@ -133,7 +133,7 @@
                   (count calls) => 4
 
                   "specialist's wrap-up inference forced submit_verdict tool-choice"
-                  (-> calls (nth 2) :tool-choice) => {:type "tool" :name "submit_verdict"}
+                  (-> calls (nth 2) :tool-choice) => {:type :tool :name "submit_verdict"}
 
                   "asker's follow-up turn carries a tool_result whose content is the JSON-encoded verdict"
                   (let [tr (->> asker-followup
