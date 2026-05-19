@@ -31,7 +31,8 @@
    [escapement.llm.types :as llm-types]
    [escapement.tools.protocol :as tp]
    [malli.core :as m]
-   [malli.error :as me])
+   [malli.error :as me]
+   [malli.transform :as mt])
   (:import
    (java.util.concurrent ArrayBlockingQueue TimeUnit)))
 
@@ -1007,18 +1008,29 @@
             tool-uses   (find-tool-uses content)
             verdict-blk (some (fn [b]
                                 (when (= submit-verdict-tool-name (:name b)) b))
-                              tool-uses)]
+                              tool-uses)
+            ;; The LLM returns tool_use input as raw JSON-shaped data
+            ;; (strings, numbers, vectors of those, never keywords). When
+            ;; the chart-supplied verdict-schema declares keyword shapes
+            ;; (e.g. `[:enum :a :b]`, qualified keyword keys), validation
+            ;; would otherwise fail. Decode through Malli's
+            ;; json-transformer so string → keyword (and similar)
+            ;; coercions land before validation.
+            decoded     (when verdict-blk
+                          (m/decode (or verdict-schema [:map])
+                                    (or (:input verdict-blk) {})
+                                    (mt/json-transformer)))]
         (cond
           (nil? verdict-blk)
           {:no-tool-use stop-reason}
 
-          (not (m/validate (or verdict-schema [:map]) (or (:input verdict-blk) {})))
-          {:validation-failed (humanize-malli-errors (or verdict-schema [:map])
-                                                     (or (:input verdict-blk) {}))
-           :input             (:input verdict-blk)}
+          (not (m/validate (or verdict-schema [:map]) decoded))
+          {:validation-failed (humanize-malli-errors (or verdict-schema [:map]) decoded)
+           :input             (:input verdict-blk)
+           :decoded           decoded}
 
           :else
-          {:verdict (:input verdict-blk)})))))
+          {:verdict decoded})))))
 
 (defn- maybe-run-verdict-and-finalize-idle!
   "When `verdict-schema` is set, run a forced `submit_verdict` inference and

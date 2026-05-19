@@ -1388,6 +1388,44 @@
                   ":llm/verdict transcript event was emitted"
                   (boolean (some #(= :llm/verdict (:event %)) @captured)) => true)))
 
+(specification "verdict JSON shape coerces to schema (string-enum → keyword)"
+  ;; Models can only emit JSON-typed values in tool_use input — strings,
+  ;; numbers, lists of those, never keywords. When the chart's
+  ;; verdict-schema uses keyword shapes (e.g. `[:enum :a :b]`), the
+  ;; wrap-up must decode through Malli's json-transformer before
+  ;; validating, otherwise an LLM that "correctly" returned the enum
+  ;; would still fail validation. This regresses the matrix-team live
+  ;; smoke failure.
+               (let [keyword-schema [:map
+                                     [:status [:enum :proposed-new-version :done :stuck]]
+                                     [:summary :string]]
+                     json-payload   {:status "proposed-new-version" :summary "ready"}
+                     backend        (mock-backend
+                                     [(end-turn-response "ok")
+                                      (verdict-tool-use-response json-payload)])
+                     seen-idle      (atom nil)
+                     chart          (chart/statechart
+                                     {:initial :wrap}
+                                     (state {:id :wrap :initial :work}
+                                            (state {:id :work}
+                                                   (h/llm-conversation
+                                                    {:id        "judge"
+                                                     :params-fn (fn [_ _]
+                                                                  {:initial-user-message "go"
+                                                                   :verdict-schema       keyword-schema})})
+                                                   (transition {:event :llm.idle :target :done}
+                                                               (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
+                                            (final {:id :done})))
+                     t              (new-llm-test-env {:statechart chart :backend backend})
+                     t              (await-config! t :done 3000)]
+                 (assertions
+                  "chart reached :done despite LLM returning string-shaped enum"
+                  (dct/in? t :done) => true
+                  "validated :verdict on idle event has the enum coerced to a keyword"
+                  (get-in @seen-idle [:data :verdict :status]) => :proposed-new-version
+                  "non-enum string field passes through unchanged"
+                  (get-in @seen-idle [:data :verdict :summary]) => "ready")))
+
 (specification "nil :verdict-schema is identical to today's behavior"
                (let [backend   (mock-backend [(end-turn-response "free text")])
                      seen-idle (atom nil)
