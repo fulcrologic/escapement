@@ -72,8 +72,7 @@
                        evs  (set (map :event rows))]
                    (assertions
                     "runner emitted :runner/started"   (contains? evs "runner/started") => true
-                    "runner emitted :runner/done"      (contains? evs "runner/done") => true
-                    "runner reached quiescence"        (contains? evs "runner/quiescent") => true))))
+                    "runner emitted :runner/done"      (contains? evs "runner/done") => true))))
 
 (def self-firing-chart
   ;; uses a raise on entry to fire :go automatically — requires an executable element.

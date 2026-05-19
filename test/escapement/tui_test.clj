@@ -32,10 +32,7 @@
                 => nil
 
                 "tick is suppressed"
-                (tui/format-event {:event :runner/tick :data {:i 0}}) => nil
-
-                "runner/quiescent heartbeat is suppressed"
-                (tui/format-event {:event :runner/quiescent :data {:live-invocations 1}}) => nil))
+                (tui/format-event {:event :runner/tick :data {:i 0}}) => nil))
 
 (specification "interactive-terminal? returns boolean"
                (assertions

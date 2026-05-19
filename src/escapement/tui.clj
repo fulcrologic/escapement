@@ -168,7 +168,6 @@
                                 :summary (str (:event-name data)
                                               "  " (pr-str (:config-before data))
                                               " → " (pr-str (:config-after data)))}]
-      :runner/quiescent      nil
       :runner/done           [{:source :debug :glyph \· :ev ev
                                :summary (str "done final=" (pr-str (:final-config data)))}]
       :runner/aborted        [{:source :error :glyph \⚠ :ev ev

@@ -353,10 +353,6 @@
                          ;; the frozen-config counter resets.
                          (recur (dec i) 0)
                          (let [live (count-live-invocations env)]
-                           (transcript-fn {:event :runner/quiescent
-                                           :data  {:live-invocations live
-                                                   :_fc frozen-cycles
-                                                   :_max max-frozen-cycles}})
                            (cond
                              (zero? live)
                              :done ;; done — no live work, counter is moot
