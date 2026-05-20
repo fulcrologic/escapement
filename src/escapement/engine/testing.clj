@@ -4,10 +4,10 @@
   Drives a chart synchronously by polling the manual queue until quiescent. Test code injects
   mock `InvocationProcessor`s as needed; chart authors don't need to know they're in a test."
   (:require
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.data-model.operations :as ops]
-   [com.fulcrologic.statecharts.protocols :as sp]
-   [escapement.engine.env :as env])
+    [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
+    [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.engine.env :as env])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
 
@@ -24,16 +24,16 @@
   Returns a map `{:env, :session-id, :chart-id}` for use with the rest of this harness."
   [{:keys [statechart session-id checkpoint-dir tool-registry session-dir]}
    & invocation-processors]
-  (let [sid       (or session-id :dcch.test/session)
-        chart-id  ::chart
+  (let [sid      (or session-id :dcch.test/session)
+        chart-id ::chart
         ;; Default session-dir = a sibling of checkpoint-dir, so artifacts and
         ;; checkpoints share one tmp tree per test run.
-        ckpt-dir  (or checkpoint-dir (tmp-dir))
-        sess-dir  (or session-dir ckpt-dir)
-        env       (env/new-env (cond-> {:checkpoint-dir        ckpt-dir
-                                        :session-dir           sess-dir
-                                        :invocation-processors (vec invocation-processors)}
-                                 tool-registry (assoc :tool-registry tool-registry)))]
+        ckpt-dir (or checkpoint-dir (tmp-dir))
+        sess-dir (or session-dir ckpt-dir)
+        env      (env/new-env (cond-> {:checkpoint-dir        ckpt-dir
+                                       :session-dir           sess-dir
+                                       :invocation-processors (vec invocation-processors)}
+                                tool-registry (assoc :tool-registry tool-registry)))]
     (sp/register-statechart! (::sc/statechart-registry env) chart-id statechart)
     {:env env :session-id sid :chart-id chart-id}))
 
@@ -46,8 +46,8 @@
    (let [processor (::sc/processor env)
          store     (::sc/working-memory-store env)
          w0        (sp/start! processor env chart-id
-                              (cond-> {::sc/session-id session-id}
-                                (seq initial-data) (assoc ::sc/invocation-data initial-data)))]
+                     (cond-> {::sc/session-id session-id}
+                       (seq initial-data) (assoc ::sc/invocation-data initial-data)))]
      (sp/save-working-memory! store env session-id w0)
      t)))
 
@@ -55,17 +55,17 @@
   "Drain currently-deliverable events for `session-id` through the processor exactly once.
    Returns true if at least one event was processed."
   [{:keys [env session-id]}]
-  (let [queue     (::sc/event-queue env)
-        store     (::sc/working-memory-store env)
-        processor (::sc/processor env)
+  (let [queue       (::sc/event-queue env)
+        store       (::sc/working-memory-store env)
+        processor   (::sc/processor env)
         progressed? (atom false)]
     (sp/receive-events! queue env
-                        (fn [_ event]
-                          (reset! progressed? true)
-                          (let [wmem  (sp/get-working-memory store env session-id)
-                                wmem' (sp/process-event! processor env wmem event)]
-                            (sp/save-working-memory! store env session-id wmem')))
-                        {:session-id session-id})
+      (fn [_ event]
+        (reset! progressed? true)
+        (let [wmem  (sp/get-working-memory store env session-id)
+              wmem' (sp/process-event! processor env wmem event)]
+          (sp/save-working-memory! store env session-id wmem')))
+      {:session-id session-id})
     @progressed?))
 
 (defn drain!
@@ -109,9 +109,9 @@
   "Return the current data-model contents."
   [{:keys [env] :as t}]
   (sp/current-data (::sc/data-model env)
-                   (assoc env
-                          ::sc/vwmem (volatile! (wmem t))
-                          ::sc/context-element-id nil)))
+    (assoc env
+      ::sc/vwmem (volatile! (wmem t))
+      ::sc/context-element-id nil)))
 
 (defn goto-configuration!
   "Force the chart into a specific configuration via direct working-memory edits, applying
@@ -123,11 +123,11 @@
         dm    (::sc/data-model env)]
     (when (seq data-ops)
       (sp/update! dm
-                  (assoc env ::sc/vwmem (volatile! (wmem t)))
-                  {:ops data-ops}))
+        (assoc env ::sc/vwmem (volatile! (wmem t)))
+        {:ops data-ops}))
     (let [w (sp/get-working-memory store env session-id)]
       (sp/save-working-memory! store env session-id
-                               (assoc w ::sc/configuration (set states)))))
+        (assoc w ::sc/configuration (set states)))))
   t)
 
 ;; Re-export ops helpers so test code only has to require this ns

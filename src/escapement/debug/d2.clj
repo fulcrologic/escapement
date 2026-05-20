@@ -22,14 +22,14 @@
    Assumes a compiled chart (one that has been through `chart/statechart`).
    Babashka-compatible."
   (:require
-   [babashka.process :as bp]
-   [clojure.java.io :as io]
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.chart :as chart]
-   [escapement.config :as config]))
+    [babashka.process :as bp]
+    [clojure.java.io :as io]
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.chart :as chart]
+    [escapement.config :as config]))
 
-(def ^:private active-fill   "\"#ffe680\"")
+(def ^:private active-fill "\"#ffe680\"")
 (def ^:private active-stroke 3)
 
 (defn safe-id
@@ -39,11 +39,11 @@
   [id]
   (let [s (cond
             (keyword? id) (subs (str id) 1)
-            (symbol? id)  (str id)
-            :else         (str id))]
+            (symbol? id) (str id)
+            :else (str id))]
     (-> s
-        (str/replace "/" "__")
-        (str/replace " " "_"))))
+      (str/replace "/" "__")
+      (str/replace " " "_"))))
 
 (defn- d2-quote
   "d2 string label literal."
@@ -61,13 +61,13 @@
   "Boxy node-types — anything that gets drawn as a rectangle/circle/etc."
   [n]
   (and (not (initial-pseudo-state? n))
-       (boolean (#{:state :final :parallel :history :statechart} (:node-type n)))))
+    (boolean (#{:state :final :parallel :history :statechart} (:node-type n)))))
 
 (defn- shape-for [{:keys [node-type deep?] :as node}]
   (case node-type
-    :final     "circle"
-    :parallel  "package"
-    :history   "circle"
+    :final "circle"
+    :parallel "package"
+    :history "circle"
     "rectangle"))
 
 (defn- node-label
@@ -160,18 +160,18 @@
         cls   (str "edge-" (safe-id id))]
     (doseq [to (or (seq tgts) [parent])]
       (.append sb (str from " -> " (d2-path elements-by-id to)
-                       ": " (if label (d2-quote label) "\"\"")
-                       " { class: " cls " }"
-                       "\n")))))
+                    ": " (if label (d2-quote label) "\"\"")
+                    " { class: " cls " }"
+                    "\n")))))
 
 (defn chart->d2
   "Returns a d2 source string for a compiled `chart` (must carry
    `::sc/elements-by-id`). State ids in `active-config` are highlighted."
   [chart active-config]
-  (let [ebi   (::sc/elements-by-id chart)
+  (let [ebi     (::sc/elements-by-id chart)
         active? (or active-config #{})
         active? (if (set? active?) active? (set active?))
-        sb    (StringBuilder.)]
+        sb      (StringBuilder.)]
     (.append sb "direction: down\n")
     ;; States: walk top-level children.
     (doseq [c-id (:children chart)
@@ -224,10 +224,10 @@
             ;; so the child can't block on input regardless of what it does.
             devnull (java.io.File. "/dev/null")
             pb      (doto (ProcessBuilder. ^java.util.List ["bash" "-lc" cmd])
-                      (.redirectInput  devnull)
+                      (.redirectInput devnull)
                       (.redirectOutput java.lang.ProcessBuilder$Redirect/DISCARD)
-                      (.redirectError  java.lang.ProcessBuilder$Redirect/DISCARD))
-            proc (.start pb)]
+                      (.redirectError java.lang.ProcessBuilder$Redirect/DISCARD))
+            proc    (.start pb)]
         {:ok? true :proc proc :cmd cmd})
       (catch Throwable t
         (let [msg (str (.getName (class t)) ": " (.getMessage t))]
@@ -252,14 +252,14 @@
    * `{:error \"...\"}` — d2 failed or wasn't installed."
   [chart active-config session-dir cfg]
   (try
-    (let [dir       (.getAbsoluteFile (io/file (str session-dir)))
-          _         (.mkdirs dir)
-          d2-path   (.getAbsoluteFile (io/file dir "chart.d2"))
-          svg-path  (.getAbsoluteFile (io/file dir "chart.svg"))
-          src       (chart->d2 chart active-config)
-          d2-cfg    (:d2 cfg)
-          command   (or (:command d2-cfg) "d2")
-          layout    (or (:layout d2-cfg) "elk")]
+    (let [dir      (.getAbsoluteFile (io/file (str session-dir)))
+          _        (.mkdirs dir)
+          d2-path  (.getAbsoluteFile (io/file dir "chart.d2"))
+          svg-path (.getAbsoluteFile (io/file dir "chart.svg"))
+          src      (chart->d2 chart active-config)
+          d2-cfg   (:d2 cfg)
+          command  (or (:command d2-cfg) "d2")
+          layout   (or (:layout d2-cfg) "elk")]
       (spit d2-path src)
       (let [{:keys [exit out err launch-error argv] :as r}
             (run-d2! command layout d2-path svg-path)
@@ -268,16 +268,16 @@
         (cond
           launch-error
           {:error (str "Could not launch `" command "`: " launch-error
-                       ". argv=" (pr-str argv))}
+                    ". argv=" (pr-str argv))}
 
           (and exit (not (zero? exit)))
           {:error (str "d2 exited with status " exit "." err-tail out-tail)}
 
           (not (.exists svg-path))
           {:error (str "d2 reported success but " (str svg-path) " was not created."
-                       err-tail out-tail
-                       " (Source written to " (str d2-path) " — try: "
-                       command " --layout=" layout " " (str d2-path) " " (str svg-path) ")")}
+                    err-tail out-tail
+                    " (Source written to " (str d2-path) " — try: "
+                    command " --layout=" layout " " (str d2-path) " " (str svg-path) ")")}
 
           :else
           (let [viewer (config/viewer-for cfg (str svg-path))]
@@ -291,7 +291,7 @@
                   {:svg-path (str svg-path) :viewer-cmd cmd}
                   {:svg-path (str svg-path)
                    :error    (str "Viewer launch failed (" error "). "
-                                  "Try the command yourself: " cmd)})))))))
+                               "Try the command yourself: " cmd)})))))))
     (catch Throwable t
       (log-err! (str "render-and-open! crashed: " (.getMessage t)))
       {:error (str "Crashed: " (.getMessage t))})))

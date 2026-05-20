@@ -11,10 +11,10 @@
          org.jline/jline-terminal    {:mvn/version "3.27.1"}}
  :aliases
  {:demos {:extra-paths ["demos"]}
-  :dev  {:extra-paths ["dev" "spike" "demos"]
-         :jvm-opts    ["-Dguardrails.enabled=true"]}
+  :dev   {:extra-paths ["dev" "spike" "demos"]
+          :jvm-opts    ["-Dguardrails.enabled=true"]}
   ;; Tests run under bb (`bb test`). This alias is retained only for an
   ;; optional JVM REPL/IDE workflow; the project itself does not require it.
-  :test   {:extra-paths ["test" "bb_test" "demos"]
-           :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
-           :jvm-opts    ["-Dguardrails.enabled=true" "-Dguardrails.mode=:all"]}}}
+  :test  {:extra-paths ["test" "bb_test" "demos"]
+          :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
+          :jvm-opts    ["-Dguardrails.enabled=true" "-Dguardrails.mode=:all"]}}}

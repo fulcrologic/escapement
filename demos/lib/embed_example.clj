@@ -36,14 +36,14 @@
   pool) and pass it on every `run`; here we derive it from one env var only
   so the file is copy-runnable."
   (:require
-   [clojure.java.io :as io]
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.elements :refer [final state transition]]
-   [escapement.chart.helpers :as h]
-   [escapement.lib :as escapement]
-   [escapement.lib.event-sink :as sink]
-   [escapement.tools.protocol :as tools]))
+    [clojure.java.io :as io]
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.elements :refer [final state transition]]
+    [escapement.chart.helpers :as h]
+    [escapement.lib :as escapement]
+    [escapement.lib.event-sink :as sink]
+    [escapement.tools.protocol :as tools]))
 
 ;; ---------------------------------------------------------------------------
 ;; 1. Credentials — injected data, not env sniffing.
@@ -60,13 +60,13 @@
   []
   (let [env  #(System/getenv %)
         pick (fn [v provider model] (when v [{:provider provider :api-key v} model]))]
-    (or (pick (env "ANTHROPIC_API_KEY")  :anthropic  "claude-sonnet-4-6")
-        (pick (env "OPENAI_API_KEY")     :openai     "gpt-4o-mini")
-        (pick (env "OPENROUTER_API_KEY") :openrouter "openai/gpt-4o-mini")
-        (pick (env "ZAI_API_KEY")        :z-ai       "glm-4.6")
-        (pick (env "OLLAMA_API_KEY")     :ollama     "gpt-oss:20b")
-        (throw (ex-info "Set one of ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / ZAI_API_KEY / OLLAMA_API_KEY"
-                        {:reason :missing-credential})))))
+    (or (pick (env "ANTHROPIC_API_KEY") :anthropic "claude-sonnet-4-6")
+      (pick (env "OPENAI_API_KEY") :openai "gpt-4o-mini")
+      (pick (env "OPENROUTER_API_KEY") :openrouter "openai/gpt-4o-mini")
+      (pick (env "ZAI_API_KEY") :z-ai "glm-4.6")
+      (pick (env "OLLAMA_API_KEY") :ollama "gpt-oss:20b")
+      (throw (ex-info "Set one of ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / ZAI_API_KEY / OLLAMA_API_KEY"
+               {:reason :missing-credential})))))
 
 ;; ---------------------------------------------------------------------------
 ;; 2. The chart — authored with escapement.chart.helpers.
@@ -81,40 +81,40 @@
 
 (defn embed-chart [model]
   (chart/statechart
-   {:initial :run}
-   (state {:id :run :initial :brief}
+    {:initial :run}
+    (state {:id :run :initial :brief}
 
-          (state {:id :brief}
-                 (h/llm-conversation
-                  {:id "brief"
-                   :params-fn
-                   (fn [_env data]
-                     {:system "You are a crisp product writer. Reply with prose only, no preamble."
-                      :model  model
-                      :max-conversation-duration-ms 60000
-                      :initial-user-message
-                      (str "Write a 3-sentence product brief for: " (:idea data))})})
-                 (transition {:event :llm.idle :target :pitch}
-                             (h/capture-llm-output {:as "brief.md"})))
+      (state {:id :brief}
+        (h/llm-conversation
+          {:id "brief"
+           :params-fn
+           (fn [_env data]
+             {:system                       "You are a crisp product writer. Reply with prose only, no preamble."
+              :model                        model
+              :max-conversation-duration-ms 60000
+              :initial-user-message
+              (str "Write a 3-sentence product brief for: " (:idea data))})})
+        (transition {:event :llm.idle :target :pitch}
+          (h/capture-llm-output {:as "brief.md"})))
 
-          (state {:id :pitch}
-                 (h/llm-conversation
-                  {:id "pitch"
-                   :params-fn
-                   (fn [env _data]
-                     {:system "You are a punchy startup pitch writer. One paragraph, no preamble."
-                      :model  model
-                      :stream? true
-                      :max-conversation-duration-ms 60000
-                      :initial-user-message
-                      (h/render-template
-                       (str "Turn this brief into a single-paragraph elevator pitch:\n\n"
-                            "{{brief.md}}")
-                       env)})})
-                 (transition {:event :llm.idle :target :done}
-                             (h/capture-llm-output {:as "pitch.md"})))
+      (state {:id :pitch}
+        (h/llm-conversation
+          {:id "pitch"
+           :params-fn
+           (fn [env _data]
+             {:system                       "You are a punchy startup pitch writer. One paragraph, no preamble."
+              :model                        model
+              :stream?                      true
+              :max-conversation-duration-ms 60000
+              :initial-user-message
+              (h/render-template
+                (str "Turn this brief into a single-paragraph elevator pitch:\n\n"
+                  "{{brief.md}}")
+                env)})})
+        (transition {:event :llm.idle :target :done}
+          (h/capture-llm-output {:as "pitch.md"})))
 
-          (final {:id :done}))))
+      (final {:id :done}))))
 
 ;; ---------------------------------------------------------------------------
 ;; 3. Run it via escapement.lib/run + stream phase 2 live.
@@ -126,36 +126,36 @@
 ;; ---------------------------------------------------------------------------
 
 (defn -main [& args]
-  (let [idea (or (first args) "a CLI that turns terminal recordings into shareable GIFs")
+  (let [idea     (or (first args) "a CLI that turns terminal recordings into shareable GIFs")
         [credential model] (host-credential)
-        adapter (sink/make-adapter)
+        adapter  (sink/make-adapter)
         result
-        (escapement/run
-         {:chart        (embed-chart model)
-          :session-id   "embed-example"
-          :session-dir  (.getPath (io/file "demos/lib/.session"))
-          ;; REQUIRED for any chart with an :llm-conversation: the lib facade
-          ;; only registers the LLM invocation processor when BOTH a backend
-          ;; (assembled from :credentials) AND a :tool-registry are present.
-          ;; `tools/new-registry` is an empty registry (no built-in fs/shell
-          ;; tools); use `escapement.tools.builtin/new-builtin-registry` to
-          ;; also expose the built-ins, or pass your own.
-          :tool-registry (tools/new-registry)
-          :credentials  [credential]
-          :config       {:llm/preferences         [(assoc credential :model model)]
-                         :llm/eligibility-strict? false}
-          :initial-data {:idea idea}
-          :transcript-tap
-          (fn [row]
-            (doseq [e (sink/feed! adapter row)]
-              (case (:type e)
-                ;; Stream only the second phase's tokens to stdout live.
-                :text-delta (when (= "pitch" (some-> (:invokeid e) name))
-                              (print (get-in e [:delta :text]))
-                              (flush))
-                :run-started (println "[run-id]" (:run-id e))
-                :run-done    (println "\n[done]" (:config e))
-                nil)))})
+                 (escapement/run
+                   {:chart         (embed-chart model)
+                    :session-id    "embed-example"
+                    :session-dir   (.getPath (io/file "demos/lib/.session"))
+                    ;; REQUIRED for any chart with an :llm-conversation: the lib facade
+                    ;; only registers the LLM invocation processor when BOTH a backend
+                    ;; (assembled from :credentials) AND a :tool-registry are present.
+                    ;; `tools/new-registry` is an empty registry (no built-in fs/shell
+                    ;; tools); use `escapement.tools.builtin/new-builtin-registry` to
+                    ;; also expose the built-ins, or pass your own.
+                    :tool-registry (tools/new-registry)
+                    :credentials   [credential]
+                    :config        {:llm/preferences         [(assoc credential :model model)]
+                                    :llm/eligibility-strict? false}
+                    :initial-data  {:idea idea}
+                    :transcript-tap
+                    (fn [row]
+                      (doseq [e (sink/feed! adapter row)]
+                        (case (:type e)
+                          ;; Stream only the second phase's tokens to stdout live.
+                          :text-delta (when (= "pitch" (some-> (:invokeid e) name))
+                                        (print (get-in e [:delta :text]))
+                                        (flush))
+                          :run-started (println "[run-id]" (:run-id e))
+                          :run-done (println "\n[done]" (:config e))
+                          nil)))})
         artifact #(let [f (io/file (:session-dir result) "artifacts" %)]
                     (when (.exists f) (str/trim (slurp f))))]
     (println "\n--- brief.md ---\n" (artifact "brief.md"))

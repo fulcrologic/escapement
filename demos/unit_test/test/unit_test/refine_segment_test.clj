@@ -9,14 +9,14 @@
    `refine-state` with the real engine, real invocation processor, real
    `params-fn`, and a mocked LLM backend."
   (:require
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.elements :refer [final state]]
-   [escapement.engine.testing :as dct]
-   [escapement.invocation.llm-conversation :as llmc]
-   [escapement.llm.protocol :as llm]
-   [escapement.tools.builtin :as builtin]
-   [fulcro-spec.core :refer [specification assertions =>]]
-   [unit-test.chart :as ut]))
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.elements :refer [final state]]
+    [escapement.engine.testing :as dct]
+    [escapement.invocation.llm-conversation :as llmc]
+    [escapement.llm.protocol :as llm]
+    [escapement.tools.builtin :as builtin]
+    [fulcro-spec.core :refer [=> assertions specification]]
+    [unit-test.chart :as ut]))
 
 ;; ---------------------------------------------------------------------------
 ;; Shim chart: wraps `refine-state` with the minimum parent state + final
@@ -25,10 +25,10 @@
 
 (def shim
   (chart/statechart
-   {:initial :run}
-   (state {:id :run :initial :refine}
-          ut/refine-state
-          (final {:id :pipeline-done}))))
+    {:initial :run}
+    (state {:id :run :initial :refine}
+      ut/refine-state
+      (final {:id :pipeline-done}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Mock LLM backend (same pattern as test/escapement/examples/iterate_test.clj)
@@ -43,7 +43,7 @@
   (send-turn [_ request]
     (swap! call-log conj request)
     (or (pop-first! responses)
-        (throw (ex-info "mock out of canned responses" {})))))
+      (throw (ex-info "mock out of canned responses" {})))))
 
 (defn- mock-backend [responses]
   (->MockBackend (atom (vec responses)) (atom [])))
@@ -52,7 +52,7 @@
   {:stop-reason :tool_use
    :content     (mapv (fn [{:keys [id name input]}]
                         {:type :tool_use :id id :name name :input input})
-                      tool-uses)
+                  tool-uses)
    :usage       {} :model "mock"})
 
 (defn- end-turn []
@@ -95,8 +95,8 @@
         proc     (llmc/new-processor {:backend backend :tool-registry registry})
         t        (-> (dct/new-testing-env {:statechart    shim
                                            :tool-registry registry}
-                                          proc)
-                     (dct/start! (refine-data)))]
+                       proc)
+                   (dct/start! (refine-data)))]
     (await-config! t :pipeline-done 3000)))
 
 ;; ---------------------------------------------------------------------------
@@ -104,33 +104,33 @@
 ;; ---------------------------------------------------------------------------
 
 (specification "refine segment: LLM seals -> chart records :sealed status + signature"
-               (let [be (mock-backend
-                         [(tool-use [{:id "x"
-                                      :name "event__refine_sealed"
-                                      :input {:signature "abc123" :iterations 2}}])
-                          (end-turn)])
-                     t  (run-segment! be)
-                     d  (dct/data t)]
-                 (assertions
-                  "reached :pipeline-done"
-                  (dct/in? t :pipeline-done) => true
-                  "final-status is :sealed"
-                  (:final-status d) => :sealed
-                  "covers-signature captured from event data"
-                  (:covers-signature d) => "abc123")))
+  (let [be (mock-backend
+             [(tool-use [{:id    "x"
+                          :name  "event__refine_sealed"
+                          :input {:signature "abc123" :iterations 2}}])
+              (end-turn)])
+        t  (run-segment! be)
+        d  (dct/data t)]
+    (assertions
+      "reached :pipeline-done"
+      (dct/in? t :pipeline-done) => true
+      "final-status is :sealed"
+      (:final-status d) => :sealed
+      "covers-signature captured from event data"
+      (:covers-signature d) => "abc123")))
 
 (specification "refine segment: LLM gives up -> chart records :gave-up + reason"
-               (let [be (mock-backend
-                         [(tool-use [{:id "x"
-                                      :name "event__refine_give_up"
-                                      :input {:reason "tests too flaky"}}])
-                          (end-turn)])
-                     t  (run-segment! be)
-                     d  (dct/data t)]
-                 (assertions
-                  "reached :pipeline-done"
-                  (dct/in? t :pipeline-done) => true
-                  "final-status is :gave-up"
-                  (:final-status d) => :gave-up
-                  "give-up-reason captured from event data"
-                  (:give-up-reason d) => "tests too flaky")))
+  (let [be (mock-backend
+             [(tool-use [{:id    "x"
+                          :name  "event__refine_give_up"
+                          :input {:reason "tests too flaky"}}])
+              (end-turn)])
+        t  (run-segment! be)
+        d  (dct/data t)]
+    (assertions
+      "reached :pipeline-done"
+      (dct/in? t :pipeline-done) => true
+      "final-status is :gave-up"
+      (:final-status d) => :gave-up
+      "give-up-reason captured from event data"
+      (:give-up-reason d) => "tests too flaky")))

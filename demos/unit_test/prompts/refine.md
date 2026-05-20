@@ -102,6 +102,7 @@ Each assertion triple: `"description string"` expression `=>` expected
 Group 10-15 related assertions per block. Every triple must have a label string.
 
 Labels combined with specification/component names must form readable sentences:
+
 - "order-fulfillment-plan when stock is sufficient status is success"
 - "calculate-discount returns 20% for premium users"
 
@@ -125,11 +126,11 @@ Every assertion must be **falsifiable** — if the described behavior changed, t
 
 ### What CAN be mocked (validated mocking requires `>defn`)
 
-| Macro | Validation | Use when |
-|---|---|---|
-| `when-mocking` / `provided` | None — plain stubs | Mocked function is NOT a `>defn` |
-| `when-mocking!` / `provided!` | Validates args + return against `>defn` schemas | Default for `>defn` functions |
-| `when-mocking!!` / `provided!!` | Validates + enforces every mock is called | Coverage proof |
+| Macro                           | Validation                                      | Use when                         |
+|---------------------------------|-------------------------------------------------|----------------------------------|
+| `when-mocking` / `provided`     | None — plain stubs                              | Mocked function is NOT a `>defn` |
+| `when-mocking!` / `provided!`   | Validates args + return against `>defn` schemas | Default for `>defn` functions    |
+| `when-mocking!!` / `provided!!` | Validates + enforces every mock is called       | Coverage proof                   |
 
 ### Preferred: `provided!` with description strings
 
@@ -142,17 +143,20 @@ Every assertion must be **falsifiable** — if the described behavior changed, t
 ### What NOT to Mock
 
 **DO mock:**
+
 - Side effect functions (database, file I/O, network)
 - Non-deterministic functions (current time, random)
 - External dependencies
 
 **DON'T mock:**
+
 - Pure functions — call them directly
 - Your own code under test
 - Data structures — just create them
 - Trivial functions
 
 **CAN'T mock (validated mocking requires `>defn`):**
+
 - Protocol methods — use `-` prefix wrapper pattern
 - Pathom resolvers/mutations — use `*-impl` delegation pattern
 - Fulcro client mutations — use `*` suffix helper pattern
@@ -236,6 +240,7 @@ THE REFINEMENT LOOP
 ## Step 1: Read All Research Artifacts
 
 Before touching the test file, read:
+
 1. The **source file** at `{{FILE}}` — understand the actual implementation
 2. The **draft test file** at `{{TEST_FILE}}` — this is what you're refining
 3. If there's a critique report in the work directory, read it too
@@ -245,6 +250,7 @@ Understand what the draft got right and what it got wrong.
 ## Step 2: Read the Source Function Carefully
 
 Trace through the function body. For each branch:
+
 - What input triggers it?
 - What is the exact return value?
 - Are there edge cases the draft missed?
@@ -286,6 +292,7 @@ EOF
 ```
 
 Capture the output. Note:
+
 - Compilation errors → namespace/require/syntax issues
 - Assertion failures → wrong expected values or wrong test logic
 - Guardrails errors → mock values don't match schemas
@@ -295,10 +302,14 @@ Capture the output. Note:
 Based on the test output AND your reading of the source:
 
 1. **Fix compilation errors**: Missing requires, wrong symbols, syntax issues
-2. **Fix wrong assertions**: If the expected value doesn't match what the function actually returns, fix the test. DO NOT change the implementation — that's not your job. If the implementation appears buggy, note it but write the test to match the current behavior.
-3. **Fix guardrails errors**: Ensure mock return values satisfy the `>defn` output schemas. Read the source function's `>defn` signature to understand what types are expected.
+2. **Fix wrong assertions**: If the expected value doesn't match what the function actually returns, fix the test. DO
+   NOT change the implementation — that's not your job. If the implementation appears buggy, note it but write the test
+   to match the current behavior.
+3. **Fix guardrails errors**: Ensure mock return values satisfy the `>defn` output schemas. Read the source function's
+   `>defn` signature to understand what types are expected.
 4. **Add missing coverage**: If you noticed behaviors in the source that aren't tested, add assertions.
-5. **Remove bad tests**: If the draft has assertions that test behaviors the function doesn't actually have, remove them.
+5. **Remove bad tests**: If the draft has assertions that test behaviors the function doesn't actually have, remove
+   them.
 
 Edit the file, reload, re-run. Repeat until all tests pass.
 
@@ -366,6 +377,7 @@ YOUR TASK
 7. Maximum `{{MAX_ITERATIONS}}` iterations
 
 Report at the end:
+
 - What was wrong in the draft (if anything)
 - How many iterations were needed
 - The final `:covers` signature

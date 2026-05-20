@@ -8,6 +8,7 @@ tools stay inside the session, a wedged run can no longer hang forever,
 and six runnable example charts demonstrate the behaviour.
 
 ### Added
+
 - `--log-level debug|info|warn|error` CLI flag (case-insensitive). An
   explicit value always wins; with no explicit value, headless
   (`--no-tui`) runs default to `info` so live archiving stays cheap while
@@ -38,6 +39,7 @@ and six runnable example charts demonstrate the behaviour.
   recipe).
 
 ### Changed
+
 - The turn primitive now ends the turn when a model batches the
   terminating event-tool (`event__done` / `event__tick`) into a
   `:tool_use` response instead of emitting a separate `:end_turn` (the
@@ -58,6 +60,7 @@ and six runnable example charts demonstrate the behaviour.
   loop actually progresses.
 
 ### Notes
+
 - The glm batched-event-tool turn-end behaviour and the example charts
   exercise live LLM backends (z.ai / glm-class via `ZAI_API_KEY`, etc.);
   their end-to-end behaviour and steering-latency findings are
@@ -79,6 +82,7 @@ when omitted. The one breaking change is the removal of the unreleased
 `:model-policy` node key (never shipped in a release): use `:needs`.
 
 ### Added
+
 - **`escapement.lib/run` hosted facade.** Embed Escapement in your own
   process without the CLI. A **closed** Malli option schema
   (`escapement.lib/Options`, unknown keys rejected; `validate-options`
@@ -158,6 +162,7 @@ when omitted. The one breaking change is the removal of the unreleased
   Runner sections.
 
 ### Removed
+
 - The unreleased `:model-policy` `llm-conversation` node key. It only
   ever lived on the now-merged backend-resilience branch and was never
   part of a release, so it is removed outright (no alias, no
@@ -167,6 +172,7 @@ when omitted. The one breaking change is the removal of the unreleased
   `escapement.examples.clj-refactor` already does).
 
 ### Changed
+
 - `escapement.llm.catalog/satisfies-policy?` now takes the subjective
   ratings table as an explicit argument (new 3-arity). The catalog no
   longer carries a process-global ratings cache
@@ -179,6 +185,7 @@ when omitted. The one breaking change is the removal of the unreleased
   resolves ratings from `.escapement.edn` per call.
 
 ### Notes
+
 - The hosted-facade option schema, hermetic credential/config assembly,
   event-sink normalization, `:needs`→policy translation,
   `eligibility-facts`, the `satisfies-policy?` 3-arity, `:initial-messages`
@@ -200,6 +207,7 @@ output-cap truncation on their own, and a new `bb test:e2e` exercises the
 real provider wire.
 
 ### Added
+
 - Automatic recovery in `:llm-conversation`, driven by the error
   categories. **Transient failures auto-retry**: a backend throw
   categorized `:rate-limited` / `:overloaded` / `:timeout` / `:transport`
@@ -234,6 +242,7 @@ real provider wire.
   printed. It is NOT run by `bb test`.
 
 ### Changed
+
 - A backend error categorized as a transient category now triggers a
   bounded retry **before** surfacing as `:error.llm.<category>`; charts
   that previously saw an immediate `:error.llm.rate-limited` will now see
@@ -245,6 +254,7 @@ real provider wire.
   `:error.llm.unexpected-stop` (now carrying `:detail :no-forward-progress`).
 
 ### Notes
+
 - Transient-retry (backoff, `:retry-after-ms` honoring, fail-fast on
   terminal categories, `:max-retries 0` disable) and the unbounded
   `:max_tokens` continuation (segment stitching, usage summing,
@@ -270,6 +280,7 @@ catalog-driven per-turn output cap, plus image content blocks in the LLM
 request protocol.
 
 ### Added
+
 - Structured backend error categories in the LLM protocol contract.
   `escapement.llm.protocol` now exports `error-categories`
   (`#{:rate-limited :overloaded :auth :invalid-request :context-length
@@ -309,6 +320,7 @@ request protocol.
   changes.
 
 ### Changed
+
 - The per-turn output cap (`max_tokens` on the wire) is now purely
   catalog-driven: it is always the resolved model's
   `catalog/max-output-tokens` (models-api.json `limit.output`), with the
@@ -317,6 +329,7 @@ request protocol.
   limit rather than tuning a param.
 
 ### Removed
+
 - The `:max-tokens` `llm-conversation` param. It is no longer a chart
   concern (see Changed above) and was dropped from all bundled example
   charts; setting it in `params-fn` now has no effect. It remains only on
@@ -324,6 +337,7 @@ request protocol.
   translation.
 
 ### Notes
+
 - Protocol/translation logic is unit-covered offline: SSE
   reconstruction (`parse-anthropic-sse!`), `send-turn*` capability
   dispatch, image-block round-trip, `effective-max-tokens`, the
@@ -339,6 +353,7 @@ request protocol.
 ## [unreleased] — feat/llm-catalog-and-merge-playbook — 2026-05-18
 
 ### Added
+
 - Ollama Cloud and OpenCode Go LLM backends. `escapement run --backend ollama`
   and `--backend opencode-go` are now selectable, `OLLAMA_API_KEY` /
   `OPENCODE_GO_API_KEY` are auto-detected for the default multi-backend, and
@@ -375,6 +390,7 @@ request protocol.
   (`:model-policy {:min {:clojure 8 :tool-calling 6}}`).
 
 ### Changed
+
 - **Breaking:** demo charts moved from `escapement.charts.*` to
   `escapement.examples.*` (e.g. `escapement run escapement.examples.hello/agent`).
   Any caller using the old `escapement.charts.*` names must update.
@@ -392,6 +408,7 @@ request protocol.
   request key instead of `max_completion_tokens`.
 
 ### Removed
+
 - The entire `escapement.llm.models` namespace was deleted (no shim, no
   re-export): its hand-maintained `known-models` fact table (context
   windows, output caps, per-model `:intelligence`/`:provider`) and the
@@ -401,6 +418,7 @@ request protocol.
   provider.
 
 ### Notes
+
 - The full suite (including the new `cli_test.clj` provider-wiring tests
   and the new `:model-policy` wiring tests) runs green under `bb test`:
   145 tests, 711 assertions, 0 failures, 0 errors; `bb sanity` passes.

@@ -1,7 +1,7 @@
 (ns escapement.llm.types-test
   (:require
-   [escapement.llm.types :as types]
-   [fulcro-spec.core :refer [specification assertions =>]]))
+    [escapement.llm.types :as types]
+    [fulcro-spec.core :refer [=> assertions specification]]))
 
 (def valid-request
   {:model    "claude-opus"
@@ -15,68 +15,68 @@
    :model       "claude-opus"})
 
 (specification "validate-request"
-               (assertions
-                "returns nil for a valid request"
-                (types/validate-request valid-request) => nil
-                "returns nil when system is omitted"
-                (types/validate-request (dissoc valid-request :system)) => nil
-                "accepts tool_use content blocks"
-                (types/validate-request
-                 (assoc valid-request :messages
-                        [{:role    :assistant
-                          :content [{:type :tool_use :id "t1" :name "fs/read" :input {:path "foo"}}]}]))
-                => nil
-                "accepts tools with input-schema"
-                (types/validate-request
-                 (assoc valid-request :tools
-                        [{:name "fs/read" :description "read a file"
-                          :input-schema {:type "object" :properties {:path {:type "string"}}}}]))
-                => nil
-                "accepts a base64 image block on a user message"
-                (types/validate-request
-                 (assoc valid-request :messages
-                        [{:role    :user
-                          :content [{:type :text :text "What is this?"}
-                                    {:type   :image
-                                     :source {:type :base64 :media-type "image/png" :data "iVBOR"}}]}]))
-                => nil
-                "accepts a url image block"
-                (types/validate-request
-                 (assoc-in valid-request [:messages 0 :content]
-                           [{:type :image :source {:type :url :url "https://x/y.png"}}]))
-                => nil
-                "rejects an image block with an unsupported media-type"
-                (some? (types/validate-request
-                        (assoc-in valid-request [:messages 0 :content]
-                                  [{:type   :image
-                                    :source {:type :base64 :media-type "image/tiff" :data "x"}}]))) => true
-                "rejects missing :model"
-                (some? (types/validate-request (dissoc valid-request :model))) => true
-                "rejects bad role"
-                (some? (types/validate-request
-                        (assoc-in valid-request [:messages 0 :role] :system))) => true
-                "rejects unknown content block type"
-                (some? (types/validate-request
-                        (assoc-in valid-request [:messages 0 :content]
-                                  [{:type :video :url "x"}]))) => true))
+  (assertions
+    "returns nil for a valid request"
+    (types/validate-request valid-request) => nil
+    "returns nil when system is omitted"
+    (types/validate-request (dissoc valid-request :system)) => nil
+    "accepts tool_use content blocks"
+    (types/validate-request
+      (assoc valid-request :messages
+                           [{:role    :assistant
+                             :content [{:type :tool_use :id "t1" :name "fs/read" :input {:path "foo"}}]}]))
+    => nil
+    "accepts tools with input-schema"
+    (types/validate-request
+      (assoc valid-request :tools
+                           [{:name         "fs/read" :description "read a file"
+                             :input-schema {:type "object" :properties {:path {:type "string"}}}}]))
+    => nil
+    "accepts a base64 image block on a user message"
+    (types/validate-request
+      (assoc valid-request :messages
+                           [{:role    :user
+                             :content [{:type :text :text "What is this?"}
+                                       {:type   :image
+                                        :source {:type :base64 :media-type "image/png" :data "iVBOR"}}]}]))
+    => nil
+    "accepts a url image block"
+    (types/validate-request
+      (assoc-in valid-request [:messages 0 :content]
+        [{:type :image :source {:type :url :url "https://x/y.png"}}]))
+    => nil
+    "rejects an image block with an unsupported media-type"
+    (some? (types/validate-request
+             (assoc-in valid-request [:messages 0 :content]
+               [{:type   :image
+                 :source {:type :base64 :media-type "image/tiff" :data "x"}}]))) => true
+    "rejects missing :model"
+    (some? (types/validate-request (dissoc valid-request :model))) => true
+    "rejects bad role"
+    (some? (types/validate-request
+             (assoc-in valid-request [:messages 0 :role] :system))) => true
+    "rejects unknown content block type"
+    (some? (types/validate-request
+             (assoc-in valid-request [:messages 0 :content]
+               [{:type :video :url "x"}]))) => true))
 
 (specification "validate-response"
-               (assertions
-                "returns nil for a valid response"
-                (types/validate-response valid-response) => nil
-                "accepts backend-metadata"
-                (types/validate-response (assoc valid-response :backend-metadata {:backend :openai-codex})) => nil
-                "rejects unknown stop-reason"
-                (some? (types/validate-response (assoc valid-response :stop-reason :nope))) => true
-                "rejects missing :model"
-                (some? (types/validate-response (dissoc valid-response :model))) => true))
+  (assertions
+    "returns nil for a valid response"
+    (types/validate-response valid-response) => nil
+    "accepts backend-metadata"
+    (types/validate-response (assoc valid-response :backend-metadata {:backend :openai-codex})) => nil
+    "rejects unknown stop-reason"
+    (some? (types/validate-response (assoc valid-response :stop-reason :nope))) => true
+    "rejects missing :model"
+    (some? (types/validate-response (dissoc valid-response :model))) => true))
 
 (specification "malli->json-schema"
-               (let [js (types/malli->json-schema [:map [:path :string]])]
-                 (assertions
-                  "produces an object schema"
-                  (:type js) => "object"
-                  "marks required keys"
-                  (:required js) => [:path]
-                  "lists properties"
-                  (get-in js [:properties :path :type]) => "string")))
+  (let [js (types/malli->json-schema [:map [:path :string]])]
+    (assertions
+      "produces an object schema"
+      (:type js) => "object"
+      "marks required keys"
+      (:required js) => [:path]
+      "lists properties"
+      (get-in js [:properties :path :type]) => "string")))

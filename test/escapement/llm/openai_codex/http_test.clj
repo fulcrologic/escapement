@@ -1,10 +1,10 @@
 (ns escapement.llm.openai-codex.http-test
   "Pure SSE parsing tests using canned event streams over StringReader."
   (:require
-   [escapement.llm.openai-codex.http :as http]
-   [fulcro-spec.core :refer [assertions component specification =>]])
+    [escapement.llm.openai-codex.http :as http]
+    [fulcro-spec.core :refer [=> assertions component specification]])
   (:import
-   (java.io BufferedReader StringReader)))
+    (java.io BufferedReader StringReader)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Helpers
@@ -41,55 +41,55 @@
 ;;; Tests
 
 (specification "parse-sse-stream! — text message"
-               (let [result (call-parse sse-text-message)]
-                 (assertions
-                  "output_item.done supersedes output_item.added for the same index"
-                  (get-in result [:items 0 :content 0 :text]) => "Hello world"
-                  "item type is preserved"
-                  (get-in result [:items 0 :type]) => "message"
-                  "model is extracted from response.completed"
-                  (:model result) => "gpt-5.1-codex"
-                  "input_tokens extracted from usage"
-                  (get-in result [:usage :input_tokens]) => 10
-                  "output_tokens extracted from usage"
-                  (get-in result [:usage :output_tokens]) => 3
-                  "stop-reason is :end_turn for completed with no function_calls"
-                  (:stop-reason result) => :end_turn)))
+  (let [result (call-parse sse-text-message)]
+    (assertions
+      "output_item.done supersedes output_item.added for the same index"
+      (get-in result [:items 0 :content 0 :text]) => "Hello world"
+      "item type is preserved"
+      (get-in result [:items 0 :type]) => "message"
+      "model is extracted from response.completed"
+      (:model result) => "gpt-5.1-codex"
+      "input_tokens extracted from usage"
+      (get-in result [:usage :input_tokens]) => 10
+      "output_tokens extracted from usage"
+      (get-in result [:usage :output_tokens]) => 3
+      "stop-reason is :end_turn for completed with no function_calls"
+      (:stop-reason result) => :end_turn)))
 
 (specification "parse-sse-stream! — function_call item"
-               (let [result (call-parse sse-function-call)]
-                 (assertions
-                  "item type is function_call"
-                  (get-in result [:items 0 :type]) => "function_call"
-                  "call_id is preserved"
-                  (get-in result [:items 0 :call_id]) => "call_abc"
-                  "name is preserved"
-                  (get-in result [:items 0 :name]) => "my_tool"
-                  "arguments from done event are used"
-                  (get-in result [:items 0 :arguments]) => "{\"key\":\"val\"}"
-                  "stop-reason is :tool_use when function_call items present"
-                  (:stop-reason result) => :tool_use)))
+  (let [result (call-parse sse-function-call)]
+    (assertions
+      "item type is function_call"
+      (get-in result [:items 0 :type]) => "function_call"
+      "call_id is preserved"
+      (get-in result [:items 0 :call_id]) => "call_abc"
+      "name is preserved"
+      (get-in result [:items 0 :name]) => "my_tool"
+      "arguments from done event are used"
+      (get-in result [:items 0 :arguments]) => "{\"key\":\"val\"}"
+      "stop-reason is :tool_use when function_call items present"
+      (:stop-reason result) => :tool_use)))
 
 (specification "parse-sse-stream! — delta events are ignored"
-               (let [result (call-parse sse-with-deltas)]
-                 (assertions
-                  "only final item is present (delta events produce no items)"
-                  (count (:items result)) => 1
-                  "final item text comes from output_item.done not deltas"
-                  (get-in result [:items 0 :content 0 :text]) => "Hello")))
+  (let [result (call-parse sse-with-deltas)]
+    (assertions
+      "only final item is present (delta events produce no items)"
+      (count (:items result)) => 1
+      "final item text comes from output_item.done not deltas"
+      (get-in result [:items 0 :content 0 :text]) => "Hello")))
 
 (specification "parse-sse-stream! — error event"
-               (component "when an error event is present in the stream"
-                          (assertions
-                           "throws ex-info"
-                           (try (call-parse sse-error-event) nil
-                                (catch clojure.lang.ExceptionInfo e
-                                  (:type (:error-payload (ex-data e))))) => "error")))
+  (component "when an error event is present in the stream"
+    (assertions
+      "throws ex-info"
+      (try (call-parse sse-error-event) nil
+           (catch clojure.lang.ExceptionInfo e
+             (:type (:error-payload (ex-data e))))) => "error")))
 
 (specification "parse-sse-stream! — incomplete / max_output_tokens"
-               (let [result (call-parse sse-incomplete-max-tokens)]
-                 (assertions
-                  "stop-reason is :max_tokens for incomplete + max_output_tokens reason"
-                  (:stop-reason result) => :max_tokens
-                  "still returns the partial item"
-                  (count (:items result)) => 1)))
+  (let [result (call-parse sse-incomplete-max-tokens)]
+    (assertions
+      "stop-reason is :max_tokens for incomplete + max_output_tokens reason"
+      (:stop-reason result) => :max_tokens
+      "still returns the partial item"
+      (count (:items result)) => 1)))

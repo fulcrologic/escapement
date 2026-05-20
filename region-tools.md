@@ -159,15 +159,15 @@ the chart's state machine expresses the policy:
 (state {:id :running :initial :ready}
   (state {:id :ready}
     (service/handle :repl/eval
-                    (fn [env req]
-                      (kick-off-async-eval! env req)
-                      ;; The handler returns nil → service helper interprets
-                      ;; nil as "reply will come later"; the kicked-off worker
-                      ;; calls service/post-reply when done.
-                      (transition-to! env :evaluating))))
+      (fn [env req]
+        (kick-off-async-eval! env req)
+        ;; The handler returns nil → service helper interprets
+        ;; nil as "reply will come later"; the kicked-off worker
+        ;; calls service/post-reply when done.
+        (transition-to! env :evaluating))))
   (state {:id :evaluating}
     (service/handle :repl/eval
-                    (constantly {:result "busy, retry shortly" :is-error true}))))
+      (constantly {:result "busy, retry shortly" :is-error true}))))
 ```
 
 A small `service/post-reply` helper lets deferred work post the reply
@@ -353,20 +353,20 @@ its own env (CLAUDE.md), so we don't take SCXML compliance for granted.
 ### Modified
 
 * `src/escapement/invocation/llm_conversation.clj`
-  - New worker-context keys (`name->region-tool`, `tool-reply-queue`).
-  - New region-tool branch in `handle-tool-use-block` (line 277).
-  - `start-invocation!` / palette assembly: derive region-tool palette
-    from `::service/registry` filtered by `:chart-tools` declarations;
-    apply `:as` aliasing; check for collisions.
-  - `forward-event!`: add the `:escapement.tool/reply` case (look up
-    worker by `:escapement.tool/reply-to`, `.offer` to its
-    `tool-reply-queue`).
+    - New worker-context keys (`name->region-tool`, `tool-reply-queue`).
+    - New region-tool branch in `handle-tool-use-block` (line 277).
+    - `start-invocation!` / palette assembly: derive region-tool palette
+      from `::service/registry` filtered by `:chart-tools` declarations;
+      apply `:as` aliasing; check for collisions.
+    - `forward-event!`: add the `:escapement.tool/reply` case (look up
+      worker by `:escapement.tool/reply-to`, `.offer` to its
+      `tool-reply-queue`).
 * `src/escapement/engine/env.clj`
-  - Initialize `::service/registry` atom on the env (around line 36).
-  - State-exit hook auto-prunes stale registry entries.
+    - Initialize `::service/registry` atom on the env (around line 36).
+    - State-exit hook auto-prunes stale registry entries.
 * `src/escapement/chart/helpers.clj`
-  - Re-export `service/handle` and `service/post-reply` as `h/handle-tool`
-    and `h/post-reply` (simple `def` aliases) for ergonomic access.
+    - Re-export `service/handle` and `service/post-reply` as `h/handle-tool`
+      and `h/post-reply` (simple `def` aliases) for ergonomic access.
 
 ### Untouched
 

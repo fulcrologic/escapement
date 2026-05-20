@@ -31,14 +31,14 @@ ANTHROPIC_API_KEY=sk-... \
 
 Required input EDN keys:
 
-| key              | required | description                                          |
-|------------------|----------|------------------------------------------------------|
-| `:source-path`   | yes      | Clojure source file containing the target function   |
-| `:function`      | yes      | Function name (string)                               |
-| `:test-file`     | no       | Defaults to `test/<…>_test.clj`                      |
-| `:work-dir`      | no       | Defaults to `/tmp/escapement/unit-test/<ns>/<fn>/`   |
-| `:max-iterations`| no       | Surfaced in the refine prompt; default 10            |
-| `:nrepl-port`    | no       | Port hint surfaced in the refine prompt              |
+| key               | required | description                                        |
+|-------------------|----------|----------------------------------------------------|
+| `:source-path`    | yes      | Clojure source file containing the target function |
+| `:function`       | yes      | Function name (string)                             |
+| `:test-file`      | no       | Defaults to `test/<…>_test.clj`                    |
+| `:work-dir`       | no       | Defaults to `/tmp/escapement/unit-test/<ns>/<fn>/` |
+| `:max-iterations` | no       | Surfaced in the refine prompt; default 10          |
+| `:nrepl-port`     | no       | Port hint surfaced in the refine prompt            |
 
 ## Artifacts
 

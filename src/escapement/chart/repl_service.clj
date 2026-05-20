@@ -18,11 +18,11 @@
   smoke-test purpose. Charts that need to evaluate AGAINST a remote nREPL
   process can substitute their own handler-fn."
   (:require
-   [clojure.java.io :as io]
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts.elements :refer [on-entry script state transition]]
-   [escapement.chart.service :as service]
-   [escapement.tools.protocol :as tp]))
+    [clojure.java.io :as io]
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts.elements :refer [on-entry script state]]
+    [escapement.chart.service :as service]
+    [escapement.tools.protocol :as tp]))
 
 ;; ---------------------------------------------------------------------------
 ;; Discovery
@@ -43,9 +43,9 @@
     (some (fn [line]
             (when-let [[_ port kind dir] (re-find discover-line-re line)]
               (when (and (not= "shadow" kind)
-                         (= target (-> dir str/trim io/file .getAbsolutePath)))
+                      (= target (-> dir str/trim io/file .getAbsolutePath)))
                 (Integer/parseInt port))))
-          (str/split-lines output))))
+      (str/split-lines output))))
 
 (defn discover-port
   "Discover an active non-shadow nREPL port matching `project-dir` via the
@@ -54,12 +54,12 @@
    `clj-nrepl-eval` isn't on PATH."
   [env project-dir]
   (let [registry (or (:escapement/tool-registry env)
-                     (get-in env [:escapement/engine :tool-registry]))]
+                   (get-in env [:escapement/engine :tool-registry]))]
     (when registry
       (let [{:keys [result is-error]}
             (try
               (tp/dispatch registry :shell/run
-                           {:command "clj-nrepl-eval --discover-ports"})
+                {:command "clj-nrepl-eval --discover-ports"})
               (catch Throwable _
                 {:result "" :is-error true}))]
         (when-not is-error
@@ -74,7 +74,7 @@
    Returns the service handler reply map `{:result :is-error}`."
   [env {:keys [data]}]
   (let [registry (or (:escapement/tool-registry env)
-                     (get-in env [:escapement/engine :tool-registry]))]
+                   (get-in env [:escapement/engine :tool-registry]))]
     (cond
       (nil? registry)
       {:result   "No tool registry on env; cannot dispatch :repl/eval."
@@ -86,7 +86,7 @@
       :else
       (let [{:keys [result is-error]}
             (tp/dispatch registry :repl/eval
-                         {:code (str (:expr data))})]
+              {:code (str (:expr data))})]
         {:result   (str result)
          :is-error (boolean is-error)}))))
 
@@ -122,30 +122,30 @@
             eval-fn eval-via-builtin}}]
    (let [discover-entry (when project-dir
                           (on-entry {}
-                                    (script
-                                     {:expr
-                                      (fn [env _data]
-                                        ;; Best-effort discovery — failures are non-fatal.
-                                        (try (discover-port env project-dir)
-                                             (catch Throwable _ nil))
-                                        nil)})))
+                            (script
+                              {:expr
+                               (fn [env _data]
+                                 ;; Best-effort discovery — failures are non-fatal.
+                                 (try (discover-port env project-dir)
+                                      (catch Throwable _ nil))
+                                 nil)})))
          status-entries (when status-fn
                           [(on-entry {}
-                                     (service/register-tool!
-                                      {:tool         :repl/status
-                                       :description  "Return brief REPL status."
-                                       :input-schema [:map]}))])
+                             (service/register-tool!
+                               {:tool         :repl/status
+                                :description  "Return brief REPL status."
+                                :input-schema [:map]}))])
          ready-children (cond-> [(service/handle :repl/eval eval-fn)]
                           status-fn (conj (service/handle :repl/status status-fn)))
          children       (filterv
-                         some?
-                         (concat
-                          [(on-entry {}
-                                     (service/register-tool!
-                                      {:tool         :repl/eval
-                                       :description  "Evaluate a Clojure form. Input :expr (string)."
-                                       :input-schema [:map [:expr :string]]}))
-                           discover-entry]
-                          status-entries
-                          [(apply state {:id :ready} ready-children)]))]
+                          some?
+                          (concat
+                            [(on-entry {}
+                               (service/register-tool!
+                                 {:tool         :repl/eval
+                                  :description  "Evaluate a Clojure form. Input :expr (string)."
+                                  :input-schema [:map [:expr :string]]}))
+                             discover-entry]
+                            status-entries
+                            [(apply state {:id :ready} ready-children)]))]
      (apply state {:id id :initial :ready} children))))

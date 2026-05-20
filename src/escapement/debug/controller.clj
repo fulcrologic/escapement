@@ -30,7 +30,7 @@
   "True when the controller is currently halting event processing."
   [controller]
   (and (= :paused (:mode @controller))
-       (zero? (:step-budget @controller))))
+    (zero? (:step-budget @controller))))
 
 (defn await-release!
   "Blocks the calling thread until the controller is allowed to process the
@@ -88,7 +88,7 @@
    Returns true when it pauses."
   [controller event-meta]
   (when (and (:pause-on-next-external? @controller)
-             (:external? event-meta))
+          (:external? event-meta))
     (swap! controller assoc :mode :paused :step-budget 0
-           :pause-on-next-external? false)
+      :pause-on-next-external? false)
     true))

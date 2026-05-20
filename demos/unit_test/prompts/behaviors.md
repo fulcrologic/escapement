@@ -8,46 +8,48 @@ You work with fulcro-spec and guardrails. Your goal is COMPLETE behavioral cover
 
 ## Philosophy
 
-A "behavior" is any decision point in your code that causes different outcomes. The goal is to test *every behavior*, not necessarily every line. You must be exhaustive. Missing a behavior means missing a test case, which means a potential bug goes undetected.
+A "behavior" is any decision point in your code that causes different outcomes. The goal is to test *every behavior*,
+not necessarily every line. You must be exhaustive. Missing a behavior means missing a test case, which means a
+potential bug goes undetected.
 
 ## What Counts as a Behavior
 
 A function has one behavior for each distinct outcome path. Enumerate all of these:
 
 1. **Conditional branches**: `if`, `when`, `cond`, `case`, `when-let`, `if-let`, `if-some`
-   - Each branch of a `cond` is a separate behavior
-   - The `else` / `:else` branch is a behavior
-   - `when` has two behaviors: the condition-is-true path and the condition-is-false path (does nothing / returns nil)
+    - Each branch of a `cond` is a separate behavior
+    - The `else` / `:else` branch is a behavior
+    - `when` has two behaviors: the condition-is-true path and the condition-is-false path (does nothing / returns nil)
 
 2. **Boolean operators**: `and`, `or`, `not` (when they affect control flow or outcomes)
-   - `(and a b)` that guards an action: two behaviors (a is false → nil, a and b are true → action)
-   - Short-circuit evaluation creates distinct behaviors
+    - `(and a b)` that guards an action: two behaviors (a is false → nil, a and b are true → action)
+    - Short-circuit evaluation creates distinct behaviors
 
 3. **Exception handling**: `try`/`catch`/`finally`, `throw`, `ex-info`
-   - Normal execution path (no exception)
-   - Each caught exception type
-   - `finally` block behaviors (if they affect state)
+    - Normal execution path (no exception)
+    - Each caught exception type
+    - `finally` block behaviors (if they affect state)
 
 4. **Collection operations**: `filter`, `remove`, `map` predicates that vary by input
-   - "What happens when the predicate matches nothing?"
-   - "What happens when it matches everything?"
-   - "What happens with a single element?"
+    - "What happens when the predicate matches nothing?"
+    - "What happens when it matches everything?"
+    - "What happens with a single element?"
 
 5. **Nil handling**: any code that branches on nil vs present values
-   - Passing nil where a map is expected
-   - Missing keys in maps
-   - Optional parameters that default
+    - Passing nil where a map is expected
+    - Missing keys in maps
+    - Optional parameters that default
 
 6. **Edge cases**:
-   - Empty collections (empty vector, empty map, empty string)
-   - Zero and negative numbers
-   - Boundary values (exactly at a threshold, one above, one below)
-   - Very large inputs (if relevant)
+    - Empty collections (empty vector, empty map, empty string)
+    - Zero and negative numbers
+    - Boundary values (exactly at a threshold, one above, one below)
+    - Very large inputs (if relevant)
 
 7. **Error validation**: input validation that returns errors or throws
-   - Each validation rule is a behavior
-   - The "all validations pass" path is a behavior
-   - Validation order matters (first error wins) — each first-error case is a behavior
+    - Each validation rule is a behavior
+    - The "all validations pass" path is a behavior
+    - Validation order matters (first error wins) — each first-error case is a behavior
 
 ## How to Identify Behaviors — Worked Example
 
@@ -66,6 +68,7 @@ Given this function:
 ```
 
 This function has **5 behaviors**. Each `cond` branch is one behavior. The edge cases add more:
+
 - Behavior 2 has a boundary: what about exactly 100? (covered by behavior 3+)
 - Behavior 4 has a boundary: exactly 5 years vs 4 years
 - What if `user` exists but has no `:loyalty-years` key? (default 0, falls to behavior 5)
@@ -75,12 +78,14 @@ This function has **5 behaviors**. Each `cond` branch is one behavior. The edge 
 1. Read the source file at `{{FILE}}`
 2. Locate the function `{{FUNCTION}}`
 3. Read the function body carefully, line by line
-4. Read any functions it calls that are defined in the same file (you need to understand what they do to classify dependencies)
+4. Read any functions it calls that are defined in the same file (you need to understand what they do to classify
+   dependencies)
 5. Read any guardrails schemas (`>def` declarations) that define the input/output types
 
 Then enumerate EVERY behavior. For each behavior provide:
 
 ### Behavior N: [concise description]
+
 - **Condition**: What input/condition triggers this behavior
 - **Expected outcome**: What the function returns or does (be specific about the exact value or shape)
 - **Edge cases**: Boundary values, nil, empty, etc. that are relevant to THIS behavior
@@ -92,22 +97,24 @@ Then enumerate EVERY behavior. For each behavior provide:
 
 As you analyze behaviors, also classify every function that `{{FUNCTION}}` calls:
 
-| Category | Examples | Can be mocked? |
-|----------|----------|----------------|
-| **Pure function** | `calculate-total`, `format-name` | No — call directly in tests |
-| **`>defn` with side effects** | `db-query`, `send-email!` | Yes — use `provided!` or `when-mocking!` |
-| **Java interop / static methods** | `Thread/sleep`, `LocalDate/now`, `System/getenv` | No — must wrap in `>defn` first |
-| **Protocol methods** | `(-save-item store id data)` | No — must create `>defn` public wrapper |
-| **Macro constructs** | `defresolver`, `defmutation` | No — must extract to `*-impl` function |
-| **Fulcro mutations** | `defmutation` action body | No — must extract to `*` suffix helper |
+| Category                          | Examples                                         | Can be mocked?                           |
+|-----------------------------------|--------------------------------------------------|------------------------------------------|
+| **Pure function**                 | `calculate-total`, `format-name`                 | No — call directly in tests              |
+| **`>defn` with side effects**     | `db-query`, `send-email!`                        | Yes — use `provided!` or `when-mocking!` |
+| **Java interop / static methods** | `Thread/sleep`, `LocalDate/now`, `System/getenv` | No — must wrap in `>defn` first          |
+| **Protocol methods**              | `(-save-item store id data)`                     | No — must create `>defn` public wrapper  |
+| **Macro constructs**              | `defresolver`, `defmutation`                     | No — must extract to `*-impl` function   |
+| **Fulcro mutations**              | `defmutation` action body                        | No — must extract to `*` suffix helper   |
 
 Common things that need wrapping (look for these patterns):
+
 - `Thread/sleep` → wrap as `(>defn sleep-ms [ms] [:int => :nil] (Thread/sleep ms))`
 - `java.time.LocalDate/now` → wrap as `(>defn now-local-date [] [=> :java.time.LocalDate] ...)`
 - `System/getProperty` → wrap if used for environment-dependent logic
 - `java.util.Date.` constructor → wrap as `(>defn now [] [=> :java.time.Instant] ...)`
 
 Note: Check if the project already has wrappers! Common namespaces:
+
 - `com.fulcrologic.rad.type-support.date-time` — has `now`, `now-ms`, time-zone helpers
 - `cljc.java-time.local-date` and related — Java Time wrappers
 - Project-specific utility namespaces

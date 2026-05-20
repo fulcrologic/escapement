@@ -60,141 +60,141 @@
       --work-dir /home/naomarik/.ai-dev/convo-steering-demos/runs \\
       --session expB"
   (:require
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.data-model.operations :as ops]
-   [com.fulcrologic.statecharts.elements
-    :refer [state parallel transition final script on-entry send]]
-   [escapement.chart.helpers :as h]))
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
+    [com.fulcrologic.statecharts.elements
+     :refer [final on-entry parallel script send state transition]]
+    [escapement.chart.helpers :as h]))
 
 (def system-prompt
   (str "You perform a slow counting task, ONE step per turn.\n"
-       "RULES:\n"
-       "1. Each turn: write EXACTLY the line `COUNT <n>` (where <n> is the "
-       "current integer), then call the `event__tick` tool exactly once with "
-       "`{\"n\":<n>}`, then END your turn. Do not call it more than once per "
-       "turn.\n"
-       "2. Start at n=1 and increase n by 1 each turn (1, 2, 3, ...).\n"
-       "3. Keep counting turn after turn until a user message tells you to "
-       "STOP.\n"
-       "4. If a user message says STOP, then from that turn on write ONLY the "
-       "line `STEERED BANANA` and call `event__tick` with `{\"n\":0}`. After "
-       "two `STEERED BANANA` turns, call the `event__done` tool once with "
-       "`{\"reason\":\"steered\"}` and end your turn.\n"
-       "Be terse. Never call more than one tool per turn."))
+    "RULES:\n"
+    "1. Each turn: write EXACTLY the line `COUNT <n>` (where <n> is the "
+    "current integer), then call the `event__tick` tool exactly once with "
+    "`{\"n\":<n>}`, then END your turn. Do not call it more than once per "
+    "turn.\n"
+    "2. Start at n=1 and increase n by 1 each turn (1, 2, 3, ...).\n"
+    "3. Keep counting turn after turn until a user message tells you to "
+    "STOP.\n"
+    "4. If a user message says STOP, then from that turn on write ONLY the "
+    "line `STEERED BANANA` and call `event__tick` with `{\"n\":0}`. After "
+    "two `STEERED BANANA` turns, call the `event__done` tool once with "
+    "`{\"reason\":\"steered\"}` and end your turn.\n"
+    "Be terse. Never call more than one tool per turn."))
 
 (def steer-message
   (str "STOP counting now. From this turn on your entire reply is the line "
-       "`STEERED BANANA` and a call to `event__tick` with `{\"n\":0}`. After "
-       "two STEERED turns call `event__done` with `{\"reason\":\"steered\"}`."))
+    "`STEERED BANANA` and a call to `event__tick` with `{\"n\":0}`. After "
+    "two STEERED turns call `event__done` with `{\"reason\":\"steered\"}`."))
 
 (def agent
   (chart/statechart
-   {:initial :run}
-   (state {:id :run :initial :work}
+    {:initial :run}
+    (state {:id :run :initial :work}
 
-          (parallel {:id :work}
+      (parallel {:id :work}
 
-                    ;; ---- Region 1: the live, multi-turn conversation ----
-                    (state {:id :convo :initial :counting}
-                           (state {:id :counting}
-                                  (h/llm-conversation
-                                   {:id        "subject"
-                                    ;; autoforward? defaults true -> tell-llm reaches it.
-                                    :params-fn
-                                    (fn [_env _data]
-                                      {:system system-prompt
-                                       :real-tools []
-                                       :allowed-events
-                                       [{:event       :tick
-                                         :description "Record one counting step."
-                                         :data-schema [:map [:n :int]]}
-                                        {:event       :done
-                                         :description "End the counting task."
-                                         :data-schema [:map [:reason :string]]}]
-                                       ;; Conservative budgets so the run can
-                                       ;; never hang on a flaky model.
-                                       :max-turns 8
-                                       :max-conversation-duration-ms 120000
-                                       :initial-user-message
-                                       "Begin the counting task at n=1."})})
-                                  ;; 001 §P1 ORDERING RULE: the event-tool's
-                                  ;; chart event (:tick/:done) is posted to the
-                                  ;; parent STRICTLY BEFORE :llm.idle for the
-                                  ;; same turn. Keep :tick :type :internal so
-                                  ;; it never tears down :counting before the
-                                  ;; monitor sees :llm.idle.
-                                  (transition {:event :tick :type :internal}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign
-                                                                 :last-tick
-                                                                 (get-in data [:_event :data :n]))])}))
-                                  (transition {:event :done :target :c-done}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign
-                                                                 :done-reason
-                                                                 (get-in data [:_event :data :reason]))])})))
-                           (final {:id :c-done}))
+        ;; ---- Region 1: the live, multi-turn conversation ----
+        (state {:id :convo :initial :counting}
+          (state {:id :counting}
+            (h/llm-conversation
+              {:id "subject"
+               ;; autoforward? defaults true -> tell-llm reaches it.
+               :params-fn
+               (fn [_env _data]
+                 {:system                       system-prompt
+                  :real-tools                   []
+                  :allowed-events
+                  [{:event       :tick
+                    :description "Record one counting step."
+                    :data-schema [:map [:n :int]]}
+                   {:event       :done
+                    :description "End the counting task."
+                    :data-schema [:map [:reason :string]]}]
+                  ;; Conservative budgets so the run can
+                  ;; never hang on a flaky model.
+                  :max-turns                    8
+                  :max-conversation-duration-ms 120000
+                  :initial-user-message
+                  "Begin the counting task at n=1."})})
+            ;; 001 §P1 ORDERING RULE: the event-tool's
+            ;; chart event (:tick/:done) is posted to the
+            ;; parent STRICTLY BEFORE :llm.idle for the
+            ;; same turn. Keep :tick :type :internal so
+            ;; it never tears down :counting before the
+            ;; monitor sees :llm.idle.
+            (transition {:event :tick :type :internal}
+              (script {:expr (fn [_env data]
+                               [(ops/assign
+                                  :last-tick
+                                  (get-in data [:_event :data :n]))])}))
+            (transition {:event :done :target :c-done}
+              (script {:expr (fn [_env data]
+                               [(ops/assign
+                                  :done-reason
+                                  (get-in data [:_event :data :reason]))])})))
+          (final {:id :c-done}))
 
-                    ;; ---- Region 2: deterministic steering monitor ----
-                    ;; Triggers off the primitive-guaranteed turn-end hook
-                    ;; (:llm.idle), NOT an LLM-behaviour counter (001 §P5 /
-                    ;; spec: the proven Exp B wedge was the nth-tick trigger).
-                    (state {:id :monitor :initial :watching}
-                           ;; Hard safety stop: if the model never calls
-                           ;; event__done, force the whole chart down after a
-                           ;; generous wall-clock budget.
-                           (on-entry {}
-                                     (send {:id    :safety-timer
-                                            :event :safety/stop
-                                            :delay 150000}))
+        ;; ---- Region 2: deterministic steering monitor ----
+        ;; Triggers off the primitive-guaranteed turn-end hook
+        ;; (:llm.idle), NOT an LLM-behaviour counter (001 §P5 /
+        ;; spec: the proven Exp B wedge was the nth-tick trigger).
+        (state {:id :monitor :initial :watching}
+          ;; Hard safety stop: if the model never calls
+          ;; event__done, force the whole chart down after a
+          ;; generous wall-clock budget.
+          (on-entry {}
+            (send {:id    :safety-timer
+                   :event :safety/stop
+                   :delay 150000}))
 
-                           (state {:id :watching}
-                                  ;; FIRST :llm.idle -> inject the steer once
-                                  ;; (one-shot guard via :steer-sent?). The
-                                  ;; steer is buffered by the worker (now
-                                  ;; parked in :awaiting-user) and applied to
-                                  ;; the NEXT turn (between-turn timing,
-                                  ;; 001 §P0/§P2).
-                                  (transition {:event  :llm.idle
-                                               :target :steered
-                                               :type   :internal
-                                               :cond   (fn [_env data]
-                                                         (not (:steer-sent? data)))}
-                                              (script {:expr (fn [_env _data]
-                                                               [(ops/assign :steer-sent? true)])})
-                                              (h/tell-llm
-                                               {:expr (fn [_env _data] steer-message)}))
-                                  ;; Subsequent :llm.idle after the steer is
-                                  ;; sent: stay watching (no-op), keeps the
-                                  ;; monitor non-final / non-wedging until a
-                                  ;; terminal signal arrives.
-                                  (transition {:event :llm.idle
-                                               :type  :internal
-                                               :cond  (fn [_env data]
-                                                        (boolean (:steer-sent? data)))}))
+          (state {:id :watching}
+            ;; FIRST :llm.idle -> inject the steer once
+            ;; (one-shot guard via :steer-sent?). The
+            ;; steer is buffered by the worker (now
+            ;; parked in :awaiting-user) and applied to
+            ;; the NEXT turn (between-turn timing,
+            ;; 001 §P0/§P2).
+            (transition {:event  :llm.idle
+                         :target :steered
+                         :type   :internal
+                         :cond   (fn [_env data]
+                                   (not (:steer-sent? data)))}
+              (script {:expr (fn [_env _data]
+                               [(ops/assign :steer-sent? true)])})
+              (h/tell-llm
+                {:expr (fn [_env _data] steer-message)}))
+            ;; Subsequent :llm.idle after the steer is
+            ;; sent: stay watching (no-op), keeps the
+            ;; monitor non-final / non-wedging until a
+            ;; terminal signal arrives.
+            (transition {:event :llm.idle
+                         :type  :internal
+                         :cond  (fn [_env data]
+                                  (boolean (:steer-sent? data)))}))
 
-                           ;; Park after steering — NOT a region `final`
-                           ;; (that would join the parallel early and kill the
-                           ;; conversation region, 001 §P5).
-                           (state {:id :steered})
+          ;; Park after steering — NOT a region `final`
+          ;; (that would join the parallel early and kill the
+          ;; conversation region, 001 §P5).
+          (state {:id :steered})
 
-                           ;; 001 §1 / acceptance: the monitor region MUST
-                           ;; have a proper exit so the parallel join can
-                           ;; complete and there is no eventless-loop wedge.
-                           ;; The convo's :done or the :safety/stop timer moves
-                           ;; the monitor to its own region `final`; combined
-                           ;; with the convo region reaching :c-done the
-                           ;; `parallel` raises done.state.work cleanly.
-                           (transition {:event :done :target :m-done})
-                           (transition {:event :safety/stop :target :m-done})
-                           (final {:id :m-done})))
+          ;; 001 §1 / acceptance: the monitor region MUST
+          ;; have a proper exit so the parallel join can
+          ;; complete and there is no eventless-loop wedge.
+          ;; The convo's :done or the :safety/stop timer moves
+          ;; the monitor to its own region `final`; combined
+          ;; with the convo region reaching :c-done the
+          ;; `parallel` raises done.state.work cleanly.
+          (transition {:event :done :target :m-done})
+          (transition {:event :safety/stop :target :m-done})
+          (final {:id :m-done})))
 
-          ;; Both regions reached their region final -> parallel raises
-          ;; done.state.work; this is the clean, non-wedging join.
-          (transition {:event :done.state.work :target :finished})
-          ;; Belt-and-braces terminators (also reachable before both regions
-          ;; finalise): the convo region's :done, or the safety timer.
-          (transition {:event :done :target :finished})
-          (transition {:event :safety/stop :target :finished})
+      ;; Both regions reached their region final -> parallel raises
+      ;; done.state.work; this is the clean, non-wedging join.
+      (transition {:event :done.state.work :target :finished})
+      ;; Belt-and-braces terminators (also reachable before both regions
+      ;; finalise): the convo region's :done, or the safety timer.
+      (transition {:event :done :target :finished})
+      (transition {:event :safety/stop :target :finished})
 
-          (final {:id :finished}))))
+      (final {:id :finished}))))

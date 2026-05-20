@@ -52,19 +52,18 @@
 
   Exit codes: 0 success, 1 chart error, 2 usage error."
   (:require
-   [clojure.edn :as edn]
-   [clojure.java.io :as io]
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts :as sc]
-   [escapement.config :as config]
-   [escapement.debug.controller :as dbg]
-   [escapement.llm.ratings :as ratings]
-   [escapement.invocation.human-input :as human-input]
-   [escapement.llm.providers :as providers]
-   [escapement.runner :as runner]
-   [escapement.transcript :as transcript]
-   [escapement.tui :as tui]
-   [taoensso.timbre :as timbre]))
+    [clojure.edn :as edn]
+    [clojure.java.io :as io]
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts :as sc]
+    [escapement.config :as config]
+    [escapement.debug.controller :as dbg]
+    [escapement.invocation.human-input :as human-input]
+    [escapement.llm.providers :as providers]
+    [escapement.llm.ratings :as ratings]
+    [escapement.runner :as runner]
+    [escapement.tui :as tui]
+    [taoensso.timbre :as timbre]))
 
 (def ^:const version "0.1.0")
 
@@ -134,7 +133,7 @@
       (if-let [lvl (get log-levels (str/lower-case (str/trim (str raw))))]
         [:level lvl]
         [:error (str "Invalid --log-level " (pr-str raw)
-                     "; expected one of debug|info|warn|error")])
+                  "; expected one of debug|info|warn|error")])
       (if (boolean (:no-tui opts))
         [:level :info]
         [:level nil]))))
@@ -162,8 +161,8 @@
           (let [parsed (try (edn/read-string v) (catch Throwable _ ::unparseable))
                 value  (cond
                          (= ::unparseable parsed) v
-                         (symbol? parsed)         v
-                         :else                    parsed)]
+                         (symbol? parsed) v
+                         :else parsed)]
             [(keyword k) value]))))))
 
 (defn- merge-params
@@ -171,23 +170,23 @@
    initial-data map. Malformed entries call `die!`."
   [base raw-params]
   (reduce
-   (fn [m s]
-     (if-let [[k v] (parse-param s)]
-       (assoc m k v)
-       (die! (str "--param expects key=value, got: " s))))
-   (or base {})
-   raw-params))
+    (fn [m s]
+      (if-let [[k v] (parse-param s)]
+        (assoc m k v)
+        (die! (str "--param expects key=value, got: " s))))
+    (or base {})
+    raw-params))
 
 ;; Provider/credential matrix lives in escapement.llm.providers so the CLI's
 ;; auto-detection and the live e2e suite share one source of truth.
-(def ^:private build-api-backend            providers/build-api-backend)
-(def ^:private build-openai-backend         providers/build-openai-backend)
-(def ^:private build-codex-backend          providers/build-codex-backend)
-(def ^:private build-multi-backend          providers/build-multi-backend)
-(def ^:private nonblank-env                 providers/nonblank-env)
-(def ^:private build-opencode-go-backend    providers/build-opencode-go-backend)
+(def ^:private build-api-backend providers/build-api-backend)
+(def ^:private build-openai-backend providers/build-openai-backend)
+(def ^:private build-codex-backend providers/build-codex-backend)
+(def ^:private build-multi-backend providers/build-multi-backend)
+(def ^:private nonblank-env providers/nonblank-env)
+(def ^:private build-opencode-go-backend providers/build-opencode-go-backend)
 (def ^:private detect-available-credentials providers/detect-available-credentials)
-(def ^:private build-credential-backend     providers/build-credential-backend)
+(def ^:private build-credential-backend providers/build-credential-backend)
 
 (defn- build-default-multi-backend!
   "Scan all available credentials and assemble a multi-dispatch backend. If only
@@ -203,23 +202,23 @@
       (empty? creds) nil
 
       (= 1 (count creds))
-      (let [c (first creds)
+      (let [c            (first creds)
             chosen-model (or model (:default-model c))]
         (binding [*out* *err*]
           (println (str "[cli] auto-detected LLM backend: " (name (:kind c))
-                        " (" (:source c) ", model " chosen-model ")")))
+                     " (" (:source c) ", model " chosen-model ")")))
         {:backend        (build-credential-backend (cond-> c model (assoc :default-model model)))
          :default-models [chosen-model]})
 
       :else
-      (let [built  (mapv (fn [c] [c (build-credential-backend c)]) creds)
-            routes (mapv (fn [[c b]] [(:route c) b]) built)
+      (let [built           (mapv (fn [c] [c (build-credential-backend c)]) creds)
+            routes          (mapv (fn [[c b]] [(:route c) b]) built)
             default-backend (second (first built))]
         (binding [*out* *err*]
           (println (str "[cli] auto-detected multi-backend dispatcher; routes by model prefix:"))
           (doseq [[c _] built]
             (println (str "[cli]   " (pr-str (:route c)) " → " (name (:kind c))
-                          " (" (:source c) ", default model " (:default-model c) ")")))
+                       " (" (:source c) ", default model " (:default-model c) ")")))
           (println (str "[cli]   default backend → " (name (:kind (ffirst built))))))
         {:backend        (build-multi-backend {:routes routes :default-backend default-backend})
          :default-models (mapv (fn [[c _]] (:default-model c)) built)}))))
@@ -239,9 +238,9 @@
     (case backend
       "api"
       {:backend        (build-api-backend (cond-> {}
-                                            model        (assoc :model model)
+                                            model (assoc :model model)
                                             api-base-url (assoc :base-url api-base-url)
-                                            api-key-env  (assoc :api-key (System/getenv api-key-env))))
+                                            api-key-env (assoc :api-key (System/getenv api-key-env))))
        :default-models (when model [model])}
 
       "openai"
@@ -262,11 +261,11 @@
 
       "opencode-go"
       (let [m (or model "glm-5")]
-        {:backend        (build-opencode-go-backend {:api-key (if api-key-env
-                                                                (System/getenv api-key-env)
-                                                                (System/getenv "OPENCODE_GO_API_KEY"))
+        {:backend        (build-opencode-go-backend {:api-key  (if api-key-env
+                                                                 (System/getenv api-key-env)
+                                                                 (System/getenv "OPENCODE_GO_API_KEY"))
                                                      :base-url api-base-url
-                                                     :model   m})
+                                                     :model    m})
          :default-models [m]})
 
       "codex"
@@ -292,11 +291,11 @@
   []
   (try
     (require 'escapement.llm.openai-codex.auth)
-    (let [load!   (resolve 'escapement.llm.openai-codex.auth/load-auth!)
-          auth    (load!)]
+    (let [load! (resolve 'escapement.llm.openai-codex.auth/load-auth!)
+          auth  (load!)]
       (when auth
         (str "present  account=" (:account-id auth)
-             "  expires=" (java.util.Date. ^long (:expires-at auth 0)))))
+          "  expires=" (java.util.Date. ^long (:expires-at auth 0)))))
     (catch Throwable _ nil)))
 
 (defn- needs-llm?
@@ -307,12 +306,12 @@
    `:type :llm-conversation` message."
   [opts]
   (and (nil? (:backend opts))
-       (empty? (detect-available-credentials))))
+    (empty? (detect-available-credentials))))
 
 (defn- cmd-info [_args]
   (println "escapement" version)
   (println "java" (System/getProperty "java.version"))
-  (println "os"   (System/getProperty "os.name") (System/getProperty "os.version"))
+  (println "os" (System/getProperty "os.name") (System/getProperty "os.version"))
   (when-let [bb (System/getProperty "babashka.version")]
     (println "babashka" bb))
   (println "cwd" (System/getProperty "user.dir"))
@@ -344,16 +343,16 @@
       (= 1 (count creds))
       (let [c (first creds)]
         (println (str "Auto-detect: single backend `" (name (:kind c))
-                      "` (default model " (:default-model c) ").")))
+                   "` (default model " (:default-model c) ").")))
 
       :else
       (do
         (println "Auto-detect: multi-backend dispatcher with routes:")
         (doseq [c creds]
           (println (str "  " (pr-str (:route c)) " → " (name (:kind c))
-                        " (default model " (:default-model c) ")")))
+                     " (default model " (:default-model c) ")")))
         (println (str "  default backend → " (name (:kind (first creds)))
-                      " (used when :model doesn't match any route)")))))
+                   " (used when :model doesn't match any route)")))))
   (System/exit 0))
 
 (defn- decide-tui
@@ -363,24 +362,24 @@
    TTY). Otherwise `^{:interactive? true}` on the chart var defaults to on;
    else off. `--debug` and `--no-tui` together is rejected."
   [opts chart-meta]
-  (let [no-tui?  (boolean (:no-tui opts))
-        debug?   (boolean (:debug opts))
-        _        (when (and no-tui? debug?)
-                   (die! "--debug requires the TUI; do not combine with --no-tui."))
+  (let [no-tui?      (boolean (:no-tui opts))
+        debug?       (boolean (:debug opts))
+        _            (when (and no-tui? debug?)
+                       (die! "--debug requires the TUI; do not combine with --no-tui."))
         interactive? (boolean (:interactive? chart-meta))
-        want?    (cond
-                   no-tui? false
-                   debug?  true
-                   :else   interactive?)]
+        want?        (cond
+                       no-tui? false
+                       debug? true
+                       :else interactive?)]
     (cond
       no-tui?
       false
 
       (and want? (not (tui/interactive-terminal?)))
       (die! (str "Interactive chart requires a TTY for the TUI.\n"
-                 "Run from a real terminal, or pass --no-tui (the chart's\n"
-                 ":human-input invocations will read from stdin).")
-            1)
+              "Run from a real terminal, or pass --no-tui (the chart's\n"
+              ":human-input invocations will read from stdin).")
+        1)
 
       :else want?)))
 
@@ -398,7 +397,7 @@
               (when-not (qualified-symbol? sym)
                 (die! (str "--tools-ns must be qualified (namespace/name), got: " s)))
               sym))
-          strs)))
+      strs)))
 
 (defn parse-deps-flag [s]
   (when s
@@ -418,7 +417,7 @@
       ((resolve 'babashka.deps/add-deps) {:deps deps-map})
       (catch Throwable t
         (die! (str "Failed to resolve runtime :deps " (pr-str deps-map) ": "
-                   (.getMessage t)) 1)))))
+                (.getMessage t)) 1)))))
 
 (defn- apply-classpath!
   "Prepend each path (a File) to the classpath via babashka.classpath."
@@ -453,81 +452,81 @@
 
    Why: kept side-effect-free so precedence rules are unit-testable."
   [cli-opts project-cfg config-root]
-  (let [cli-sps (mapv #(io/file %) (parse-source-paths (:source-paths cli-opts)))
-        cfg-sps (mapv #(config/resolve-path config-root %) (:source-paths project-cfg))
-        cli-deps (parse-deps-flag (:deps cli-opts))
+  (let [cli-sps   (mapv #(io/file %) (parse-source-paths (:source-paths cli-opts)))
+        cfg-sps   (mapv #(config/resolve-path config-root %) (:source-paths project-cfg))
+        cli-deps  (parse-deps-flag (:deps cli-opts))
         cli-tools (parse-tools-ns-flag (:tools-ns cli-opts))
         cfg-tools (or (:tools-ns project-cfg) [])
-        work-dir (cond
-                   (:work-dir cli-opts) (:work-dir cli-opts)
-                   (and config-root (:work-dir project-cfg))
-                   (.getAbsolutePath (config/resolve-path config-root (:work-dir project-cfg)))
-                   :else ".escapement")]
-    {:source-paths (vec (concat cli-sps cfg-sps))
-     :deps         (merge (:deps project-cfg) cli-deps)
-     :tools-ns     (vec (concat cfg-tools cli-tools))
-     :work-dir     work-dir
+        work-dir  (cond
+                    (:work-dir cli-opts) (:work-dir cli-opts)
+                    (and config-root (:work-dir project-cfg))
+                    (.getAbsolutePath (config/resolve-path config-root (:work-dir project-cfg)))
+                    :else ".escapement")]
+    {:source-paths  (vec (concat cli-sps cfg-sps))
+     :deps          (merge (:deps project-cfg) cli-deps)
+     :tools-ns      (vec (concat cfg-tools cli-tools))
+     :work-dir      work-dir
      :default-chart (:default-chart project-cfg)}))
 
 (defn- cmd-run [args]
   (let [{:keys [positional opts]}
         (parse-args args #{:resume :trace :no-tui :debug} #{:param :tools-ns})
-        _ (let [[tag v] (resolve-log-level opts)]
-            (if (= tag :error)
-              (die! v 2)
-              (when v (timbre/set-min-level! v))))
-        project-cfg-info (try (config/load-project-config)
-                              (catch clojure.lang.ExceptionInfo e
-                                (die! (str (.getMessage e) "\n"
-                                           (pr-str (:errors (ex-data e)))) 2)))
-        project-cfg      (:config project-cfg-info)
-        config-root      (:root project-cfg-info)
-        chart-arg (first positional)
-        chart-sym (cond
-                    chart-arg
-                    (let [s (symbol chart-arg)]
-                      (when-not (qualified-symbol? s)
-                        (die! (str "Chart symbol must be qualified, got: " chart-arg)))
-                      s)
-                    (:default-chart project-cfg)
-                    (:default-chart project-cfg)
-                    :else
-                    (die! "Usage: run <chart-sym> [flags]  (or set :default-chart in .escapement.edn)"))
-        eff              (effective-opts opts project-cfg config-root)
-        work-dir         (:work-dir eff)
-        all-source-paths (:source-paths eff)
-        merged-deps      (:deps eff)
-        all-tools-ns     (:tools-ns eff)
-        prelude-events   (cond-> []
-                           project-cfg-info
-                           (conj {:event :cli/config-loaded
-                                  :data  {:path (.getPath ^java.io.File (:path project-cfg-info))
-                                          :keys (vec (keys project-cfg))}})
-                           (seq merged-deps)
-                           (conj {:event :cli/deps-added
-                                  :data  {:coords (into {} (map (fn [[k v]] [(str k) (pr-str v)]))
-                                                        merged-deps)}}))
-        _                (apply-deps! merged-deps)
-        _                (apply-classpath! all-source-paths)
-        session   (or (:session opts) (str (java.util.UUID/randomUUID)))
-        session-dir (str work-dir "/" session)
-        transcript (or (:transcript opts) (str session-dir "/transcript.jsonl"))
-        checkpoint-dir (or (:checkpoint-dir opts) (str session-dir "/checkpoints"))
-        _         (.mkdirs (io/file session-dir))
-        initial-data (let [base (when-let [p (:input opts)] (read-edn-file p))]
-                       (merge-params base (:param opts)))
-        _         (when (needs-llm? opts)
-                    (die! (str "Error: no LLM backend configured.\n"
-                               "Options:\n"
-                               "  1. Set ANTHROPIC_API_KEY (Anthropic API)\n"
-                               "  2. Set ZAI_API_KEY (z.ai Anthropic-compatible endpoint)\n"
-                               "  3. Set OLLAMA_API_KEY (Ollama Cloud)\n"
-                               "  4. Set OPENCODE_GO_API_KEY (OpenCode Go)\n"
-                               "  5. Pass --backend codex  (ChatGPT Plus/Pro subscription; run 'escapement login codex' first)\n"
-                               "See: escapement info   (or:  Guide.adoc, \"LLM backends\")")
-                          1))
-        backend-info  (make-backend opts)
-        backend       (:backend backend-info)
+        _                      (let [[tag v] (resolve-log-level opts)]
+                                 (if (= tag :error)
+                                   (die! v 2)
+                                   (when v (timbre/set-min-level! v))))
+        project-cfg-info       (try (config/load-project-config)
+                                    (catch clojure.lang.ExceptionInfo e
+                                      (die! (str (.getMessage e) "\n"
+                                              (pr-str (:errors (ex-data e)))) 2)))
+        project-cfg            (:config project-cfg-info)
+        config-root            (:root project-cfg-info)
+        chart-arg              (first positional)
+        chart-sym              (cond
+                                 chart-arg
+                                 (let [s (symbol chart-arg)]
+                                   (when-not (qualified-symbol? s)
+                                     (die! (str "Chart symbol must be qualified, got: " chart-arg)))
+                                   s)
+                                 (:default-chart project-cfg)
+                                 (:default-chart project-cfg)
+                                 :else
+                                 (die! "Usage: run <chart-sym> [flags]  (or set :default-chart in .escapement.edn)"))
+        eff                    (effective-opts opts project-cfg config-root)
+        work-dir               (:work-dir eff)
+        all-source-paths       (:source-paths eff)
+        merged-deps            (:deps eff)
+        all-tools-ns           (:tools-ns eff)
+        prelude-events         (cond-> []
+                                 project-cfg-info
+                                 (conj {:event :cli/config-loaded
+                                        :data  {:path (.getPath ^java.io.File (:path project-cfg-info))
+                                                :keys (vec (keys project-cfg))}})
+                                 (seq merged-deps)
+                                 (conj {:event :cli/deps-added
+                                        :data  {:coords (into {} (map (fn [[k v]] [(str k) (pr-str v)]))
+                                                          merged-deps)}}))
+        _                      (apply-deps! merged-deps)
+        _                      (apply-classpath! all-source-paths)
+        session                (or (:session opts) (str (java.util.UUID/randomUUID)))
+        session-dir            (str work-dir "/" session)
+        transcript             (or (:transcript opts) (str session-dir "/transcript.jsonl"))
+        checkpoint-dir         (or (:checkpoint-dir opts) (str session-dir "/checkpoints"))
+        _                      (.mkdirs (io/file session-dir))
+        initial-data           (let [base (when-let [p (:input opts)] (read-edn-file p))]
+                                 (merge-params base (:param opts)))
+        _                      (when (needs-llm? opts)
+                                 (die! (str "Error: no LLM backend configured.\n"
+                                         "Options:\n"
+                                         "  1. Set ANTHROPIC_API_KEY (Anthropic API)\n"
+                                         "  2. Set ZAI_API_KEY (z.ai Anthropic-compatible endpoint)\n"
+                                         "  3. Set OLLAMA_API_KEY (Ollama Cloud)\n"
+                                         "  4. Set OPENCODE_GO_API_KEY (OpenCode Go)\n"
+                                         "  5. Pass --backend codex  (ChatGPT Plus/Pro subscription; run 'escapement login codex' first)\n"
+                                         "See: escapement info   (or:  Guide.adoc, \"LLM backends\")")
+                                   1))
+        backend-info           (make-backend opts)
+        backend                (:backend backend-info)
         backend-default-models (:default-models backend-info)
         ;; Resolve the subjective ratings table + fail-closed flag ONCE
         ;; from the merged `.escapement.edn` at startup, then inject them
@@ -535,54 +534,54 @@
         ;; the lib facade — Step 4 — feeds from injected `:config`). The
         ;; processor no longer relies on the Step-1 disk-resolving 2-arg
         ;; `satisfies-policy?` seam.
-        run-cfg          (config/load-config)
-        catalog-ratings  (ratings/ratings run-cfg)
-        eligibility-strict? (boolean
-                             (or (:llm/eligibility-strict? run-cfg)
-                                 (get-in run-cfg [:llm :eligibility-strict?])))
+        run-cfg                (config/load-config)
+        catalog-ratings        (ratings/ratings run-cfg)
+        eligibility-strict?    (boolean
+                                 (or (:llm/eligibility-strict? run-cfg)
+                                   (get-in run-cfg [:llm :eligibility-strict?])))
         ;; Load the chart FIRST. Its require-graph may include namespaces
         ;; whose top-level forms call
         ;; `(tp/register! escapement.tools.builtin/default-registry ...)`.
         ;; Those side-effects mutate the singleton registry atom and are then
         ;; visible to `runner/run!` below.
         [chart chart-meta] (runner/load-chart-with-meta chart-sym)
-        use-tui?       (decide-tui opts chart-meta)
-        debug?         (boolean (:debug opts))
-        debug-cfg      (when debug? (config/load-config))
-        debug-controller (when debug?
-                           (dbg/new-controller
-                            {:initial-pause? (boolean
-                                              (get-in debug-cfg
-                                                      [:debug :auto-pause?]
-                                                      true))}))
-        session-short  (apply str (take 8 session))
-        tui-handle     (when use-tui?
-                         (tui/start! (cond-> {:chart-sym     chart-sym
-                                              :session-short session-short}
-                                       debug? (assoc :debug?           true
-                                                     :debug-controller debug-controller
-                                                     :debug-config     debug-cfg))))
-        human-renderer (cond
-                         tui-handle              (tui/->renderer tui-handle)
-                         (:interactive? chart-meta) (human-input/stdin-renderer)
-                         ;; Charts that don't declare :interactive? still get
-                         ;; a stdin renderer for any human-input states they
-                         ;; happen to invoke — fail-soft rather than silently
-                         ;; hang on a missing renderer.
-                         :else (human-input/stdin-renderer))
-        tool-registry (when backend
-                        (require 'escapement.tools.builtin)
-                        (let [reg-var (resolve 'escapement.tools.builtin/default-registry)
-                              _       (assert reg-var "escapement.tools.builtin/default-registry not found")
-                              reg     (deref reg-var)]
-                          (require-tools-nses! all-tools-ns reg)
-                          ;; R3: builtin path-taking tools resolve RELATIVE paths
-                          ;; against the session work-dir. `tp/dispatch` reads
-                          ;; `:escapement/base-dir` off the registry's metadata
-                          ;; when no explicit base-dir arg is given.
-                          (when session-dir
-                            (alter-meta! reg assoc :escapement/base-dir session-dir))
-                          reg))]
+        use-tui?               (decide-tui opts chart-meta)
+        debug?                 (boolean (:debug opts))
+        debug-cfg              (when debug? (config/load-config))
+        debug-controller       (when debug?
+                                 (dbg/new-controller
+                                   {:initial-pause? (boolean
+                                                      (get-in debug-cfg
+                                                        [:debug :auto-pause?]
+                                                        true))}))
+        session-short          (apply str (take 8 session))
+        tui-handle             (when use-tui?
+                                 (tui/start! (cond-> {:chart-sym     chart-sym
+                                                      :session-short session-short}
+                                               debug? (assoc :debug? true
+                                                             :debug-controller debug-controller
+                                                             :debug-config debug-cfg))))
+        human-renderer         (cond
+                                 tui-handle (tui/->renderer tui-handle)
+                                 (:interactive? chart-meta) (human-input/stdin-renderer)
+                                 ;; Charts that don't declare :interactive? still get
+                                 ;; a stdin renderer for any human-input states they
+                                 ;; happen to invoke — fail-soft rather than silently
+                                 ;; hang on a missing renderer.
+                                 :else (human-input/stdin-renderer))
+        tool-registry          (when backend
+                                 (require 'escapement.tools.builtin)
+                                 (let [reg-var (resolve 'escapement.tools.builtin/default-registry)
+                                       _       (assert reg-var "escapement.tools.builtin/default-registry not found")
+                                       reg     (deref reg-var)]
+                                   (require-tools-nses! all-tools-ns reg)
+                                   ;; R3: builtin path-taking tools resolve RELATIVE paths
+                                   ;; against the session work-dir. `tp/dispatch` reads
+                                   ;; `:escapement/base-dir` off the registry's metadata
+                                   ;; when no explicit base-dir arg is given.
+                                   (when session-dir
+                                     (alter-meta! reg assoc :escapement/base-dir session-dir))
+                                   reg))]
     (try
       (let [session-kw         (keyword "session" session)
             parse-pos-int      (fn [k]
@@ -590,40 +589,40 @@
                                    (let [n (try (Long/parseLong s) (catch Throwable _ nil))]
                                      (when (or (nil? n) (not (pos? n)))
                                        (die! (str "--" (name k) " must be a positive integer (got: " s ")")
-                                             2))
+                                         2))
                                      n)))
             max-frozen-cycles  (parse-pos-int :max-frozen-cycles)
             quiescent-sleep-ms (parse-pos-int :quiescent-sleep-ms)
-            summary    (runner/run!
-                        (cond-> {:chart                  chart
-                                 :session-id             session-kw
-                                 :transcript-path        transcript
-                                 :checkpoint-dir         checkpoint-dir
-                                 :session-dir            session-dir
-                                 :backend                backend
-                                 :backend-default-models backend-default-models
-                                 :catalog-ratings        catalog-ratings
-                                 :eligibility-strict?    eligibility-strict?
-                                 :tool-registry          tool-registry
-                                 :human-renderer         human-renderer
-                                 :initial-data           initial-data
-                                 :resume?                (boolean (:resume opts))
-                                 :trace?                 (boolean (:trace opts))
-                                 :prelude-events         prelude-events
-                                 :transcript-tap         (when tui-handle
-                                                           (fn [ev] (tui/event! tui-handle ev)))
-                                 :debug-controller       debug-controller
-                                 :human-input-active?    (when tui-handle
-                                                           (fn [] (tui/human-input-active? tui-handle)))
-                                 :on-env-ready           (when tui-handle
-                                                           (fn [env]
-                                                             (tui/attach-session!
-                                                              tui-handle
-                                                              session-kw
-                                                              (::sc/event-queue env))
-                                                             (tui/attach-env! tui-handle env chart)))}
-                          max-frozen-cycles  (assoc :max-frozen-cycles max-frozen-cycles)
-                          quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)))]
+            summary            (runner/run!
+                                 (cond-> {:chart                  chart
+                                          :session-id             session-kw
+                                          :transcript-path        transcript
+                                          :checkpoint-dir         checkpoint-dir
+                                          :session-dir            session-dir
+                                          :backend                backend
+                                          :backend-default-models backend-default-models
+                                          :catalog-ratings        catalog-ratings
+                                          :eligibility-strict?    eligibility-strict?
+                                          :tool-registry          tool-registry
+                                          :human-renderer         human-renderer
+                                          :initial-data           initial-data
+                                          :resume?                (boolean (:resume opts))
+                                          :trace?                 (boolean (:trace opts))
+                                          :prelude-events         prelude-events
+                                          :transcript-tap         (when tui-handle
+                                                                    (fn [ev] (tui/event! tui-handle ev)))
+                                          :debug-controller       debug-controller
+                                          :human-input-active?    (when tui-handle
+                                                                    (fn [] (tui/human-input-active? tui-handle)))
+                                          :on-env-ready           (when tui-handle
+                                                                    (fn [env]
+                                                                      (tui/attach-session!
+                                                                        tui-handle
+                                                                        session-kw
+                                                                        (::sc/event-queue env))
+                                                                      (tui/attach-env! tui-handle env chart)))}
+                                   max-frozen-cycles (assoc :max-frozen-cycles max-frozen-cycles)
+                                   quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)))]
         ;; In debug mode, hold the TUI open after the chart finishes so the
         ;; user can keep browsing the inspector (artifacts, history, viz).
         ;; Ctrl-C from the input thread breaks await-quit!.
@@ -710,12 +709,12 @@ Exit codes: 0 success, 1 chart error, 2 usage error.")
 (defn -main [& args]
   (let [[sub & rest-args] args]
     (case sub
-      "info"        (cmd-info rest-args)
-      "run"         (cmd-run rest-args)
-      "login"       (cmd-login rest-args)
-      "logout"      (cmd-logout rest-args)
-      "help"        (print-help!)
-      "--help"      (print-help!)
-      "-h"          (print-help!)
-      nil           (print-help!)
+      "info" (cmd-info rest-args)
+      "run" (cmd-run rest-args)
+      "login" (cmd-login rest-args)
+      "logout" (cmd-logout rest-args)
+      "help" (print-help!)
+      "--help" (print-help!)
+      "-h" (print-help!)
+      nil (print-help!)
       (die! (str "Unknown subcommand: " sub "\nRun `escapement help` for usage.")))))

@@ -21,8 +21,8 @@
    Dated ids like `claude-opus-4-7-20260101` resolve to the family entry
    via longest-prefix, same as the catalog."
   (:require
-   [clojure.string :as str]
-   [escapement.config :as config]))
+    [clojure.string :as str]
+    [escapement.config :as config]))
 
 (comment
   ;; There are deliberately no built-in ratings. To gate model selection
@@ -41,7 +41,7 @@
    the flat key or the nested `[:llm :ratings]`. nil when neither set."
   [cfg]
   (or (:llm/ratings cfg)
-      (get-in cfg [:llm :ratings])))
+    (get-in cfg [:llm :ratings])))
 
 (defn ratings
   "Effective id → opinion map, taken solely from the config overlay.
@@ -60,8 +60,8 @@
   (when (string? model)
     (let [table (ratings cfg)]
       (or (get table model)
-          (->> (keys table)
-               (sort-by (comp - count))
-               (some (fn [k]
-                       (when (str/starts-with? model k)
-                         (get table k)))))))))
+        (->> (keys table)
+          (sort-by (comp - count))
+          (some (fn [k]
+                  (when (str/starts-with? model k)
+                    (get table k)))))))))

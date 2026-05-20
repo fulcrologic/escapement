@@ -62,11 +62,11 @@ message:
 1. Read the existing test file at `{{TEST_PATH}}` (it may be a stub).
 2. Write a thorough correctness test suite for `com.example.matrix/mult`
    to that path. Cover:
-   * Identity matrix on both sides.
-   * Zero matrix.
-   * General 3x3 with mixed positive/negative integers.
-   * General 3x3 with floats.
-   * Two random matrices verified via a naive triple-loop reference.
+    * Identity matrix on both sides.
+    * Zero matrix.
+    * General 3x3 with mixed positive/negative integers.
+    * General 3x3 with floats.
+    * Two random matrices verified via a naive triple-loop reference.
 3. In your REPL:
    `(require '[com.example.matrix :as m] '[com.example.matrix-test] :reload-all)`
    then `(clojure.test/run-tests 'com.example.matrix-test)`.
@@ -84,8 +84,8 @@ The experimenter's source file at `{{SOURCE_PATH}}` has been updated. To check i
    experimenter is iterating on performance and may try unusual data
    structures internally — make sure the public contract still holds.
 4. Conclude:
-   * **All passing** → `{"status": "pass", "summary": "<one-line>"}`
-   * **Any failure** → `{"status": "fail", "summary": "<one-line>", "details": "<full failure output>"}`
+    * **All passing** → `{"status": "pass", "summary": "<one-line>"}`
+    * **Any failure** → `{"status": "fail", "summary": "<one-line>", "details": "<full failure output>"}`
 
 # Constraints
 

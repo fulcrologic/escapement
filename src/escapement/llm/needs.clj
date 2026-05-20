@@ -45,7 +45,7 @@
 
    Pure: no I/O, no config, no disk, no globals."
   (:require
-   [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]))
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]))
 
 (def ^:private comparator->clause
   "The only two accepted `:needs` operators and the canonical policy
@@ -56,8 +56,8 @@
 (defn- bad-entry!
   [k v reason]
   (throw (ex-info (str "Invalid :needs entry for " (pr-str k) ": " reason
-                       " (got " (pr-str v) ")")
-                  {:key k :value v :reason reason})))
+                    " (got " (pr-str v) ")")
+           {:key k :value v :reason reason})))
 
 (>defn needs->policy
   "Translate a flat `:needs` map into the canonical
@@ -70,27 +70,27 @@
   [needs]
   [[:maybe map?] => [:map [:require map?] [:min map?] [:max map?]]]
   (reduce-kv
-   (fn [acc k v]
-     (cond
-       ;; [op n] form — numeric floor / ceiling.
-       (vector? v)
-       (let [[op n & extra] v]
-         (cond
-           (or (seq extra) (not= 2 (count v)))
-           (bad-entry! k v "expected a 2-element [:>= n] or [:<= n] vector")
+    (fn [acc k v]
+      (cond
+        ;; [op n] form — numeric floor / ceiling.
+        (vector? v)
+        (let [[op n & extra] v]
+          (cond
+            (or (seq extra) (not= 2 (count v)))
+            (bad-entry! k v "expected a 2-element [:>= n] or [:<= n] vector")
 
-           (not (contains? comparator->clause op))
-           (bad-entry! k v (str "unknown operator " (pr-str op)
-                                 " — only :>= and :<= are supported"))
+            (not (contains? comparator->clause op))
+            (bad-entry! k v (str "unknown operator " (pr-str op)
+                              " — only :>= and :<= are supported"))
 
-           (not (number? n))
-           (bad-entry! k v "the bound after the operator must be a number")
+            (not (number? n))
+            (bad-entry! k v "the bound after the operator must be a number")
 
-           :else
-           (assoc-in acc [(comparator->clause op) k] n)))
+            :else
+            (assoc-in acc [(comparator->clause op) k] n)))
 
-       ;; bare value — exact equality.
-       :else
-       (assoc-in acc [:require k] v)))
-   {:require {} :min {} :max {}}
-   (or needs {})))
+        ;; bare value — exact equality.
+        :else
+        (assoc-in acc [:require k] v)))
+    {:require {} :min {} :max {}}
+    (or needs {})))

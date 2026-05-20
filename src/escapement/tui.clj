@@ -18,17 +18,16 @@
     no-ops so the calling code path stays uniform; the renderer falls through
     to stdin behavior in that case."
   (:require
-   [clojure.java.io :as io]
-   [clojure.pprint :as pp]
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.protocols :as sp]
-   [escapement.config :as ecfg]
-   [escapement.debug.controller :as dbg]
-   [escapement.invocation.human-input :as hi])
+    [clojure.java.io :as io]
+    [clojure.pprint :as pp]
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.config :as ecfg]
+    [escapement.debug.controller :as dbg]
+    [escapement.invocation.human-input :as hi])
   (:import
-   (java.io Reader)
-   (org.jline.terminal Terminal TerminalBuilder)))
+    (java.io Reader)
+    (org.jline.terminal Terminal TerminalBuilder)))
 
 ;; ---------------------------------------------------------------------------
 ;; TTY detection
@@ -50,9 +49,9 @@
    back to `(System/console)` under plain JVM Clojure."
   []
   (boolean
-   (if bb-tty?
-     (and (bb-tty? :stdin) (bb-tty? :stdout))
-     (some? (System/console)))))
+    (if bb-tty?
+      (and (bb-tty? :stdin) (bb-tty? :stdout))
+      (some? (System/console)))))
 
 ;; ---------------------------------------------------------------------------
 ;; ANSI primitives — written to *err*, no colors.
@@ -61,28 +60,28 @@
 (def ^:private CSI "\033[")
 (defn- esc [s] (str CSI s))
 (def ^:private clear-screen-s (str (esc "2J") (esc "H")))
-(def ^:private clear-eol-s    (esc "K"))
+(def ^:private clear-eol-s (esc "K"))
 ;; Alternate screen buffer — full-screen TUI convention. Entering switches the
 ;; terminal to a fresh blank screen; leaving restores the prior contents (so
 ;; the user's shell scrollback isn't polluted with our paint).
-(def ^:private alt-screen-on-s  (esc "?1049h"))
+(def ^:private alt-screen-on-s (esc "?1049h"))
 (def ^:private alt-screen-off-s (esc "?1049l"))
 ;; Synchronized Output (Mode 2026). When the terminal supports it, any writes
 ;; between BSU/ESU are buffered and rendered atomically — true per-frame double
 ;; buffering. Supported by iTerm2 (recent), kitty, wezterm, foot, ghostty,
 ;; contour. Apple Terminal does NOT support it; we detect at startup.
 (def ^:private sync-output-begin-s (esc "?2026h"))
-(def ^:private sync-output-end-s   (esc "?2026l"))
+(def ^:private sync-output-end-s (esc "?2026l"))
 (def ^:private sync-output-query-s (esc "?2026$p"))
-(def ^:private hide-cursor-s  (esc "?25l"))
+(def ^:private hide-cursor-s (esc "?25l"))
 ;; Under tmux-256color, terminfo `cnorm` is `\e[34h\e[?25h` — the
 ;; `\e[34h` ("Normal Cursor Visibility Mode") is what the multiplexer's
 ;; per-pane state watches for; `\e[?25h` alone is a no-op. The extra
 ;; code is harmless on terminals that don't recognise it, so we always
 ;; send the union, exactly like terminfo would.
-(def ^:private show-cursor-s  (str (esc "34h") (esc "?25h")))
-(def ^:private reverse-on-s   (esc "7m"))
-(def ^:private reset-attrs-s  (esc "0m"))
+(def ^:private show-cursor-s (str (esc "34h") (esc "?25h")))
+(def ^:private reverse-on-s (esc "7m"))
+(def ^:private reset-attrs-s (esc "0m"))
 (defn- move-to-s [row col] (esc (str row ";" col "H")))
 
 (defn- emit! [s]
@@ -110,29 +109,29 @@
 (defn- ts->hms
   "Format a unix-ms timestamp as HH:MM:SS in the local timezone."
   [ts]
-  (let [ts (or ts (System/currentTimeMillis))
+  (let [ts  (or ts (System/currentTimeMillis))
         fmt (java.text.SimpleDateFormat. "HH:mm:ss")]
     (.format fmt (java.util.Date. ^long ts))))
 
 ;; ANSI palette for invokeid color allocation. Round-robin in this order.
 ;; SGR codes — start with `(esc "...m")` and reset with reset-attrs-s.
 (def ^:private invokeid-palette
-  ["36" ;; cyan
-   "35" ;; magenta
-   "33" ;; yellow
-   "32" ;; green
-   "34" ;; blue
-   "91" ;; bright red
-   "96" ;; bright cyan
-   "95" ;; bright magenta
-   "93" ;; bright yellow
-   "92" ;; bright green
+  ["36"                                                     ;; cyan
+   "35"                                                     ;; magenta
+   "33"                                                     ;; yellow
+   "32"                                                     ;; green
+   "34"                                                     ;; blue
+   "91"                                                     ;; bright red
+   "96"                                                     ;; bright cyan
+   "95"                                                     ;; bright magenta
+   "93"                                                     ;; bright yellow
+   "92"                                                     ;; bright green
    ])
 
-(def ^:private chart-color  "90") ;; bright black / dim grey
-(def ^:private human-color  "97") ;; bright white
-(def ^:private error-color  "31") ;; red
-(def ^:private debug-color  "90") ;; dim
+(def ^:private chart-color "90")                            ;; bright black / dim grey
+(def ^:private human-color "97")                            ;; bright white
+(def ^:private error-color "31")                            ;; red
+(def ^:private debug-color "90")                            ;; dim
 
 (defn- entries-for
   "Return a vector of scrollback entries (one per logical line) for transcript
@@ -140,139 +139,139 @@
                                :glyph <ch> :summary <one-line> :ev ev}`.
    Returns nil/empty when the event has no scrollback relevance."
   [{:keys [event data] :as ev}]
-  (let [iid    (some-> (:invokeid data) str)
-        src    (or iid
-                   (case event
-                     (:human-input/start :human-input/answer
-                                         :human-input/cancelled :human-input/error
-                                         :human-input/validation-failed
-                                         :human-input/interrupted)
-                     :human
+  (let [iid (some-> (:invokeid data) str)
+        src (or iid
+              (case event
+                (:human-input/start :human-input/answer
+                  :human-input/cancelled :human-input/error
+                  :human-input/validation-failed
+                  :human-input/interrupted)
+                :human
 
-                     (:llm/error :llm/model-down :llm/model-policy-empty
-                                 :runner/error :runner/aborted)
-                     :error
+                (:llm/error :llm/model-down :llm/model-policy-empty
+                  :runner/error :runner/aborted)
+                :error
 
-                     (:debug/awaiting-quit :debug/awaiting-step
-                                           :runner/started :runner/start-config :runner/done)
-                     :debug
+                (:debug/awaiting-quit :debug/awaiting-step
+                  :runner/started :runner/start-config :runner/done)
+                :debug
 
-                     :chart))]
+                :chart))]
     (case event
-      :runner/started        [{:source :debug :glyph \· :ev ev
-                               :summary (str "runner started session=" (:session-id data)
-                                             " chart=" (:chart-id data))}]
-      :runner/start-config   [{:source :debug :glyph \· :ev ev
-                               :summary (str "start config=" (pr-str (:config data)))}]
-      :runner/event-processed [{:source :chart :glyph \· :ev ev
+      :runner/started [{:source  :debug :glyph \· :ev ev
+                        :summary (str "runner started session=" (:session-id data)
+                                   " chart=" (:chart-id data))}]
+      :runner/start-config [{:source  :debug :glyph \· :ev ev
+                             :summary (str "start config=" (pr-str (:config data)))}]
+      :runner/event-processed [{:source  :chart :glyph \· :ev ev
                                 :summary (str (:event-name data)
-                                              "  " (pr-str (:config-before data))
-                                              " → " (pr-str (:config-after data)))}]
-      :runner/done           [{:source :debug :glyph \· :ev ev
-                               :summary (str "done final=" (pr-str (:final-config data)))}]
-      :runner/aborted        [{:source :error :glyph \⚠ :ev ev
-                               :summary (str "aborted " (:reason data))}]
-      :runner/error          [{:source :error :glyph \⚠ :ev ev
-                               :summary (str "ERROR " (truncate (:message data) 200))}]
+                                           "  " (pr-str (:config-before data))
+                                           " → " (pr-str (:config-after data)))}]
+      :runner/done [{:source  :debug :glyph \· :ev ev
+                     :summary (str "done final=" (pr-str (:final-config data)))}]
+      :runner/aborted [{:source  :error :glyph \⚠ :ev ev
+                        :summary (str "aborted " (:reason data))}]
+      :runner/error [{:source  :error :glyph \⚠ :ev ev
+                      :summary (str "ERROR " (truncate (:message data) 200))}]
 
-      :llm/start             [{:source src :glyph \· :ev ev
-                               :summary (str "invocation start session=" (:session-id data))}]
-      :llm/worker-exit       [{:source src :glyph \· :ev ev
-                               :summary (str "invocation exit reason=" (:reason data))}]
+      :llm/start [{:source  src :glyph \· :ev ev
+                   :summary (str "invocation start session=" (:session-id data))}]
+      :llm/worker-exit [{:source  src :glyph \· :ev ev
+                         :summary (str "invocation exit reason=" (:reason data))}]
 
       :llm/user-message
-      [{:source src :glyph \▸ :ev ev
+      [{:source  src :glyph \▸ :ev ev
         :summary (truncate (or (:text data) "") 240)}]
 
       :llm/request
       ;; The user message was already shown via :llm/user-message; we render
       ;; :llm/request as a low-noise meta line only when there's a model tag.
-      [{:source src :glyph \· :ev ev
+      [{:source  src :glyph \· :ev ev
         :summary (str "req "
-                      (when-let [m (:model data)] (str "model=" m " "))
-                      "n-messages=" (:n-messages data))}]
+                   (when-let [m (:model data)] (str "model=" m " "))
+                   "n-messages=" (:n-messages data))}]
 
       :llm/response
       (let [blocks (:content data)
             stop   (:stop-reason data)
             usage  (:usage data)
             entries
-            (vec
-             (for [b blocks
-                   :let [t (:type b)]
-                   :when (#{:text :thinking :tool_use} t)]
-               (case t
-                 :text     {:source src :glyph \◂ :ev ev :block b
-                            :summary (truncate (str (:text b)) 240)}
-                 :thinking {:source src :glyph \… :ev ev :block b
-                            :summary (truncate (str (:thinking b)) 240)}
-                 :tool_use {:source src :glyph \⚙ :ev ev :block b
-                            :summary (str (:name b) " "
-                                          (truncate (pr-str (or (:input b) {})) 200))})))
-            tail {:source src :glyph (if (= :end_turn stop) \✓ \·) :ev ev
-                  :summary (str "resp stop=" stop
-                                (when-let [m (:model data)] (str " model=" m))
-                                " tokens=in:" (:input-tokens usage "?")
-                                "/out:" (:output-tokens usage "?"))}]
+                   (vec
+                     (for [b blocks
+                           :let [t (:type b)]
+                           :when (#{:text :thinking :tool_use} t)]
+                       (case t
+                         :text {:source  src :glyph \◂ :ev ev :block b
+                                :summary (truncate (str (:text b)) 240)}
+                         :thinking {:source  src :glyph \… :ev ev :block b
+                                    :summary (truncate (str (:thinking b)) 240)}
+                         :tool_use {:source  src :glyph \⚙ :ev ev :block b
+                                    :summary (str (:name b) " "
+                                               (truncate (pr-str (or (:input b) {})) 200))})))
+            tail   {:source  src :glyph (if (= :end_turn stop) \✓ \·) :ev ev
+                    :summary (str "resp stop=" stop
+                               (when-let [m (:model data)] (str " model=" m))
+                               " tokens=in:" (:input-tokens usage "?")
+                               "/out:" (:output-tokens usage "?"))}]
         (conj entries tail))
 
       :llm/tool-result
-      [{:source src :glyph \↩ :ev ev
+      [{:source  src :glyph \↩ :ev ev
         :summary (str (:tool data)
-                      (when (:is-error data) " (ERROR)")
-                      "  " (truncate (str (:content-preview data)) 200))}]
+                   (when (:is-error data) " (ERROR)")
+                   "  " (truncate (str (:content-preview data)) 200))}]
 
       :llm/context-warning
-      [{:source src :glyph \⚠ :ev ev
+      [{:source  src :glyph \⚠ :ev ev
         :summary (str "context " (long (* 100 (:used-frac data 0))) "%")}]
 
       :llm/error
-      [{:source :error :glyph \⚠ :ev ev
+      [{:source  :error :glyph \⚠ :ev ev
         :summary (str "llm error " (truncate (:message data) 200))}]
 
       :llm/model-down
-      [{:source :error :glyph \⚠ :ev ev
+      [{:source  :error :glyph \⚠ :ev ev
         :summary (str "model-down " (or (:model data) "<default>")
-                      " — " (truncate (:message data) 120))}]
+                   " — " (truncate (:message data) 120))}]
 
       :llm/model-policy-empty
-      [{:source :error :glyph \⚠ :ev ev
+      [{:source  :error :glyph \⚠ :ev ev
         :summary (str "model policy " (pr-str (:policy data)) " filter empty"
-                      (when (:strict? data) " (strict: node failed)"))}]
+                   (when (:strict? data) " (strict: node failed)"))}]
 
       :human-input/start
-      [{:source :human :glyph \? :ev ev
+      [{:source  :human :glyph \? :ev ev
         :summary (str "prompt kind=" (:kind data)
-                      (when-let [p (:prompt data)] (str " : " (truncate p 200))))}]
+                   (when-let [p (:prompt data)] (str " : " (truncate p 200))))}]
 
       :human-input/answer
-      [{:source :human :glyph \! :ev ev
+      [{:source  :human :glyph \! :ev ev
         :summary (str "answer kind=" (:kind data)
-                      (when (contains? data :answer)
-                        (str " = " (truncate (pr-str (:answer data)) 200))))}]
+                   (when (contains? data :answer)
+                     (str " = " (truncate (pr-str (:answer data)) 200))))}]
 
       :human-input/cancelled
       [{:source :human :glyph \⚠ :ev ev :summary "cancelled"}]
 
       :human-input/error
-      [{:source :error :glyph \⚠ :ev ev
+      [{:source  :error :glyph \⚠ :ev ev
         :summary (str "human ERROR " (truncate (:message data) 200))}]
 
       :checkpoint/written nil
-      :runner/tick        nil
+      :runner/tick nil
 
       :debug/awaiting-quit
-      [{:source :debug :glyph \· :ev ev
+      [{:source  :debug :glyph \· :ev ev
         :summary (or (:msg data) "Press Ctrl-C to quit.")}]
       :debug/awaiting-step
-      [{:source :debug :glyph \· :ev ev
+      [{:source  :debug :glyph \· :ev ev
         :summary (str "PAUSED on event=" (:event-name data)
-                      (when (:external? data) " (external)"))}]
+                   (when (:external? data) " (external)"))}]
 
       ;; default
-      [{:source src :glyph \· :ev ev
+      [{:source  src :glyph \· :ev ev
         :summary (str (name (or event :unknown)) " "
-                      (truncate (pr-str (or data {})) 200))}])))
+                   (truncate (pr-str (or data {})) 200))}])))
 
 (defn format-event
   "Public for tests. Render `ev` as a single one-line string `<source> <summary>`.
@@ -296,26 +295,26 @@
 ;; ---------------------------------------------------------------------------
 
 (defrecord ^:private TuiHandle
-           [enabled?
-            state          ;; atom: {:config [], :scrollback [], :scroll-offset, :modal, :term-h, :term-w}
-            lock           ;; rendering lock
-            terminal       ;; JLine Terminal (or nil)
-            raw-mode?      ;; atom bool
-            input-thread   ;; Thread (or nil)
-            session-id     ;; promise/atom
-            queue          ;; promise/atom: the runner's event queue
-            chart-sym
-            session-short
-            cursor-shown?  ;; atom bool — tracks last-emitted state, so we only
-                           ;; emit hide/show ANSI on actual transitions
-            sync-output?   ;; atom bool — terminal supports Mode 2026 atomic frames
-            inspector?     ;; bool — overlay always available (true whenever TUI enabled)
-            debug?         ;; bool — debug controller features (pause/step/continue) enabled?
-            debug-controller ;; atom (escapement.debug.controller) or nil
-            debug-config   ;; map (.escapement.edn merged) or nil
-            env            ;; atom holding the chart's env (for inspector reads)
-            stopped?       ;; atom bool — guards stop! against double-invocation
-            ])
+  [enabled?
+   state                                                    ;; atom: {:config [], :scrollback [], :scroll-offset, :modal, :term-h, :term-w}
+   lock                                                     ;; rendering lock
+   terminal                                                 ;; JLine Terminal (or nil)
+   raw-mode?                                                ;; atom bool
+   input-thread                                             ;; Thread (or nil)
+   session-id                                               ;; promise/atom
+   queue                                                    ;; promise/atom: the runner's event queue
+   chart-sym
+   session-short
+   cursor-shown?                                            ;; atom bool — tracks last-emitted state, so we only
+   ;; emit hide/show ANSI on actual transitions
+   sync-output?                                             ;; atom bool — terminal supports Mode 2026 atomic frames
+   inspector?                                               ;; bool — overlay always available (true whenever TUI enabled)
+   debug?                                                   ;; bool — debug controller features (pause/step/continue) enabled?
+   debug-controller                                         ;; atom (escapement.debug.controller) or nil
+   debug-config                                             ;; map (.escapement.edn merged) or nil
+   env                                                      ;; atom holding the chart's env (for inspector reads)
+   stopped?                                                 ;; atom bool — guards stop! against double-invocation
+   ])
 
 ;; ---------------------------------------------------------------------------
 ;; Debug overlay — inspector views
@@ -327,11 +326,11 @@
    paused, otherwise `R`."
   [h s]
   (cond
-    (:modal s)                              "H"
-    (:pending-modal s)                      "H?"
+    (:modal s) "H"
+    (:pending-modal s) "H?"
     (and (:debug-controller h)
-         (dbg/paused? (:debug-controller h))) "P"
-    :else                                    "R"))
+      (dbg/paused? (:debug-controller h))) "P"
+    :else "R"))
 
 (defn- list-artifacts
   "Returns a vector of artifact filenames in `session-dir`'s artifacts/ that
@@ -342,8 +341,8 @@
       (if (and (.exists d) (.isDirectory d))
         (let [prefix (str invokeid)]
           (vec (sort (filter #(or (= % prefix)
-                                  (str/starts-with? % (str prefix ".")))
-                             (.list d)))))
+                                (str/starts-with? % (str prefix ".")))
+                       (.list d)))))
         []))
     (catch Throwable _ [])))
 
@@ -363,7 +362,7 @@
   [state title text]
   (let [lines (vec (str/split-lines (str text)))]
     (swap! state assoc-in [:debug-overlay :pager]
-           {:title title :lines lines :offset 0})))
+      {:title title :lines lines :offset 0})))
 
 (defn- close-pager! [state]
   (swap! state assoc-in [:debug-overlay :pager] nil))
@@ -381,13 +380,13 @@
   "Most-recent-first vector of {:ts :event-name :config-before :config-after :ev}."
   [events]
   (vec (reverse
-        (mapv (fn [ev]
-                {:ts            (:ts ev)
-                 :event-name    (get-in ev [:data :event-name] (:event ev))
-                 :config-before (get-in ev [:data :config-before])
-                 :config-after  (get-in ev [:data :config-after])
-                 :ev            ev})
-              events))))
+         (mapv (fn [ev]
+                 {:ts            (:ts ev)
+                  :event-name    (get-in ev [:data :event-name] (:event ev))
+                  :config-before (get-in ev [:data :config-before])
+                  :config-after  (get-in ev [:data :config-after])
+                  :ev            ev})
+           events))))
 
 (defn- render-pager-lines
   "Render lines for the pager into `buf` between rows `r0` and `r1`."
@@ -418,17 +417,17 @@
       (let [b (:block _e)]
         (if b
           (case (:type b)
-            :text     (str hdr "  (text)\n\n" (:text b))
+            :text (str hdr "  (text)\n\n" (:text b))
             :thinking (str hdr "  (thinking)\n\n" (:thinking b))
             :tool_use (str hdr "  (tool_use " (:name b) ")\n\nINPUT:\n"
-                           (pretty (:input b)))
+                        (pretty (:input b)))
             (str hdr "\n\n" (pretty b)))
           (str hdr "\n\n" (pretty data))))
 
       :llm/tool-result
       (str hdr "  tool=" (:tool data)
-           (when (:is-error data) "  (ERROR)")
-           "\n\n" (or (:content-preview data) ""))
+        (when (:is-error data) "  (ERROR)")
+        "\n\n" (or (:content-preview data) ""))
 
       :llm/user-message
       (str hdr "\n\n" (or (:text data) ""))
@@ -438,11 +437,11 @@
 
       :human-input/start
       (str hdr "  kind=" (pr-str (:kind data))
-           (when-let [p (:prompt data)] (str "\n\n" p)))
+        (when-let [p (:prompt data)] (str "\n\n" p)))
 
       :human-input/answer
       (str hdr "  kind=" (pr-str (:kind data))
-           "\n\n" (pretty (:answer data)))
+        "\n\n" (pretty (:answer data)))
 
       ;; default — pretty the whole event
       (str hdr "\n\n" (pretty ev)))))
@@ -451,24 +450,24 @@
   "Renders the inspector overlay into the scrollback region. Row range
    `[r0..r1]` is inclusive."
   [^StringBuilder buf h s r0 r1 term-w]
-  (let [ov     (:debug-overlay s)
-        view   (:view ov)
-        cursor (:cursor ov 0)
-        env    (some-> (:env h) deref)
-        events (:events ov)
-        tabs   "[1]Invocations [2]Chart [3]Status"
+  (let [ov             (:debug-overlay s)
+        view           (:view ov)
+        cursor         (:cursor ov 0)
+        env            (some-> (:env h) deref)
+        events         (:events ov)
+        tabs           "[1]Invocations [2]Chart [3]Status"
         pending-suffix (if (:pending-modal s)
                          "  Esc=back (1 prompt waiting)"
                          "")
-        title  (str " ── inspector "
-                    (case view
-                      :invocations  tabs
-                      :chart        tabs
-                      :status       tabs
-                      "")
-                    "  (j/k g/G Enter=drill o=open Esc/h=back  s/c/p/P=ctrl v=viz)"
-                    pending-suffix
-                    " ── ")]
+        title          (str " ── inspector "
+                         (case view
+                           :invocations tabs
+                           :chart tabs
+                           :status tabs
+                           "")
+                         "  (j/k g/G Enter=drill o=open Esc/h=back  s/c/p/P=ctrl v=viz)"
+                         pending-suffix
+                         " ── ")]
     (.append buf (move-to-s r0 1))
     (.append buf (truncate title term-w))
     (.append buf clear-eol-s)
@@ -477,8 +476,8 @@
       ;; Each view returns {:rows [strings] :hl-offset N} where hl-offset is
       ;; the index into :rows corresponding to cursor=0. That keeps decorative
       ;; header lines from throwing off the selection highlight.
-      (let [body-r0 (inc r0)
-            sdir (session-dir-from-env env)
+      (let [body-r0  (inc r0)
+            sdir     (session-dir-from-env env)
             fmt-time (fn [ms]
                        (when ms
                          (let [age (- (System/currentTimeMillis) ms)
@@ -493,40 +492,40 @@
                 ;; Drilldown: focus on one invocation's artifacts.
                 (:focus ov)
                 (let [{:keys [invokeid]} (:focus ov)
-                      arts (list-artifacts sdir invokeid)
+                      arts   (list-artifacts sdir invokeid)
                       header [(str " " invokeid "  ── (Esc/h to go back, Enter/o to view) ──")]]
                   (if (seq arts)
-                    {:rows (into header
-                                 (mapv (fn [name]
-                                         (let [f (io/file (str sdir "/artifacts/" name))]
-                                           (format "  %-30s  %sB"
-                                                   (str/join (take 30 name))
-                                                   (.length f))))
-                                       arts))
-                     :hl-offset (count header)
+                    {:rows        (into header
+                                    (mapv (fn [name]
+                                            (let [f (io/file (str sdir "/artifacts/" name))]
+                                              (format "  %-30s  %sB"
+                                                (str/join (take 30 name))
+                                                (.length f))))
+                                      arts))
+                     :hl-offset   (count header)
                      :selectable? true}
-                    {:rows (conj header "  (no artifacts captured for this invocation)")
+                    {:rows      (conj header "  (no artifacts captured for this invocation)")
                      :hl-offset nil :selectable? false}))
 
                 ;; List view: invocation history (newest first).
                 :else
                 (let [hist (:invocations ov)]
                   (if (seq hist)
-                    {:rows (mapv (fn [{:keys [invokeid started-ms ended-ms reason]}]
-                                   (let [arts-n (count (list-artifacts sdir invokeid))
-                                         status (cond
-                                                  (nil? ended-ms) "live "
-                                                  (= reason :stopped) "done "
-                                                  (= reason :interrupted) "stop "
-                                                  reason (str (name reason) " ")
-                                                  :else "done ")
-                                         age    (or (fmt-time started-ms) "?")]
-                                     (format " %-5s  %s ago  %s  artifacts=%d"
-                                             status age invokeid arts-n)))
-                                 hist)
-                     :hl-offset 0
+                    {:rows        (mapv (fn [{:keys [invokeid started-ms ended-ms reason]}]
+                                          (let [arts-n (count (list-artifacts sdir invokeid))
+                                                status (cond
+                                                         (nil? ended-ms) "live "
+                                                         (= reason :stopped) "done "
+                                                         (= reason :interrupted) "stop "
+                                                         reason (str (name reason) " ")
+                                                         :else "done ")
+                                                age    (or (fmt-time started-ms) "?")]
+                                            (format " %-5s  %s ago  %s  artifacts=%d"
+                                              status age invokeid arts-n)))
+                                    hist)
+                     :hl-offset   0
                      :selectable? true}
-                    {:rows [" (no LLM invocations yet)"]
+                    {:rows      [" (no LLM invocations yet)"]
                      :hl-offset nil :selectable? false})))
 
               :chart
@@ -534,31 +533,31 @@
                     erows  (current-event-rows events)
                     header [(str " active config: " (pr-str active))
                             " ── recent events (newest first) ── time         event              before → after"]]
-                {:rows (into header
-                             (mapv (fn [{:keys [ts event-name config-before config-after]}]
-                                     (format "  %s  %-22s  %s  →  %s"
-                                             (fmt-hms ts)
-                                             (str event-name)
-                                             (pr-str config-before)
-                                             (pr-str config-after)))
-                                   erows))
-                 :hl-offset (count header)
+                {:rows        (into header
+                                (mapv (fn [{:keys [ts event-name config-before config-after]}]
+                                        (format "  %s  %-22s  %s  →  %s"
+                                          (fmt-hms ts)
+                                          (str event-name)
+                                          (pr-str config-before)
+                                          (pr-str config-after)))
+                                  erows))
+                 :hl-offset   (count header)
                  :selectable? (seq erows)})
 
               :status
-              (let [c (:debug-controller h)
+              (let [c  (:debug-controller h)
                     cs (when c @c)]
-                {:rows [(str " mode:           " (or (:mode cs) "n/a"))
-                        (str " step-budget:    " (or (:step-budget cs) 0))
-                        (str " pause-on-ext?:  " (boolean (:pause-on-next-external? cs)))
-                        (str " buffered events: " (count events))
-                        (str " session-dir:    " (session-dir-from-env env))]
+                {:rows      [(str " mode:           " (or (:mode cs) "n/a"))
+                             (str " step-budget:    " (or (:step-budget cs) 0))
+                             (str " pause-on-ext?:  " (boolean (:pause-on-next-external? cs)))
+                             (str " buffered events: " (count events))
+                             (str " session-dir:    " (session-dir-from-env env))]
                  :hl-offset nil :selectable? false})
 
               {:rows [" (unknown view)"] :hl-offset nil :selectable? false})
-            room (max 1 (- r1 body-r0 -1))
-            hl-row (when (and selectable? hl-offset)
-                     (+ hl-offset cursor))]
+            room     (max 1 (- r1 body-r0 -1))
+            hl-row   (when (and selectable? hl-offset)
+                       (+ hl-offset cursor))]
         (doseq [[i ln] (map-indexed vector (take room rows))]
           (let [row (+ body-r0 i)
                 hl? (and hl-row (= i hl-row))]
@@ -590,42 +589,42 @@
 (defn- render-frame!
   [{:keys [state lock terminal] :as h}]
   (locking lock
-    (let [term-h (if terminal (.getHeight ^Terminal terminal) 24)
-          term-w (if terminal (.getWidth  ^Terminal terminal) 80)
+    (let [term-h        (if terminal (.getHeight ^Terminal terminal) 24)
+          term-w        (if terminal (.getWidth ^Terminal terminal) 80)
           ;; Restore an auto-suspended overlay once the modal has cleared.
-          _      (swap! state
-                        (fn [s]
-                          (let [ov (:debug-overlay s)]
-                            (cond-> (assoc s :term-h term-h :term-w term-w)
-                              (and (nil? (:modal s)) (:suspended? ov))
-                              (assoc :debug-overlay
-                                     (assoc ov :open? true :suspended? false))))))
-          s      @state
-          ind    (when (:inspector? h) (str "[" (status-indicator h s) "] "))
-          paused?  (and (:debug? h) (:debug-controller h)
-                        (dbg/paused? (:debug-controller h))
-                        (nil? (:modal s))
-                        (not (get-in s [:debug-overlay :open?])))
-          header (str " escapement · " (:chart-sym h) " · " (:session-short h))
-          status (if paused?
-                   (str " " ind "PAUSED — s=step c=continue ?=inspector")
-                   (str " " (or ind "") "states: " (pr-str (:config s []))))
+          _             (swap! state
+                          (fn [s]
+                            (let [ov (:debug-overlay s)]
+                              (cond-> (assoc s :term-h term-h :term-w term-w)
+                                (and (nil? (:modal s)) (:suspended? ov))
+                                (assoc :debug-overlay
+                                       (assoc ov :open? true :suspended? false))))))
+          s             @state
+          ind           (when (:inspector? h) (str "[" (status-indicator h s) "] "))
+          paused?       (and (:debug? h) (:debug-controller h)
+                          (dbg/paused? (:debug-controller h))
+                          (nil? (:modal s))
+                          (not (get-in s [:debug-overlay :open?])))
+          header        (str " escapement · " (:chart-sym h) " · " (:session-short h))
+          status        (if paused?
+                          (str " " ind "PAUSED — s=step c=continue ?=inspector")
+                          (str " " (or ind "") "states: " (pr-str (:config s []))))
           ;; Inspector overlay opens OVER a live modal — user can drill into
           ;; scrollback, hit Esc to close, and then answer the modal.
           overlay-open? (and (:inspector? h) (get-in s [:debug-overlay :open?]))
-          vis    (when-not overlay-open? (visible-scrollback s term-h))
-          lines  (:slice vis)
-          slice-start (:start vis 0)
-          cursor-idx  (:cursor-idx s)
-          modal  (:modal s)
-          help   (cond
-                   (:debug? h)
-                   " Esc=interrupt  Ctrl-C=quit  ?=inspector  s/c/p/P=ctrl  v=viz"
-                   (:inspector? h)
-                   " Esc=interrupt  Ctrl-C=quit  ?=inspector  PgUp/PgDn=scroll"
-                   :else
-                   " Esc=interrupt   Ctrl-C=quit   PgUp/PgDn=scroll")
-          buf    (StringBuilder.)]
+          vis           (when-not overlay-open? (visible-scrollback s term-h))
+          lines         (:slice vis)
+          slice-start   (:start vis 0)
+          cursor-idx    (:cursor-idx s)
+          modal         (:modal s)
+          help          (cond
+                          (:debug? h)
+                          " Esc=interrupt  Ctrl-C=quit  ?=inspector  s/c/p/P=ctrl  v=viz"
+                          (:inspector? h)
+                          " Esc=interrupt  Ctrl-C=quit  ?=inspector  PgUp/PgDn=scroll"
+                          :else
+                          " Esc=interrupt   Ctrl-C=quit   PgUp/PgDn=scroll")
+          buf           (StringBuilder.)]
       ;; No full-screen clear per frame — that's the source of the flicker.
       ;; Each row is rewritten with clear-eol, and we explicitly blank any
       ;; rows in the scrollback region that don't have content this frame.
@@ -668,7 +667,7 @@
       ;; modal area: row (term-h - 1)
       (let [modal-row (max 1 (dec term-h))]
         (.append buf (move-to-s modal-row 1))
-        (.append buf clear-eol-s) ;; baseline: row is blank if no modal
+        (.append buf clear-eol-s)                           ;; baseline: row is blank if no modal
         (cond
           (nil? modal) nil
 
@@ -679,16 +678,16 @@
             (.append buf clear-eol-s)
             ;; Position cursor at end of buffer; will be shown explicitly below.
             (.append buf (move-to-s modal-row
-                                    (inc (+ (count prompt) (count buffer))))))
+                           (inc (+ (count prompt) (count buffer))))))
 
           (= :confirm (:kind modal))
           (let [prompt (str " ▸ " (:prompt modal)
-                            (if (:default modal) " [Y/n] " " [y/N] "))
+                         (if (:default modal) " [Y/n] " " [y/N] "))
                 buffer (:buffer modal "")]
             (.append buf (truncate (str prompt buffer) term-w))
             (.append buf clear-eol-s)
             (.append buf (move-to-s modal-row
-                                    (inc (+ (count prompt) (count buffer))))))
+                           (inc (+ (count prompt) (count buffer))))))
 
           (or (= :select (:kind modal)) (= :multi-select (:kind modal)))
           (let [multi?   (= :multi-select (:kind modal))
@@ -696,17 +695,17 @@
                 idx      (:cursor modal 0)
                 checked  (:checked modal #{})
                 head     (str " ▸ " (:prompt modal)
-                              (if multi? "  (Space=toggle, Enter=submit)" "  (Enter=select)"))
+                           (if multi? "  (Space=toggle, Enter=submit)" "  (Enter=select)"))
                 ;; Inline rendering of options on the same row, comma-separated,
                 ;; with reverse-video on the cursor and brackets on checked items.
                 opt-strs (map-indexed
-                          (fn [i o]
-                            (let [label (str (if (and multi? (checked i)) "[x] " "")
-                                             (:label o))]
-                              (if (= i idx)
-                                (str reverse-on-s label reset-attrs-s)
-                                label)))
-                          options)
+                           (fn [i o]
+                             (let [label (str (if (and multi? (checked i)) "[x] " "")
+                                           (:label o))]
+                               (if (= i idx)
+                                 (str reverse-on-s label reset-attrs-s)
+                                 label)))
+                           options)
                 line     (str head "  " (clojure.string/join "  " opt-strs))]
             (.append buf (truncate line term-w))
             (.append buf clear-eol-s))
@@ -751,8 +750,8 @@
   (let [c (.read rdr)]
     (cond
       (= c -1) :eof
-      (= c 3)  :ctrl-c
-      (= c 9)  :tab
+      (= c 3) :ctrl-c
+      (= c 9) :tab
       (or (= c 8) (= c 127)) :backspace
       (or (= c 10) (= c 13)) :enter
       (= c 32) :space
@@ -789,15 +788,15 @@
   "Mutate the modal state in response to a key while a modal is active.
    When the modal is completed (Enter or Esc), delivers its promise."
   [state k]
-  (let [m (:modal @state)
+  (let [m    (:modal @state)
         kind (:kind m)]
     (case kind
       :text
       (case k
-        :enter     (complete-modal! state (:buffer m ""))
-        :esc       (complete-modal! state ::cancelled)
+        :enter (complete-modal! state (:buffer m ""))
+        :esc (complete-modal! state ::cancelled)
         :backspace (swap! state update-in [:modal :buffer]
-                          (fn [b] (if (and b (seq b)) (subs b 0 (dec (count b))) (or b ""))))
+                     (fn [b] (if (and b (seq b)) (subs b 0 (dec (count b))) (or b ""))))
         (cond
           (and (vector? k) (= :char (first k)))
           (swap! state update-in [:modal :buffer] (fnil str "") (str (second k)))
@@ -807,16 +806,16 @@
 
       :confirm
       (case k
-        :enter     (let [b (:buffer m "")
-                         v (cond
-                             (clojure.string/blank? b) (boolean (:default m))
-                             (re-matches #"(?i)y(es)?" b) true
-                             (re-matches #"(?i)no?" b)   false
-                             :else                       (boolean (:default m)))]
-                     (complete-modal! state v))
-        :esc       (complete-modal! state ::cancelled)
+        :enter (let [b (:buffer m "")
+                     v (cond
+                         (clojure.string/blank? b) (boolean (:default m))
+                         (re-matches #"(?i)y(es)?" b) true
+                         (re-matches #"(?i)no?" b) false
+                         :else (boolean (:default m)))]
+                 (complete-modal! state v))
+        :esc (complete-modal! state ::cancelled)
         :backspace (swap! state update-in [:modal :buffer]
-                          (fn [b] (if (and b (seq b)) (subs b 0 (dec (count b))) (or b ""))))
+                     (fn [b] (if (and b (seq b)) (subs b 0 (dec (count b))) (or b ""))))
         (cond
           (and (vector? k) (= :char (first k)))
           (swap! state update-in [:modal :buffer] (fnil str "") (str (second k)))
@@ -826,30 +825,30 @@
       (let [multi? (= :multi-select kind)
             n      (count (:options m))]
         (case k
-          :up    (swap! state update-in [:modal :cursor]
-                        (fn [i] (mod (dec (or i 0)) n)))
-          :down  (swap! state update-in [:modal :cursor]
-                        (fn [i] (mod (inc (or i 0)) n)))
-          :left  (swap! state update-in [:modal :cursor]
-                        (fn [i] (mod (dec (or i 0)) n)))
+          :up (swap! state update-in [:modal :cursor]
+                (fn [i] (mod (dec (or i 0)) n)))
+          :down (swap! state update-in [:modal :cursor]
+                  (fn [i] (mod (inc (or i 0)) n)))
+          :left (swap! state update-in [:modal :cursor]
+                  (fn [i] (mod (dec (or i 0)) n)))
           :right (swap! state update-in [:modal :cursor]
-                        (fn [i] (mod (inc (or i 0)) n)))
+                   (fn [i] (mod (inc (or i 0)) n)))
           :space (if multi?
                    (swap! state update-in [:modal :checked]
-                          (fn [s] (let [i (or (:cursor m) 0)
-                                        s (or s #{})]
-                                    (if (s i) (disj s i) (conj s i)))))
+                     (fn [s] (let [i (or (:cursor m) 0)
+                                   s (or s #{})]
+                               (if (s i) (disj s i) (conj s i)))))
                    nil)
           :enter (cond
                    multi?
                    (let [m' (:modal @state)]
                      (complete-modal! state
-                                      (mapv (fn [i] (:value (nth (:options m') i)))
-                                            (sort (or (:checked m') #{})))))
+                       (mapv (fn [i] (:value (nth (:options m') i)))
+                         (sort (or (:checked m') #{})))))
                    :else
                    (complete-modal! state
-                                    (:value (nth (:options m) (or (:cursor m) 0)))))
-          :esc   (complete-modal! state ::cancelled)
+                     (:value (nth (:options m) (or (:cursor m) 0)))))
+          :esc (complete-modal! state ::cancelled)
           nil))
 
       nil)))
@@ -891,12 +890,12 @@
       ;; Drilled into a single invocation — selectable rows are its artifacts.
       (and (= :invocations (:view ov)) (:focus ov))
       (count (list-artifacts (session-dir-from-env env)
-                             (get-in ov [:focus :invokeid])))
+               (get-in ov [:focus :invokeid])))
 
       :else
       (case (:view ov)
-        :invocations  (count (:invocations ov))
-        :chart        (count (current-event-rows (:events ov)))
+        :invocations (count (:invocations ov))
+        :chart (count (current-event-rows (:events ov)))
         0))))
 
 (defn- append-scrollback!
@@ -904,11 +903,11 @@
    `line` may be a string (system message) or a `{:line :ev}` map entry."
   [state line]
   (swap! state update :scrollback
-         (fn [v]
-           (let [entry (if (map? line) line {:line (str line) :ev nil})
-                 v' (conj (or v []) entry)
-                 n  (count v')]
-             (if (> n 2000) (subvec v' (- n 2000)) v')))))
+    (fn [v]
+      (let [entry (if (map? line) line {:line (str line) :ev nil})
+            v'    (conj (or v []) entry)
+            n     (count v')]
+        (if (> n 2000) (subvec v' (- n 2000)) v')))))
 
 (defn- do-visualize!
   "On the first `v` press, start a tiny httpkit-backed viz server that renders
@@ -921,9 +920,9 @@
         s     @state]
     (if-let [server (:viz-server s)]
       (append-scrollback! state (str "[viz] already running: " (:url server)))
-      (let [env    (some-> (:env h) deref)
-            chart  (chart-from-env env)
-            sdir   (session-dir-from-env env)]
+      (let [env   (some-> (:env h) deref)
+            chart (chart-from-env env)
+            sdir  (session-dir-from-env env)]
         (cond
           (nil? chart)
           (append-scrollback! state "[viz] no chart attached to TUI handle (debug bug)")
@@ -935,7 +934,7 @@
           (let [start! (try (requiring-resolve 'escapement.debug.viz-server/start!)
                             (catch Throwable t
                               (append-scrollback!
-                               state (str "[viz] cannot load viz-server ns: " (.getMessage t)))
+                                state (str "[viz] cannot load viz-server ns: " (.getMessage t)))
                               nil))]
             (when start!
               (try
@@ -944,37 +943,37 @@
                                  :session-dir sdir
                                  :config      (:debug-config h)
                                  :title       (str (:chart-sym h)
-                                                   " · " (:session-short h))})]
+                                                " · " (:session-short h))})]
                   (cond
                     (:error r)
                     (append-scrollback!
-                     state (str "[viz] failed: " (:error r)
-                                " (d2 source still at " sdir "/chart.d2)"))
+                      state (str "[viz] failed: " (:error r)
+                              " (d2 source still at " sdir "/chart.d2)"))
 
                     (:url r)
                     (do (swap! state assoc :viz-server r)
                         (append-scrollback!
-                         state (str "[viz] live: " (:url r)
-                                    " (SVG also at " (:svg-path r) ")"))
+                          state (str "[viz] live: " (:url r)
+                                  " (SVG also at " (:svg-path r) ")"))
                         (let [viewer (ecfg/viewer-for-url (:debug-config h))]
                           (when (string? viewer)
                             (try
                               (let [cmd (ecfg/expand-command viewer (:url r))]
                                 (.exec (Runtime/getRuntime) ^"[Ljava.lang.String;"
-                                       (into-array String ["sh" "-c" cmd]))
+                                  (into-array String ["sh" "-c" cmd]))
                                 (append-scrollback!
-                                 state (str "[viz] launched: " cmd)))
+                                  state (str "[viz] launched: " cmd)))
                               (catch Throwable t
                                 (append-scrollback!
-                                 state (str "[viz] auto-open failed: "
-                                            (.getMessage t)
-                                            " — open " (:url r) " manually")))))))
+                                  state (str "[viz] auto-open failed: "
+                                          (.getMessage t)
+                                          " — open " (:url r) " manually")))))))
 
                     :else
                     (append-scrollback! state (str "[viz] result: " (pr-str r)))))
                 (catch Throwable t
                   (append-scrollback!
-                   state (str "[viz] threw: " (.getMessage t))))))))))))
+                    state (str "[viz] threw: " (.getMessage t))))))))))))
 
 (defn- open-artifact-file!
   "Open `path` using `(:viewers cfg)`. Falls back to the internal pager when
@@ -993,12 +992,12 @@
       (try
         (let [cmd (ecfg/expand-command viewer path-abs)]
           (.exec (Runtime/getRuntime) ^"[Ljava.lang.String;"
-                 (into-array String ["sh" "-c" cmd])))
+            (into-array String ["sh" "-c" cmd])))
         (catch Throwable t
           (open-pager! state display-name
-                       (str "Could not launch viewer: " (.getMessage t)
-                            "\n\nFalling back to internal view:\n\n"
-                            (try (slurp path-abs) (catch Throwable _ "")))))))))
+            (str "Could not launch viewer: " (.getMessage t)
+              "\n\nFalling back to internal view:\n\n"
+              (try (slurp path-abs) (catch Throwable _ "")))))))))
 
 (defn- focus-invocation!
   "Drill into the invocation at `cursor` in the history list (newest first).
@@ -1006,23 +1005,23 @@
   [state hist cursor]
   (when-let [row (nth hist cursor nil)]
     (swap! state update :debug-overlay
-           merge {:focus  {:invokeid (:invokeid row)}
-                  :cursor 0})))
+      merge {:focus  {:invokeid (:invokeid row)}
+             :cursor 0})))
 
 (defn- open-focused-artifact!
   "When drilled into an invocation, open the artifact at `cursor`."
   [h state]
-  (let [s    @state
-        ov   (:debug-overlay s)
-        env  (some-> (:env h) deref)
-        sdir (session-dir-from-env env)
+  (let [s        @state
+        ov       (:debug-overlay s)
+        env      (some-> (:env h) deref)
+        sdir     (session-dir-from-env env)
         invokeid (get-in ov [:focus :invokeid])
-        arts (list-artifacts sdir invokeid)
-        idx  (:cursor ov 0)]
+        arts     (list-artifacts sdir invokeid)
+        idx      (:cursor ov 0)]
     (when-let [name (nth arts idx nil)]
       (open-artifact-file! state (:debug-config h)
-                           (str sdir "/artifacts/" name)
-                           name))))
+        (str sdir "/artifacts/" name)
+        name))))
 
 (defn- open-event-detail!
   "Drill-in for a chart event row: pretty-print the event into the pager."
@@ -1042,24 +1041,24 @@
         pager (:pager ov)]
     (if pager
       (case k
-        :esc       (close-pager! state)
-        :pgdn      (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
-        :space     (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
-        :pgup      (swap! state update-in [:debug-overlay :pager :offset]
-                          #(max 0 (- (or % 0) 10)))
-        :down      (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
-        :up        (swap! state update-in [:debug-overlay :pager :offset]
-                          #(max 0 (dec (or % 0))))
+        :esc (close-pager! state)
+        :pgdn (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
+        :space (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
+        :pgup (swap! state update-in [:debug-overlay :pager :offset]
+                #(max 0 (- (or % 0) 10)))
+        :down (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
+        :up (swap! state update-in [:debug-overlay :pager :offset]
+              #(max 0 (dec (or % 0))))
         (cond
           (= k [:char \b]) (swap! state update-in [:debug-overlay :pager :offset]
-                                  #(max 0 (- (or % 0) 10)))
+                             #(max 0 (- (or % 0) 10)))
           (= k [:char \j]) (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
           (= k [:char \k]) (swap! state update-in [:debug-overlay :pager :offset]
-                                  #(max 0 (dec (or % 0))))
+                             #(max 0 (dec (or % 0))))
           (= k [:char \g]) (swap! state assoc-in [:debug-overlay :pager :offset] 0)
           (= k [:char \G]) (let [n (count (get-in @state [:debug-overlay :pager :lines]))]
                              (swap! state assoc-in [:debug-overlay :pager :offset]
-                                    (max 0 (dec n))))
+                               (max 0 (dec n))))
           :else nil))
       (cond
         (= k :esc)
@@ -1070,35 +1069,35 @@
           :else
           ;; Close overlay; if a human-input modal is pending, promote it now.
           (swap! state
-                 (fn [s]
-                   (let [pm (:pending-modal s)]
-                     (cond-> (assoc-in s [:debug-overlay :open?] false)
-                       pm (-> (assoc :modal pm) (dissoc :pending-modal)))))))
+            (fn [s]
+              (let [pm (:pending-modal s)]
+                (cond-> (assoc-in s [:debug-overlay :open?] false)
+                  pm (-> (assoc :modal pm) (dissoc :pending-modal)))))))
 
         (= k [:char \?])
         (swap! state update-in [:debug-overlay :open?] not)
 
         (= k [:char \1]) (swap! state update :debug-overlay
-                                merge {:view :invocations :cursor 0 :focus nil})
+                           merge {:view :invocations :cursor 0 :focus nil})
         (= k [:char \2]) (swap! state update :debug-overlay
-                                merge {:view :chart :cursor 0 :focus nil})
+                           merge {:view :chart :cursor 0 :focus nil})
         (= k [:char \3]) (swap! state update :debug-overlay
-                                merge {:view :status :cursor 0 :focus nil})
+                           merge {:view :status :cursor 0 :focus nil})
 
         ;; In invocations drilldown, `h` or Backspace pops back to the list.
         (and (= :invocations (:view ov)) (:focus ov)
-             (or (= k [:char \h]) (= k :backspace)))
+          (or (= k [:char \h]) (= k :backspace)))
         (swap! state update :debug-overlay merge {:focus nil :cursor 0})
 
         (or (= k :down) (= k [:char \j]))
         (let [n (max 1 (view-row-count h s))]
           (swap! state update-in [:debug-overlay :cursor]
-                 (fn [i] (mod (inc (or i 0)) n))))
+            (fn [i] (mod (inc (or i 0)) n))))
 
         (or (= k :up) (= k [:char \k]))
         (let [n (max 1 (view-row-count h s))]
           (swap! state update-in [:debug-overlay :cursor]
-                 (fn [i] (mod (dec (or i 0)) n))))
+            (fn [i] (mod (dec (or i 0)) n))))
 
         (= k [:char \g]) (swap! state assoc-in [:debug-overlay :cursor] 0)
         (= k [:char \G]) (let [n (max 1 (view-row-count h s))]
@@ -1110,7 +1109,7 @@
           (if (:focus ov)
             (open-focused-artifact! h state)
             (focus-invocation! state (:invocations ov) (:cursor ov 0)))
-          :chart        (open-event-detail! h state (:cursor ov 0))
+          :chart (open-event-detail! h state (:cursor ov 0))
           nil)
 
         (= k [:char \o])
@@ -1173,7 +1172,7 @@
 
               (= k :pgdn)
               (do (swap! state update :scroll-offset
-                         #(max 0 (- (or % 0) 10)))
+                    #(max 0 (- (or % 0) 10)))
                   (render-frame! h) (recur))
 
               :else
@@ -1183,72 +1182,72 @@
 
             ;; Inspector overlay key dispatch (no modal active).
             (and (:inspector? h)
-                 (get-in @state [:debug-overlay :open?]))
+              (get-in @state [:debug-overlay :open?]))
             (do (handle-debug-key! h k) (render-frame! h) (recur))
 
             ;; No modal: chart-level keybindings.
             :else
             (case k
-              :esc  (do (send-ui-event! h :ui.interrupt) (recur))
+              :esc (do (send-ui-event! h :ui.interrupt) (recur))
               :pgup (do (swap! state update :scroll-offset (fnil + 0) 10)
                         (render-frame! h)
                         (recur))
               :pgdn (do (swap! state update :scroll-offset
-                               #(max 0 (- (or % 0) 10)))
+                          #(max 0 (- (or % 0) 10)))
                         (render-frame! h)
                         (recur))
               :home (do (swap! state assoc :scroll-offset
-                               (max 0 (- (count (:scrollback @state))
-                                         (max 5 (- (:term-h @state 24) 4)))))
+                          (max 0 (- (count (:scrollback @state))
+                                   (max 5 (- (:term-h @state 24) 4)))))
                         (render-frame! h)
                         (recur))
-              :end  (do (swap! state assoc :scroll-offset 0
-                               :cursor-idx nil)
-                        (render-frame! h)
-                        (recur))
-              :up   (do (swap! state
-                               (fn [s]
-                                 (let [n (count (:scrollback s))
-                                       cur (or (:cursor-idx s) n)]
-                                   (assoc s :cursor-idx (max 0 (dec cur))))))
-                        (render-frame! h) (recur))
+              :end (do (swap! state assoc :scroll-offset 0
+                         :cursor-idx nil)
+                       (render-frame! h)
+                       (recur))
+              :up (do (swap! state
+                        (fn [s]
+                          (let [n   (count (:scrollback s))
+                                cur (or (:cursor-idx s) n)]
+                            (assoc s :cursor-idx (max 0 (dec cur))))))
+                      (render-frame! h) (recur))
               :down (do (swap! state
-                               (fn [s]
-                                 (let [n (count (:scrollback s))
-                                       cur (or (:cursor-idx s) (dec n))]
-                                   (assoc s :cursor-idx (min (dec n) (inc cur))))))
+                          (fn [s]
+                            (let [n   (count (:scrollback s))
+                                  cur (or (:cursor-idx s) (dec n))]
+                              (assoc s :cursor-idx (min (dec n) (inc cur))))))
                         (render-frame! h) (recur))
               :enter (do
-                       (let [s @state
-                             idx (:cursor-idx s)
+                       (let [s     @state
+                             idx   (:cursor-idx s)
                              entry (when idx (nth (:scrollback s) idx nil))]
                          (when (and entry (:ev entry))
                            (swap! state assoc-in [:debug-overlay :open?] true)
                            (open-pager! state
-                                        (str (name (or (:event (:ev entry)) :event)))
-                                        (entry-pager-text entry))))
+                             (str (name (or (:event (:ev entry)) :event)))
+                             (entry-pager-text entry))))
                        (render-frame! h) (recur))
               (cond
                 (= k [:char \j])
                 (do (swap! state
-                           (fn [s]
-                             (let [n (count (:scrollback s))
-                                   cur (or (:cursor-idx s) (dec n))]
-                               (assoc s :cursor-idx (min (dec n) (inc cur))))))
+                      (fn [s]
+                        (let [n   (count (:scrollback s))
+                              cur (or (:cursor-idx s) (dec n))]
+                          (assoc s :cursor-idx (min (dec n) (inc cur))))))
                     (render-frame! h) (recur))
                 (= k [:char \k])
                 (do (swap! state
-                           (fn [s]
-                             (let [n (count (:scrollback s))
-                                   cur (or (:cursor-idx s) n)]
-                               (assoc s :cursor-idx (max 0 (dec cur))))))
+                      (fn [s]
+                        (let [n   (count (:scrollback s))
+                              cur (or (:cursor-idx s) n)]
+                          (assoc s :cursor-idx (max 0 (dec cur))))))
                     (render-frame! h) (recur))
                 (= k [:char \g])
                 (do (swap! state assoc :cursor-idx 0) (render-frame! h) (recur))
                 (= k [:char \G])
                 (do (swap! state
-                           (fn [s] (assoc s :cursor-idx
-                                          (max 0 (dec (count (:scrollback s)))))))
+                      (fn [s] (assoc s :cursor-idx
+                                       (max 0 (dec (count (:scrollback s)))))))
                     (render-frame! h) (recur))
                 ;; Inspector top-level key (always active when no modal).
                 (and (:inspector? h) (= k [:char \?]))
@@ -1256,19 +1255,19 @@
                     (render-frame! h) (recur))
 
                 (and (:debug? h) (:debug-controller h)
-                     (= k [:char \s]))
+                  (= k [:char \s]))
                 (do (dbg/step! (:debug-controller h)) (render-frame! h) (recur))
 
                 (and (:debug? h) (:debug-controller h)
-                     (= k [:char \c]))
+                  (= k [:char \c]))
                 (do (dbg/continue! (:debug-controller h)) (render-frame! h) (recur))
 
                 (and (:debug? h) (:debug-controller h)
-                     (= k [:char \p]))
+                  (= k [:char \p]))
                 (do (dbg/pause! (:debug-controller h)) (render-frame! h) (recur))
 
                 (and (:debug? h) (:debug-controller h)
-                     (= k [:char \P]))
+                  (= k [:char \P]))
                 (do (dbg/arm-pause-on-next-external! (:debug-controller h))
                     (render-frame! h) (recur))
 
@@ -1294,36 +1293,36 @@
   [{:keys [chart-sym session-short debug? debug-controller debug-config]}]
   (if-not (interactive-terminal?)
     (->TuiHandle false (atom {}) (Object.) nil (atom false) nil (atom nil) (atom nil)
-                 (str chart-sym) (str session-short) (atom false) (atom false)
-                 false (boolean debug?) debug-controller debug-config (atom nil) (atom false))
+      (str chart-sym) (str session-short) (atom false) (atom false)
+      false (boolean debug?) debug-controller debug-config (atom nil) (atom false))
     (let [terminal (-> (TerminalBuilder/builder)
-                       (.system true)
-                       (.build))
-          state    (atom {:config           []
-                          :scrollback       []
-                          :scroll-offset    0
-                          :cursor-idx       nil ;; nil = no selection; index into scrollback
-                          :invokeid-colors  {}  ;; invokeid → SGR code string
-                          :next-color-idx   0
-                          :modal            nil
-                          :term-h           (.getHeight terminal)
-                          :term-w           (.getWidth terminal)
-                          :debug-overlay    {:open?       false
-                                             :suspended?  false
-                                             :view        :invocations
-                                             :cursor      0
-                                             :pane        :list
-                                             :events      []
-                                             :invocations []
-                                             :focus       nil
-                                             :pager       nil}})
+                     (.system true)
+                     (.build))
+          state    (atom {:config          []
+                          :scrollback      []
+                          :scroll-offset   0
+                          :cursor-idx      nil              ;; nil = no selection; index into scrollback
+                          :invokeid-colors {}               ;; invokeid → SGR code string
+                          :next-color-idx  0
+                          :modal           nil
+                          :term-h          (.getHeight terminal)
+                          :term-w          (.getWidth terminal)
+                          :debug-overlay   {:open?       false
+                                            :suspended?  false
+                                            :view        :invocations
+                                            :cursor      0
+                                            :pane        :list
+                                            :events      []
+                                            :invocations []
+                                            :focus       nil
+                                            :pager       nil}})
           h        (->TuiHandle true state (Object.) terminal (atom false) nil
-                                (atom nil) (atom nil)
-                                (str chart-sym) (str session-short)
-                                (atom false) (atom false)
-                                true ;; inspector? — always on when TUI is enabled
-                                (boolean debug?) debug-controller debug-config
-                                (atom nil) (atom false))
+                     (atom nil) (atom nil)
+                     (str chart-sym) (str session-short)
+                     (atom false) (atom false)
+                     true                                   ;; inspector? — always on when TUI is enabled
+                     (boolean debug?) debug-controller debug-config
+                     (atom nil) (atom false))
           t        (Thread. ^Runnable (fn [] (input-loop! h)) "tui-input")
           _        (.setDaemon t true)
           h        (assoc h :input-thread t)]
@@ -1341,20 +1340,20 @@
       ;; whatever JLine just installed.
       (try
         (sun.misc.Signal/handle
-         (sun.misc.Signal. "INT")
-         (reify sun.misc.SignalHandler
-           (handle [_ _signal]
-             (try (stop! h) (catch Throwable _ nil))
-             (System/exit 130))))
+          (sun.misc.Signal. "INT")
+          (reify sun.misc.SignalHandler
+            (handle [_ _signal]
+              (try (stop! h) (catch Throwable _ nil))
+              (System/exit 130))))
         (catch Throwable _ nil))
       ;; Belt for non-INT exit paths (SIGTERM, normal System/exit): the JVM
       ;; shutdown hook still runs stop! so the terminal is restored.
       (try
         (.addShutdownHook (Runtime/getRuntime)
-                          (Thread. ^Runnable
-                           (fn [] (try (stop! h)
-                                       (catch Throwable _ nil)))
-                                   "tui-shutdown"))
+          (Thread. ^Runnable
+            (fn [] (try (stop! h)
+                        (catch Throwable _ nil)))
+            "tui-shutdown"))
         (catch Throwable _ nil))
       h)))
 
@@ -1391,7 +1390,7 @@
   [ev]
   (let [e (:event ev)]
     (or (= :runner/event-processed e)
-        (and (keyword? e) (= "debug" (namespace e))))))
+      (and (keyword? e) (= "debug" (namespace e))))))
 
 (defn- update-invocation-history
   "Folds an `:llm/start` or `:llm/worker-exit` transcript event into the
@@ -1402,14 +1401,14 @@
   (let [e (:event ev)]
     (cond
       (= :llm/start e)
-      (let [d         (:data ev)
-            invokeid  (some-> (:invokeid d) str)
-            ts        (or (:ts ev) (System/currentTimeMillis))
-            entry     {:invokeid   invokeid
-                       :session-id (:session-id d)
-                       :started-ms ts
-                       :ended-ms   nil
-                       :reason     nil}]
+      (let [d        (:data ev)
+            invokeid (some-> (:invokeid d) str)
+            ts       (or (:ts ev) (System/currentTimeMillis))
+            entry    {:invokeid   invokeid
+                      :session-id (:session-id d)
+                      :started-ms ts
+                      :ended-ms   nil
+                      :reason     nil}]
         (vec (take 200 (cons entry (or history [])))))
 
       (= :llm/worker-exit e)
@@ -1419,10 +1418,10 @@
             reason   (:reason d)]
         (mapv (fn [row]
                 (if (and (= invokeid (:invokeid row))
-                         (nil? (:ended-ms row)))
+                      (nil? (:ended-ms row)))
                   (assoc row :ended-ms ts :reason reason)
                   row))
-              (or history [])))
+          (or history [])))
 
       :else history)))
 
@@ -1446,8 +1445,8 @@
     (let [idx  (:next-color-idx s 0)
           code (nth invokeid-palette (mod idx (count invokeid-palette)))]
       (-> s
-          (assoc-in [:invokeid-colors invokeid] code)
-          (assoc :next-color-idx (inc idx))))))
+        (assoc-in [:invokeid-colors invokeid] code)
+        (assoc :next-color-idx (inc idx))))))
 
 (defn- color-for
   "Looks up the SGR code (digits, e.g. `\"36\"`) for the given source. For
@@ -1457,12 +1456,12 @@
   [s source]
   (when (ansi-supported?)
     (cond
-      (string? source)  (get-in s [:invokeid-colors source])
+      (string? source) (get-in s [:invokeid-colors source])
       (= :chart source) chart-color
       (= :human source) human-color
       (= :error source) error-color
       (= :debug source) debug-color
-      :else             nil)))
+      :else nil)))
 
 (defn- entry->rendered-line
   "Build the displayable line for a scrollback entry, with timestamp, source
@@ -1470,9 +1469,9 @@
   [s {:keys [source glyph summary ev]}]
   (let [ts   (ts->hms (:ts ev))
         tag  (cond
-               (string? source)   (short-invokeid source)
-               (keyword? source)  (name source)
-               :else              "?")
+               (string? source) (short-invokeid source)
+               (keyword? source) (name source)
+               :else "?")
         code (color-for s source)
         body (str ts " [" tag "] " (or glyph \·) " " (str summary))]
     (if code
@@ -1484,46 +1483,46 @@
    the status line when the event carries a new chart configuration."
   [h ev]
   (when (:enabled? h)
-    (let [entries  (entries-for ev)
-          cfg      (get-in ev [:data :config-after])
+    (let [entries   (entries-for ev)
+          cfg       (get-in ev [:data :config-after])
           start-cfg (when (= (:event ev) :runner/start-config)
                       (get-in ev [:data :config]))]
       (swap! (:state h)
-             (fn [s]
-               (let [;; Allocate colors for any new string-valued (invokeid) sources.
-                     s' (reduce (fn [s e]
-                                  (let [src (:source e)]
-                                    (if (string? src) (allocate-color s src) s)))
-                                s entries)
-                     s' (cond-> s'
-                          cfg       (assoc :config cfg)
-                          start-cfg (assoc :config start-cfg))
-                     s' (if (seq entries)
-                          (update s' :scrollback
-                                  (fn [v]
-                                    (let [v0 (or v [])
-                                          v2 (reduce (fn [vv e]
-                                                       (conj vv {:line (entry->rendered-line s' e)
-                                                                 :ev   (:ev e)
-                                                                 :source (:source e)
-                                                                 :glyph (:glyph e)
-                                                                 :block (:block e)
-                                                                 :summary (:summary e)}))
-                                                     v0
-                                                     entries)
-                                          n  (count v2)]
-                                      (if (> n 2000) (subvec v2 (- n 2000)) v2))))
-                          s')]
-                 (cond-> s'
-                   (debug-event-of-interest? ev)
-                   (update-in [:debug-overlay :events]
-                              (fn [v]
-                                (let [v' (conj (or v []) ev)
-                                      n  (count v')]
-                                  (if (> n 1000) (subvec v' (- n 1000)) v'))))
-                   (#{:llm/start :llm/worker-exit} (:event ev))
-                   (update-in [:debug-overlay :invocations]
-                              update-invocation-history ev)))))
+        (fn [s]
+          (let [;; Allocate colors for any new string-valued (invokeid) sources.
+                s' (reduce (fn [s e]
+                             (let [src (:source e)]
+                               (if (string? src) (allocate-color s src) s)))
+                     s entries)
+                s' (cond-> s'
+                     cfg (assoc :config cfg)
+                     start-cfg (assoc :config start-cfg))
+                s' (if (seq entries)
+                     (update s' :scrollback
+                       (fn [v]
+                         (let [v0 (or v [])
+                               v2 (reduce (fn [vv e]
+                                            (conj vv {:line    (entry->rendered-line s' e)
+                                                      :ev      (:ev e)
+                                                      :source  (:source e)
+                                                      :glyph   (:glyph e)
+                                                      :block   (:block e)
+                                                      :summary (:summary e)}))
+                                    v0
+                                    entries)
+                               n  (count v2)]
+                           (if (> n 2000) (subvec v2 (- n 2000)) v2))))
+                     s')]
+            (cond-> s'
+              (debug-event-of-interest? ev)
+              (update-in [:debug-overlay :events]
+                (fn [v]
+                  (let [v' (conj (or v []) ev)
+                        n  (count v')]
+                    (if (> n 1000) (subvec v' (- n 1000)) v'))))
+              (#{:llm/start :llm/worker-exit} (:event ev))
+              (update-in [:debug-overlay :invocations]
+                update-invocation-history ev)))))
       (render-frame! h)))
   nil)
 
@@ -1548,8 +1547,8 @@
    waiting for the user to close the inspector."
   [h]
   (boolean (and h (:enabled? h)
-                (let [s @(:state h)]
-                  (or (:modal s) (:pending-modal s))))))
+             (let [s @(:state h)]
+               (or (:modal s) (:pending-modal s))))))
 
 (defn- run-tput-cnorm!
   "Shell out to `tput cnorm` to restore the cursor. Necessary because
@@ -1561,11 +1560,11 @@
   []
   (try
     (-> (ProcessBuilder.
-         ^"[Ljava.lang.String;"
-         (into-array String ["sh" "-c" "tput cnorm 2>/dev/null"]))
-        (.inheritIO)
-        (.start)
-        (.waitFor))
+          ^"[Ljava.lang.String;"
+          (into-array String ["sh" "-c" "tput cnorm 2>/dev/null"]))
+      (.inheritIO)
+      (.start)
+      (.waitFor))
     (catch Throwable _ nil)))
 
 (defn stop!
@@ -1580,7 +1579,7 @@
    wakes up tmux's per-pane cursor visibility tracking."
   [h]
   (when (and (:enabled? h)
-             (compare-and-set! (:stopped? h) false true))
+          (compare-and-set! (:stopped? h) false true))
     (try
       (try
         (when-let [stop-viz (some-> (:state h) deref :viz-server :stop)]
@@ -1629,17 +1628,17 @@
       (hi/prompt-text (hi/stdin-renderer) {:prompt prompt})))
   (prompt-select [_ {:keys [prompt options] :as opts}]
     (if (:enabled? handle)
-      (ask! handle {:kind :select :prompt (or prompt "Select:")
+      (ask! handle {:kind    :select :prompt (or prompt "Select:")
                     :options (vec options) :cursor 0})
       (hi/prompt-select (hi/stdin-renderer) opts)))
   (prompt-multi [_ {:keys [prompt options] :as opts}]
     (if (:enabled? handle)
-      (ask! handle {:kind :multi-select :prompt (or prompt "Select any:")
+      (ask! handle {:kind    :multi-select :prompt (or prompt "Select any:")
                     :options (vec options) :cursor 0 :checked #{}})
       (hi/prompt-multi (hi/stdin-renderer) opts)))
   (prompt-confirm [_ {:keys [prompt default] :as opts}]
     (if (:enabled? handle)
-      (ask! handle {:kind :confirm :prompt (or prompt "Confirm?")
+      (ask! handle {:kind   :confirm :prompt (or prompt "Confirm?")
                     :buffer "" :default (boolean default)})
       (hi/prompt-confirm (hi/stdin-renderer) opts)))
   (start-progress [_ opts] (atom {:pct 0 :prompt (:prompt opts)}))

@@ -38,41 +38,41 @@
    Run it:
      escapement run escapement.examples.clj-refactor/agent --debug"
   (:require
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.data-model.operations :as ops]
-   [com.fulcrologic.statecharts.elements :refer [state transition final script]]
-   [escapement.chart.helpers :as h]))
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
+    [com.fulcrologic.statecharts.elements :refer [final script state transition]]
+    [escapement.chart.helpers :as h]))
 
 (def system-prompt
   (str "You are a Clojure refactoring agent. Apply the requested change to "
-       "idiomatic, bb-compatible Clojure. When the edit is complete, call "
-       "the `event__done` tool exactly once with a one-line `summary` of "
-       "what changed. Then end your turn. Do not call any other tools."))
+    "idiomatic, bb-compatible Clojure. When the edit is complete, call "
+    "the `event__done` tool exactly once with a one-line `summary` of "
+    "what changed. Then end your turn. Do not call any other tools."))
 
 (def agent
   (chart/statechart
-   {:initial :run}
-   (state {:id :run :initial :refactor}
-          (state {:id :refactor}
-                 (h/llm-conversation
-                  {:id        "clj-refactor"
-                   :params-fn (fn [_env _data]
-                                {:system       system-prompt
-                                 ;; Multi-dimensional eligibility gate over
-                                 ;; the ratings overlay: strong Clojure AND
-                                 ;; usable tool-calling, or this model is
-                                 ;; not eligible for the auto-fallback list.
-                                 :needs {:clojure [:>= 8] :tool-calling [:>= 6]}
-                                 :real-tools   []
-                                 :allowed-events
-                                 [{:event       :done
-                                   :data-schema [:map [:summary :string]]}]
-                                 :initial-user-message
-                                 (str "Rename the function `foo` to `bar` "
-                                      "across `src/example.clj` and update "
-                                      "its call sites.")})})
-                 (transition {:event :done :target :finished}
-                             (script {:expr (fn [_env data]
-                                              [(ops/assign :summary
-                                                           (get-in data [:_event :data :summary]))])})))
-          (final {:id :finished}))))
+    {:initial :run}
+    (state {:id :run :initial :refactor}
+      (state {:id :refactor}
+        (h/llm-conversation
+          {:id        "clj-refactor"
+           :params-fn (fn [_env _data]
+                        {:system     system-prompt
+                         ;; Multi-dimensional eligibility gate over
+                         ;; the ratings overlay: strong Clojure AND
+                         ;; usable tool-calling, or this model is
+                         ;; not eligible for the auto-fallback list.
+                         :needs      {:clojure [:>= 8] :tool-calling [:>= 6]}
+                         :real-tools []
+                         :allowed-events
+                         [{:event       :done
+                           :data-schema [:map [:summary :string]]}]
+                         :initial-user-message
+                         (str "Rename the function `foo` to `bar` "
+                           "across `src/example.clj` and update "
+                           "its call sites.")})})
+        (transition {:event :done :target :finished}
+          (script {:expr (fn [_env data]
+                           [(ops/assign :summary
+                              (get-in data [:_event :data :summary]))])})))
+      (final {:id :finished}))))

@@ -27,25 +27,25 @@
                             [#\"^gpt-5\"  (codex/new-backend {})]]
           :default-backend (anthropic/new-backend {...})})"
   (:require
-   [com.fulcrologic.guardrails.malli.core :refer [>defn => ?]]
-   [escapement.llm.protocol :as proto]))
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [escapement.llm.protocol :as proto]))
 
 (defn- match?
   [matcher ^String model]
   (cond
     (instance? java.util.regex.Pattern matcher) (boolean (re-find matcher model))
-    (set? matcher)                              (contains? matcher model)
-    (fn? matcher)                               (boolean (matcher model))
-    :else                                       false))
+    (set? matcher) (contains? matcher model)
+    (fn? matcher) (boolean (matcher model))
+    :else false))
 
 (defn- pick-backend
   [routes default-backend model]
   (let [m (or model "")]
     (or (some (fn [[matcher b]] (when (match? matcher m) b)) routes)
-        default-backend
-        (throw (ex-info "No route matched model and no :default-backend configured"
-                        {:model           model
-                         :route-matchers  (mapv first routes)})))))
+      default-backend
+      (throw (ex-info "No route matched model and no :default-backend configured"
+               {:model          model
+                :route-matchers (mapv first routes)})))))
 
 (defn- select-backend
   "Shared sub-backend selection used by both `send-turn` and `stream-turn`,
@@ -88,24 +88,24 @@
     (delegate-stream-turn this request on-delta)))
 
 (>defn new-backend
-       "Construct a routing backend.
+  "Construct a routing backend.
 
-        `opts`:
-        - `:routes`           — vector of `[matcher sub-backend]` pairs (required)
-        - `:default-backend`  — backend used when no route matches (optional)
+   `opts`:
+   - `:routes`           — vector of `[matcher sub-backend]` pairs (required)
+   - `:default-backend`  — backend used when no route matches (optional)
 
-        Returns a backend that also implements `StreamingLLMBackend` iff every
-        selectable sub-backend (all routed backends plus any default) supports
-        streaming, so `protocol/streaming?` reflects the picked sub-backend and
-        `stream-turn` delegates via the same routing logic as `send-turn`."
-       [opts]
-       [[:map
-         [:routes [:vector [:tuple :any :any]]]
-         [:default-backend {:optional true} :any]]
-        => :any]
-       (let [routes  (vec (:routes opts))
-             default (:default-backend opts)
-             subs    (cond-> (mapv second routes) default (conj default))]
-         (if (and (seq subs) (every? proto/streaming? subs))
-           (->StreamingMultiBackend routes default)
-           (->MultiBackend routes default))))
+   Returns a backend that also implements `StreamingLLMBackend` iff every
+   selectable sub-backend (all routed backends plus any default) supports
+   streaming, so `protocol/streaming?` reflects the picked sub-backend and
+   `stream-turn` delegates via the same routing logic as `send-turn`."
+  [opts]
+  [[:map
+    [:routes [:vector [:tuple :any :any]]]
+    [:default-backend {:optional true} :any]]
+   => :any]
+  (let [routes  (vec (:routes opts))
+        default (:default-backend opts)
+        subs    (cond-> (mapv second routes) default (conj default))]
+    (if (and (seq subs) (every? proto/streaming? subs))
+      (->StreamingMultiBackend routes default)
+      (->MultiBackend routes default))))

@@ -1,5 +1,6 @@
 You are an expert at analyzing Clojure functions to determine their testability and the correct mocking strategy.
-You work with fulcro-spec and guardrails. You understand that **testability is a design quality** — code that is easy to test is usually well-designed, and code that is hard to test usually needs refactoring.
+You work with fulcro-spec and guardrails. You understand that **testability is a design quality** — code that is easy to
+test is usually well-designed, and code that is hard to test usually needs refactoring.
 
 ## Target
 
@@ -12,6 +13,7 @@ You work with fulcro-spec and guardrails. You understand that **testability is a
 The single most important principle for testability is to separate pure logic from effects.
 
 **Side effects** are operations that interact with the outside world:
+
 - Database queries and updates
 - HTTP requests
 - File I/O
@@ -21,6 +23,7 @@ The single most important principle for testability is to separate pure logic fr
 - Logging (if it is a defined necessary behavior)
 
 **Pure functions** are deterministic transformations of data:
+
 - Input → Output, with no side effects
 - Same inputs always produce same outputs
 - Can be understood and tested in isolation
@@ -64,6 +67,7 @@ The single most important principle for testability is to separate pure logic fr
 ```
 
 Benefits:
+
 1. All business logic is in pure functions — test with simple assertions
 2. Each decision point is independently testable
 3. Email generation is testable without sending emails
@@ -76,11 +80,13 @@ Benefits:
 Read the source file AND the behavioral analysis file. Determine the function's level of abstraction.
 
 **Abstraction is a ladder:**
+
 - **High level**: "Process the daily billing" — business concept, orchestrates other functions
 - **Mid level**: "Check if billing is due, calculate amount, send notification" — business logic
 - **Low level**: "Subtract two dates and divide by milliseconds in a day" — primitive operations
 
 A function should stay at ONE level. It should either:
+
 - Call high-level functions (orchestration)
 - Call mid-level functions (business logic)
 - Perform low-level operations (primitive operations)
@@ -108,6 +114,7 @@ If the function mixes levels, note what should be extracted. For example:
 ```
 
 Classify `{{FUNCTION}}`:
+
 - What level does it operate at?
 - Does it mix levels?
 - What should be extracted?
@@ -143,6 +150,7 @@ For EVERY function or side-effect that `{{FUNCTION}}` calls, classify it into on
 ```
 
 Validated mocking (`when-mocking!` / `provided!`) **only works with `>defn` functions**. It validates:
+
 - Arguments match the function's input schema
 - Return values match the function's output schema
 - This gives transitive proof: if Test A passes and Test B (mocking A) passes, they compose correctly
@@ -165,6 +173,7 @@ Validated mocking (`when-mocking!` / `provided!`) **only works with `>defn` func
 ```
 
 **IMPORTANT**: Check if the project already has wrappers! Look for:
+
 - `com.fulcrologic.rad.type-support.date-time` — has `now`, `now-ms`, timezone helpers
 - `cljc.java-time.local-date` and related — Java Time wrappers
 - Any project utility namespace with date/time/random wrappers
@@ -189,6 +198,7 @@ Validated mocking (`when-mocking!` / `provided!`) **only works with `>defn` func
 **Strategy**: These require delegation patterns:
 
 **Protocol wrapper pattern**: Use `-` prefix for protocol methods, `>defn` for public API:
+
 ```clojure
 (defprotocol DataStore
   (-save-item [this id data]))
@@ -199,6 +209,7 @@ Validated mocking (`when-mocking!` / `provided!`) **only works with `>defn` func
 ```
 
 **Server-side impl pattern**: Extract resolver logic to `*-impl` function:
+
 ```clojure
 (>defn user-orders-impl [db user-id]
   [:any :user/id => [:vector :domain/order]]
@@ -210,6 +221,7 @@ Validated mocking (`when-mocking!` / `provided!`) **only works with `>defn` func
 ```
 
 **Fulcro mutation helper pattern**: Extract to `*` suffix with `[state-map & args] => state-map`:
+
 ```clojure
 (>defn mark-complete* [state-map item-id complete?]
   [:fulcro/state-map :item/id :boolean => :fulcro/state-map]
@@ -225,12 +237,14 @@ Validated mocking (`when-mocking!` / `provided!`) **only works with `>defn` func
 Group behaviors that share the same setup into `component` blocks.
 
 Rules:
+
 - Use `component` ONLY when setup differs between groups
 - If setup is the same, put all assertions in one flat `assertions` block under `specification`
 - Each `component` should have a label that, combined with the specification name, forms a readable sentence
 - Within a component, use multi-triple `assertions` with descriptive labels
 
 For each group, specify:
+
 - The `component` label
 - Which behaviors it covers
 - The setup (`let` bindings needed)
@@ -283,16 +297,19 @@ For each group, specify:
         result (sut/function-name order inventory)]
     ...)
   ```
+
 - **Mocking needed**: [none, or what to mock with what returns]
 - **Assertions**:
-  - "status is success" → `(:status result) => :success`
-  - "total is calculated" → `(:total result) => 50.0`
-  - ...
+    - "status is success" → `(:status result) => :success`
+    - "total is calculated" → `(:total result) => 50.0`
+    - ...
 
 #### component "when [condition B]"
+
 - **Covers behaviors**: 2, 4
 - **Setup**: ...
 - **Mocking needed**: ...
 - **Assertions**:
-  - ...
+    - ...
+
 ```

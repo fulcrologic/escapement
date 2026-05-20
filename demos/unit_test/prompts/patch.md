@@ -18,12 +18,14 @@ You are editing an existing file. Use the `edit` tool to make precise, targeted 
 Do NOT use the `write` tool to overwrite the entire file.
 
 Changes you SHOULD make:
+
 - Add missing `component`/`assertions` blocks for GAP behaviors
 - Strengthen weak assertions for PARTIALLY COVERED behaviors
 - Fix quality issues (banned macros, missing labels, unfalsifiable assertions)
 - Fix label-assertion alignment issues
 
 Changes you should NOT make:
+
 - Do NOT rewrite assertions that are already good
 - Do NOT restructure existing passing tests
 - Do NOT change the namespace or requires unless something is genuinely missing
@@ -32,23 +34,28 @@ Changes you should NOT make:
 ## Rule 2: Follow fulcro-spec methodology
 
 ### BANNED: The `behavior` macro
+
 If the existing file uses `(behavior`, replace it with multi-triple `assertions`.
 
 ### Multi-triple assertions with labels
+
 Each assertion triple: `"description string"` expression `=>` expected
 Group 10-15 related assertions per block.
 
 ### Positive language
+
 - "preserves the original value" not "does not modify the input"
 - "focuses only on the target area" not "doesn't corrupt other fields"
 - For showing targeted changes: compare `(dissoc result :changed-key)` with `(dissoc original :changed-key)`
 
 ### Every assertion must be falsifiable
+
 - No trivially true assertions
 - No assertions that only prove structural properties without content
 - No assertions that would pass even if the function did nothing
 
 ### Mocking
+
 - Only mock `>defn` functions with side effects
 - Use `provided!` with description strings
 - Do NOT mock pure functions
@@ -86,9 +93,9 @@ YOUR TASK
 2. Read the existing test file at `{{TEST_FILE}}` — understand what's already there
 3. Read the source file at `{{FILE}}` — verify the correct expected values
 4. Make targeted edits to the test file:
-   - Add missing test cases for every GAP behavior
-   - Strengthen every PARTIALLY COVERED behavior
-   - Fix every quality issue identified in the gap analysis
+    - Add missing test cases for every GAP behavior
+    - Strengthen every PARTIALLY COVERED behavior
+    - Fix every quality issue identified in the gap analysis
 5. Verify your edits don't break the existing file structure (balanced parentheses, etc.)
 
 Be thorough — every GAP and PARTIALLY COVERED behavior must be addressed.

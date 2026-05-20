@@ -12,13 +12,11 @@
   test then asserts the counter to verify whether prior states were re-entered
   on resume (documenting library behavior precisely)."
   (:require
-   [clojure.java.io :as io]
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.elements :refer [state transition final on-entry script]]
-   [com.fulcrologic.statecharts.protocols :as sp]
-   [escapement.runner :as runner]
-   [fulcro-spec.core :refer [specification assertions =>]])
+    [clojure.java.io :as io]
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.elements :refer [final on-entry script state transition]]
+    [escapement.runner :as runner]
+    [fulcro-spec.core :refer [=> assertions specification]])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
 
@@ -34,58 +32,58 @@
 
 (def two-step-chart
   (chart/statechart
-   {:initial :run}
-   (state {:id :run :initial :a}
-          (state {:id :a}
-                 (on-entry {} (script {:expr (fn [_ _] (bump! :a) nil)}))
-                 (transition {:event :go :target :b}))
-          (state {:id :b}
-                 (on-entry {} (script {:expr (fn [_ _] (bump! :b) nil)}))
-                 (transition {:event :go :target :done}))
-          (final {:id :done}
-                 (on-entry {} (script {:expr (fn [_ _] (bump! :done) nil)}))))))
+    {:initial :run}
+    (state {:id :run :initial :a}
+      (state {:id :a}
+        (on-entry {} (script {:expr (fn [_ _] (bump! :a) nil)}))
+        (transition {:event :go :target :b}))
+      (state {:id :b}
+        (on-entry {} (script {:expr (fn [_ _] (bump! :b) nil)}))
+        (transition {:event :go :target :done}))
+      (final {:id :done}
+        (on-entry {} (script {:expr (fn [_ _] (bump! :done) nil)}))))))
 
 (specification "runner resume: starting with :resume? true picks up checkpointed config"
-               (let [dir         (tmp-dir "runner-resume-m6-")
-                     chk         (str dir "/chk")
-                     transcript1 (str dir "/run1.jsonl")
-                     transcript2 (str dir "/run2.jsonl")
-                     sid         :resume-test/session
-                     entries     (atom {})]
-                 (binding [*entries* entries]
+  (let [dir         (tmp-dir "runner-resume-m6-")
+        chk         (str dir "/chk")
+        transcript1 (str dir "/run1.jsonl")
+        transcript2 (str dir "/run2.jsonl")
+        sid         :resume-test/session
+        entries     (atom {})]
+    (binding [*entries* entries]
       ;; Run 1: starts in :a, no events available -> goes quiescent immediately.
-                   (runner/run! {:chart              two-step-chart
-                                 :session-id         sid
-                                 :transcript-path    transcript1
-                                 :checkpoint-dir     chk
-                                 :max-iterations     50
-                                 :quiescent-sleep-ms 5}))
-                 (let [entries-after-1 @entries
+      (runner/run! {:chart              two-step-chart
+                    :session-id         sid
+                    :transcript-path    transcript1
+                    :checkpoint-dir     chk
+                    :max-iterations     50
+                    :quiescent-sleep-ms 5}))
+    (let [entries-after-1 @entries
           ;; Now we want to:
           ;;   1. simulate a "crash" (no in-memory state survives)
           ;;   2. restart with :resume? true and confirm we DO NOT re-enter :a
           ;; To test cleanly, reset the counters before run 2 and assert what
           ;; on-entry hooks fire.
-                       _ (reset! entries {})]
-                   (binding [*entries* entries]
+          _               (reset! entries {})]
+      (binding [*entries* entries]
         ;; Resume run: same session-id, same checkpoint-dir. Library will not
         ;; call start! again because checkpoint has a non-empty configuration.
-                     (runner/run! {:chart              two-step-chart
-                                   :session-id         sid
-                                   :transcript-path    transcript2
-                                   :checkpoint-dir     chk
-                                   :resume?            true
-                                   :max-iterations     50
-                                   :quiescent-sleep-ms 5}))
-                   (let [entries-after-2 @entries]
-                     (assertions
-                      "run 1 entered :a"
-                      (get entries-after-1 :a) => 1
-                      "run 1 did not enter :b or :done"
-                      (boolean (or (get entries-after-1 :b) (get entries-after-1 :done))) => false
-                      "resume run did NOT re-enter :a (library does not replay on-entry on resume)"
-                      (get entries-after-2 :a) => nil
-                      "transcript 2 logs :runner/resumed (the resume code path was taken)"
-                      (let [rows (with-open [r (io/reader transcript2)]
-                                   (doall (line-seq r)))]
-                        (boolean (some #(re-find #"runner/resumed" %) rows))) => true)))))
+        (runner/run! {:chart              two-step-chart
+                      :session-id         sid
+                      :transcript-path    transcript2
+                      :checkpoint-dir     chk
+                      :resume?            true
+                      :max-iterations     50
+                      :quiescent-sleep-ms 5}))
+      (let [entries-after-2 @entries]
+        (assertions
+          "run 1 entered :a"
+          (get entries-after-1 :a) => 1
+          "run 1 did not enter :b or :done"
+          (boolean (or (get entries-after-1 :b) (get entries-after-1 :done))) => false
+          "resume run did NOT re-enter :a (library does not replay on-entry on resume)"
+          (get entries-after-2 :a) => nil
+          "transcript 2 logs :runner/resumed (the resume code path was taken)"
+          (let [rows (with-open [r (io/reader transcript2)]
+                       (doall (line-seq r)))]
+            (boolean (some #(re-find #"runner/resumed" %) rows))) => true)))))

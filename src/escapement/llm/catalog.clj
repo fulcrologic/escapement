@@ -26,10 +26,10 @@
    the ratings overlay, filtered like any other via `satisfies-policy?`
    (which takes ratings explicitly) — callers never name it directly."
   (:require
-   [clojure.string :as str]
-   [escapement.config :as config]
-   [escapement.llm.catalog-source :as src]
-   [escapement.llm.ratings :as ratings]))
+    [clojure.string :as str]
+    [escapement.config :as config]
+    [escapement.llm.catalog-source :as src]
+    [escapement.llm.ratings :as ratings]))
 
 ;; =============================================================================
 ;; Layer 2 — small local fact overlay (deep-merged over the dump; local wins)
@@ -39,9 +39,9 @@
   "Intrinsic facts for ids the models.dev dump doesn't carry yet but that
    the project still wants reachable. Keep this as small as possible."
   {"claude-sonnet-4-7" {:context-tokens 1000000 :max-output-tokens 64000
-                         :vision? true :tool-call? true :reasoning? true
-                         :family "claude" :company "Anthropic"
-                         :name "Claude Sonnet 4.7"}
+                        :vision?        true :tool-call? true :reasoning? true
+                        :family         "claude" :company "Anthropic"
+                        :name           "Claude Sonnet 4.7"}
    "deepseek-v4-flash" {:max-output-tokens 65536}})
 
 (def local-providers
@@ -53,9 +53,9 @@
    {:models {"claude-sonnet-4-7" {:pricing {:input 3.0 :output 15.0}}}}
    :openai-codex
    {:display "OpenAI Codex" :auth :subscription
-    :models {"gpt-5"      {:pricing {:input 0 :output 0}}
-             "gpt-5-mini" {:pricing {:input 0 :output 0}}
-             "o3"         {:pricing {:input 0 :output 0}}}}})
+    :models  {"gpt-5"      {:pricing {:input 0 :output 0}}
+              "gpt-5-mini" {:pricing {:input 0 :output 0}}
+              "o3"         {:pricing {:input 0 :output 0}}}}})
 
 ;; =============================================================================
 ;; Assembled tables
@@ -79,9 +79,9 @@
   [table k]
   (when (string? k)
     (or (get table k)
-        (->> (keys table)
-             (sort-by (comp - count))
-             (some (fn [kk] (when (str/starts-with? k kk) (get table kk))))))))
+      (->> (keys table)
+        (sort-by (comp - count))
+        (some (fn [kk] (when (str/starts-with? k kk) (get table kk))))))))
 
 ;; =============================================================================
 ;; Model accessors (id-keyed, provider-independent)
@@ -203,8 +203,8 @@
        true
        (if-let [i (merged-info model ratings)]
          (and (every? (fn [[k v]] (= (get i k) v)) require)
-              (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (>= x n)))) min)
-              (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (<= x n)))) max))
+           (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (>= x n)))) min)
+           (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (<= x n)))) max))
          false)))))
 
 ;; =============================================================================
@@ -221,8 +221,8 @@
    \"Unknown\"."
   [provider]
   (or (:display (provider-info provider))
-      (some-> provider name)
-      "Unknown"))
+    (some-> provider name)
+    "Unknown"))
 
 (defn subscription?
   "True when `provider` bills a flat subscription (per-token pricing is
@@ -239,8 +239,8 @@
   "Provider keywords that serve model `id`, in catalog order."
   [id]
   (->> providers
-       (filter (fn [[_ entry]] (contains? (:models entry) id)))
-       (mapv key)))
+    (filter (fn [[_ entry]] (contains? (:models entry) id)))
+    (mapv key)))
 
 (defn pricing
   "USD per 1M tokens `{:input N :output M}`.
@@ -252,9 +252,9 @@
      providers serving `id` (by `:input`), or nil."
   ([id]
    (->> (providers-for id)
-        (remove subscription?)
-        (keep #(get-in providers [% :models id :pricing]))
-        (sort-by :input)
-        first))
+     (remove subscription?)
+     (keep #(get-in providers [% :models id :pricing]))
+     (sort-by :input)
+     first))
   ([provider id]
    (get-in providers [provider :models id :pricing])))

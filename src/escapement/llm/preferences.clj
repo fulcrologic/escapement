@@ -35,10 +35,10 @@
    subscription-backed options first, climbing to premium models. Tune via
    `:llm/preferences` in `.escapement.edn` rather than editing this."
   [{:provider :z-ai-plan :model "glm-5.1"}
-   {:provider :z-ai      :model "glm-4.7"}
+   {:provider :z-ai :model "glm-4.7"}
    {:provider :anthropic :model "claude-sonnet-4-7"}
    {:provider :anthropic :model "claude-opus-4-7"}
-   {:provider :openai    :model "gpt-5"}])
+   {:provider :openai :model "gpt-5"}])
 
 (defn valid-entry?
   "True when `entry` is a `{:provider :model}` pair the catalog can
@@ -52,7 +52,7 @@
    nil when neither is present (caller falls back to the default)."
   [cfg]
   (or (:llm/preferences cfg)
-      (get-in cfg [:llm :preferences])))
+    (get-in cfg [:llm :preferences])))
 
 (defn sanitize
   "Coerce a raw preference seq to validated `{:provider :model}` entries,
@@ -60,11 +60,11 @@
    `[:provider \"model\"]` entries are accepted alongside maps."
   [raw]
   (->> raw
-       (map (fn [e]
-              (if (map? e)
-                (select-keys e [:provider :model])
-                {:provider (first e) :model (second e)})))
-       (filterv valid-entry?)))
+    (map (fn [e]
+           (if (map? e)
+             (select-keys e [:provider :model])
+             {:provider (first e) :model (second e)})))
+    (filterv valid-entry?)))
 
 (defn preferences
   "The effective priority list as validated `{:provider :model}` entries.

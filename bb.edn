@@ -1,30 +1,30 @@
-{:paths ["src" "bb_test" "demos"]
- :deps  {com.fulcrologic/statecharts {:mvn/version "1.4.0-RC13"}
-         com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
-         metosin/malli               {:mvn/version "0.16.4"}
-         cheshire/cheshire           {:mvn/version "5.13.0"}}
+{:paths    ["src" "bb_test" "demos"]
+ :deps     {com.fulcrologic/statecharts {:mvn/version "1.4.0-RC13"}
+            com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
+            metosin/malli               {:mvn/version "0.16.4"}
+            cheshire/cheshire           {:mvn/version "5.13.0"}}
  :bbin/bin {escapement {:main-opts ["-m" "escapement.cli"]}}
- :tasks {repl   {:override-builtin true
-                 :doc  "Start a babashka nrepl on port 1667"
-                 :requires ([babashka.nrepl.server :as s])
-                 :task (do (s/start-server! {:port 1667})
-                           (println "bb nREPL on 1667")
-                           (deref (promise)))}
-         sanity {:doc  "Run the bb sanity script for the engine."
-                 :task (shell "bb bb_test/sanity.clj")}
-         test   {:doc  "Run all tests under bb (test/**/*_test.clj)."
-                 :extra-paths ["test"]
-                 :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
-                 :task (exec 'escapement.test.runner/run!)}
-         test-demo-unit-test
-         {:doc  "Run the unit_test demo's own tests (segment-composition pattern)."
-          :extra-paths ["demos/unit_test/test"]
-          :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
-          :task (exec 'escapement.test.runner/run-paths!)
-          :exec-args {:paths ["demos/unit_test/test"]}}
-         test:e2e
-         {:doc  "Live e2e checks against real LLM providers (uses env API keys; skips what it can't reach). NOT run by `bb test`."
-          :extra-paths ["e2e"]
-          :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
-          :task (exec 'escapement.test.runner/run-paths!)
-          :exec-args {:paths ["e2e"]}}}}
+ :tasks    {repl   {:override-builtin true
+                    :doc              "Start a babashka nrepl on port 1667"
+                    :requires         ([babashka.nrepl.server :as s])
+                    :task             (do (s/start-server! {:port 1667})
+                                          (println "bb nREPL on 1667")
+                                          (deref (promise)))}
+            sanity {:doc  "Run the bb sanity script for the engine."
+                    :task (shell "bb bb_test/sanity.clj")}
+            test   {:doc         "Run all tests under bb (test/**/*_test.clj)."
+                    :extra-paths ["test"]
+                    :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
+                    :task        (exec 'escapement.test.runner/run!)}
+            test-demo-unit-test
+            {:doc         "Run the unit_test demo's own tests (segment-composition pattern)."
+             :extra-paths ["demos/unit_test/test"]
+             :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
+             :task        (exec 'escapement.test.runner/run-paths!)
+             :exec-args   {:paths ["demos/unit_test/test"]}}
+            test:e2e
+            {:doc         "Live e2e checks against real LLM providers (uses env API keys; skips what it can't reach). NOT run by `bb test`."
+             :extra-paths ["e2e"]
+             :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
+             :task        (exec 'escapement.test.runner/run-paths!)
+             :exec-args   {:paths ["e2e"]}}}}

@@ -32,18 +32,18 @@
     bb -m escapement.cli run matrix-team.chart/agent \\
        --input demos/matrix_team/example-input.edn"
   (:require
-   [babashka.process :as bp]
-   [clojure.java.io :as io]
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.data-model.operations :as ops]
-   [com.fulcrologic.statecharts.elements :refer [final on-entry on-exit parallel script state transition]]
-   [com.fulcrologic.statecharts.environment :as env-ns]
-   [com.fulcrologic.statecharts.protocols :as sp]
-   [escapement.chart.helpers :as h]
-   [escapement.chart.service :as service]
-   [escapement.tools.protocol :as tp]
-   [matrix-team.prompts :as p]))
+    [babashka.process :as bp]
+    [clojure.java.io :as io]
+    [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
+    [com.fulcrologic.statecharts.elements :refer [final on-entry on-exit parallel script state transition]]
+    [com.fulcrologic.statecharts.environment :as env-ns]
+    [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.chart.helpers :as h]
+    [escapement.chart.service :as service]
+    [escapement.tools.protocol :as tp]
+    [matrix-team.prompts :as p]))
 
 ;; ===========================================================================
 ;; nREPL JVM lifecycle (chart-owned) — unchanged from the original demo.
@@ -62,10 +62,10 @@
   [queue sid event-kw event-data]
   (when (and queue sid)
     (sp/send! queue {}
-              {:target            sid
-               :source-session-id sid
-               :event             event-kw
-               :data              (or event-data {})})))
+      {:target            sid
+       :source-session-id sid
+       :event             event-kw
+       :data              (or event-data {})})))
 
 (defn- watch-for-port!
   [proc queue sid ready-event failed-event]
@@ -76,26 +76,26 @@
           (loop []
             (when-let [line (.readLine rdr)]
               (when (and (not @seen?)
-                         (re-find port-line-re line))
+                      (re-find port-line-re line))
                 (let [[_ port-s] (re-find port-line-re line)]
                   (reset! seen? true)
                   (send-self! queue sid ready-event
-                              {:port (Integer/parseInt port-s)})))
+                    {:port (Integer/parseInt port-s)})))
               (recur))))
         (catch Throwable t
           (when-not @seen?
             (send-self! queue sid failed-event
-                        {:reason (str "stdout reader threw: " (.getMessage t))}))))
+              {:reason (str "stdout reader threw: " (.getMessage t))}))))
       (when-not @seen?
         (send-self! queue sid failed-event
-                    {:reason "nREPL process ended before reporting a port"})))))
+          {:reason "nREPL process ended before reporting a port"})))))
 
 (defn- spawn-nrepl!
   [region-id project-dir queue sid ready-event failed-event]
   (let [proc (bp/process ["sh" "-c" "clojure -M:nrepl 2>&1"]
-                         {:dir      project-dir
-                          :in       nil
-                          :shutdown bp/destroy-tree})]
+               {:dir      project-dir
+                :in       nil
+                :shutdown bp/destroy-tree})]
     (swap! processes assoc region-id proc)
     (watch-for-port! proc queue sid ready-event failed-event)
     nil))
@@ -110,15 +110,15 @@
 (defn- start-region-script
   [region-id ready-event failed-event]
   (script
-   {:expr
-    (fn [env data]
-      (let [queue (::sc/event-queue env)
-            sid   (env-ns/session-id env)
-            pdir  (:project-dir data)]
-        (assert (string? pdir)
-                "matrix-team chart needs :project-dir in initial data")
-        (spawn-nrepl! region-id pdir queue sid ready-event failed-event)
-        nil))}))
+    {:expr
+     (fn [env data]
+       (let [queue (::sc/event-queue env)
+             sid   (env-ns/session-id env)
+             pdir  (:project-dir data)]
+         (assert (string? pdir)
+           "matrix-team chart needs :project-dir in initial data")
+         (spawn-nrepl! region-id pdir queue sid ready-event failed-event)
+         nil))}))
 
 ;; ===========================================================================
 ;; REPL eval handler — shells out to clj-nrepl-eval against a private port.
@@ -139,7 +139,7 @@
 
 (defn- registry-of [env]
   (or (:escapement/tool-registry env)
-      (get-in env [:escapement/engine :tool-registry])))
+    (get-in env [:escapement/engine :tool-registry])))
 
 (defn- run-eval!
   [registry region-id port code timeout-ms]
@@ -148,8 +148,8 @@
         command   (str "clj-nrepl-eval -p " port " < " path)]
     (try
       (tp/dispatch registry :shell/run
-                   {:command    command
-                    :timeout-ms shell-tmo})
+        {:command    command
+         :timeout-ms shell-tmo})
       (catch Throwable t
         {:result   (str "shell dispatch threw: " (.getMessage t))
          :is-error true}))))
@@ -171,8 +171,8 @@
 
         :else
         (let [{:keys [result is-error]} (run-eval! registry region-id port
-                                                   (or (:code data) "")
-                                                   timeout-ms)]
+                                          (or (:code data) "")
+                                          timeout-ms)]
           {:result   (str result)
            :is-error (boolean is-error)})))))
 
@@ -185,20 +185,20 @@
   [region-id]
   (fn [env {:keys [reply-id reply-to timeout-ms data]}]
     (swap! pending-evals update region-id (fnil conj [])
-           {:reply-id    reply-id
-            :reply-to    reply-to
-            :timeout-ms  timeout-ms
-            :code        (or (:code data) "")
-            :env         env
-            :enqueued-at (System/currentTimeMillis)})
+      {:reply-id    reply-id
+       :reply-to    reply-to
+       :timeout-ms  timeout-ms
+       :code        (or (:code data) "")
+       :env         env
+       :enqueued-at (System/currentTimeMillis)})
     nil))
 
 (defn- post-error-reply [env item reason]
   (service/post-reply env
-                      {:reply-id (:reply-id item)
-                       :reply-to (:reply-to item)
-                       :result   reason
-                       :is-error true}))
+    {:reply-id (:reply-id item)
+     :reply-to (:reply-to item)
+     :result   reason
+     :is-error true}))
 
 (defn- drain-queue-async!
   [region-id port]
@@ -216,16 +216,16 @@
 
               (not (pos? remaining))
               (post-error-reply env item
-                                (str "Queued eval expired before REPL became ready (waited "
-                                     elapsed "ms)."))
+                (str "Queued eval expired before REPL became ready (waited "
+                  elapsed "ms)."))
 
               :else
               (let [{:keys [result is-error]} (run-eval! registry region-id port code remaining)]
                 (service/post-reply env
-                                    {:reply-id (:reply-id item)
-                                     :reply-to (:reply-to item)
-                                     :result   (str result)
-                                     :is-error (boolean is-error)})))))))))
+                  {:reply-id (:reply-id item)
+                   :reply-to (:reply-to item)
+                   :result   (str result)
+                   :is-error (boolean is-error)})))))))))
 
 (defn- drain-queue-with-error!
   [region-id reason]
@@ -250,73 +250,73 @@
 
 (defn- exp-repl-region []
   (state {:id :exp-repl :initial :exp-repl-starting}
-         (on-entry {} (service/register-tool! exp-eval-decl))
-         (on-exit  {} (service/unregister-tool! :exp/eval))
-         (on-exit  {} (script {:expr (fn [_ _] (kill-nrepl! :exp-repl))}))
+    (on-entry {} (service/register-tool! exp-eval-decl))
+    (on-exit {} (service/unregister-tool! :exp/eval))
+    (on-exit {} (script {:expr (fn [_ _] (kill-nrepl! :exp-repl))}))
 
-         (state {:id :exp-repl-starting}
-                (on-entry {} (start-region-script :exp-repl
-                                                  :exp-repl/ready
-                                                  :exp-repl/failed))
-                (h/handle-tool :exp/eval (make-deferring-eval-handler :exp-repl))
-                (transition {:event :exp-repl/ready :target :exp-repl-ready :type :internal}
-                            (script {:expr (fn [_ data]
-                                             [(ops/assign :experimenter-port
-                                                          (get-in data [:_event :data :port]))])}))
-                (transition {:event :exp-repl/failed :target :exp-repl-aborted :type :internal}
-                            (script {:expr (fn [_ data]
-                                             [(ops/assign :exp-repl-error
-                                                          (get-in data [:_event :data :reason]))])})))
+    (state {:id :exp-repl-starting}
+      (on-entry {} (start-region-script :exp-repl
+                     :exp-repl/ready
+                     :exp-repl/failed))
+      (h/handle-tool :exp/eval (make-deferring-eval-handler :exp-repl))
+      (transition {:event :exp-repl/ready :target :exp-repl-ready :type :internal}
+        (script {:expr (fn [_ data]
+                         [(ops/assign :experimenter-port
+                            (get-in data [:_event :data :port]))])}))
+      (transition {:event :exp-repl/failed :target :exp-repl-aborted :type :internal}
+        (script {:expr (fn [_ data]
+                         [(ops/assign :exp-repl-error
+                            (get-in data [:_event :data :reason]))])})))
 
-         (state {:id :exp-repl-ready}
-                (on-entry {} (script {:expr (fn [_ data]
-                                              (drain-queue-async! :exp-repl
-                                                                  (:experimenter-port data))
-                                              nil)}))
-                (h/handle-tool :exp/eval (make-ready-eval-handler :exp-repl :experimenter-port)))
+    (state {:id :exp-repl-ready}
+      (on-entry {} (script {:expr (fn [_ data]
+                                    (drain-queue-async! :exp-repl
+                                      (:experimenter-port data))
+                                    nil)}))
+      (h/handle-tool :exp/eval (make-ready-eval-handler :exp-repl :experimenter-port)))
 
-         (state {:id :exp-repl-aborted}
-                (on-entry {} (script {:expr (fn [_ data]
-                                              (drain-queue-with-error!
-                                               :exp-repl
-                                               (str "Experimenter REPL aborted: "
-                                                    (:exp-repl-error data)))
-                                              nil)})))))
+    (state {:id :exp-repl-aborted}
+      (on-entry {} (script {:expr (fn [_ data]
+                                    (drain-queue-with-error!
+                                      :exp-repl
+                                      (str "Experimenter REPL aborted: "
+                                        (:exp-repl-error data)))
+                                    nil)})))))
 
 (defn- test-repl-region []
   (state {:id :test-repl :initial :test-repl-starting}
-         (on-entry {} (service/register-tool! test-eval-decl))
-         (on-exit  {} (service/unregister-tool! :test/eval))
-         (on-exit  {} (script {:expr (fn [_ _] (kill-nrepl! :test-repl))}))
+    (on-entry {} (service/register-tool! test-eval-decl))
+    (on-exit {} (service/unregister-tool! :test/eval))
+    (on-exit {} (script {:expr (fn [_ _] (kill-nrepl! :test-repl))}))
 
-         (state {:id :test-repl-starting}
-                (on-entry {} (start-region-script :test-repl
-                                                  :test-repl/ready
-                                                  :test-repl/failed))
-                (h/handle-tool :test/eval (make-deferring-eval-handler :test-repl))
-                (transition {:event :test-repl/ready :target :test-repl-ready :type :internal}
-                            (script {:expr (fn [_ data]
-                                             [(ops/assign :tester-port
-                                                          (get-in data [:_event :data :port]))])}))
-                (transition {:event :test-repl/failed :target :test-repl-aborted :type :internal}
-                            (script {:expr (fn [_ data]
-                                             [(ops/assign :test-repl-error
-                                                          (get-in data [:_event :data :reason]))])})))
+    (state {:id :test-repl-starting}
+      (on-entry {} (start-region-script :test-repl
+                     :test-repl/ready
+                     :test-repl/failed))
+      (h/handle-tool :test/eval (make-deferring-eval-handler :test-repl))
+      (transition {:event :test-repl/ready :target :test-repl-ready :type :internal}
+        (script {:expr (fn [_ data]
+                         [(ops/assign :tester-port
+                            (get-in data [:_event :data :port]))])}))
+      (transition {:event :test-repl/failed :target :test-repl-aborted :type :internal}
+        (script {:expr (fn [_ data]
+                         [(ops/assign :test-repl-error
+                            (get-in data [:_event :data :reason]))])})))
 
-         (state {:id :test-repl-ready}
-                (on-entry {} (script {:expr (fn [_ data]
-                                              (drain-queue-async! :test-repl
-                                                                  (:tester-port data))
-                                              nil)}))
-                (h/handle-tool :test/eval (make-ready-eval-handler :test-repl :tester-port)))
+    (state {:id :test-repl-ready}
+      (on-entry {} (script {:expr (fn [_ data]
+                                    (drain-queue-async! :test-repl
+                                      (:tester-port data))
+                                    nil)}))
+      (h/handle-tool :test/eval (make-ready-eval-handler :test-repl :tester-port)))
 
-         (state {:id :test-repl-aborted}
-                (on-entry {} (script {:expr (fn [_ data]
-                                              (drain-queue-with-error!
-                                               :test-repl
-                                               (str "Tester REPL aborted: "
-                                                    (:test-repl-error data)))
-                                              nil)})))))
+    (state {:id :test-repl-aborted}
+      (on-entry {} (script {:expr (fn [_ data]
+                                    (drain-queue-with-error!
+                                      :test-repl
+                                      (str "Tester REPL aborted: "
+                                        (:test-repl-error data)))
+                                    nil)})))))
 
 ;; ===========================================================================
 ;; Verdict schemas — the typed payload each region produces at idle.
@@ -330,10 +330,10 @@
      :done                 — chart terminates into :finished
      :stuck                — chart terminates into :aborted"
   [:map
-   [:status      [:enum :proposed-new-version :done :stuck]]
-   [:summary     :string]
-   [:approach    {:optional true} :string]   ;; only when :proposed-new-version
-   [:best-timing {:optional true} :string]]) ;; only when :done
+   [:status [:enum :proposed-new-version :done :stuck]]
+   [:summary :string]
+   [:approach {:optional true} :string]                     ;; only when :proposed-new-version
+   [:best-timing {:optional true} :string]])                ;; only when :done
 
 (def ^:private tester-verdict-schema
   "What the tester must submit at the end of EVERY turn.
@@ -342,29 +342,29 @@
      :pass — chart wakes the experimenter with the summary
      :fail — chart wakes the experimenter with summary + details"
   [:map
-   [:status  [:enum :pass :fail]]
+   [:status [:enum :pass :fail]]
    [:summary :string]
-   [:details {:optional true} :string]])  ;; only when :fail
+   [:details {:optional true} :string]])                    ;; only when :fail
 
 ;; ===========================================================================
 ;; Per-agent params-fns
 ;; ===========================================================================
 
 (defn- experimenter-params [data]
-  {:system               (p/render :experimenter data)
-   :real-tools           [:fs/read :fs/write :fs/edit :shell/run]
-   :chart-tools          [{:owner :exp-repl}]
-   :verdict-schema       experimenter-verdict-schema
+  {:system         (p/render :experimenter data)
+   :real-tools     [:fs/read :fs/write :fs/edit :shell/run]
+   :chart-tools    [{:owner :exp-repl}]
+   :verdict-schema experimenter-verdict-schema
    :initial-user-message
    (str "Begin work on `com.example.matrix/mult` in `"
-        (:project-dir data) "/src/com/example/matrix.clj`. "
-        "Follow the instructions exactly.")})
+     (:project-dir data) "/src/com/example/matrix.clj`. "
+     "Follow the instructions exactly.")})
 
 (defn- tester-params [data]
-  {:system          (p/render :tester data)
-   :real-tools      [:fs/read :fs/write :fs/edit]
-   :chart-tools     [{:owner :test-repl}]
-   :verdict-schema  tester-verdict-schema
+  {:system         (p/render :tester data)
+   :real-tools     [:fs/read :fs/write :fs/edit]
+   :chart-tools    [{:owner :test-repl}]
+   :verdict-schema tester-verdict-schema
    ;; No :initial-user-message — the tester parks in :awaiting-user until the
    ;; experimenter's first verdict arrives via tell-other-llm!.
    })
@@ -375,19 +375,19 @@
 
 (defn- experimenter-region []
   (state {:id :experimenter :initial :experimenter-running}
-         (state {:id :experimenter-running}
-                (h/llm-conversation
-                 {:id        "experimenter"
-                  :params-fn (fn [_env data] (experimenter-params data))}))
-         (final {:id :experimenter-finished})))
+    (state {:id :experimenter-running}
+      (h/llm-conversation
+        {:id        "experimenter"
+         :params-fn (fn [_env data] (experimenter-params data))}))
+    (final {:id :experimenter-finished})))
 
 (defn- tester-region []
   (state {:id :tester :initial :tester-running}
-         (state {:id :tester-running}
-                (h/llm-conversation
-                 {:id        "tester"
-                  :params-fn (fn [_env data] (tester-params data))}))
-         (final {:id :tester-finished})))
+    (state {:id :tester-running}
+      (h/llm-conversation
+        {:id        "tester"
+         :params-fn (fn [_env data] (tester-params data))}))
+    (final {:id :tester-finished})))
 
 ;; ===========================================================================
 ;; Routing — at idle boundaries, the chart inspects :verdict and either
@@ -410,25 +410,25 @@
 (defn- ->tester-msg [data]
   (let [v (get-in data [:_event :data :verdict])]
     (str "EXPERIMENTER ANNOUNCEMENT — new candidate ready\n\n"
-         "Summary: " (:summary v) "\n"
-         "Approach: " (or (:approach v) "(no approach detail)") "\n\n"
-         "The source file at `src/com/example/matrix.clj` has been updated and reloaded in the\n"
-         "experimenter's REPL. Reload it in YOUR REPL, run your correctness tests, add new\n"
-         "edge cases if you can think of any, and end your turn by submitting your verdict.")))
+      "Summary: " (:summary v) "\n"
+      "Approach: " (or (:approach v) "(no approach detail)") "\n\n"
+      "The source file at `src/com/example/matrix.clj` has been updated and reloaded in the\n"
+      "experimenter's REPL. Reload it in YOUR REPL, run your correctness tests, add new\n"
+      "edge cases if you can think of any, and end your turn by submitting your verdict.")))
 
 (defn- ->experimenter-pass-msg [data]
   (let [v (get-in data [:_event :data :verdict])]
     (str "TESTER VERDICT — PASSED\n\n"
-         (:summary v) "\n\n"
-         "You may refine for performance and submit another :proposed-new-version,\n"
-         "or — if you're satisfied with the current performance — submit :done.")))
+      (:summary v) "\n\n"
+      "You may refine for performance and submit another :proposed-new-version,\n"
+      "or — if you're satisfied with the current performance — submit :done.")))
 
 (defn- ->experimenter-fail-msg [data]
   (let [v (get-in data [:_event :data :verdict])]
     (str "TESTER VERDICT — FAILED\n\n"
-         "Summary: " (:summary v) "\n\n"
-         "Details:\n" (or (:details v) "(no details provided)") "\n\n"
-         "Fix the bug and submit a new :proposed-new-version.")))
+      "Summary: " (:summary v) "\n\n"
+      "Details:\n" (or (:details v) "(no details provided)") "\n\n"
+      "Fix the bug and submit a new :proposed-new-version.")))
 
 ;; ===========================================================================
 ;; Chart
@@ -442,92 +442,92 @@
         abs     (.getAbsolutePath (io/file project))]
     [(ops/assign :project-dir abs)
      (ops/assign :source-path (str abs "/src/com/example/matrix.clj"))
-     (ops/assign :test-path   (str abs "/test/com/example/matrix_test.clj"))
+     (ops/assign :test-path (str abs "/test/com/example/matrix_test.clj"))
      (ops/assign :max-iterations (or (:max-iterations data) 5))]))
 
 (def agent
   (chart/statechart
-   {:initial :run}
+    {:initial :run}
 
-   (state {:id :run :initial :init}
+    (state {:id :run :initial :init}
 
-          (state {:id :init}
-                 (on-entry {} (script {:expr init-derivations}))
-                 (transition {:target :work}))
+      (state {:id :init}
+        (on-entry {} (script {:expr init-derivations}))
+        (transition {:target :work}))
 
-          (parallel {:id :work}
+      (parallel {:id :work}
 
-                    (exp-repl-region)
-                    (test-repl-region)
-                    (experimenter-region)
-                    (tester-region)
+        (exp-repl-region)
+        (test-repl-region)
+        (experimenter-region)
+        (tester-region)
 
-                    ;; --- routing: experimenter idled with :proposed-new-version
-                    (transition
-                     {:event :llm.idle
-                      :type  :internal
-                      :cond  (and-cond (idle-from? "experimenter")
-                                       (verdict-status= :proposed-new-version))}
-                     (script
-                      {:expr (fn [env data]
-                               (h/tell-other-llm! env "tester" (->tester-msg data))
-                               nil)}))
+        ;; --- routing: experimenter idled with :proposed-new-version
+        (transition
+          {:event :llm.idle
+           :type  :internal
+           :cond  (and-cond (idle-from? "experimenter")
+                    (verdict-status= :proposed-new-version))}
+          (script
+            {:expr (fn [env data]
+                     (h/tell-other-llm! env "tester" (->tester-msg data))
+                     nil)}))
 
-                    ;; --- routing: tester idled with :pass
-                    (transition
-                     {:event :llm.idle
-                      :type  :internal
-                      :cond  (and-cond (idle-from? "tester")
-                                       (verdict-status= :pass))}
-                     (script
-                      {:expr (fn [env data]
-                               (h/tell-other-llm! env "experimenter" (->experimenter-pass-msg data))
-                               nil)}))
+        ;; --- routing: tester idled with :pass
+        (transition
+          {:event :llm.idle
+           :type  :internal
+           :cond  (and-cond (idle-from? "tester")
+                    (verdict-status= :pass))}
+          (script
+            {:expr (fn [env data]
+                     (h/tell-other-llm! env "experimenter" (->experimenter-pass-msg data))
+                     nil)}))
 
-                    ;; --- routing: tester idled with :fail
-                    (transition
-                     {:event :llm.idle
-                      :type  :internal
-                      :cond  (and-cond (idle-from? "tester")
-                                       (verdict-status= :fail))}
-                     (script
-                      {:expr (fn [env data]
-                               (h/tell-other-llm! env "experimenter" (->experimenter-fail-msg data))
-                               nil)})))
+        ;; --- routing: tester idled with :fail
+        (transition
+          {:event :llm.idle
+           :type  :internal
+           :cond  (and-cond (idle-from? "tester")
+                    (verdict-status= :fail))}
+          (script
+            {:expr (fn [env data]
+                     (h/tell-other-llm! env "experimenter" (->experimenter-fail-msg data))
+                     nil)})))
 
-          ;; --- termination: experimenter idled with :done ---
-          (transition
-           {:event :llm.idle
-            :target :finished
-            :cond  (and-cond (idle-from? "experimenter")
-                             (verdict-status= :done))}
-           (script {:expr (fn [_env data]
-                            (let [v (get-in data [:_event :data :verdict])]
-                              [(ops/assign :final-summary (:summary v))
-                               (ops/assign :best-timing   (or (:best-timing v) "(not provided)"))]))}))
+      ;; --- termination: experimenter idled with :done ---
+      (transition
+        {:event  :llm.idle
+         :target :finished
+         :cond   (and-cond (idle-from? "experimenter")
+                   (verdict-status= :done))}
+        (script {:expr (fn [_env data]
+                         (let [v (get-in data [:_event :data :verdict])]
+                           [(ops/assign :final-summary (:summary v))
+                            (ops/assign :best-timing (or (:best-timing v) "(not provided)"))]))}))
 
-          ;; --- termination: experimenter idled with :stuck ---
-          (transition
-           {:event :llm.idle
-            :target :aborted
-            :cond  (and-cond (idle-from? "experimenter")
-                             (verdict-status= :stuck))}
-           (script {:expr (fn [_env data]
-                            [(ops/assign :abort-reason
-                                         (str "experimenter is stuck: "
-                                              (get-in data [:_event :data :verdict :summary])))])}))
+      ;; --- termination: experimenter idled with :stuck ---
+      (transition
+        {:event  :llm.idle
+         :target :aborted
+         :cond   (and-cond (idle-from? "experimenter")
+                   (verdict-status= :stuck))}
+        (script {:expr (fn [_env data]
+                         [(ops/assign :abort-reason
+                            (str "experimenter is stuck: "
+                              (get-in data [:_event :data :verdict :summary])))])}))
 
-          ;; --- termination: either REPL failed to start ---
-          (transition {:event :exp-repl/failed :target :aborted}
-                      (script {:expr (fn [_ data]
-                                       [(ops/assign :abort-reason
-                                                    (str "experimenter REPL failed: "
-                                                         (get-in data [:_event :data :reason])))])}))
-          (transition {:event :test-repl/failed :target :aborted}
-                      (script {:expr (fn [_ data]
-                                       [(ops/assign :abort-reason
-                                                    (str "tester REPL failed: "
-                                                         (get-in data [:_event :data :reason])))])}))
+      ;; --- termination: either REPL failed to start ---
+      (transition {:event :exp-repl/failed :target :aborted}
+        (script {:expr (fn [_ data]
+                         [(ops/assign :abort-reason
+                            (str "experimenter REPL failed: "
+                              (get-in data [:_event :data :reason])))])}))
+      (transition {:event :test-repl/failed :target :aborted}
+        (script {:expr (fn [_ data]
+                         [(ops/assign :abort-reason
+                            (str "tester REPL failed: "
+                              (get-in data [:_event :data :reason])))])}))
 
-          (final {:id :finished})
-          (final {:id :aborted}))))
+      (final {:id :finished})
+      (final {:id :aborted}))))

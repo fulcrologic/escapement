@@ -16,14 +16,14 @@
    .cached_tokens`, which we surface as `:cache-read-input-tokens` for
    transcript symmetry."
   (:require
-   [babashka.http-client :as http]
-   [cheshire.core :as json]
-   [clojure.string :as str]
-   [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
-   [escapement.llm.protocol :as proto]
-   [escapement.llm.types :as types])
+    [babashka.http-client :as http]
+    [cheshire.core :as json]
+    [clojure.string :as str]
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [escapement.llm.protocol :as proto]
+    [escapement.llm.types :as types])
   (:import
-   (java.io BufferedReader InputStreamReader)))
+    (java.io BufferedReader InputStreamReader)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Request translation: our Request -> OpenAI Chat Completions JSON
@@ -32,9 +32,9 @@
   "Concatenate :text blocks from a content vector; nil when there are none."
   [blocks]
   (let [s (->> blocks
-               (filter #(= :text (:type %)))
-               (map :text)
-               (str/join ""))]
+            (filter #(= :text (:type %)))
+            (map :text)
+            (str/join ""))]
     (when (seq s) s)))
 
 (defn- user-content-block->openai [block]
@@ -74,24 +74,24 @@
    PLUS one `role:tool` message per tool_result block. Returns a vector — the
    caller flattens."
   [{:keys [content]}]
-  (let [trs (tool-result-blocks content)
+  (let [trs            (tool-result-blocks content)
         content-blocks (->> content
-                            (remove #(= :tool_result (:type %)))
-                            (keep user-content-block->openai)
-                            vec)
-        txt (text-content content)
-        msgs (cond-> []
-               (seq content-blocks) (conj {"role" "user" "content" content-blocks})
-               (and (empty? content-blocks) txt) (conj {"role" "user" "content" txt}))]
+                         (remove #(= :tool_result (:type %)))
+                         (keep user-content-block->openai)
+                         vec)
+        txt            (text-content content)
+        msgs           (cond-> []
+                         (seq content-blocks) (conj {"role" "user" "content" content-blocks})
+                         (and (empty? content-blocks) txt) (conj {"role" "user" "content" txt}))]
     (into msgs
-          (mapv (fn [{:keys [tool_use_id content is-error]}]
-                  (cond-> {"role"         "tool"
-                           "tool_call_id" tool_use_id
-                           "content"      (or content "")}
-                    ;; OpenAI has no is_error flag; surface it inline so the
-                    ;; model can still see the signal.
-                    is-error (update "content" #(str "[error] " %))))
-                trs))))
+      (mapv (fn [{:keys [tool_use_id content is-error]}]
+              (cond-> {"role"         "tool"
+                       "tool_call_id" tool_use_id
+                       "content"      (or content "")}
+                ;; OpenAI has no is_error flag; surface it inline so the
+                ;; model can still see the signal.
+                is-error (update "content" #(str "[error] " %))))
+        trs))))
 
 (defn- assistant-message->openai
   "An :assistant message becomes ONE OpenAI assistant message that may carry
@@ -100,8 +100,8 @@
   (let [txt   (text-content content)
         calls (tool-use-blocks content)]
     [(cond-> {"role" "assistant"}
-       txt          (assoc "content" txt)
-       (seq calls)  (assoc "tool_calls" (mapv tool-use->openai-call calls))
+       txt (assoc "content" txt)
+       (seq calls) (assoc "tool_calls" (mapv tool-use->openai-call calls))
        ;; OpenAI requires `content` to be present (string or null) when there
        ;; are no tool_calls — fill in nil explicitly to avoid 400s.
        (and (nil? txt) (empty? calls))
@@ -109,7 +109,7 @@
 
 (defn- message->openai [{:keys [role] :as msg}]
   (case role
-    :user      (user-message->openai msg)
+    :user (user-message->openai msg)
     :assistant (assistant-message->openai msg)))
 
 (defn- tool->openai [{:keys [name description input-schema]}]
@@ -120,12 +120,12 @@
 
 (defn- tool-choice->openai [tc]
   (cond
-    (nil? tc)     nil
-    (= :auto tc)  "auto"
-    (= :any tc)   "required"
-    (= :none tc)  "none"
-    (map? tc)     {"type"     "function"
-                   "function" {"name" (:name tc)}}))
+    (nil? tc) nil
+    (= :auto tc) "auto"
+    (= :any tc) "required"
+    (= :none tc) "none"
+    (map? tc) {"type"     "function"
+               "function" {"name" (:name tc)}}))
 
 (def ^:private legacy-max-tokens-prefixes
   "Model-id prefixes that still require the deprecated `max_tokens` key:
@@ -143,34 +143,34 @@
     "max_completion_tokens"))
 
 (>defn request->openai-json
-       "Pure translation from our Request map to an OpenAI Chat Completions request
-   body (Clojure map with string keys, ready for JSON serialization)."
-       [request]
-       [:map => :map]
-       (let [{:keys [model system messages tools max-tokens
-                     temperature top-p stop-sequences tool-choice metadata]} request
-             sys-msg  (when system [{"role" "system" "content" system}])
-             rest-msg (into [] (mapcat message->openai messages))
-             all-msgs (into (vec sys-msg) rest-msg)]
-         (cond-> {"model"    model
-                  "messages" all-msgs}
-           max-tokens           (assoc (max-tokens-key model) max-tokens)
-           (seq tools)          (assoc "tools" (mapv tool->openai tools))
-           (some? temperature)  (assoc "temperature" temperature)
-           (some? top-p)        (assoc "top_p" top-p)
-           (seq stop-sequences) (assoc "stop" (vec stop-sequences))
-           (some? tool-choice)  (assoc "tool_choice" (tool-choice->openai tool-choice))
-           (:user-id metadata)  (assoc "user" (:user-id metadata)))))
+  "Pure translation from our Request map to an OpenAI Chat Completions request
+body (Clojure map with string keys, ready for JSON serialization)."
+  [request]
+  [:map => :map]
+  (let [{:keys [model system messages tools max-tokens
+                temperature top-p stop-sequences tool-choice metadata]} request
+        sys-msg  (when system [{"role" "system" "content" system}])
+        rest-msg (into [] (mapcat message->openai messages))
+        all-msgs (into (vec sys-msg) rest-msg)]
+    (cond-> {"model"    model
+             "messages" all-msgs}
+      max-tokens (assoc (max-tokens-key model) max-tokens)
+      (seq tools) (assoc "tools" (mapv tool->openai tools))
+      (some? temperature) (assoc "temperature" temperature)
+      (some? top-p) (assoc "top_p" top-p)
+      (seq stop-sequences) (assoc "stop" (vec stop-sequences))
+      (some? tool-choice) (assoc "tool_choice" (tool-choice->openai tool-choice))
+      (:user-id metadata) (assoc "user" (:user-id metadata)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Response translation: OpenAI JSON -> our Response
 
 (defn- parse-finish-reason [s]
   (case s
-    "stop"           :end_turn
-    "length"         :max_tokens
-    "tool_calls"     :tool_use
-    "function_call"  :tool_use
+    "stop" :end_turn
+    "length" :max_tokens
+    "tool_calls" :tool_use
+    "function_call" :tool_use
     "content_filter" :refusal
     :end_turn))
 
@@ -200,28 +200,28 @@
 (defn- usage->ours [usage]
   (let [cached (some-> usage (get "prompt_tokens_details") (get "cached_tokens"))]
     (cond-> {}
-      (get usage "prompt_tokens")     (assoc :input-tokens (get usage "prompt_tokens"))
+      (get usage "prompt_tokens") (assoc :input-tokens (get usage "prompt_tokens"))
       (get usage "completion_tokens") (assoc :output-tokens (get usage "completion_tokens"))
-      cached                          (assoc :cache-read-input-tokens cached))))
+      cached (assoc :cache-read-input-tokens cached))))
 
 (>defn openai-json->response
-       "Pure translation from a parsed OpenAI Chat Completions response to our
-   Response map."
-       [parsed request-model]
-       [:map :string => :map]
-       (let [choice  (first (get parsed "choices"))
-             msg     (get choice "message")
-             finish  (get choice "finish_reason")
-             content (message->content-blocks msg)]
-         {:stop-reason      (parse-finish-reason finish)
+  "Pure translation from a parsed OpenAI Chat Completions response to our
+Response map."
+  [parsed request-model]
+  [:map :string => :map]
+  (let [choice  (first (get parsed "choices"))
+        msg     (get choice "message")
+        finish  (get choice "finish_reason")
+        content (message->content-blocks msg)]
+    {:stop-reason      (parse-finish-reason finish)
      ;; Our Response schema requires at least an empty content vector. Some
      ;; pure-tool-call turns have no text — that's fine, the :tool_use blocks
      ;; carry the payload. Guarantee a non-nil vector.
-          :content          (vec content)
-          :usage            (usage->ours (get parsed "usage" {}))
-          :model            (or (get parsed "model") request-model)
-          :backend-metadata (cond-> {:backend :openai}
-                              (get parsed "id") (assoc :message-id (get parsed "id")))}))
+     :content          (vec content)
+     :usage            (usage->ours (get parsed "usage" {}))
+     :model            (or (get parsed "model") request-model)
+     :backend-metadata (cond-> {:backend :openai}
+                         (get parsed "id") (assoc :message-id (get parsed "id")))}))
 
 ;;; ---------------------------------------------------------------------------
 ;;; HTTP
@@ -237,21 +237,21 @@
   (let [url     (str base-url "/chat/completions")
         headers (merge {"Content-Type"  "application/json"
                         "Authorization" (str "Bearer " api-key)}
-                       extra-headers)
+                  extra-headers)
         body    (json/generate-string body-map)
         {:keys [status body]} (http/post url
-                                         {:headers headers
-                                          :body    body
-                                          :timeout (or http-timeout-ms 60000)
-                                          :throw   false})]
+                                {:headers headers
+                                 :body    body
+                                 :timeout (or http-timeout-ms 60000)
+                                 :throw   false})]
     (when-not (and (>= status 200) (< status 300))
       (throw (ex-info (str "OpenAI API error: HTTP " status)
-                      {:status status :body body :url url})))
+               {:status status :body body :url url})))
     (try
       (json/parse-string body)
       (catch Throwable t
         (throw (ex-info "Failed to parse OpenAI API JSON response"
-                        {:body body :cause (.getMessage t)}))))))
+                 {:body body :cause (.getMessage t)}))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Streaming (SSE) — Chat Completions with "stream": true
@@ -272,7 +272,7 @@
    the last streamed usage object (running usage is kept here so a downstream
    consumer can surface it on deltas without re-architecting — see task-004)."
   []
-  {:id nil :model nil :content "" :tool-calls (sorted-map)
+  {:id            nil :model nil :content "" :tool-calls (sorted-map)
    :finish-reason nil :usage nil})
 
 (defn- merge-tool-call-delta
@@ -283,16 +283,16 @@
   (let [idx     (or index 0)
         fn*     (get tc "function")
         cur     (get-in acc [:tool-calls idx]
-                        {"index" idx "type" "function"
-                         "function" {"name" "" "arguments" ""}})
+                  {"index"    idx "type" "function"
+                   "function" {"name" "" "arguments" ""}})
         updated (cond-> cur
-                  id   (assoc "id" id)
+                  id (assoc "id" id)
                   type (assoc "type" type)
                   (get fn* "name")
                   (assoc-in ["function" "name"] (get fn* "name"))
                   (get fn* "arguments")
                   (update-in ["function" "arguments"]
-                             str (get fn* "arguments")))]
+                    str (get fn* "arguments")))]
     (assoc-in acc [:tool-calls idx] updated)))
 
 (defn- with-running-usage
@@ -317,7 +317,7 @@
    fold — see `with-running-usage`). Pure except for the supplied callback."
   [acc chunk on-delta]
   (let [acc    (cond-> acc
-                 (get chunk "id")    (assoc :id (get chunk "id"))
+                 (get chunk "id") (assoc :id (get chunk "id"))
                  (get chunk "model") (assoc :model (get chunk "model"))
                  ;; Final usage chunk (stream_options.include_usage) — and
                  ;; some providers attach usage to the finish chunk too.
@@ -331,7 +331,7 @@
         acc    (if (and (string? text) (seq text))
                  (do (when on-delta
                        (on-delta (with-running-usage
-                                  {:type :text-delta :text text} acc)))
+                                   {:type :text-delta :text text} acc)))
                      (update acc :content str text))
                  acc)]
     (reduce merge-tool-call-delta acc (get delta "tool_calls" []))))
@@ -349,7 +349,7 @@
                          "finish_reason" (:finish-reason acc)
                          "message"       msg}]
              "usage"   (or (:usage acc) {})}
-      (:id acc)    (assoc "id" (:id acc))
+      (:id acc) (assoc "id" (:id acc))
       (:model acc) (assoc "model" (:model acc)))))
 
 (defn parse-openai-sse!
@@ -362,15 +362,15 @@
     (let [line (.readLine reader)]
       (if (nil? line)
         (openai-json->response (stream-acc->openai-body acc)
-                               (str request-model))
+          (str request-model))
         (if (str/starts-with? line "data:")
           (let [data (str/trim (subs line 5))]
             (if (or (empty? data) (= data "[DONE]"))
               (recur acc)
               (recur (stream-acc-step
-                      acc (json/parse-string data)
-                      (fn [d] (try (when on-delta (on-delta d))
-                                   (catch Throwable _ nil)))))))
+                       acc (json/parse-string data)
+                       (fn [d] (try (when on-delta (on-delta d))
+                                    (catch Throwable _ nil)))))))
           (recur acc))))))
 
 (defn- stream-chat! [{:keys [base-url api-key extra-headers http-timeout-ms]}
@@ -379,24 +379,24 @@
         headers (merge {"Content-Type"  "application/json"
                         "Accept"        "text/event-stream"
                         "Authorization" (str "Bearer " api-key)}
-                       extra-headers)
+                  extra-headers)
         ;; stream:true plus stream_options.include_usage so the final usage
         ;; chunk arrives, matching the buffered path's usage.
         body    (json/generate-string
-                 (assoc body-map
-                        "stream" true
-                        "stream_options" {"include_usage" true}))
+                  (assoc body-map
+                    "stream" true
+                    "stream_options" {"include_usage" true}))
         {:keys [status body]} (http/post url
-                                         {:headers headers
-                                          :body    body
-                                          :as      :stream
-                                          :timeout (or http-timeout-ms 60000)
-                                          :throw   false})]
+                                {:headers headers
+                                 :body    body
+                                 :as      :stream
+                                 :timeout (or http-timeout-ms 60000)
+                                 :throw   false})]
     (when-not (and (>= status 200) (< status 300))
       (throw (ex-info (str "OpenAI API error: HTTP " status)
-                      {:status status
-                       :body   (try (slurp body) (catch Throwable _ ""))
-                       :url    url})))
+               {:status status
+                :body   (try (slurp body) (catch Throwable _ ""))
+                :url    url})))
     (with-open [reader (BufferedReader. (InputStreamReader. body "UTF-8"))]
       (parse-openai-sse! reader request-model on-delta))))
 
@@ -428,7 +428,7 @@
                           :response response}))
         (when-let [err (types/validate-response response)]
           (throw (ex-info "OpenAI backend produced an invalid response"
-                          {:errors err :response response :raw parsed})))
+                   {:errors err :response response :raw parsed})))
         response)))
 
   proto/StreamingLLMBackend
@@ -455,24 +455,24 @@
                           :response response}))
         (when-let [err (types/validate-response response)]
           (throw (ex-info "OpenAI backend produced an invalid response"
-                          {:errors err :response response})))
+                   {:errors err :response response})))
         response))))
 
 (>defn new-backend
-       "Construct an OpenAI Chat Completions backend.
+  "Construct an OpenAI Chat Completions backend.
 
-   Required opts:
-   - `:api-key`  — string.
-   - `:base-url` — string, e.g. \"https://api.openai.com/v1\" or an
-                   OpenAI-compatible endpoint root (must NOT include the
-                   trailing `/chat/completions`).
+Required opts:
+- `:api-key`  — string.
+- `:base-url` — string, e.g. \"https://api.openai.com/v1\" or an
+              OpenAI-compatible endpoint root (must NOT include the
+              trailing `/chat/completions`).
 
-   Optional opts:
-   - `:default-model`   — string used when Request omits `:model`.
-   - `:extra-headers`   — map of additional request headers.
-   - `:http-timeout-ms` — request timeout (default 60000).
-   - `:transcript-fn`   — `(fn [event])` called with `:llm/request` / `:llm/response`."
-       ([] [=> :any] (new-backend {}))
-       ([opts]
-        [:map => :any]
-        (->OpenAIBackend opts)))
+Optional opts:
+- `:default-model`   — string used when Request omits `:model`.
+- `:extra-headers`   — map of additional request headers.
+- `:http-timeout-ms` — request timeout (default 60000).
+- `:transcript-fn`   — `(fn [event])` called with `:llm/request` / `:llm/response`."
+  ([] [=> :any] (new-backend {}))
+  ([opts]
+   [:map => :any]
+   (->OpenAIBackend opts)))

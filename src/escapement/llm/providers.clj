@@ -14,7 +14,7 @@
    Backend constructors are resolved lazily (require + resolve) so this ns
    stays cheap to load and pulls in only the backends actually used."
   (:require
-   [clojure.string :as str]))
+    [clojure.string :as str]))
 
 (defn build-api-backend
   "Anthropic-compatible (Messages API) backend: Anthropic, z.ai,
@@ -74,79 +74,79 @@
    OAuth token present). Order is the preference order used for the default
    backend when assembling a multi-dispatch."
   []
-  (let [anthropic       (nonblank-env "ANTHROPIC_API_KEY")
-        zai             (nonblank-env "ZAI_API_KEY")
-        openai          (nonblank-env "OPENAI_API_KEY")
-        openrouter      (nonblank-env "OPENROUTER_API_KEY")
-        ollama          (nonblank-env "OLLAMA_API_KEY")
-        opencode-go     (nonblank-env "OPENCODE_GO_API_KEY")
-        codex-auth (try
-                     (require 'escapement.llm.openai-codex.auth)
-                     (when-let [load! (resolve 'escapement.llm.openai-codex.auth/load-auth!)]
-                       (load!))
-                     (catch Throwable _ nil))]
+  (let [anthropic   (nonblank-env "ANTHROPIC_API_KEY")
+        zai         (nonblank-env "ZAI_API_KEY")
+        openai      (nonblank-env "OPENAI_API_KEY")
+        openrouter  (nonblank-env "OPENROUTER_API_KEY")
+        ollama      (nonblank-env "OLLAMA_API_KEY")
+        opencode-go (nonblank-env "OPENCODE_GO_API_KEY")
+        codex-auth  (try
+                      (require 'escapement.llm.openai-codex.auth)
+                      (when-let [load! (resolve 'escapement.llm.openai-codex.auth/load-auth!)]
+                        (load!))
+                      (catch Throwable _ nil))]
     (cond-> []
       anthropic
-      (conj {:kind :anthropic :source "ANTHROPIC_API_KEY"
-             :api-key anthropic :base-url "https://api.anthropic.com"
+      (conj {:kind          :anthropic :source "ANTHROPIC_API_KEY"
+             :api-key       anthropic :base-url "https://api.anthropic.com"
              :default-model "claude-sonnet-4-6" :auth-mode :x-api-key
-             :route #"^claude-"})
+             :route         #"^claude-"})
 
       codex-auth
-      (conj {:kind :codex :source "saved OAuth token"
+      (conj {:kind          :codex :source "saved OAuth token"
              :default-model "gpt-5.1-codex"
-             :route #"^gpt-5"})
+             :route         #"^gpt-5"})
 
       openai
-      (conj {:kind :openai :source "OPENAI_API_KEY"
-             :api-key openai :base-url "https://api.openai.com/v1"
+      (conj {:kind          :openai :source "OPENAI_API_KEY"
+             :api-key       openai :base-url "https://api.openai.com/v1"
              :default-model (or (System/getenv "OPENAI_MODEL") "gpt-4o-mini")
-             :route #"^gpt-"})
+             :route         #"^gpt-"})
 
       openrouter
-      (conj {:kind :openrouter :source "OPENROUTER_API_KEY"
-             :api-key openrouter :base-url "https://openrouter.ai/api/v1"
+      (conj {:kind          :openrouter :source "OPENROUTER_API_KEY"
+             :api-key       openrouter :base-url "https://openrouter.ai/api/v1"
              :default-model (or (System/getenv "OPENROUTER_MODEL") "openai/gpt-4o-mini")
-             :route #".+/.+"})
+             :route         #".+/.+"})
 
       ;; Keep established provider routes before newer hosted gateways so
       ;; adding Ollama/OpenCode credentials does not steal existing glm-* traffic.
       zai
-      (conj {:kind :zai :source "ZAI_API_KEY"
-             :api-key zai :base-url "https://api.z.ai/api/anthropic"
+      (conj {:kind          :zai :source "ZAI_API_KEY"
+             :api-key       zai :base-url "https://api.z.ai/api/anthropic"
              :default-model "glm-4.6" :auth-mode :bearer
-             :route #"^glm-"})
+             :route         #"^glm-"})
 
       opencode-go
-      (conj {:kind :opencode-go-openai :source "OPENCODE_GO_API_KEY"
-             :api-key opencode-go :base-url "https://opencode.ai/zen/go/v1"
+      (conj {:kind          :opencode-go-openai :source "OPENCODE_GO_API_KEY"
+             :api-key       opencode-go :base-url "https://opencode.ai/zen/go/v1"
              :default-model (or (System/getenv "OPENCODE_GO_MODEL") "glm-5")
-             :route #"^(glm-|kimi-|mimo-)"})
+             :route         #"^(glm-|kimi-|mimo-)"})
 
       opencode-go
-      (conj {:kind :opencode-go-anthropic :source "OPENCODE_GO_API_KEY"
-             :api-key opencode-go :base-url "https://opencode.ai/zen/go"
+      (conj {:kind          :opencode-go-anthropic :source "OPENCODE_GO_API_KEY"
+             :api-key       opencode-go :base-url "https://opencode.ai/zen/go"
              :default-model "minimax-m2.7" :auth-mode :x-api-key
-             :route #"^minimax-"})
+             :route         #"^minimax-"})
 
       ollama
-      (conj {:kind :ollama :source "OLLAMA_API_KEY"
-             :api-key ollama :base-url "https://ollama.com/v1"
+      (conj {:kind          :ollama :source "OLLAMA_API_KEY"
+             :api-key       ollama :base-url "https://ollama.com/v1"
              :default-model (or (System/getenv "OLLAMA_MODEL") "kimi-k2.5")
-             :route #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}))))
+             :route         #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}))))
 
 (defn build-credential-backend
   "Instantiate the sub-backend for one credential descriptor."
   [{:keys [kind] :as c}]
   (case kind
-    :anthropic  (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
-    :zai        (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
-    :openai     (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
+    :anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
+    :zai (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
+    :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
-    :ollama     (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
+    :ollama (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :opencode-go-openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :opencode-go-anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
-    :codex      (build-codex-backend {:default-model (:default-model c)})))
+    :codex (build-codex-backend {:default-model (:default-model c)})))
 
 ;; --- Hermetic explicit-credentials assembly -------------------------------
 ;;
@@ -165,38 +165,38 @@
    keyword used in `:llm/preferences` / injected descriptors. Each value is
    the env-independent half of the descriptor `detect-available-credentials`
    builds for that provider (the `:api-key` / overrides come from the caller)."
-  {:anthropic    {:kind :anthropic :base-url "https://api.anthropic.com"
-                  :default-model "claude-sonnet-4-6" :auth-mode :x-api-key
-                  :route #"^claude-"}
-   :z-ai         {:kind :zai :base-url "https://api.z.ai/api/anthropic"
-                  :default-model "glm-4.6" :auth-mode :bearer
-                  :route #"^glm-"}
+  {:anthropic             {:kind          :anthropic :base-url "https://api.anthropic.com"
+                           :default-model "claude-sonnet-4-6" :auth-mode :x-api-key
+                           :route         #"^claude-"}
+   :z-ai                  {:kind          :zai :base-url "https://api.z.ai/api/anthropic"
+                           :default-model "glm-4.6" :auth-mode :bearer
+                           :route         #"^glm-"}
    ;; `:z-ai-plan` is the subscription-billed face of z.ai used in
    ;; `default-preferences`; same wire backend as metered `:z-ai`.
-   :z-ai-plan    {:kind :zai :base-url "https://api.z.ai/api/anthropic"
-                  :default-model "glm-4.6" :auth-mode :bearer
-                  :route #"^glm-"}
-   :openai       {:kind :openai :base-url "https://api.openai.com/v1"
-                  :default-model "gpt-4o-mini"
-                  :route #"^gpt-"}
-   :openrouter   {:kind :openrouter :base-url "https://openrouter.ai/api/v1"
-                  :default-model "openai/gpt-4o-mini"
-                  :route #".+/.+"}
-   :ollama       {:kind :ollama :base-url "https://ollama.com/v1"
-                  :default-model "kimi-k2.5"
-                  :route #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}
-   :opencode-go  {:kind :opencode-go-openai :base-url "https://opencode.ai/zen/go/v1"
-                  :default-model "glm-5"
-                  :route #"^(glm-|kimi-|mimo-)"}
-   :opencode-go-anthropic {:kind :opencode-go-anthropic :base-url "https://opencode.ai/zen/go"
+   :z-ai-plan             {:kind          :zai :base-url "https://api.z.ai/api/anthropic"
+                           :default-model "glm-4.6" :auth-mode :bearer
+                           :route         #"^glm-"}
+   :openai                {:kind          :openai :base-url "https://api.openai.com/v1"
+                           :default-model "gpt-4o-mini"
+                           :route         #"^gpt-"}
+   :openrouter            {:kind          :openrouter :base-url "https://openrouter.ai/api/v1"
+                           :default-model "openai/gpt-4o-mini"
+                           :route         #".+/.+"}
+   :ollama                {:kind          :ollama :base-url "https://ollama.com/v1"
+                           :default-model "kimi-k2.5"
+                           :route         #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}
+   :opencode-go           {:kind          :opencode-go-openai :base-url "https://opencode.ai/zen/go/v1"
+                           :default-model "glm-5"
+                           :route         #"^(glm-|kimi-|mimo-)"}
+   :opencode-go-anthropic {:kind          :opencode-go-anthropic :base-url "https://opencode.ai/zen/go"
                            :default-model "minimax-m2.7" :auth-mode :x-api-key
-                           :route #"^minimax-"}
+                           :route         #"^minimax-"}
    ;; ChatGPT-subscription: no api-key/base-url; OAuth token is loaded by the
    ;; codex backend itself at send time, not here.
-   :codex        {:kind :codex :default-model "gpt-5.1-codex"
-                  :route #"^gpt-5"}
-   :openai-codex {:kind :codex :default-model "gpt-5.1-codex"
-                  :route #"^gpt-5"}})
+   :codex                 {:kind  :codex :default-model "gpt-5.1-codex"
+                           :route #"^gpt-5"}
+   :openai-codex          {:kind  :codex :default-model "gpt-5.1-codex"
+                           :route #"^gpt-5"}})
 
 (defn- descriptor->credential
   "Resolve one injected credential descriptor into a full
@@ -207,8 +207,8 @@
   [{:keys [provider] :as desc}]
   (when-let [tmpl (get provider-templates provider)]
     (let [overrides (-> desc
-                         (select-keys [:api-key :base-url :default-model :auth-mode])
-                        (cond-> (:model desc) (assoc :default-model (:model desc))))]
+                      (select-keys [:api-key :base-url :default-model :auth-mode])
+                      (cond-> (:model desc) (assoc :default-model (:model desc))))]
       (merge tmpl (into {} (remove (comp nil? val)) overrides)))))
 
 (defn- preference-rank
@@ -216,8 +216,8 @@
    priority). Providers absent from `preferences` sort last (stable)."
   [preferences]
   (->> preferences
-       (map :provider)
-       (reduce (fn [m p] (if (contains? m p) m (assoc m p (count m)))) {})))
+    (map :provider)
+    (reduce (fn [m p] (if (contains? m p) m (assoc m p (count m)))) {})))
 
 (defn build-injected-credentials-backend
   "Assemble a `multi` routing backend purely from explicitly injected
@@ -248,21 +248,21 @@
    resolves."
   [descriptors preferences]
   (let [creds (->> descriptors
-                   (keep (fn [d] (some-> (descriptor->credential d)
-                                         (assoc ::provider (:provider d)))))
-                   vec)]
+                (keep (fn [d] (some-> (descriptor->credential d)
+                                (assoc ::provider (:provider d)))))
+                vec)]
     (when (seq creds)
-      (let [rank   (preference-rank preferences)
-            n      (count creds)
+      (let [rank    (preference-rank preferences)
+            n       (count creds)
             ;; stable sort by preference rank; unranked keep descriptor order
-            sorted (->> (map-indexed vector creds)
-                        (sort-by (fn [[i c]]
-                                   [(get rank (::provider c) (+ n i)) i]))
-                        (mapv second))
-            routes (mapv (fn [c]
-                           [(:route c)
-                            (build-credential-backend (dissoc c ::provider :route))])
-                         sorted)
+            sorted  (->> (map-indexed vector creds)
+                      (sort-by (fn [[i c]]
+                                 [(get rank (::provider c) (+ n i)) i]))
+                      (mapv second))
+            routes  (mapv (fn [c]
+                            [(:route c)
+                             (build-credential-backend (dissoc c ::provider :route))])
+                      sorted)
             default (build-credential-backend
-                     (dissoc (first creds) ::provider :route))]
+                      (dissoc (first creds) ::provider :route))]
         (build-multi-backend {:routes routes :default-backend default})))))

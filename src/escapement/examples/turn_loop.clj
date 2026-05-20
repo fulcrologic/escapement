@@ -32,10 +32,10 @@
   Acceptance: transcript shows a `:llm/tool-result` for `fs_write` and a final
   `:llm/response` with stop-reason \"end_turn\"."
   (:require
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.data-model.operations :as ops]
-   [com.fulcrologic.statecharts.elements :refer [state transition final script]]
-   [escapement.chart.helpers :as h]))
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
+    [com.fulcrologic.statecharts.elements :refer [final script state transition]]
+    [escapement.chart.helpers :as h]))
 
 ;; Scratch file the model reads/writes. Relative to the run's work dir; the
 ;; built-in fs tools resolve it there. Non-destructive (a dedicated scratch
@@ -44,40 +44,40 @@
 
 (def system-prompt
   (str "You are completing a tiny file task by chaining tools in ONE turn. "
-       "The scratch file is at \"" scratch-path "\". Do exactly this, in order:\n"
-       "1. Briefly state your plan in one sentence.\n"
-       "2. Call `fs_read` with {\"path\":\"" scratch-path "\"} to read the "
-       "current contents. If the file does not exist yet, that is expected — "
-       "treat it as empty and continue.\n"
-       "3. Call `fs_write` with {\"path\":\"" scratch-path "\","
-       "\"content\":\"turn-loop ok\\n\"} to write the file.\n"
-       "4. Call `fs_read` again with {\"path\":\"" scratch-path "\"} to "
-       "confirm the new contents.\n"
-       "5. Call `event__done` exactly once with "
-       "{\"summary\":\"<one short sentence confirming the write>\"} and end "
-       "your turn.\n"
-       "Use only these tools. Keep all text terse. Do not repeat steps."))
+    "The scratch file is at \"" scratch-path "\". Do exactly this, in order:\n"
+    "1. Briefly state your plan in one sentence.\n"
+    "2. Call `fs_read` with {\"path\":\"" scratch-path "\"} to read the "
+    "current contents. If the file does not exist yet, that is expected — "
+    "treat it as empty and continue.\n"
+    "3. Call `fs_write` with {\"path\":\"" scratch-path "\","
+    "\"content\":\"turn-loop ok\\n\"} to write the file.\n"
+    "4. Call `fs_read` again with {\"path\":\"" scratch-path "\"} to "
+    "confirm the new contents.\n"
+    "5. Call `event__done` exactly once with "
+    "{\"summary\":\"<one short sentence confirming the write>\"} and end "
+    "your turn.\n"
+    "Use only these tools. Keep all text terse. Do not repeat steps."))
 
-(def agent                       ; runnable: bb -m escapement.cli run escapement.examples.turn-loop/agent
+(def agent                                                  ; runnable: bb -m escapement.cli run escapement.examples.turn-loop/agent
   (chart/statechart
-   {:initial :run}
-   (state {:id :run :initial :converse}        ; compound parent so :finished final is non-fatal
-          (state {:id :converse}
-                 (h/llm-conversation
-                  {:id        "coder"
-                   :params-fn (fn [_env _data]
-                                {:system                       system-prompt
-                                 :real-tools                   [:fs/read :fs/write]
-                                 :allowed-events               [{:event       :done
-                                                                 :description "Signal the turn-loop task is complete."
-                                                                 :data-schema [:map [:summary :string]]}]
-                                 :max-turns                    8
-                                 :max-conversation-duration-ms 120000
-                                 :initial-user-message
-                                 (str "Run the scratch-file turn-loop task now: "
-                                      "plan, read, write, re-read, then call event__done.")})})
-                 (transition {:event :done :target :finished}
-                             (script {:expr (fn [_env data]
-                                              [(ops/assign :summary
-                                                           (get-in data [:_event :data :summary]))])})))
-          (final {:id :finished}))))
+    {:initial :run}
+    (state {:id :run :initial :converse}                    ; compound parent so :finished final is non-fatal
+      (state {:id :converse}
+        (h/llm-conversation
+          {:id        "coder"
+           :params-fn (fn [_env _data]
+                        {:system                       system-prompt
+                         :real-tools                   [:fs/read :fs/write]
+                         :allowed-events               [{:event       :done
+                                                         :description "Signal the turn-loop task is complete."
+                                                         :data-schema [:map [:summary :string]]}]
+                         :max-turns                    8
+                         :max-conversation-duration-ms 120000
+                         :initial-user-message
+                         (str "Run the scratch-file turn-loop task now: "
+                           "plan, read, write, re-read, then call event__done.")})})
+        (transition {:event :done :target :finished}
+          (script {:expr (fn [_env data]
+                           [(ops/assign :summary
+                              (get-in data [:_event :data :summary]))])})))
+      (final {:id :finished}))))

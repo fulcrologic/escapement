@@ -29,11 +29,11 @@
 
    Babashka-compatible: only `clojure.edn` and `java.io.File`."
   (:require
-   [clojure.edn :as edn]
-   [clojure.java.io :as io]
-   [clojure.string :as str]
-   [malli.core :as m]
-   [malli.error :as me]))
+    [clojure.edn :as edn]
+    [clojure.java.io :as io]
+    [clojure.string :as str]
+    [malli.core :as m]
+    [malli.error :as me]))
 
 (def ^:const filename ".escapement.edn")
 
@@ -74,7 +74,7 @@
    project-local is deep-merged on top so project entries win."
   []
   (deep-merge (read-edn-or-empty (user-config-file))
-              (read-edn-or-empty (project-config-file))))
+    (read-edn-or-empty (project-config-file))))
 
 (defn- shell-quote
   "Single-quotes `s` for safe inclusion in a `sh -c` command line. Embedded
@@ -107,8 +107,8 @@
                       i (.lastIndexOf n ".")]
                   (when (pos? i) (str/lower-case (subs n (inc i)))))]
     (or (when ext (get viewers ext))
-        (get viewers "default")
-        :internal)))
+      (get viewers "default")
+      :internal)))
 
 (defn viewer-for-url
   "Resolves the viewer entry for a URL (no file extension to key on). Looks
@@ -121,16 +121,16 @@
 
 (def project-schema
   [:map {:closed true}
-   [:source-paths  {:optional true} [:vector :string]]
-   [:deps          {:optional true} [:map-of :symbol :any]]
-   [:tools-ns      {:optional true} [:or :symbol [:vector :symbol]]]
-   [:work-dir      {:optional true} :string]
+   [:source-paths {:optional true} [:vector :string]]
+   [:deps {:optional true} [:map-of :symbol :any]]
+   [:tools-ns {:optional true} [:or :symbol [:vector :symbol]]]
+   [:work-dir {:optional true} :string]
    [:default-chart {:optional true} :symbol]
    ;; Why: existing user-level keys are tolerated in project files too so a
    ;; single .escapement.edn can hold both kinds of settings.
-   [:debug         {:optional true} :any]
-   [:viewers       {:optional true} :any]
-   [:d2            {:optional true} :any]
+   [:debug {:optional true} :any]
+   [:viewers {:optional true} :any]
+   [:d2 {:optional true} :any]
    ;; LLM model selection overlays. Validated/sanitized downstream by
    ;; `escapement.llm.preferences` / `escapement.llm.ratings` against the
    ;; catalog, so kept `:any` here (same as the user-level keys above).
@@ -138,8 +138,8 @@
    ;; `:llm` map (`[:llm :preferences]` / `[:llm :ratings]`) are accepted,
    ;; matching those namespaces' `from-config`.
    [:llm/preferences {:optional true} :any]
-   [:llm/ratings     {:optional true} :any]
-   [:llm             {:optional true} :any]])
+   [:llm/ratings {:optional true} :any]
+   [:llm {:optional true} :any]])
 
 (defn find-project-config
   "Walks up from `start-dir` (a File or path string) looking for
@@ -166,16 +166,16 @@
   (if (m/validate project-schema cfg)
     cfg
     (throw (ex-info (str "Invalid .escapement.edn at " path)
-                    {:path   (str path)
-                     :errors (me/humanize (m/explain project-schema cfg))}))))
+             {:path   (str path)
+              :errors (me/humanize (m/explain project-schema cfg))}))))
 
 (defn- normalize-tools-ns [v]
   (cond
-    (nil? v)     []
-    (symbol? v)  [v]
-    (vector? v)  v
-    :else        (throw (ex-info ":tools-ns must be a symbol or vector of symbols"
-                                 {:value v}))))
+    (nil? v) []
+    (symbol? v) [v]
+    (vector? v) v
+    :else (throw (ex-info ":tools-ns must be a symbol or vector of symbols"
+                   {:value v}))))
 
 (defn load-project-config
   "Discover and load the project `.escapement.edn` by walking up from
@@ -189,8 +189,8 @@
      (let [raw (or (try (read-edn-strict f)
                         (catch Throwable t
                           (throw (ex-info (str "Failed to parse " (.getPath f) ": " (.getMessage t))
-                                          {:path (.getPath f)} t))))
-                   {})
+                                   {:path (.getPath f)} t))))
+                 {})
            _   (validate-project-config! raw (.getPath f))
            cfg (cond-> raw
                  (contains? raw :tools-ns) (update :tools-ns normalize-tools-ns))]

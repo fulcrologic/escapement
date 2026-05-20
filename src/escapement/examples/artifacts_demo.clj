@@ -20,48 +20,48 @@
    first event — press `c` to continue, or `s` to single-step. After each
    `:llm.idle` you'll see an `:artifact/captured` line in the scrollback."
   (:require
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.elements :refer [state transition final]]
-   [escapement.chart.helpers :as h]))
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.elements :refer [final state transition]]
+    [escapement.chart.helpers :as h]))
 
 (def writer-system
   (str "You are a poet. When asked, write ONE original haiku (3 lines, "
-       "5/7/5 syllables) and then stop. Do not include any preamble, "
-       "explanation, or trailing commentary — just the haiku."))
+    "5/7/5 syllables) and then stop. Do not include any preamble, "
+    "explanation, or trailing commentary — just the haiku."))
 
 (def critic-system
   (str "You are a kind but candid editor. Given a haiku, respond with a "
-       "two-paragraph critique in Markdown: paragraph one praises one "
-       "specific image; paragraph two suggests one concrete improvement. "
-       "Stop after the second paragraph."))
+    "two-paragraph critique in Markdown: paragraph one praises one "
+    "specific image; paragraph two suggests one concrete improvement. "
+    "Stop after the second paragraph."))
 
 (def agent
   (chart/statechart
-   {:initial :run}
-   (state {:id :run :initial :writing}
+    {:initial :run}
+    (state {:id :run :initial :writing}
 
-          ;; ---- Stage 1: writer ---------------------------------------------
-          (state {:id :writing}
-                 (h/llm-conversation
-                  {:id        "writer"
-                   :params-fn (fn [_env _data]
-                                {:system               writer-system
-                                 :initial-user-message "Write a haiku about debugging a statechart at midnight."})})
-                 (transition {:event :llm.idle :target :critiquing}
-                             (h/capture-llm-output {:as "writer.md"})))
+      ;; ---- Stage 1: writer ---------------------------------------------
+      (state {:id :writing}
+        (h/llm-conversation
+          {:id        "writer"
+           :params-fn (fn [_env _data]
+                        {:system               writer-system
+                         :initial-user-message "Write a haiku about debugging a statechart at midnight."})})
+        (transition {:event :llm.idle :target :critiquing}
+          (h/capture-llm-output {:as "writer.md"})))
 
-          ;; ---- Stage 2: critic (reads writer.md via template) --------------
-          (state {:id :critiquing}
-                 (h/llm-conversation
-                  {:id        "critic"
-                   :params-fn (fn [env _data]
-                                {:system               critic-system
-                                 :initial-user-message
-                                 (h/render-template
-                                  (str "Please critique the following haiku:\n\n"
-                                       "{{writer.md}}\n")
-                                  env)})})
-                 (transition {:event :llm.idle :target :done}
-                             (h/capture-llm-output {:as "critic.md"})))
+      ;; ---- Stage 2: critic (reads writer.md via template) --------------
+      (state {:id :critiquing}
+        (h/llm-conversation
+          {:id        "critic"
+           :params-fn (fn [env _data]
+                        {:system critic-system
+                         :initial-user-message
+                         (h/render-template
+                           (str "Please critique the following haiku:\n\n"
+                             "{{writer.md}}\n")
+                           env)})})
+        (transition {:event :llm.idle :target :done}
+          (h/capture-llm-output {:as "critic.md"})))
 
-          (final {:id :done}))))
+      (final {:id :done}))))

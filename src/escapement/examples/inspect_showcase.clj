@@ -155,103 +155,103 @@
    Live end-to-end is task 007.
    ==========================================================================="
   (:require
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.data-model.operations :as ops]
-   [com.fulcrologic.statecharts.elements
-    :refer [state transition final script]]
-   [escapement.chart.helpers :as h]))
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
+    [com.fulcrologic.statecharts.elements
+     :refer [final script state transition]]
+    [escapement.chart.helpers :as h]))
 
 (def system-prompt
   (str
-   "You drive a statechart by calling tools. Work in TWO phases, terse, "
-   "no chit-chat.\n\n"
-   "PHASE 1 (PLAN): Write a numbered 2-3 step PLAN for answering the user's "
-   "question. Do NOT answer the question yet. Then call the event tool "
-   "`event__step` exactly once with {\"phase\":\"plan\"} to finish phase 1.\n\n"
-   "PHASE 2 (ANSWER): You will receive a user message telling you to execute "
-   "the plan. First call the real tool `fs_write` exactly once with "
-   "{\"path\":\"scratch/fact.txt\",\"content\":\"<the key fact>\"} to record "
-   "the key fact. After the tool result, write your FINAL one-paragraph "
-   "answer to the original question. Then call the event tool `event__done` "
-   "exactly once with {\"summary\":\"<one-sentence summary of your answer>\"} "
-   "to finish.\n\n"
-   "Do not call any other tools. Do not loop. One event tool per phase."))
+    "You drive a statechart by calling tools. Work in TWO phases, terse, "
+    "no chit-chat.\n\n"
+    "PHASE 1 (PLAN): Write a numbered 2-3 step PLAN for answering the user's "
+    "question. Do NOT answer the question yet. Then call the event tool "
+    "`event__step` exactly once with {\"phase\":\"plan\"} to finish phase 1.\n\n"
+    "PHASE 2 (ANSWER): You will receive a user message telling you to execute "
+    "the plan. First call the real tool `fs_write` exactly once with "
+    "{\"path\":\"scratch/fact.txt\",\"content\":\"<the key fact>\"} to record "
+    "the key fact. After the tool result, write your FINAL one-paragraph "
+    "answer to the original question. Then call the event tool `event__done` "
+    "exactly once with {\"summary\":\"<one-sentence summary of your answer>\"} "
+    "to finish.\n\n"
+    "Do not call any other tools. Do not loop. One event tool per phase."))
 
 (def phase-2-message
   (str
-   "Phase 1 accepted. Now execute the plan: call `fs_write` once to record "
-   "the key fact at scratch/fact.txt, then write your FINAL one-paragraph "
-   "answer, then call `event__done` with a one-sentence summary."))
+    "Phase 1 accepted. Now execute the plan: call `fs_write` once to record "
+    "the key fact at scratch/fact.txt, then write your FINAL one-paragraph "
+    "answer, then call `event__done` with a one-sentence summary."))
 
-(def agent ; runnable: bb -m escapement.cli run escapement.examples.inspect-showcase/agent
+(def agent                                                  ; runnable: bb -m escapement.cli run escapement.examples.inspect-showcase/agent
   (chart/statechart
-   {:initial :run}
-   ;; Compound parent so the :finished `final` empties only this sub-config,
-   ;; not the whole machine (cheat-sheet §3 / hello.clj pattern).
-   (state {:id :run :initial :converse}
+    {:initial :run}
+    ;; Compound parent so the :finished `final` empties only this sub-config,
+    ;; not the whole machine (cheat-sheet §3 / hello.clj pattern).
+    (state {:id :run :initial :converse}
 
-          (state {:id :converse}
-                 (h/llm-conversation
-                  {:id        "showcase"
-                   ;; autoforward? defaults true — REQUIRED so the phase-2
-                   ;; h/tell-llm steer reaches this conversation (task 001 P2).
-                   :params-fn
-                   (fn [_env _data]
-                     {:system     system-prompt
-                      ;; Real-tool: built-in fs/write writes a real scratch
-                      ;; file under --work-dir (non-destructive). Whitelisted
-                      ;; so the model can ONLY write, nothing else.
-                      :real-tools [:fs/write]
-                      ;; Two event-tools: one per phase boundary.
-                      :allowed-events
-                      [{:event       :step
-                        :data-schema [:map [:phase :string]]}
-                       {:event       :done
-                        :data-schema [:map [:summary :string]]}]
-                      ;; Conservative budgets so a live run can never hang
-                      ;; (cheat-sheet §1: ALWAYS bound the loop). Two phases
-                      ;; need >=2 turns; 6 leaves slack for tool round-trips.
-                      :max-turns                    6
-                      :max-conversation-duration-ms 120000
-                      :initial-user-message
-                      (str "Question: In one paragraph, what is a statechart "
-                           "and why is it useful for driving an autonomous "
-                           "agent? Begin with PHASE 1: produce the PLAN only.")})})
+      (state {:id :converse}
+        (h/llm-conversation
+          {:id "showcase"
+           ;; autoforward? defaults true — REQUIRED so the phase-2
+           ;; h/tell-llm steer reaches this conversation (task 001 P2).
+           :params-fn
+           (fn [_env _data]
+             {:system                       system-prompt
+              ;; Real-tool: built-in fs/write writes a real scratch
+              ;; file under --work-dir (non-destructive). Whitelisted
+              ;; so the model can ONLY write, nothing else.
+              :real-tools                   [:fs/write]
+              ;; Two event-tools: one per phase boundary.
+              :allowed-events
+              [{:event       :step
+                :data-schema [:map [:phase :string]]}
+               {:event       :done
+                :data-schema [:map [:summary :string]]}]
+              ;; Conservative budgets so a live run can never hang
+              ;; (cheat-sheet §1: ALWAYS bound the loop). Two phases
+              ;; need >=2 turns; 6 leaves slack for tool round-trips.
+              :max-turns                    6
+              :max-conversation-duration-ms 120000
+              :initial-user-message
+              (str "Question: In one paragraph, what is a statechart "
+                "and why is it useful for driving an autonomous "
+                "agent? Begin with PHASE 1: produce the PLAN only.")})})
 
-                 ;; --- Event-tool events (task 001 P1: posted BEFORE :llm.idle
-                 ;; for the same turn). BOTH are `:type :internal` — they
-                 ;; record data and bump the :phase counter WITHOUT exiting
-                 ;; :converse, so the :llm.idle capture transition below stays
-                 ;; active for the same turn (mirrors iterate.clj). ----------
-                 (transition {:event :step :type :internal}
-                             (script
-                              {:expr (fn [_env _data]
-                                       [(ops/assign :phase 1)])}))
+        ;; --- Event-tool events (task 001 P1: posted BEFORE :llm.idle
+        ;; for the same turn). BOTH are `:type :internal` — they
+        ;; record data and bump the :phase counter WITHOUT exiting
+        ;; :converse, so the :llm.idle capture transition below stays
+        ;; active for the same turn (mirrors iterate.clj). ----------
+        (transition {:event :step :type :internal}
+          (script
+            {:expr (fn [_env _data]
+                     [(ops/assign :phase 1)])}))
 
-                 (transition {:event :done :type :internal}
-                             (script
-                              {:expr (fn [_env data]
-                                       [(ops/assign :phase 2)
-                                        (ops/assign
-                                         :summary
-                                         (get-in data [:_event :data :summary]))])}))
+        (transition {:event :done :type :internal}
+          (script
+            {:expr (fn [_env data]
+                     [(ops/assign :phase 2)
+                      (ops/assign
+                        :summary
+                        (get-in data [:_event :data :summary]))])}))
 
-                 ;; --- Phase 1 :llm.idle: capture plan.md, steer to phase 2.
-                 ;; Guarded on (:phase data) == 1 (a CHART counter set by the
-                 ;; :step event above — NOT an LLM heuristic, task 001 P5).
-                 ;; `:type :internal` so :converse (and the conversation
-                 ;; binding) survives into phase 2. ------------------------
-                 (transition {:event :llm.idle :type :internal
-                              :cond  (fn [_env data] (= 1 (:phase data)))}
-                             (h/capture-llm-output {:as "plan.md"})
-                             (h/tell-llm {:expr (fn [_env _data] phase-2-message)}))
+        ;; --- Phase 1 :llm.idle: capture plan.md, steer to phase 2.
+        ;; Guarded on (:phase data) == 1 (a CHART counter set by the
+        ;; :step event above — NOT an LLM heuristic, task 001 P5).
+        ;; `:type :internal` so :converse (and the conversation
+        ;; binding) survives into phase 2. ------------------------
+        (transition {:event :llm.idle :type :internal
+                     :cond  (fn [_env data] (= 1 (:phase data)))}
+          (h/capture-llm-output {:as "plan.md"})
+          (h/tell-llm {:expr (fn [_env _data] phase-2-message)}))
 
-                 ;; --- Phase 2 :llm.idle: capture answer.md, THEN finish.
-                 ;; Guarded on (:phase data) == 2. Capture runs while
-                 ;; :converse is still active (the :done event was internal),
-                 ;; then this transition advances to :finished. ------------
-                 (transition {:event :llm.idle :target :finished
-                              :cond  (fn [_env data] (= 2 (:phase data)))}
-                             (h/capture-llm-output {:as "answer.md"})))
+        ;; --- Phase 2 :llm.idle: capture answer.md, THEN finish.
+        ;; Guarded on (:phase data) == 2. Capture runs while
+        ;; :converse is still active (the :done event was internal),
+        ;; then this transition advances to :finished. ------------
+        (transition {:event :llm.idle :target :finished
+                     :cond  (fn [_env data] (= 2 (:phase data)))}
+          (h/capture-llm-output {:as "answer.md"})))
 
-          (final {:id :finished}))))
+      (final {:id :finished}))))

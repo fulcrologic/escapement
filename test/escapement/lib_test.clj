@@ -6,21 +6,21 @@
   transcript/checkpoint, `:store` threaded to `engine.env/new-env`, and quiet
   logging by default."
   (:require
-   [babashka.fs :as fs]
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.elements :refer [state transition final]]
-   [escapement.engine.store :as store]
-   [escapement.lib :as lib]
-   [fulcro-spec.core :refer [specification assertions =>]]))
+    [babashka.fs :as fs]
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.elements :refer [final state transition]]
+    [escapement.engine.store :as store]
+    [escapement.lib :as lib]
+    [fulcro-spec.core :refer [=> assertions specification]]))
 
 (def trivial-chart
   (chart/statechart {:initial :work}
-                    (state {:id :work :initial :idle}
-                           (state {:id :idle}
-                                  (transition {:event :go :target :done}))
-                           (final {:id :done}))))
+    (state {:id :work :initial :idle}
+      (state {:id :idle}
+        (transition {:event :go :target :done}))
+      (final {:id :done}))))
 
 ;; A minimal valid credentials vector for the no-LLM trivial chart. The chart
 ;; never invokes an LLM so the backend assembled from this is never exercised,
@@ -69,11 +69,11 @@
       (= (:run-id r1) (:run-id r2)) => false)))
 
 (specification ":run-id is emitted on the :runner/started event"
-  (let [seen   (atom [])
-        result (lib/run {:chart trivial-chart
-                         :session-id :tap-1
-                         :credentials creds
-                         :transcript-tap #(swap! seen conj %)})
+  (let [seen    (atom [])
+        result  (lib/run {:chart          trivial-chart
+                          :session-id     :tap-1
+                          :credentials    creds
+                          :transcript-tap #(swap! seen conj %)})
         started (->> @seen (filter #(= :runner/started (:event %))) first)]
     (assertions
       ":runner/started carries the same :run-id as the result"
@@ -82,13 +82,13 @@
       (some? (get-in started [:data :run-id])) => true)))
 
 (specification ":store override is threaded to engine.env/new-env"
-  (let [tmp   (str (fs/create-temp-dir {:prefix "lib-store-"}))
-        store (store/new-store tmp)
-        seen  (atom nil)
-        result (lib/run {:chart trivial-chart
-                         :session-id :store-1
-                         :credentials creds
-                         :store store
+  (let [tmp    (str (fs/create-temp-dir {:prefix "lib-store-"}))
+        store  (store/new-store tmp)
+        seen   (atom nil)
+        result (lib/run {:chart        trivial-chart
+                         :session-id   :store-1
+                         :credentials  creds
+                         :store        store
                          :on-env-ready (fn [env]
                                          (reset! seen (::sc/working-memory-store env)))})]
     (assertions
@@ -98,14 +98,14 @@
       (identical? (::sc/working-memory-store (:env result)) store) => true)))
 
 (specification "explicit transcript/checkpoint paths are honored (no temp dir)"
-  (let [base (str (fs/create-temp-dir {:prefix "lib-explicit-"}))
-        tp   (str (fs/path base "t.jsonl"))
-        cd   (str (fs/path base "ckpt"))
-        result (lib/run {:chart trivial-chart
-                         :session-id :explicit-1
-                         :credentials creds
+  (let [base   (str (fs/create-temp-dir {:prefix "lib-explicit-"}))
+        tp     (str (fs/path base "t.jsonl"))
+        cd     (str (fs/path base "ckpt"))
+        result (lib/run {:chart           trivial-chart
+                         :session-id      :explicit-1
+                         :credentials     creds
                          :transcript-path tp
-                         :checkpoint-dir cd})]
+                         :checkpoint-dir  cd})]
     (assertions
       "result surfaces the explicit transcript path"
       (:transcript result) => tp

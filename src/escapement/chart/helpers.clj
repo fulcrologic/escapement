@@ -13,18 +13,18 @@
   IMPORTANT: `tell-llm` must execute inside the state that owns the binding (or a
   descendant thereof); the invocation only exists while that state is active."
   (:require
-   [clojure.java.io :as io]
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.data-model.operations :as ops]
-   [com.fulcrologic.statecharts.elements :as elt]
-   [com.fulcrologic.statecharts.environment :as env-ns]
-   [com.fulcrologic.statecharts.protocols :as sp]
-   [escapement.chart.service :as service]
-   [escapement.invocation.llm-conversation :as llmc])
+    [clojure.java.io :as io]
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
+    [com.fulcrologic.statecharts.elements :as elt]
+    [com.fulcrologic.statecharts.environment :as env-ns]
+    [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.chart.service :as service]
+    [escapement.invocation.llm-conversation :as llmc])
   (:import
-   (java.nio.file Files Paths StandardCopyOption)
-   (java.nio.file.attribute FileAttribute)))
+    (java.nio.file Files Paths StandardCopyOption)
+    (java.nio.file.attribute FileAttribute)))
 
 ;; ---------------------------------------------------------------------------
 ;; Region-tool authoring sugar (re-exported from escapement.chart.service)
@@ -133,90 +133,90 @@
         ask-choice-id (keyword (str base-name ".ask-choice"))
         ask-text-id   (keyword (str base-name ".ask-text"))
         question-events
-        [{:event       :question/ask-choice
-          :description "Ask the human to pick one option. Use when you need a design decision the human must make."
-          :data-schema [:map
-                        [:question :string]
-                        [:options [:vector [:map
-                                            [:label :string]
-                                            [:value :any]]]]]}
-         {:event       :question/ask-text
-          :description "Ask the human a free-text question. Use when you need clarification or a value the human must supply."
-          :data-schema [:map [:question :string]]}]
+                      [{:event       :question/ask-choice
+                        :description "Ask the human to pick one option. Use when you need a design decision the human must make."
+                        :data-schema [:map
+                                      [:question :string]
+                                      [:options [:vector [:map
+                                                          [:label :string]
+                                                          [:value :any]]]]]}
+                       {:event       :question/ask-text
+                        :description "Ask the human a free-text question. Use when you need clarification or a value the human must supply."
+                        :data-schema [:map [:question :string]]}]
         wrapped-params-fn
-        (fn [env data]
-          (let [p (params-fn env data)]
-            (update p :allowed-events
-                    (fn [evs] (vec (concat (or evs []) question-events))))))]
+                      (fn [env data]
+                        (let [p (params-fn env data)]
+                          (update p :allowed-events
+                            (fn [evs] (vec (concat (or evs []) question-events))))))]
     (apply elt/state {:id id :initial converse-id}
-           ;; Conversation owned by the PARENT so child-state transitions
-           ;; don't tear it down.
-           (llm-conversation
-            {:id           (str base-name "/conv")
-             :autoforward? autoforward?
-             :params-fn    wrapped-params-fn})
-           (apply elt/state {:id converse-id}
-                  (elt/transition
-                   {:event :question/ask-choice :target ask-choice-id}
-                   (elt/script
-                    {:expr (fn [_ data]
-                             [(ops/assign :question/pending-question
-                                          (get-in data [:_event :data :question]))
-                              (ops/assign :question/pending-options
-                                          (get-in data [:_event :data :options]))])}))
-                  (elt/transition
-                   {:event :question/ask-text :target ask-text-id}
-                   (elt/script
-                    {:expr (fn [_ data]
-                             [(ops/assign :question/pending-question
-                                          (get-in data [:_event :data :question]))])}))
-                  exit-transitions)
-           [(elt/state {:id ask-choice-id}
-                       (human-input
-                        {:id        (str base-name "/ask-choice")
-                         :params-fn (fn [_ data]
-                                      {:kind    :select
-                                       :prompt  (:question/pending-question data)
-                                       :options (:question/pending-options data)})})
-                       (elt/transition
-                        {:event :human.answer :target converse-id}
-                        (tell-llm
-                         {:expr (fn [_ data]
-                                  (str "User chose: "
-                                       (pr-str (get-in data [:_event :data :answer]))))}))
-                       (elt/transition
-                        {:event :human.cancelled :target converse-id}
-                        (tell-llm
-                         {:expr (fn [_ _]
-                                  "User declined to choose; please proceed with your best judgement.")}))
-                       (elt/transition
-                        {:event :error.human.* :target converse-id}
-                        (tell-llm
-                         {:expr (fn [_ _]
-                                  "Question prompt errored; please proceed without that input.")})))
+      ;; Conversation owned by the PARENT so child-state transitions
+      ;; don't tear it down.
+      (llm-conversation
+        {:id           (str base-name "/conv")
+         :autoforward? autoforward?
+         :params-fn    wrapped-params-fn})
+      (apply elt/state {:id converse-id}
+        (elt/transition
+          {:event :question/ask-choice :target ask-choice-id}
+          (elt/script
+            {:expr (fn [_ data]
+                     [(ops/assign :question/pending-question
+                        (get-in data [:_event :data :question]))
+                      (ops/assign :question/pending-options
+                        (get-in data [:_event :data :options]))])}))
+        (elt/transition
+          {:event :question/ask-text :target ask-text-id}
+          (elt/script
+            {:expr (fn [_ data]
+                     [(ops/assign :question/pending-question
+                        (get-in data [:_event :data :question]))])}))
+        exit-transitions)
+      [(elt/state {:id ask-choice-id}
+         (human-input
+           {:id        (str base-name "/ask-choice")
+            :params-fn (fn [_ data]
+                         {:kind    :select
+                          :prompt  (:question/pending-question data)
+                          :options (:question/pending-options data)})})
+         (elt/transition
+           {:event :human.answer :target converse-id}
+           (tell-llm
+             {:expr (fn [_ data]
+                      (str "User chose: "
+                        (pr-str (get-in data [:_event :data :answer]))))}))
+         (elt/transition
+           {:event :human.cancelled :target converse-id}
+           (tell-llm
+             {:expr (fn [_ _]
+                      "User declined to choose; please proceed with your best judgement.")}))
+         (elt/transition
+           {:event :error.human.* :target converse-id}
+           (tell-llm
+             {:expr (fn [_ _]
+                      "Question prompt errored; please proceed without that input.")})))
 
-            (elt/state {:id ask-text-id}
-                       (human-input
-                        {:id        (str base-name "/ask-text")
-                         :params-fn (fn [_ data]
-                                      {:kind   :text
-                                       :prompt (:question/pending-question data)})})
-                       (elt/transition
-                        {:event :human.answer :target converse-id}
-                        (tell-llm
-                         {:expr (fn [_ data]
-                                  (str "User said: "
-                                       (pr-str (get-in data [:_event :data :answer]))))}))
-                       (elt/transition
-                        {:event :human.cancelled :target converse-id}
-                        (tell-llm
-                         {:expr (fn [_ _]
-                                  "User declined to answer; please proceed without that input.")}))
-                       (elt/transition
-                        {:event :error.human.* :target converse-id}
-                        (tell-llm
-                         {:expr (fn [_ _]
-                                  "Question prompt errored; please proceed without that input.")})))])))
+       (elt/state {:id ask-text-id}
+         (human-input
+           {:id        (str base-name "/ask-text")
+            :params-fn (fn [_ data]
+                         {:kind   :text
+                          :prompt (:question/pending-question data)})})
+         (elt/transition
+           {:event :human.answer :target converse-id}
+           (tell-llm
+             {:expr (fn [_ data]
+                      (str "User said: "
+                        (pr-str (get-in data [:_event :data :answer]))))}))
+         (elt/transition
+           {:event :human.cancelled :target converse-id}
+           (tell-llm
+             {:expr (fn [_ _]
+                      "User declined to answer; please proceed without that input.")}))
+         (elt/transition
+           {:event :error.human.* :target converse-id}
+           (tell-llm
+             {:expr (fn [_ _]
+                      "Question prompt errored; please proceed without that input.")})))])))
 
 (defn tell-llm
   "Returns a `script` element that, when executed, posts a `:llm.user-message`
@@ -233,16 +233,16 @@
   [{:keys [expr]}]
   (assert (fn? expr) "tell-llm requires :expr")
   (elt/script
-   {:expr (fn [env data]
-            (let [text  (expr env data)
-                  queue (::sc/event-queue env)
-                  sid   (env-ns/session-id env)]
-              (sp/send! queue env
-                        {:target            sid
-                         :source-session-id sid
-                         :event             :llm.user-message
-                         :data              {:text text}})
-              nil))}))
+    {:expr (fn [env data]
+             (let [text  (expr env data)
+                   queue (::sc/event-queue env)
+                   sid   (env-ns/session-id env)]
+               (sp/send! queue env
+                 {:target            sid
+                  :source-session-id sid
+                  :event             :llm.user-message
+                  :data              {:text text}})
+               nil))}))
 
 (defn tell-other-llm!
   "Direct-call form of [[tell-other-llm]] for use INSIDE a handler lambda
@@ -258,10 +258,10 @@
         queue   (::sc/event-queue env)
         sid     (env-ns/session-id env)]
     (sp/send! queue env
-              {:target            sid
-               :source-session-id sid
-               :event             :llm.user-message
-               :data              {:text text :target target'}})
+      {:target            sid
+       :source-session-id sid
+       :event             :llm.user-message
+       :data              {:text text :target target'}})
     nil))
 
 (defn tell-other-llm
@@ -284,10 +284,10 @@
   (assert target "tell-other-llm requires :target")
   (assert (fn? expr) "tell-other-llm requires :expr")
   (elt/script
-   {:expr (fn [env data]
-            (let [text   (expr env data)
-                  target (if (fn? target) (target env data) target)]
-              (tell-other-llm! env target text)))}))
+    {:expr (fn [env data]
+             (let [text   (expr env data)
+                   target (if (fn? target) (target env data) target)]
+               (tell-other-llm! env target text)))}))
 
 ;; ===========================================================================
 ;; Artifact helpers — file-backed LLM outputs
@@ -307,8 +307,8 @@
    any artifact-related operation."
   [env]
   (or (:escapement/session-dir env)
-      (throw (ex-info "No :escapement/session-dir on env — set :session-dir on (runner/run! …)"
-                      {:reason :missing-session-dir}))))
+    (throw (ex-info "No :escapement/session-dir on env — set :session-dir on (runner/run! …)"
+             {:reason :missing-session-dir}))))
 
 (defn- artifact-path
   "Absolute filesystem path for an artifact named `name` in `env`'s session."
@@ -323,12 +323,12 @@
         _      (when parent
                  (Files/createDirectories parent (into-array FileAttribute [])))
         tmp    (Files/createTempFile parent ".artifact-" ".tmp"
-                                     (into-array FileAttribute []))]
+                 (into-array FileAttribute []))]
     (Files/writeString tmp s (into-array java.nio.file.OpenOption []))
     (Files/move tmp target
-                (into-array java.nio.file.CopyOption
-                            [StandardCopyOption/ATOMIC_MOVE
-                             StandardCopyOption/REPLACE_EXISTING]))))
+      (into-array java.nio.file.CopyOption
+        [StandardCopyOption/ATOMIC_MOVE
+         StandardCopyOption/REPLACE_EXISTING]))))
 
 (defn- read-artifact!
   "Read the artifact named `name` in `env`'s session. Throws ex-info with
@@ -338,7 +338,7 @@
         f    (io/file path)]
     (when-not (.exists f)
       (throw (ex-info (str "Missing artifact: " name)
-                      {:reason :missing-artifact :name name :path path})))
+               {:reason :missing-artifact :name name :path path})))
     (slurp f)))
 
 (defn capture-llm-output
@@ -353,21 +353,21 @@
   ([] (capture-llm-output {}))
   ([{:keys [as] :as _opts}]
    (elt/script
-    {:expr
-     (fn [env data]
-       (let [text (or (get-in data [:_event :data :text]) "")
-             from (llmc/->id-str (get-in data [:_event :data :from]))
-             name (llmc/->id-str (or as from))]
-         (when-not name
-           (throw (ex-info "capture-llm-output: no :as and no :from in event data"
-                           {:reason :missing-artifact-name})))
-         (atomic-write! (artifact-path env name) text)
-         ;; Surface for the TUI + transcript JSONL.
-         (when-let [tfn (:escapement/transcript-fn env)]
-           (try (tfn {:event :artifact/captured
-                      :data  {:name name :bytes (count text)}})
-                (catch Throwable _ nil)))
-         nil))})))
+     {:expr
+      (fn [env data]
+        (let [text (or (get-in data [:_event :data :text]) "")
+              from (llmc/->id-str (get-in data [:_event :data :from]))
+              name (llmc/->id-str (or as from))]
+          (when-not name
+            (throw (ex-info "capture-llm-output: no :as and no :from in event data"
+                     {:reason :missing-artifact-name})))
+          (atomic-write! (artifact-path env name) text)
+          ;; Surface for the TUI + transcript JSONL.
+          (when-let [tfn (:escapement/transcript-fn env)]
+            (try (tfn {:event :artifact/captured
+                       :data  {:name name :bytes (count text)}})
+                 (catch Throwable _ nil)))
+          nil))})))
 
 (def ^:private mustache-pattern
   #"\{\{\s*([A-Za-z0-9_./\-]+)\s*\}\}")
@@ -381,8 +381,8 @@
   (cond
     (= "output" token)
     (or (:output extras)
-        (throw (ex-info "Template uses {{output}} but no :output in scope"
-                        {:reason :missing-template-key :key "output"})))
+      (throw (ex-info "Template uses {{output}} but no :output in scope"
+               {:reason :missing-template-key :key "output"})))
 
     :else
     (read-artifact! env token)))
@@ -401,8 +401,8 @@
    (render-template template env nil))
   ([template env extras]
    (str/replace template mustache-pattern
-                (fn [[_ token]]
-                  (resolve-token env extras token)))))
+     (fn [[_ token]]
+       (resolve-token env extras token)))))
 
 (defn forward-llm-output
   "Returns a `script` element that captures the in-flight LLM output to a
@@ -424,24 +424,24 @@
   (assert to "forward-llm-output requires :to")
   (assert (string? template) "forward-llm-output requires a string :template")
   (elt/script
-   {:expr
-    (fn [env data]
-      (let [text     (or (get-in data [:_event :data :text]) "")
-            from     (llmc/->id-str (get-in data [:_event :data :from]))
-            art-name (llmc/->id-str (or as from))
-            to'      (llmc/->id-str to)
-            queue    (::sc/event-queue env)
-            sid      (env-ns/session-id env)]
-        (when (and capture? art-name)
-          (atomic-write! (artifact-path env art-name) text)
-          (when-let [tfn (:escapement/transcript-fn env)]
-            (try (tfn {:event :artifact/captured
-                       :data  {:name art-name :bytes (count text)}})
-                 (catch Throwable _ nil))))
-        (let [rendered (render-template template env {:output text})]
-          (sp/send! queue env
-                    {:target            sid
-                     :source-session-id sid
-                     :event             :llm.user-message
-                     :data              {:text rendered :target to'}}))
-        nil))}))
+    {:expr
+     (fn [env data]
+       (let [text     (or (get-in data [:_event :data :text]) "")
+             from     (llmc/->id-str (get-in data [:_event :data :from]))
+             art-name (llmc/->id-str (or as from))
+             to'      (llmc/->id-str to)
+             queue    (::sc/event-queue env)
+             sid      (env-ns/session-id env)]
+         (when (and capture? art-name)
+           (atomic-write! (artifact-path env art-name) text)
+           (when-let [tfn (:escapement/transcript-fn env)]
+             (try (tfn {:event :artifact/captured
+                        :data  {:name art-name :bytes (count text)}})
+                  (catch Throwable _ nil))))
+         (let [rendered (render-template template env {:output text})]
+           (sp/send! queue env
+             {:target            sid
+              :source-session-id sid
+              :event             :llm.user-message
+              :data              {:text rendered :target to'}}))
+         nil))}))

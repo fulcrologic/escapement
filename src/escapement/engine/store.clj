@@ -7,21 +7,21 @@
 
   An in-memory cache mirrors the on-disk state so that hot reads (every event) don't hit the disk."
   (:require
-   [clojure.edn :as edn]
-   [clojure.java.io :as io]
-   [com.fulcrologic.guardrails.malli.core :refer [>defn => ?]]
-   [com.fulcrologic.statecharts.protocols :as sp])
+    [clojure.edn :as edn]
+    [clojure.java.io :as io]
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [com.fulcrologic.statecharts.protocols :as sp])
   (:import
-   (java.nio.file CopyOption Files Path StandardCopyOption)))
+    (java.nio.file CopyOption Files Path StandardCopyOption)))
 
 (>defn ^:private session-file
-       "Returns the canonical checkpoint file for `session-id` inside `dir`."
-       [dir session-id]
-       [:string [:or :keyword :string :uuid :symbol] => any?]
-       (io/file dir (str (cond
-                           (keyword? session-id) (subs (str session-id) 1)
-                           :else                 (str session-id))
-                         ".edn")))
+  "Returns the canonical checkpoint file for `session-id` inside `dir`."
+  [dir session-id]
+  [:string [:or :keyword :string :uuid :symbol] => any?]
+  (io/file dir (str (cond
+                      (keyword? session-id) (subs (str session-id) 1)
+                      :else (str session-id))
+                 ".edn")))
 
 (defn- ensure-dir! [^String dir]
   (let [d (io/file dir)]
@@ -39,8 +39,8 @@
       (binding [*out* w]
         (pr value)))
     (Files/move (as-path tmp) (as-path file)
-                (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
-                                        StandardCopyOption/REPLACE_EXISTING]))
+      (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
+                              StandardCopyOption/REPLACE_EXISTING]))
     nil))
 
 (defn- read-edn-file [file]
@@ -66,15 +66,15 @@
     nil))
 
 (>defn new-store
-       "Create a new checkpoint store backed by `dir` (creating it if necessary)."
-       [dir]
-       [:string => any?]
-       (ensure-dir! dir)
-       (->FileBackedStore dir (atom {})))
+  "Create a new checkpoint store backed by `dir` (creating it if necessary)."
+  [dir]
+  [:string => any?]
+  (ensure-dir! dir)
+  (->FileBackedStore dir (atom {})))
 
 (>defn reload-from-disk!
-       "Drop the in-memory cache so the next read for `session-id` comes from disk (simulating a process restart)."
-       [store session-id]
-       [any? any? => :nil]
-       (swap! (:cache store) dissoc session-id)
-       nil)
+  "Drop the in-memory cache so the next read for `session-id` comes from disk (simulating a process restart)."
+  [store session-id]
+  [any? any? => :nil]
+  (swap! (:cache store) dissoc session-id)
+  nil)

@@ -1,7 +1,7 @@
 (ns escapement.llm.openai-codex.cli
   "Entry points for `escapement login codex` and `escapement logout codex`."
   (:require
-   [escapement.llm.openai-codex.auth :as auth]))
+    [escapement.llm.openai-codex.auth :as auth]))
 
 (defn login!
   "Runs the interactive OAuth login flow and saves credentials to AUTH-FILE.

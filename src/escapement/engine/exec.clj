@@ -6,8 +6,8 @@
   Crib of `com.fulcrologic.statecharts.execution-model.lambda` without the timbre dependency
   so it can be loaded cleanly under bb without pulling a logger chain."
   (:require
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.protocols :as sp]))
+    [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.protocols :as sp]))
 
 (deftype LambdaExecutionModel [data-model event-queue]
   sp/ExecutionModel
@@ -16,12 +16,12 @@
       (let [data    (sp/current-data data-model env)
             result  (expr env data)
             update? (and (not (::sc/raw-result? env))
-                         (vector? result))]
+                      (vector? result))]
         (when update?
           (sp/update! data-model env {:ops result}))
         result)
       (let [update? (and (not (::sc/raw-result? env))
-                         (vector? expr))]
+                      (vector? expr))]
         (when update?
           (sp/update! data-model env {:ops expr}))
         expr))))

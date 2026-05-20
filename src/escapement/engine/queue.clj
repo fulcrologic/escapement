@@ -5,10 +5,10 @@
   that we own so we can evolve it without pulling library deps that break under bb. The semantics match:
   separate per-session queues, delivery-time gating for delays, `cancel!` by `send-id`."
   (:require
-   [com.fulcrologic.guardrails.malli.core :refer [>defn => ?]]
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.events :as evts]
-   [com.fulcrologic.statecharts.protocols :as sp]))
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.events :as evts]
+    [com.fulcrologic.statecharts.protocols :as sp]))
 
 (def ^:private now-ms-fn
   ;; Wrapper so tests could mock if needed.
@@ -16,10 +16,10 @@
 
 (defn- supported-type? [type]
   (or (nil? type)
-      (= type ::sc/chart)
-      (= type :statechart)
-      (and (string? type)
-           (clojure.string/starts-with? (clojure.string/lower-case type) "http://www.w3.org/tr/scxml"))))
+    (= type ::sc/chart)
+    (= type :statechart)
+    (and (string? type)
+      (clojure.string/starts-with? (clojure.string/lower-case type) "http://www.w3.org/tr/scxml"))))
 
 (defrecord InProcessQueue [session-queues]
   sp/EventQueue
@@ -45,8 +45,8 @@
       false))
   (cancel! [_ _env session-id send-id]
     (swap! session-queues update session-id
-           (fn [q]
-             (vec (remove (fn [{sid ::sc/send-id}] (= sid send-id)) q))))
+      (fn [q]
+        (vec (remove (fn [{sid ::sc/send-id}] (= sid send-id)) q))))
     nil)
   (receive-events! [this env handler]
     (sp/receive-events! this env handler {}))
@@ -56,13 +56,13 @@
         (sp/receive-events! this env handler {:session-id sid}))
       (let [cutoff  (now-ms-fn)
             [old _] (swap-vals! session-queues
-                                (fn [qs]
-                                  (let [to-defer (filterv
-                                                  (fn [evt] (> (::delivery-time (meta evt)) cutoff))
-                                                  (get qs session-id))]
-                                    (assoc qs session-id to-defer))))
+                      (fn [qs]
+                        (let [to-defer (filterv
+                                         (fn [evt] (> (::delivery-time (meta evt)) cutoff))
+                                         (get qs session-id))]
+                          (assoc qs session-id to-defer))))
             to-send (filterv (fn [evt] (<= (::delivery-time (meta evt)) cutoff))
-                             (get old session-id))]
+                      (get old session-id))]
         (doseq [event to-send]
           (try (handler env event)
                (catch Throwable e
@@ -70,13 +70,13 @@
                    (println "[engine.queue] handler threw:" (.getMessage e))))))))))
 
 (>defn new-queue
-       "Create a new in-process event queue."
-       []
-       [=> any?]
-       (->InProcessQueue (atom {})))
+  "Create a new in-process event queue."
+  []
+  [=> any?]
+  (->InProcessQueue (atom {})))
 
 (>defn pending-count
-       "Return the number of currently-queued events across all sessions (including deferred ones)."
-       [queue]
-       [any? => :int]
-       (reduce + 0 (map count (vals @(:session-queues queue)))))
+  "Return the number of currently-queued events across all sessions (including deferred ones)."
+  [queue]
+  [any? => :int]
+  (reduce + 0 (map count (vals @(:session-queues queue)))))

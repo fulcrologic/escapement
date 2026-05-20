@@ -6,21 +6,21 @@
   controlled by the test. The chart itself is exercised end-to-end through
   the testing harness."
   (:require
-   [escapement.examples.iterate :as it]
-   [escapement.engine.testing :as dct]
-   [escapement.invocation.llm-conversation :as llmc]
-   [escapement.llm.protocol :as llm]
-   [escapement.tools.builtin :as builtin]
-   [escapement.test-support :as ts]
-   [escapement.tools.protocol :as tp]
-   [fulcro-spec.core :refer [specification assertions =>]]))
+    [escapement.engine.testing :as dct]
+    [escapement.examples.iterate :as it]
+    [escapement.invocation.llm-conversation :as llmc]
+    [escapement.llm.protocol :as llm]
+    [escapement.test-support :as ts]
+    [escapement.tools.builtin :as builtin]
+    [escapement.tools.protocol :as tp]
+    [fulcro-spec.core :refer [=> assertions specification]]))
 
 (defrecord MockBackend [responses call-log]
   llm/LLMBackend
   (send-turn [_ request]
     (swap! call-log conj request)
     (or (ts/pop-first! responses)
-        (throw (ex-info "mock out of canned responses" {})))))
+      (throw (ex-info "mock out of canned responses" {})))))
 
 (defn- mock-backend [responses]
   (->MockBackend (ts/queue responses) (atom [])))
@@ -29,7 +29,7 @@
   {:stop-reason :tool_use
    :content     (mapv (fn [{:keys [id name input]}]
                         {:type :tool_use :id id :name name :input input})
-                      tool-uses)
+                  tool-uses)
    :usage       {} :model "mock"})
 
 (defn- end-turn []
@@ -45,7 +45,7 @@
   (invoke [_ input]
     (swap! calls conj input)
     (or (ts/pop-first! responses)
-        {:result "no canned response" :is-error true})))
+      {:result "no canned response" :is-error true})))
 
 (defn- stub-shell [responses]
   (->StubShellTool (ts/queue responses) (atom [])))
@@ -73,8 +73,8 @@
         proc     (llmc/new-processor {:backend backend :tool-registry registry})
         t        (-> (dct/new-testing-env {:statechart    it/agent
                                            :tool-registry registry}
-                                          proc)
-                     (dct/start! initial-data))]
+                       proc)
+                   (dct/start! initial-data))]
     (let [t (await-config! t :finished 4000)]
       {:t t :shell-calls (-> shell :calls deref) :backend backend})))
 
@@ -83,101 +83,101 @@
 ;; ============================================================================
 
 (specification "iterate chart: happy path — patch passes on first try"
-               (let [be (mock-backend
-                         [(tool-use [{:id "s" :name "event__spec_ready"
-                                      :input {:summary "make square"}}])
-                          (tool-use [{:id "p" :name "event__patch_applied"
-                                      :input {:rationale "wrote square"}}])])
-                     {:keys [t shell-calls]}
-                     (run-chart! {:backend be
-                                  :shell-responses [{:result "ok" :is-error false}]
-                                  :initial-data {:spec-path "/tmp/spec" :target-path "/tmp/t.clj"
-                                                 :test-cmd "true" :max-iterations 3}})
-                     d (dct/data t)]
-                 (assertions
-                  "reached :finished"
-                  (dct/in? t :finished) => true
-                  "final-status is :passed"
-                  (:final-status d) => :passed
-                  "exactly one shell invocation"
-                  (count shell-calls) => 1
-                  "iterations incremented to 1"
-                  (:iterations d) => 1)))
+  (let [be (mock-backend
+             [(tool-use [{:id    "s" :name "event__spec_ready"
+                          :input {:summary "make square"}}])
+              (tool-use [{:id    "p" :name "event__patch_applied"
+                          :input {:rationale "wrote square"}}])])
+        {:keys [t shell-calls]}
+        (run-chart! {:backend         be
+                     :shell-responses [{:result "ok" :is-error false}]
+                     :initial-data    {:spec-path "/tmp/spec" :target-path "/tmp/t.clj"
+                                       :test-cmd  "true" :max-iterations 3}})
+        d  (dct/data t)]
+    (assertions
+      "reached :finished"
+      (dct/in? t :finished) => true
+      "final-status is :passed"
+      (:final-status d) => :passed
+      "exactly one shell invocation"
+      (count shell-calls) => 1
+      "iterations incremented to 1"
+      (:iterations d) => 1)))
 
 (specification "iterate chart: retry then pass"
-               (let [be (mock-backend
-                         [(tool-use [{:id "s" :name "event__spec_ready"
-                                      :input {:summary "make square"}}])
-                          (tool-use [{:id "p1" :name "event__patch_applied"
-                                      :input {:rationale "first attempt"}}])
-                          (tool-use [{:id "r" :name "event__retry"
-                                      :input {:reasoning "try again"}}])
-                          (tool-use [{:id "p2" :name "event__patch_applied"
-                                      :input {:rationale "second attempt"}}])])
-                     {:keys [t shell-calls]}
-                     (run-chart! {:backend be
-                                  :shell-responses [{:result "boom" :is-error true}
-                                                    {:result "ok" :is-error false}]
-                                  :initial-data {:spec-path "/tmp/spec" :target-path "/tmp/t.clj"
-                                                 :test-cmd "true" :max-iterations 3}})
-                     d (dct/data t)]
-                 (assertions
-                  "reached :finished"
-                  (dct/in? t :finished) => true
-                  "final-status is :passed"
-                  (:final-status d) => :passed
-                  "two shell invocations"
-                  (count shell-calls) => 2
-                  "iterations is 2"
-                  (:iterations d) => 2)))
+  (let [be (mock-backend
+             [(tool-use [{:id    "s" :name "event__spec_ready"
+                          :input {:summary "make square"}}])
+              (tool-use [{:id    "p1" :name "event__patch_applied"
+                          :input {:rationale "first attempt"}}])
+              (tool-use [{:id    "r" :name "event__retry"
+                          :input {:reasoning "try again"}}])
+              (tool-use [{:id    "p2" :name "event__patch_applied"
+                          :input {:rationale "second attempt"}}])])
+        {:keys [t shell-calls]}
+        (run-chart! {:backend         be
+                     :shell-responses [{:result "boom" :is-error true}
+                                       {:result "ok" :is-error false}]
+                     :initial-data    {:spec-path "/tmp/spec" :target-path "/tmp/t.clj"
+                                       :test-cmd  "true" :max-iterations 3}})
+        d  (dct/data t)]
+    (assertions
+      "reached :finished"
+      (dct/in? t :finished) => true
+      "final-status is :passed"
+      (:final-status d) => :passed
+      "two shell invocations"
+      (count shell-calls) => 2
+      "iterations is 2"
+      (:iterations d) => 2)))
 
 (specification "iterate chart: exhaust iterations"
-               (let [be (mock-backend
-                         [(tool-use [{:id "s" :name "event__spec_ready"
-                                      :input {:summary "make square"}}])
-                          (tool-use [{:id "p1" :name "event__patch_applied"
-                                      :input {:rationale "first"}}])
-                          (tool-use [{:id "r1" :name "event__retry"
-                                      :input {:reasoning "again"}}])
-                          (tool-use [{:id "p2" :name "event__patch_applied"
-                                      :input {:rationale "second"}}])
-                          (tool-use [{:id "r2" :name "event__retry"
-                                      :input {:reasoning "yet again"}}])])
-                     {:keys [t shell-calls]}
-                     (run-chart! {:backend be
-                                  :shell-responses [{:result "boom1" :is-error true}
-                                                    {:result "boom2" :is-error true}]
-                                  :initial-data {:spec-path "/tmp/spec" :target-path "/tmp/t.clj"
-                                                 :test-cmd "true" :max-iterations 2}})
-                     d (dct/data t)]
-                 (assertions
-                  "reached :finished"
-                  (dct/in? t :finished) => true
-                  "final-status is :exhausted"
-                  (:final-status d) => :exhausted
-                  "two shell invocations (capped by :max-iterations)"
-                  (count shell-calls) => 2
-                  "iterations equals max-iterations"
-                  (:iterations d) => 2)))
+  (let [be (mock-backend
+             [(tool-use [{:id    "s" :name "event__spec_ready"
+                          :input {:summary "make square"}}])
+              (tool-use [{:id    "p1" :name "event__patch_applied"
+                          :input {:rationale "first"}}])
+              (tool-use [{:id    "r1" :name "event__retry"
+                          :input {:reasoning "again"}}])
+              (tool-use [{:id    "p2" :name "event__patch_applied"
+                          :input {:rationale "second"}}])
+              (tool-use [{:id    "r2" :name "event__retry"
+                          :input {:reasoning "yet again"}}])])
+        {:keys [t shell-calls]}
+        (run-chart! {:backend         be
+                     :shell-responses [{:result "boom1" :is-error true}
+                                       {:result "boom2" :is-error true}]
+                     :initial-data    {:spec-path "/tmp/spec" :target-path "/tmp/t.clj"
+                                       :test-cmd  "true" :max-iterations 2}})
+        d  (dct/data t)]
+    (assertions
+      "reached :finished"
+      (dct/in? t :finished) => true
+      "final-status is :exhausted"
+      (:final-status d) => :exhausted
+      "two shell invocations (capped by :max-iterations)"
+      (count shell-calls) => 2
+      "iterations equals max-iterations"
+      (:iterations d) => 2)))
 
 (specification "iterate chart: give-up"
-               (let [be (mock-backend
-                         [(tool-use [{:id "s" :name "event__spec_ready"
-                                      :input {:summary "make square"}}])
-                          (tool-use [{:id "p1" :name "event__patch_applied"
-                                      :input {:rationale "first"}}])
-                          (tool-use [{:id "g" :name "event__give_up"
-                                      :input {:reason "stuck"}}])])
-                     {:keys [t shell-calls]}
-                     (run-chart! {:backend be
-                                  :shell-responses [{:result "boom" :is-error true}]
-                                  :initial-data {:spec-path "/tmp/spec" :target-path "/tmp/t.clj"
-                                                 :test-cmd "true" :max-iterations 3}})
-                     d (dct/data t)]
-                 (assertions
-                  "reached :finished"
-                  (dct/in? t :finished) => true
-                  "final-status is :gave-up"
-                  (:final-status d) => :gave-up
-                  "one shell invocation"
-                  (count shell-calls) => 1)))
+  (let [be (mock-backend
+             [(tool-use [{:id    "s" :name "event__spec_ready"
+                          :input {:summary "make square"}}])
+              (tool-use [{:id    "p1" :name "event__patch_applied"
+                          :input {:rationale "first"}}])
+              (tool-use [{:id    "g" :name "event__give_up"
+                          :input {:reason "stuck"}}])])
+        {:keys [t shell-calls]}
+        (run-chart! {:backend         be
+                     :shell-responses [{:result "boom" :is-error true}]
+                     :initial-data    {:spec-path "/tmp/spec" :target-path "/tmp/t.clj"
+                                       :test-cmd  "true" :max-iterations 3}})
+        d  (dct/data t)]
+    (assertions
+      "reached :finished"
+      (dct/in? t :finished) => true
+      "final-status is :gave-up"
+      (:final-status d) => :gave-up
+      "one shell invocation"
+      (count shell-calls) => 1)))

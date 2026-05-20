@@ -12,10 +12,10 @@
    Backends honoring native cache_control (API) will pass markers through.
    Backends that don't (openai-codex) ignore them but the schema accepts them so calling code is portable."
   (:require
-   [com.fulcrologic.guardrails.malli.core :refer [>defn => ?]]
-   [malli.core :as m]
-   [malli.error :as me]
-   [malli.json-schema :as mjs]))
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn ?]]
+    [malli.core :as m]
+    [malli.error :as me]
+    [malli.json-schema :as mjs]))
 
 (def CacheControl
   "Anthropic-style cache_control marker. Optional on any cacheable item (system, message, tool)."
@@ -139,17 +139,17 @@
    ;; Sampling parameters (Anthropic accepts 0 < temperature <= 1; top-p in
    ;; (0, 1]; top-k a positive int). We don't constrain ranges in the schema
    ;; — let the model server reject out-of-range values, since they change.
-   [:temperature    {:optional true} number?]
-   [:top-p          {:optional true} number?]
-   [:top-k          {:optional true} pos-int?]
+   [:temperature {:optional true} number?]
+   [:top-p {:optional true} number?]
+   [:top-k {:optional true} pos-int?]
    [:stop-sequences {:optional true} [:vector :string]]
    ;; Extended thinking. When :type is :enabled, :budget-tokens is required
    ;; AND :max-tokens on the Request must be > :budget-tokens.
-   [:thinking       {:optional true} Thinking]
+   [:thinking {:optional true} Thinking]
    ;; Tool-choice forcing.
-   [:tool-choice    {:optional true} ToolChoice]
+   [:tool-choice {:optional true} ToolChoice]
    ;; Optional audit/metadata.
-   [:metadata       {:optional true} Metadata]
+   [:metadata {:optional true} Metadata]
    ;; Extension key for conversation tracking / prompt cache key.
    [:conversation/id {:optional true} [:or :string :keyword :uuid]]])
 
@@ -176,21 +176,21 @@
    [:backend-metadata {:optional true} :map]])
 
 (>defn validate-request
-       "Returns nil when `request` matches the Request schema; otherwise returns a humanized error map."
-       [request]
-       [:any => (? :any)]
-       (when-not (m/validate Request request)
-         (me/humanize (m/explain Request request))))
+  "Returns nil when `request` matches the Request schema; otherwise returns a humanized error map."
+  [request]
+  [:any => (? :any)]
+  (when-not (m/validate Request request)
+    (me/humanize (m/explain Request request))))
 
 (>defn validate-response
-       "Returns nil when `response` matches the Response schema; otherwise returns a humanized error map."
-       [response]
-       [:any => (? :any)]
-       (when-not (m/validate Response response)
-         (me/humanize (m/explain Response response))))
+  "Returns nil when `response` matches the Response schema; otherwise returns a humanized error map."
+  [response]
+  [:any => (? :any)]
+  (when-not (m/validate Response response)
+    (me/humanize (m/explain Response response))))
 
 (>defn malli->json-schema
-       "Convert a Malli `schema` to a JSON Schema map suitable for use as Tool `:input-schema`."
-       [schema]
-       [:any => :map]
-       (mjs/transform schema))
+  "Convert a Malli `schema` to a JSON Schema map suitable for use as Tool `:input-schema`."
+  [schema]
+  [:any => :map]
+  (mjs/transform schema))

@@ -35,12 +35,12 @@
    chart authors transition on `:error.human.*` rather than configuring an
    `:on-error-event`.}"
   (:require
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.environment :as env-ns]
-   [com.fulcrologic.statecharts.protocols :as sp]
-   [malli.core :as m]
-   [malli.error :as me]))
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.environment :as env-ns]
+    [com.fulcrologic.statecharts.protocols :as sp]
+    [malli.core :as m]
+    [malli.error :as me]))
 
 ;; ---------------------------------------------------------------------------
 ;; Renderer protocol
@@ -50,14 +50,14 @@
   "All methods take an `opts` map sharing the chart-author params.
    Implementations may block. They MUST return promptly when the worker
    thread is interrupted (so `stop-invocation!` works)."
-  (prompt-text     [this opts])
-  (prompt-select   [this opts])
-  (prompt-multi    [this opts])
-  (prompt-confirm  [this opts])
-  (start-progress  [this opts])
+  (prompt-text [this opts])
+  (prompt-select [this opts])
+  (prompt-multi [this opts])
+  (prompt-confirm [this opts])
+  (start-progress [this opts])
   (update-progress [this handle pct label])
-  (end-progress    [this handle])
-  (custom-render   [this f env data]))
+  (end-progress [this handle])
+  (custom-render [this f env data]))
 
 ;; ---------------------------------------------------------------------------
 ;; Stdin/ANSI fallback renderer (used when no TUI is attached)
@@ -75,9 +75,9 @@
   (loop []
     (let [line (or (read-trim-line) "")]
       (cond
-        (str/blank? line)              default
+        (str/blank? line) default
         (re-matches #"(?i)y(es)?" line) true
-        (re-matches #"(?i)no?" line)   false
+        (re-matches #"(?i)no?" line) false
         :else (do (print-prompt! "Please answer y or n: ") (recur))))))
 
 (defn- print-numbered-options! [options]
@@ -100,10 +100,10 @@
       (if (str/blank? line)
         #{}
         (let [parts (->> (str/split line #"[,\s]+")
-                         (remove str/blank?))
+                      (remove str/blank?))
               idxs  (keep #(try (Long/parseLong %) (catch Throwable _ nil)) parts)]
           (if (and (= (count idxs) (count parts))
-                   (every? #(<= 1 % n) idxs))
+                (every? #(<= 1 % n) idxs))
             (set (map dec idxs))
             (do (print-prompt! (str "Enter comma-separated numbers in 1.." n " (blank=none): ")) (recur))))))))
 
@@ -152,12 +152,12 @@
 (defn- post-event-to-parent!
   [{:keys [env queue parent-session-id invokeid]} event data]
   (sp/send! queue env
-            {:target            parent-session-id
-             :source-session-id parent-session-id
-             :sendid            (str parent-session-id "." invokeid "." (name event))
-             :invokeid          invokeid
-             :event             event
-             :data              data}))
+    {:target            parent-session-id
+     :source-session-id parent-session-id
+     :sendid            (str parent-session-id "." invokeid "." (name event))
+     :invokeid          invokeid
+     :event             event
+     :data              data}))
 
 (defn- humanize-malli-errors [schema input]
   (-> (m/explain schema input) me/humanize pr-str))
@@ -167,13 +167,13 @@
    Throws on unknown :kind."
   [renderer {:keys [kind render] :as opts} env data]
   (case kind
-    :text          (prompt-text renderer opts)
-    :select        (prompt-select renderer opts)
-    :multi-select  (prompt-multi renderer opts)
-    :confirm       (prompt-confirm renderer opts)
-    :custom        (custom-render renderer render env data)
+    :text (prompt-text renderer opts)
+    :select (prompt-select renderer opts)
+    :multi-select (prompt-multi renderer opts)
+    :confirm (prompt-confirm renderer opts)
+    :custom (custom-render renderer render env data)
     (throw (ex-info (str "Unsupported :human-input :kind " kind)
-                    {:kind kind}))))
+             {:kind kind}))))
 
 (defn- error-event
   "SCXML-style canonical error event for the human-input invocation."
@@ -188,13 +188,13 @@
         env         (:env parent-ctx)
         post-error! (fn [reason data]
                       (post-event-to-parent! parent-ctx (error-event reason)
-                                             (assoc data :reason reason)))]
+                        (assoc data :reason reason)))]
     (try
       (transcript! transcript-fn
-                   {:event :human-input/start
-                    :ts    (now-ms)
-                    :data  (cond-> {:kind kind :invokeid (:invokeid parent-ctx)}
-                             (:prompt params) (assoc :prompt (:prompt params)))})
+        {:event :human-input/start
+         :ts    (now-ms)
+         :data  (cond-> {:kind kind :invokeid (:invokeid parent-ctx)}
+                  (:prompt params) (assoc :prompt (:prompt params)))})
       (cond
         (= :dying @worker-state)
         (transcript! transcript-fn {:event :human-input/cancelled :ts (now-ms) :data {}})
@@ -216,21 +216,21 @@
             (and answer-schema (not (m/validate answer-schema answer)))
             (let [err (humanize-malli-errors answer-schema answer)]
               (transcript! transcript-fn
-                           {:event :human-input/validation-failed
-                            :ts    (now-ms)
-                            :data  {:errors err}})
+                {:event :human-input/validation-failed
+                 :ts    (now-ms)
+                 :data  {:errors err}})
               (post-error! :invalid-answer
-                           {:errors err :answer answer}))
+                {:errors err :answer answer}))
 
             :else
             (do
               (transcript! transcript-fn
-                           {:event :human-input/answer
-                            :ts    (now-ms)
-                            :data  (cond-> {:kind     kind
-                                            :invokeid (:invokeid parent-ctx)}
-                                     (get params :record-answer? true)
-                                     (assoc :answer answer))})
+                {:event :human-input/answer
+                 :ts    (now-ms)
+                 :data  (cond-> {:kind     kind
+                                 :invokeid (:invokeid parent-ctx)}
+                          (get params :record-answer? true)
+                          (assoc :answer answer))})
               (post-event-to-parent! parent-ctx on-answer-event {:answer answer})))))
       (catch InterruptedException _
         (transcript! transcript-fn {:event :human-input/interrupted :ts (now-ms) :data {}}))
@@ -238,17 +238,17 @@
         (if (= :cancelled (:reason (ex-data t)))
           (do
             (transcript! transcript-fn
-                         {:event :human-input/cancelled
-                          :ts    (now-ms)
-                          :data  {}})
+              {:event :human-input/cancelled
+               :ts    (now-ms)
+               :data  {}})
             (try
               (post-event-to-parent! parent-ctx on-cancel-event {})
               (catch Throwable _ nil)))
           (do
             (transcript! transcript-fn
-                         {:event :human-input/error
-                          :ts    (now-ms)
-                          :data  {:message (.getMessage t)}})
+              {:event :human-input/error
+               :ts    (now-ms)
+               :data  {:message (.getMessage t)}})
             (try
               (post-error! :worker-exception {:message (.getMessage t)})
               (catch Throwable _ nil)))))
@@ -274,14 +274,14 @@
                               (reset! (:worker-state old) :dying))
           queue             (::sc/event-queue env)
           worker-state      (atom :running)
-          parent-ctx        {:env env :queue queue
+          parent-ctx        {:env               env :queue queue
                              :parent-session-id parent-session-id
-                             :invokeid invokeid}
+                             :invokeid          invokeid}
           ;; Pull a snapshot of the data model so :custom renderers can use it.
           data              (try
                               (sp/current-data
-                               (::sc/data-model env)
-                               (assoc env ::sc/context-element-id nil))
+                                (::sc/data-model env)
+                                (assoc env ::sc/context-element-id nil))
                               (catch Throwable _ nil))
           ctx               {:renderer      renderer
                              :worker-state  worker-state
@@ -291,7 +291,7 @@
                              :data          data}
           runnable          (fn [] (run-worker! ctx))
           ^Thread thread    (doto (Thread. ^Runnable runnable
-                                           (str "human-input-" parent-session-id "-" invokeid))
+                                    (str "human-input-" parent-session-id "-" invokeid))
                               (.setDaemon true))]
       (swap! workers assoc k {:thread thread :worker-state worker-state})
       (.start thread)
@@ -313,8 +313,8 @@
           entry             (get @workers k)
           ev-name           (cond
                               (keyword? event) event
-                              (map? event)     (or (:event event) (:name event))
-                              :else            nil)]
+                              (map? event) (or (:event event) (:name event))
+                              :else nil)]
       (when (and entry (= :human.cancel ev-name))
         (reset! (:worker-state entry) :dying)
         (try (.interrupt ^Thread (:thread entry)) (catch Throwable _ nil)))
@@ -329,16 +329,16 @@
   [{:keys [renderer transcript-fn]}]
   (assert renderer ":renderer is required")
   (->HumanInputProcessor renderer
-                         (or transcript-fn (fn [_] nil))
-                         (atom {})))
+    (or transcript-fn (fn [_] nil))
+    (atom {})))
 
 (defn active-worker-count
   "Number of workers whose state is not :dying. Used by the runner to decide
    when it's safe to terminate."
   [processor]
   (reduce-kv
-   (fn [n _ entry]
-     (let [s (some-> (:worker-state entry) deref)]
-       (if (or (nil? s) (= :dying s)) n (inc n))))
-   0
-   @(:workers processor)))
+    (fn [n _ entry]
+      (let [s (some-> (:worker-state entry) deref)]
+        (if (or (nil? s) (= :dying s)) n (inc n))))
+    0
+    @(:workers processor)))

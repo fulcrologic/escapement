@@ -12,15 +12,15 @@
   which model the eligibility gate + preference order selected) and emits a
   `tool_use` that fires the chart's terminal event."
   (:require
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.elements :refer [state transition final]]
-   [escapement.chart.helpers :as h]
-   [escapement.config :as config]
-   [escapement.lib :as lib]
-   [clojure.string :as str]
-   [escapement.llm.protocol :as proto]
-   [escapement.tools.protocol :as tp]
-   [fulcro-spec.core :refer [specification component assertions =>]]))
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.elements :refer [final state transition]]
+    [escapement.chart.helpers :as h]
+    [escapement.config :as config]
+    [escapement.lib :as lib]
+    [escapement.llm.protocol :as proto]
+    [escapement.tools.protocol :as tp]
+    [fulcro-spec.core :refer [=> assertions component specification]]))
 
 (defn- event-tool
   "The Anthropic-tool name the llm-conversation processor expects for a chart
@@ -64,7 +64,7 @@
   {:llm/preferences
    [{:provider :z-ai-plan :model "glm-5.1"}
     {:provider :anthropic :model "claude-opus-4-7"}
-    {:provider :openai    :model "gpt-5"}]
+    {:provider :openai :model "gpt-5"}]
 
    :llm/ratings
    {"glm-5.1"         {:clojure 7 :ux 5}
@@ -76,7 +76,7 @@
 (def reference-credentials
   [{:provider :z-ai-plan :subscription true}
    {:provider :anthropic :api-key "sk-anthropic"}
-   {:provider :openai    :api-key "sk-openai"}])
+   {:provider :openai :api-key "sk-openai"}])
 
 ;; ---------------------------------------------------------------------------
 ;; Hermetic guard: any call to config/load-config or System/getenv on the lib
@@ -102,19 +102,19 @@
   reaches `:finished` on `:gate-done`."
   [needs]
   (chart/statechart
-   {:initial :work}
-   (state {:id :work :initial :running}
-          (state {:id :running}
-                 (h/llm-conversation
-                  {:id        "gate"
-                   :params-fn (fn [_ _]
-                                {:system               "go"
-                                 :needs                needs
-                                 :real-tools           []
-                                 :allowed-events       [{:event :gate-done}]
-                                 :initial-user-message "do it"})})
-                 (transition {:event :gate-done :target :finished}))
-          (final {:id :finished}))))
+    {:initial :work}
+    (state {:id :work :initial :running}
+      (state {:id :running}
+        (h/llm-conversation
+          {:id        "gate"
+           :params-fn (fn [_ _]
+                        {:system               "go"
+                         :needs                needs
+                         :real-tools           []
+                         :allowed-events       [{:event :gate-done}]
+                         :initial-user-message "do it"})})
+        (transition {:event :gate-done :target :finished}))
+      (final {:id :finished}))))
 
 (defn- run-gate
   "Run `gate-chart` with `needs` through the facade with `cfg`/`creds` and an
@@ -146,23 +146,23 @@
     (let [needs {:clojure [:>= 7]}
           prefs [{:provider :z-ai-plan :model "glm-5.1"}
                  {:provider :anthropic :model "claude-opus-4-7"}
-                 {:provider :openai    :model "gpt-5"}]
+                 {:provider :openai :model "gpt-5"}]
           ;; Run A: only gpt-5 clears :clojure>=7 ⇒ gpt-5 selected.
-          a (hermetic
-             #(run-gate {:needs needs
-                         :credentials reference-credentials
-                         :config {:llm/preferences prefs
-                                  :llm/ratings {"glm-5.1"         {:clojure 2}
-                                                "claude-opus-4-7" {:clojure 3}
-                                                "gpt-5"           {:clojure 9}}}}))
+          a     (hermetic
+                  #(run-gate {:needs       needs
+                              :credentials reference-credentials
+                              :config      {:llm/preferences prefs
+                                            :llm/ratings     {"glm-5.1"         {:clojure 2}
+                                                              "claude-opus-4-7" {:clojure 3}
+                                                              "gpt-5"           {:clojure 9}}}}))
           ;; Run B: only glm-5.1 clears it ⇒ glm-5.1 selected (first in prefs).
-          b (hermetic
-             #(run-gate {:needs needs
-                         :credentials reference-credentials
-                         :config {:llm/preferences prefs
-                                  :llm/ratings {"glm-5.1"         {:clojure 9}
-                                                "claude-opus-4-7" {:clojure 2}
-                                                "gpt-5"           {:clojure 1}}}}))]
+          b     (hermetic
+                  #(run-gate {:needs       needs
+                              :credentials reference-credentials
+                              :config      {:llm/preferences prefs
+                                            :llm/ratings     {"glm-5.1"         {:clojure 9}
+                                                              "claude-opus-4-7" {:clojure 2}
+                                                              "gpt-5"           {:clojure 1}}}}))]
       (assertions
         "run A selected the only model its ratings let through the gate"
         (:model a) => "gpt-5"
@@ -190,8 +190,8 @@
     ;; the unfiltered default-preferences list (CLI-bias documented behavior).
     (let [{:keys [model status]}
           (hermetic
-           #(run-gate {:needs       {:clojure [:>= 5]}
-                       :credentials reference-credentials}))]
+            #(run-gate {:needs       {:clojure [:>= 5]}
+                        :credentials reference-credentials}))]
       (assertions
         "the run still proceeded (fail-open default) to its final state"
         status => :done
@@ -202,13 +202,13 @@
     (let [stub (new-stub :gate-done)
           {:keys [status model]}
           (hermetic
-           #(run-gate {:needs       {}
-                       ;; A provider keyword that has NO template — if the
-                       ;; facade tried to assemble from it the backend would
-                       ;; be nil and the LLM node could not run. It runs ⇒
-                       ;; the explicit :backend was used verbatim.
-                       :credentials [{:provider :no-such-provider}]
-                       :backend     stub}))]
+            #(run-gate {:needs       {}
+                        ;; A provider keyword that has NO template — if the
+                        ;; facade tried to assemble from it the backend would
+                        ;; be nil and the LLM node could not run. It runs ⇒
+                        ;; the explicit :backend was used verbatim.
+                        :credentials [{:provider :no-such-provider}]
+                        :backend     stub}))]
       (assertions
         "the explicit backend was exercised (run reached final via its tool_use)"
         status => :done
@@ -220,9 +220,9 @@
   ;; `hermetic` redefs config/load-config to throw; a clean run inside it
   ;; proves the lib path never resolved config from disk.
   (let [outcome (hermetic
-                 #(run-gate {:needs       {:tool-call? true}
-                             :credentials reference-credentials
-                             :config      reference-config}))]
+                  #(run-gate {:needs       {:tool-call? true}
+                              :credentials reference-credentials
+                              :config      reference-config}))]
     (assertions
       "a full lib/run completed without ever calling config/load-config"
       (:status outcome) => :done
@@ -237,65 +237,65 @@
   ;; NODE 2 :design-review — :vision? true + :ux [:>= 6]
   ;;   only gpt-5 (ux 8, vision ok); glm-5.1 (ux 5)/opus (ux 4) dropped
   ;;   ⇒ gpt-5 (only survivor — gate overrode preference priority).
-  (let [seen  (atom [])
+  (let [seen   (atom [])
         ;; First turn of each node: record the gate-selected model + emit that
         ;; node's terminal event tool. Then `:end_turn` so the worker parks
         ;; (it does not spin) while the chart processes the transition and
         ;; cancels the invocation. `node` advances per distinct first-turn.
-        node  (atom 0)
-        stub (reify proto/LLMBackend
-               (send-turn [_ request]
-                 (let [n (count @seen)]
-                   (if (or (zero? n)
+        node   (atom 0)
+        stub   (reify proto/LLMBackend
+                 (send-turn [_ request]
+                   (let [n (count @seen)]
+                     (if (or (zero? n)
                            (not= (peek @seen) (:model request)))
-                     ;; first turn of a (new) node
-                     (do
-                       (swap! seen conj (:model request))
-                       (let [k (swap! node inc)]
-                         {:stop-reason :tool_use
-                          :content     [{:type :tool_use :id (str "u" k)
-                                         :name (if (= 1 k) (event-tool :refactor-done)
-                                                   (event-tool :review-done))
-                                         :input {}}]
-                          :usage       {:input-tokens 1 :output-tokens 1}
-                          :model       (:model request)}))
-                     ;; subsequent turn of the same node — park the worker
-                     {:stop-reason :end_turn
-                      :content     [{:type :text :text "done"}]
-                      :usage       {:input-tokens 1 :output-tokens 1}
-                      :model       (:model request)}))))
+                       ;; first turn of a (new) node
+                       (do
+                         (swap! seen conj (:model request))
+                         (let [k (swap! node inc)]
+                           {:stop-reason :tool_use
+                            :content     [{:type  :tool_use :id (str "u" k)
+                                           :name  (if (= 1 k) (event-tool :refactor-done)
+                                                              (event-tool :review-done))
+                                           :input {}}]
+                            :usage       {:input-tokens 1 :output-tokens 1}
+                            :model       (:model request)}))
+                       ;; subsequent turn of the same node — park the worker
+                       {:stop-reason :end_turn
+                        :content     [{:type :text :text "done"}]
+                        :usage       {:input-tokens 1 :output-tokens 1}
+                        :model       (:model request)}))))
         agent
-        (chart/statechart
-         {:initial :refactor}
-         (state {:id :refactor}
-                (h/llm-conversation
-                 {:id        "refactor"
-                  :params-fn (fn [_ _]
-                               {:system "You are a Clojure refactoring agent."
-                                :needs  {:tool-call? true :clojure [:>= 7]}
-                                :real-tools []
-                                :allowed-events [{:event :refactor-done}]
-                                :initial-user-message "rename foo to bar"})})
-                (transition {:event :refactor-done :target :design-review}))
-         (state {:id :design-review}
-                (h/llm-conversation
-                 {:id        "design-review"
-                  :params-fn (fn [_ _]
-                               {:system "You are a UX/design reviewer."
-                                :needs  {:vision? true :ux [:>= 6]}
-                                :real-tools []
-                                :allowed-events [{:event :review-done}]
-                                :initial-user-message "critique the mockups"})})
-                (transition {:event :review-done :target :finished}))
-         (final {:id :finished}))
+               (chart/statechart
+                 {:initial :refactor}
+                 (state {:id :refactor}
+                   (h/llm-conversation
+                     {:id        "refactor"
+                      :params-fn (fn [_ _]
+                                   {:system               "You are a Clojure refactoring agent."
+                                    :needs                {:tool-call? true :clojure [:>= 7]}
+                                    :real-tools           []
+                                    :allowed-events       [{:event :refactor-done}]
+                                    :initial-user-message "rename foo to bar"})})
+                   (transition {:event :refactor-done :target :design-review}))
+                 (state {:id :design-review}
+                   (h/llm-conversation
+                     {:id        "design-review"
+                      :params-fn (fn [_ _]
+                                   {:system               "You are a UX/design reviewer."
+                                    :needs                {:vision? true :ux [:>= 6]}
+                                    :real-tools           []
+                                    :allowed-events       [{:event :review-done}]
+                                    :initial-user-message "critique the mockups"})})
+                   (transition {:event :review-done :target :finished}))
+                 (final {:id :finished}))
         result (hermetic
-                #(lib/run {:chart          agent
-                           :session-id     :req-42
-                           :credentials    reference-credentials
-                           :config         reference-config
-                           :backend        stub
-                           :tool-registry  (tp/new-registry)
-                           :max-iterations 300}))
+                 #(lib/run {:chart          agent
+                            :session-id     :req-42
+                            :credentials    reference-credentials
+                            :config         reference-config
+                            :backend        stub
+                            :tool-registry  (tp/new-registry)
+                            :max-iterations 300}))
         models @seen]
     (assertions
       "the chart ran both nodes then terminated via the top-level final"

@@ -51,7 +51,8 @@ Keep `component` to split logical areas, such as when **setup differs** between 
 
 ## Rule 3: Test Structure — specification / component / assertions
 
-The combination of `specification`, `component`, and assertion label strings should form complete, readable sentences when read aloud.
+The combination of `specification`, `component`, and assertion label strings should form complete, readable sentences
+when read aloud.
 
 ```clojure
 (specification "order-fulfillment-plan"
@@ -87,6 +88,7 @@ The combination of `specification`, `component`, and assertion label strings sho
 ```
 
 Reads as:
+
 - "order-fulfillment-plan when stock is sufficient status is success"
 - "order-fulfillment-plan when stock is insufficient reason is insufficient-stock"
 
@@ -148,7 +150,8 @@ When it is important to indicate that something is CONDITIONALLY skipped, phrase
 (set ops) => #{foo-op bar-op}
 ```
 
-Make SURE that EVERY assertion you write will break if the TEXT description of the assertion is invalidated by a code change.
+Make SURE that EVERY assertion you write will break if the TEXT description of the assertion is invalidated by a code
+change.
 
 ### Assertion Labels Are Mandatory
 
@@ -168,7 +171,8 @@ Make SURE that EVERY assertion you write will break if the TEXT description of t
 
 ## Rule 6: When to Use `component`
 
-Use `component` ONLY when **setup differs** between groups. If setup is the same, put all assertions flat under `specification`:
+Use `component` ONLY when **setup differs** between groups. If setup is the same, put all assertions flat under
+`specification`:
 
 ```clojure
 ;; Same setup — flat assertions:
@@ -194,11 +198,11 @@ Use `component` ONLY when **setup differs** between groups. If setup is the same
 
 ### What CAN be mocked (validated mocking requires `>defn`)
 
-| Macro | Validation | Use when |
-|---|---|---|
-| `when-mocking` / `provided` | None — plain stubs | Mocked function is not defined with `>defn` |
-| `when-mocking!` / `provided!` | Validates args and return against `>defn` schemas | Default choice for `>defn` functions |
-| `when-mocking!!` / `provided!!` | Validates + enforces every mock is actually called | Coverage proof that mock was exercised |
+| Macro                           | Validation                                         | Use when                                    |
+|---------------------------------|----------------------------------------------------|---------------------------------------------|
+| `when-mocking` / `provided`     | None — plain stubs                                 | Mocked function is not defined with `>defn` |
+| `when-mocking!` / `provided!`   | Validates args and return against `>defn` schemas  | Default choice for `>defn` functions        |
+| `when-mocking!!` / `provided!!` | Validates + enforces every mock is actually called | Coverage proof that mock was exercised      |
 
 ### Preferred: `provided!` with description strings
 
@@ -246,18 +250,21 @@ Use `component` ONLY when **setup differs** between groups. If setup is the same
 ### What NOT to Mock
 
 **DO mock:**
+
 - Side effect functions (database, file I/O, network)
 - Functions that return non-deterministic values (current time, random numbers)
 - External dependencies you don't own
 - Complex dependencies when testing high-level orchestration
 
 **DON'T mock:**
+
 - Pure functions — just call them directly
 - Your own code when testing that specific code
 - Data structures — just create them
 - Trivial functions (getters, simple transformations)
 
 **CAN'T mock (validated mocking requires `>defn`):**
+
 - Protocol methods — use `-` prefix wrapper pattern
 - Pathom `defresolver`/`defmutation` — use `*-impl` delegation pattern
 - Fulcro `defmutation` — use `*` suffix helper pattern
@@ -276,7 +283,8 @@ Use `component` ONLY when **setup differs** between groups. If setup is the same
 
 ## Rule 9: Be Succinct
 
-When a single setup can assert multiple things, do so. If you're doing mocking and showing that different mocked things connect together, use `spied-value` and mock check functions to spell out all connections in one component block.
+When a single setup can assert multiple things, do so. If you're doing mocking and showing that different mocked things
+connect together, use `spied-value` and mock check functions to spell out all connections in one component block.
 
 ```clojure
 ;; GOOD — one setup, many assertions about the composed behavior:
@@ -364,6 +372,7 @@ The test namespace must be `{{TEST_NAMESPACE}}`.
 The source namespace is `{{SOURCE_NAMESPACE}}` — require it as `sut`.
 
 **Coverage requirements:**
+
 - Every single behavior from the analysis must have at least one assertion
 - Include edge cases (nil, empty, boundary values)
 - Cover error/exception paths

@@ -118,70 +118,70 @@
                               escapement.examples.inspectable/agent)))'
    ==========================================================================="
   (:require
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.data-model.operations :as ops]
-   [com.fulcrologic.statecharts.elements
-    :refer [state transition final script]]
-   [escapement.chart.helpers :as h]))
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
+    [com.fulcrologic.statecharts.elements
+     :refer [final script state transition]]
+    [escapement.chart.helpers :as h]))
 
 (def system-prompt
   (str
-   "You drive a statechart by calling tools. Follow these steps exactly, "
-   "terse, no chit-chat:\n"
-   "1. Call the real tool `fs_write` once with "
-   "{\"path\":\"scratch/note.txt\",\"content\":\"sky is blue\"} to record the fact.\n"
-   "2. After the tool result, write a ONE-sentence final answer stating the "
-   "fact you recorded, then end your turn.\n"
-   "3. Then call the event tool `event__done` exactly once with "
-   "{\"summary\":\"<your one-sentence answer>\"} to finish.\n"
-   "Do not call any other tools. Do not loop."))
+    "You drive a statechart by calling tools. Follow these steps exactly, "
+    "terse, no chit-chat:\n"
+    "1. Call the real tool `fs_write` once with "
+    "{\"path\":\"scratch/note.txt\",\"content\":\"sky is blue\"} to record the fact.\n"
+    "2. After the tool result, write a ONE-sentence final answer stating the "
+    "fact you recorded, then end your turn.\n"
+    "3. Then call the event tool `event__done` exactly once with "
+    "{\"summary\":\"<your one-sentence answer>\"} to finish.\n"
+    "Do not call any other tools. Do not loop."))
 
-(def agent ; runnable: bb -m escapement.cli run escapement.examples.inspectable/agent
+(def agent                                                  ; runnable: bb -m escapement.cli run escapement.examples.inspectable/agent
   (chart/statechart
-   {:initial :run}
-   ;; Compound parent so the :finished `final` empties only this sub-config,
-   ;; not the whole machine (cheat-sheet §3 / hello.clj pattern).
-   (state {:id :run :initial :converse}
-          (state {:id :converse}
-                 (h/llm-conversation
-                  {:id        "inspectable"
-                   ;; autoforward? defaults true; not needed here (no steering).
-                   :params-fn
-                   (fn [_env _data]
-                     {:system               system-prompt
-                      ;; Real-tool: built-in fs/write writes a real scratch
-                      ;; file under --work-dir (non-destructive). Whitelisted
-                      ;; so the model can ONLY write, nothing else.
-                      :real-tools           [:fs/write]
-                      ;; Event-tool that advances the chart to :finished.
-                      :allowed-events       [{:event       :done
+    {:initial :run}
+    ;; Compound parent so the :finished `final` empties only this sub-config,
+    ;; not the whole machine (cheat-sheet §3 / hello.clj pattern).
+    (state {:id :run :initial :converse}
+      (state {:id :converse}
+        (h/llm-conversation
+          {:id "inspectable"
+           ;; autoforward? defaults true; not needed here (no steering).
+           :params-fn
+           (fn [_env _data]
+             {:system                       system-prompt
+              ;; Real-tool: built-in fs/write writes a real scratch
+              ;; file under --work-dir (non-destructive). Whitelisted
+              ;; so the model can ONLY write, nothing else.
+              :real-tools                   [:fs/write]
+              ;; Event-tool that advances the chart to :finished.
+              :allowed-events               [{:event       :done
                                               :data-schema [:map [:summary :string]]}]
-                      ;; Conservative budgets so a live run can never hang
-                      ;; (cheat-sheet §1: ALWAYS bound the loop).
-                      :max-turns                    5
-                      :max-conversation-duration-ms 120000
-                      :initial-user-message
-                      "Record the fact \"sky is blue\" and report it."})})
+              ;; Conservative budgets so a live run can never hang
+              ;; (cheat-sheet §1: ALWAYS bound the loop).
+              :max-turns                    5
+              :max-conversation-duration-ms 120000
+              :initial-user-message
+              "Record the fact \"sky is blue\" and report it."})})
 
-                 ;; Event-tool fires :done FIRST (task 001 P1: posted before
-                 ;; :llm.idle for the same turn). It is `:type :internal` so
-                 ;; it records the summary WITHOUT exiting :converse — the
-                 ;; :llm.idle transition below stays active for step 2.
-                 (transition {:event :done :type :internal}
-                             (script
-                              {:expr (fn [_env data]
-                                       [(ops/assign
-                                         :summary
-                                         (get-in data [:_event :data :summary]))])}))
+        ;; Event-tool fires :done FIRST (task 001 P1: posted before
+        ;; :llm.idle for the same turn). It is `:type :internal` so
+        ;; it records the summary WITHOUT exiting :converse — the
+        ;; :llm.idle transition below stays active for step 2.
+        (transition {:event :done :type :internal}
+          (script
+            {:expr (fn [_env data]
+                     [(ops/assign
+                        :summary
+                        (get-in data [:_event :data :summary]))])}))
 
-                 ;; The turn-end hook posts :llm.idle (default
-                 ;; :on-end-turn-event) AFTER :done, carrying
-                 ;; {:text final-text :from id}. Capture the final assistant
-                 ;; text to a named artifact under --work-dir (emits the
-                 ;; :artifact/captured transcript event AND writes a real
-                 ;; file at <session-dir>/artifacts/answer.md), then — and
-                 ;; only then — advance to :finished.
-                 (transition {:event :llm.idle :target :finished}
-                             (h/capture-llm-output {:as "answer.md"})))
+        ;; The turn-end hook posts :llm.idle (default
+        ;; :on-end-turn-event) AFTER :done, carrying
+        ;; {:text final-text :from id}. Capture the final assistant
+        ;; text to a named artifact under --work-dir (emits the
+        ;; :artifact/captured transcript event AND writes a real
+        ;; file at <session-dir>/artifacts/answer.md), then — and
+        ;; only then — advance to :finished.
+        (transition {:event :llm.idle :target :finished}
+          (h/capture-llm-output {:as "answer.md"})))
 
-          (final {:id :finished}))))
+      (final {:id :finished}))))

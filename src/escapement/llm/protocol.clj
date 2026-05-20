@@ -25,10 +25,10 @@
   ([category message] (llm-error category message nil))
   ([category message {:keys [status cause data] :as _opts}]
    (ex-info message
-            (merge {:llm/category category}
-                   (when status {:llm/status status})
-                   data)
-            cause)))
+     (merge {:llm/category category}
+       (when status {:llm/status status})
+       data)
+     cause)))
 
 (defn error-category
   "Returns the `:llm/category` keyword carried by `throwable` (walking the
@@ -38,7 +38,7 @@
   (loop [t throwable]
     (when t
       (or (:llm/category (ex-data t))
-          (recur (ex-cause t))))))
+        (recur (ex-cause t))))))
 
 (defprotocol LLMBackend
   "An LLM conversational backend. Implementations are responsible for honoring

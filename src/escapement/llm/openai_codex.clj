@@ -11,12 +11,12 @@
     `~/.escapement/openai-auth.json`. The backend refreshes the token
     automatically when it is within 60 seconds of expiry."
   (:require
-   [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
-   [escapement.llm.openai-codex.auth :as auth]
-   [escapement.llm.openai-codex.http :as http]
-   [escapement.llm.openai-codex.translate :as t]
-   [escapement.llm.protocol :as proto]
-   [escapement.llm.types :as types]))
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [escapement.llm.openai-codex.auth :as auth]
+    [escapement.llm.openai-codex.http :as http]
+    [escapement.llm.openai-codex.translate :as t]
+    [escapement.llm.protocol :as proto]
+    [escapement.llm.types :as types]))
 
 (defrecord OpenAICodexBackend [default-model]
   proto/LLMBackend
@@ -29,33 +29,33 @@
           body     (t/build-request-body request)
           send!    (fn [a]
                      (http/post-responses-stream!
-                      {:body         body
-                       :access-token (:access-token a)
-                       :account-id   (:account-id a)
-                       :timeout-ms   180000}))
+                       {:body         body
+                        :access-token (:access-token a)
+                        :account-id   (:account-id a)
+                        :timeout-ms   180000}))
           raw      (try
                      (send! auth-map)
                      (catch clojure.lang.ExceptionInfo e
                        (if (= 401 (:status (ex-data e)))
                          ;; token expired between load and use — refresh once then retry
                          (do (auth/save-auth!
-                              (auth/refresh-token!
-                               (:refresh-token (auth/load-auth!))))
+                               (auth/refresh-token!
+                                 (:refresh-token (auth/load-auth!))))
                              (send! (auth/get-auth!)))
                          (throw e))))
           response (t/openai-response->anthropic-response raw (:model request))]
       (when-let [err (types/validate-response response)]
         (throw (ex-info "openai-codex produced an invalid response"
-                        {:errors err :response response})))
+                 {:errors err :response response})))
       response)))
 
 (>defn new-backend
-       "Constructs an OpenAI Codex backend instance.
+  "Constructs an OpenAI Codex backend instance.
 
-  Optional opts:
-    * `:default-model` — model string used when the Request omits `:model`
-                         (default `\"gpt-5.1-codex\"`)."
-       ([] [=> :any] (new-backend {}))
-       ([opts]
-        [:map => :any]
-        (->OpenAICodexBackend (or (:default-model opts) "gpt-5.1-codex"))))
+Optional opts:
+* `:default-model` — model string used when the Request omits `:model`
+                    (default `\"gpt-5.1-codex\"`)."
+  ([] [=> :any] (new-backend {}))
+  ([opts]
+   [:map => :any]
+   (->OpenAICodexBackend (or (:default-model opts) "gpt-5.1-codex"))))

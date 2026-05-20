@@ -15,6 +15,7 @@ YOUR TASK
 ================================================================
 
 Read ALL of these files:
+
 1. The source file at `{{FILE}}` — understand the actual implementation
 2. The existing test file at `{{TEST_FILE}}` — what's already tested
 3. The behavioral analysis at `{{BEHAVIORS_FILE}}` — every behavior that should be tested
@@ -31,17 +32,20 @@ For EVERY behavior listed in the behavioral analysis, find the matching assertio
 Classify each behavior:
 
 ### COVERED — The behavior has at least one assertion that would fail if the behavior changed
+
 - Note the line numbers of the covering assertion(s)
 - Verify the assertion is falsifiable (see quality checks below)
 - A behavior is ONLY truly covered if the assertion proves the specific outcome described
 
 ### PARTIALLY COVERED — The behavior has an assertion, but it's weak or incomplete
+
 - Note WHAT is covered and WHAT is missing
 - Example: label says "calculates discount for premium users" but assertion only checks `(number? result) => true`
 - Example: behavior has edge cases (nil, boundary) but only the happy path is tested
 - Example: label claims one thing but the assertion proves something different
 
 ### GAP — No assertion exists for this behavior
+
 - This is the most important finding
 - Note which behavior is missing and what the assertion should prove
 
@@ -52,9 +56,11 @@ PART 2: QUALITY REVIEW
 Also review the existing test file for these quality issues:
 
 ### Q1. Banned `behavior` macro
+
 - The string `(behavior` appearing anywhere is a quality issue
 
 ### Q2. Label-Assertion Alignment
+
 - For each assertion triple, read the label and the expression SEPARATELY
 - Does the expression actually prove what the label claims?
 - FAIL if label says "validates email format" but assertion is `(count result) => 1`
@@ -62,6 +68,7 @@ Also review the existing test file for these quality issues:
 - FAIL if label describes a complex behavior but assertion only proves a trivially true property
 
 ### Q3. Tautological / Impossible-to-Fail Assertions
+
 - No assertions that compare an immutable value to itself (e.g., testing that a Clojure map wasn't mutated)
 - No assertions that would pass regardless of the function's behavior
 - No assertions that test language/runtime guarantees rather than the function's behavior
@@ -69,23 +76,27 @@ Also review the existing test file for these quality issues:
 - If yes, the assertion is tautological
 
 ### Q4. Positive Assertion Language
+
 - Every assertion label should describe what the code DOES, not what it doesn't do
 - BAD: "does not modify other fields" — GOOD: "preserves all fields outside the target area"
 - BAD: "doesn't fail on nil" — GOOD: "returns the default value for nil input"
 - For showing that a function focuses on a specific area of a data structure:
-  - BAD: "doesn't corrupt other fields"
-  - GOOD: "focuses only on the target area" with assertion: `(= (dissoc result :target-key) (dissoc original :target-key)) => true`
+    - BAD: "doesn't corrupt other fields"
+    - GOOD: "focuses only on the target area" with assertion:
+      `(= (dissoc result :target-key) (dissoc original :target-key)) => true`
 - For showing a pure function returns an unchanged value:
-  - BAD: "does not modify the input"
-  - GOOD: "preserves the original value" with assertion: `result => original`
+    - BAD: "does not modify the input"
+    - GOOD: "preserves the original value" with assertion: `result => original`
 
 ### Q5. Falsifiable Assertions
+
 - Every assertion must be capable of failing
 - No `(count x) => 2` without also proving what the 2 items ARE
 - No `(contains? m :k) => true` without proving the value at :k
 - No `(some? (f x)) => true` — too weak to prove anything meaningful
 
 ### Q6. Missing Assertion Labels
+
 - Every assertion triple must have a string label before the expression
 
 ================================================================

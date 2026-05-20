@@ -21,12 +21,12 @@
    Babashka-compatible: only depends on bb-bundled `org.httpkit.server` and
    `cheshire.core`, plus `escapement.debug.d2` for the one-shot render."
   (:require
-   [cheshire.core :as json]
-   [clojure.java.io :as io]
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts :as sc]
-   [escapement.debug.d2 :as d2]
-   [org.httpkit.server :as hk]))
+    [cheshire.core :as json]
+    [clojure.java.io :as io]
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts :as sc]
+    [escapement.debug.d2 :as d2]
+    [org.httpkit.server :as hk]))
 
 (defn- log-err! [msg]
   (binding [*out* *err*] (println (str "[escapement.viz-server] " msg))))
@@ -37,17 +37,17 @@
 
 (defn- as-set [x]
   (cond
-    (nil? x)    #{}
-    (set? x)    x
-    (coll? x)   (set x)
-    :else       #{x}))
+    (nil? x) #{}
+    (set? x) x
+    (coll? x) (set x)
+    :else #{x}))
 
 (defn- transition-targets [t]
   (let [tgt (:target t)]
     (cond
-      (nil? tgt)         []
-      (sequential? tgt)  (vec tgt)
-      :else              [tgt])))
+      (nil? tgt) []
+      (sequential? tgt) (vec tgt)
+      :else [tgt])))
 
 (defn- fired-edge-classes
   "Heuristic: given the chart and a (before, after) configuration pair, return
@@ -61,12 +61,12 @@
         before (as-set before)
         after  (as-set after)]
     (vec
-     (keep (fn [el]
-             (when (and (= :transition (:node-type el))
-                        (contains? before (:parent el))
-                        (some after (transition-targets el)))
-               (str "edge-" (d2/safe-id (:id el)))))
-           (vals ebi)))))
+      (keep (fn [el]
+              (when (and (= :transition (:node-type el))
+                      (contains? before (:parent el))
+                      (some after (transition-targets el)))
+                (str "edge-" (d2/safe-id (:id el)))))
+        (vals ebi)))))
 
 (defn- state-classes
   "Returns CSS class names for the active state ids in `config`."
@@ -94,8 +94,8 @@
           _        (spit d2-file src)
           argv     [command (str "--layout=" layout) (str d2-file) (str svg-file)]
           proc     (-> (ProcessBuilder. ^java.util.List (mapv str argv))
-                       (.redirectErrorStream true)
-                       (.start))
+                     (.redirectErrorStream true)
+                     (.start))
           out      (slurp (.getInputStream proc))
           exit     (.waitFor proc)]
       (cond
@@ -106,8 +106,8 @@
         {:error (str "d2 reported success but " (str svg-file) " is missing")}
 
         :else
-        {:svg     (slurp svg-file)
-         :d2-path (str d2-file)
+        {:svg      (slurp svg-file)
+         :d2-path  (str d2-file)
          :svg-path (str svg-file)}))
     (catch Throwable t
       {:error (str (.getName (class t)) ": " (.getMessage t))})))
@@ -117,8 +117,8 @@
    doctype) so the SVG can be inlined directly into the page."
   [svg]
   (-> svg
-      (str/replace #"(?s)\A\s*<\?xml[^?]*\?>\s*" "")
-      (str/replace #"(?s)\A\s*<!DOCTYPE[^>]*>\s*" "")))
+    (str/replace #"(?s)\A\s*<\?xml[^?]*\?>\s*" "")
+    (str/replace #"(?s)\A\s*<!DOCTYPE[^>]*>\s*" "")))
 
 ;; ---------------------------------------------------------------------------
 ;; HTML page
@@ -270,8 +270,8 @@
 
 (defn- render-page [title svg]
   (-> page-template
-      (str/replace "__TITLE__" (or title ""))
-      (str/replace "__SVG__"   (strip-xml-prolog svg))))
+    (str/replace "__TITLE__" (or title ""))
+    (str/replace "__SVG__" (strip-xml-prolog svg))))
 
 ;; ---------------------------------------------------------------------------
 ;; SSE plumbing
@@ -319,59 +319,59 @@
             last-cfg  (atom (some-> state-atom deref :config))
             chart-ref chart
             handler
-            (fn [req]
-              (case (:uri req)
-                "/"
-                {:status  200
-                 :headers {"Content-Type" "text/html; charset=utf-8"
-                           "Cache-Control" "no-cache"}
-                 :body    page}
+                      (fn [req]
+                        (case (:uri req)
+                          "/"
+                          {:status  200
+                           :headers {"Content-Type"  "text/html; charset=utf-8"
+                                     "Cache-Control" "no-cache"}
+                           :body    page}
 
-                "/events"
-                (hk/as-channel
-                 req
-                 {:on-open
-                  (fn [ch]
-                    (swap! channels conj ch)
-                    (let [cur (or @last-cfg
-                                  (some-> state-atom deref :config))
-                          payload (snapshot chart-ref cur nil)]
-                      (hk/send! ch
-                                {:status  200
-                                 :headers {"Content-Type"      "text/event-stream"
-                                           "Cache-Control"     "no-cache"
-                                           "X-Accel-Buffering" "no"
-                                           "Connection"        "keep-alive"}
-                                 :body    (sse-frame payload)}
-                                false)))
-                  :on-close
-                  (fn [ch _status] (swap! channels disj ch))})
+                          "/events"
+                          (hk/as-channel
+                            req
+                            {:on-open
+                             (fn [ch]
+                               (swap! channels conj ch)
+                               (let [cur     (or @last-cfg
+                                               (some-> state-atom deref :config))
+                                     payload (snapshot chart-ref cur nil)]
+                                 (hk/send! ch
+                                   {:status  200
+                                    :headers {"Content-Type"      "text/event-stream"
+                                              "Cache-Control"     "no-cache"
+                                              "X-Accel-Buffering" "no"
+                                              "Connection"        "keep-alive"}
+                                    :body    (sse-frame payload)}
+                                   false)))
+                             :on-close
+                             (fn [ch _status] (swap! channels disj ch))})
 
-                {:status 404 :headers {"Content-Type" "text/plain"} :body "not found"}))
-            server (hk/run-server handler
-                                  {:ip                   "127.0.0.1"
-                                   :port                 0
-                                   :legacy-return-value? false})
-            port   (hk/server-port server)
+                          {:status 404 :headers {"Content-Type" "text/plain"} :body "not found"}))
+            server    (hk/run-server handler
+                        {:ip                   "127.0.0.1"
+                         :port                 0
+                         :legacy-return-value? false})
+            port      (hk/server-port server)
             watch-key (keyword "escapement.viz-server" (str "w-" port))
-            _ (when state-atom
-                (add-watch
-                 state-atom watch-key
-                 (fn [_k _r old new]
-                   (let [old-cfg (:config old)
-                         new-cfg (:config new)]
-                     (when (not= old-cfg new-cfg)
-                       (reset! last-cfg new-cfg)
-                       (broadcast! channels (snapshot chart-ref new-cfg old-cfg)))))))
-            stopped? (atom false)
+            _         (when state-atom
+                        (add-watch
+                          state-atom watch-key
+                          (fn [_k _r old new]
+                            (let [old-cfg (:config old)
+                                  new-cfg (:config new)]
+                              (when (not= old-cfg new-cfg)
+                                (reset! last-cfg new-cfg)
+                                (broadcast! channels (snapshot chart-ref new-cfg old-cfg)))))))
+            stopped?  (atom false)
             stop-fn
-            (fn []
-              (when (compare-and-set! stopped? false true)
-                (when state-atom (remove-watch state-atom watch-key))
-                (doseq [ch @channels]
-                  (try (hk/close ch) (catch Throwable _ nil)))
-                (reset! channels #{})
-                (try (hk/server-stop! server) (catch Throwable _ nil))))]
+                      (fn []
+                        (when (compare-and-set! stopped? false true)
+                          (when state-atom (remove-watch state-atom watch-key))
+                          (doseq [ch @channels]
+                            (try (hk/close ch) (catch Throwable _ nil)))
+                          (reset! channels #{})
+                          (try (hk/server-stop! server) (catch Throwable _ nil))))]
         {:url      (str "http://127.0.0.1:" port "/")
          :port     port
          :d2-path  d2-path

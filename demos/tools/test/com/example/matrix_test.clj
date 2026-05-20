@@ -3,8 +3,8 @@
 
    Owned by the TESTER agent. The experimenter never edits this file."
   (:require
-   [clojure.test :refer [deftest is testing]]
-   [com.example.matrix :as m]))
+    [clojure.test :refer [deftest is testing]]
+    [com.example.matrix :as m]))
 
 ;; Reference implementation for spot-checks
 (defn ref-mult [a b]
@@ -51,22 +51,22 @@
 
 (deftest known-hand-computed
   (testing "Specific case with known result"
-    (let [A [[1 2 3] [4 5 6] [7 8 9]]
-          B [[9 8 7] [6 5 4] [3 2 1]]
+    (let [A        [[1 2 3] [4 5 6] [7 8 9]]
+          B        [[9 8 7] [6 5 4] [3 2 1]]
           expected [[30 24 18] [84 69 54] [138 114 90]]]
       (is (= expected (m/mult A B))))))
 
 (deftest negative-entries
   (testing "Mixed positive and negative entries"
-    (let [A [[1 -2 3] [-4 5 -6] [7 -8 9]]
-          B [[-1 2 -3] [4 -5 6] [-7 8 -9]]
+    (let [A        [[1 -2 3] [-4 5 -6] [7 -8 9]]
+          B        [[-1 2 -3] [4 -5 6] [-7 8 -9]]
           expected [[-30 36 -42] [66 -81 96] [-102 126 -150]]]
       (is (= expected (m/mult A B))))))
 
 (deftest floating-point
   (testing "Floating-point inputs"
-    (let [A [[1.0 2.0 3.0] [4.0 5.0 6.0] [7.0 8.0 9.0]]
-          B [[0.5 0.5 0.5] [0.5 0.5 0.5] [0.5 0.5 0.5]]
+    (let [A        [[1.0 2.0 3.0] [4.0 5.0 6.0] [7.0 8.0 9.0]]
+          B        [[0.5 0.5 0.5] [0.5 0.5 0.5] [0.5 0.5 0.5]]
           expected [[3.0 3.0 3.0] [7.5 7.5 7.5] [12.0 12.0 12.0]]]
       (is (= expected (m/mult A B))))))
 

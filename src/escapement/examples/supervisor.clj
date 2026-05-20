@@ -114,152 +114,152 @@
            (println (some? (:com.fulcrologic.statecharts/elements-by-id
                              escapement.examples.supervisor/agent)))'"
   (:require
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.data-model.operations :as ops]
-   [com.fulcrologic.statecharts.elements
-    :refer [state parallel transition final script on-entry send]]
-   [escapement.chart.helpers :as h]))
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
+    [com.fulcrologic.statecharts.elements
+     :refer [final on-entry parallel script send state transition]]
+    [escapement.chart.helpers :as h]))
 
 (def system-prompt
   (str "You perform a slow counting task, ONE step per turn.\n"
-       "RULES:\n"
-       "1. Each turn: write EXACTLY the line `COUNT <n>` (where <n> is the "
-       "current integer), then call the `event__tick` tool exactly once with "
-       "`{\"n\":<n>}`, then END your turn. Do not call it more than once per "
-       "turn.\n"
-       "2. Start at n=1 and increase n by 1 each turn (1, 2, 3, ...).\n"
-       "3. Keep counting turn after turn until a user message tells you to "
-       "STOP.\n"
-       "4. If a user message says STOP, then from that turn on write ONLY the "
-       "line `STEERED BANANA` and call `event__tick` with `{\"n\":0}`. After "
-       "two `STEERED BANANA` turns, call the `event__done` tool once with "
-       "`{\"reason\":\"steered\"}` and end your turn.\n"
-       "Be terse. Never call more than one tool per turn."))
+    "RULES:\n"
+    "1. Each turn: write EXACTLY the line `COUNT <n>` (where <n> is the "
+    "current integer), then call the `event__tick` tool exactly once with "
+    "`{\"n\":<n>}`, then END your turn. Do not call it more than once per "
+    "turn.\n"
+    "2. Start at n=1 and increase n by 1 each turn (1, 2, 3, ...).\n"
+    "3. Keep counting turn after turn until a user message tells you to "
+    "STOP.\n"
+    "4. If a user message says STOP, then from that turn on write ONLY the "
+    "line `STEERED BANANA` and call `event__tick` with `{\"n\":0}`. After "
+    "two `STEERED BANANA` turns, call the `event__done` tool once with "
+    "`{\"reason\":\"steered\"}` and end your turn.\n"
+    "Be terse. Never call more than one tool per turn."))
 
 (def steer-message
   (str "STOP counting now. From this turn on your entire reply is the line "
-       "`STEERED BANANA` and a call to `event__tick` with `{\"n\":0}`. After "
-       "two STEERED turns call `event__done` with `{\"reason\":\"steered\"}`."))
+    "`STEERED BANANA` and a call to `event__tick` with `{\"n\":0}`. After "
+    "two STEERED turns call `event__done` with `{\"reason\":\"steered\"}`."))
 
-(def agent ; runnable: bb -m escapement.cli run escapement.examples.supervisor/agent
+(def agent                                                  ; runnable: bb -m escapement.cli run escapement.examples.supervisor/agent
   (chart/statechart
-   {:initial :run}
-   (state {:id :run :initial :work}
+    {:initial :run}
+    (state {:id :run :initial :work}
 
-          (parallel {:id :work}
+      (parallel {:id :work}
 
-                    ;; ---- Region 1: the live, multi-turn conversation ----
-                    (state {:id :convo :initial :counting}
-                           (state {:id :counting}
-                                  (h/llm-conversation
-                                   {:id        "subject"
-                                    ;; autoforward? defaults true -> tell-llm
-                                    ;; from the supervisor region reaches it
-                                    ;; (task 001 §P2).
-                                    :params-fn
-                                    (fn [_env _data]
-                                      {:system     system-prompt
-                                       :real-tools []
-                                       :allowed-events
-                                       [{:event       :tick
-                                         :description "Record one counting step."
-                                         :data-schema [:map [:n :int]]}
-                                        {:event       :done
-                                         :description "End the counting task."
-                                         :data-schema [:map [:reason :string]]}]
-                                       ;; Conservative budgets so the run can
-                                       ;; never hang on a flaky model.
-                                       :max-turns                    8
-                                       :max-conversation-duration-ms 120000
-                                       :initial-user-message
-                                       "Begin the counting task at n=1."})})
-                                  ;; task 001 §P1 ORDERING RULE: the
-                                  ;; event-tool's chart event (:tick/:done) is
-                                  ;; posted to the parent STRICTLY BEFORE
-                                  ;; :llm.idle for the same turn. Keep :tick
-                                  ;; :type :internal so it never tears down
-                                  ;; :counting before the supervisor sees
-                                  ;; :llm.idle.
-                                  (transition {:event :tick :type :internal}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign
-                                                                 :last-tick
-                                                                 (get-in data [:_event :data :n]))])}))
-                                  (transition {:event :done :target :c-done}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign
-                                                                 :done-reason
-                                                                 (get-in data [:_event :data :reason]))])})))
-                           (final {:id :c-done}))
+        ;; ---- Region 1: the live, multi-turn conversation ----
+        (state {:id :convo :initial :counting}
+          (state {:id :counting}
+            (h/llm-conversation
+              {:id "subject"
+               ;; autoforward? defaults true -> tell-llm
+               ;; from the supervisor region reaches it
+               ;; (task 001 §P2).
+               :params-fn
+               (fn [_env _data]
+                 {:system                       system-prompt
+                  :real-tools                   []
+                  :allowed-events
+                  [{:event       :tick
+                    :description "Record one counting step."
+                    :data-schema [:map [:n :int]]}
+                   {:event       :done
+                    :description "End the counting task."
+                    :data-schema [:map [:reason :string]]}]
+                  ;; Conservative budgets so the run can
+                  ;; never hang on a flaky model.
+                  :max-turns                    8
+                  :max-conversation-duration-ms 120000
+                  :initial-user-message
+                  "Begin the counting task at n=1."})})
+            ;; task 001 §P1 ORDERING RULE: the
+            ;; event-tool's chart event (:tick/:done) is
+            ;; posted to the parent STRICTLY BEFORE
+            ;; :llm.idle for the same turn. Keep :tick
+            ;; :type :internal so it never tears down
+            ;; :counting before the supervisor sees
+            ;; :llm.idle.
+            (transition {:event :tick :type :internal}
+              (script {:expr (fn [_env data]
+                               [(ops/assign
+                                  :last-tick
+                                  (get-in data [:_event :data :n]))])}))
+            (transition {:event :done :target :c-done}
+              (script {:expr (fn [_env data]
+                               [(ops/assign
+                                  :done-reason
+                                  (get-in data [:_event :data :reason]))])})))
+          (final {:id :c-done}))
 
-                    ;; ---- Region 2: deterministic supervisor sidechart ----
-                    ;; MONITOR + STEER + CAPTURE, all off the
-                    ;; primitive-guaranteed turn-end hook (:llm.idle), NEVER
-                    ;; an LLM-behaviour counter (task 001 §P5).
-                    (state {:id :supervisor :initial :watching}
-                           ;; Hard safety stop: if the model never calls
-                           ;; event__done, force the whole chart down after a
-                           ;; generous wall-clock budget.
-                           (on-entry {}
-                                     (send {:id    :safety-timer
-                                            :event :safety/stop
-                                            :delay 150000}))
+        ;; ---- Region 2: deterministic supervisor sidechart ----
+        ;; MONITOR + STEER + CAPTURE, all off the
+        ;; primitive-guaranteed turn-end hook (:llm.idle), NEVER
+        ;; an LLM-behaviour counter (task 001 §P5).
+        (state {:id :supervisor :initial :watching}
+          ;; Hard safety stop: if the model never calls
+          ;; event__done, force the whole chart down after a
+          ;; generous wall-clock budget.
+          (on-entry {}
+            (send {:id    :safety-timer
+                   :event :safety/stop
+                   :delay 150000}))
 
-                           ;; --- watching: pre-steer ---
-                           (state {:id :watching}
-                                  ;; FIRST :llm.idle -> do all three jobs at
-                                  ;; once: MONITOR (record the turn), STEER
-                                  ;; (inject once, one-shot via :steer-sent?),
-                                  ;; CAPTURE (write the artifact). Then park
-                                  ;; in :supervising (a PLAIN non-final
-                                  ;; substate, task 001 §P5 — NOT a region
-                                  ;; final, which would join the parallel
-                                  ;; early and kill the conversation region).
-                                  (transition {:event  :llm.idle
-                                               :target :supervising
-                                               :cond   (fn [_env data]
-                                                         (not (:steer-sent? data)))}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign :steer-sent? true)
-                                                                (ops/assign :turns-seen
-                                                                            (inc (long (:turns-seen data 0))))])})
-                                              (h/tell-llm
-                                               {:expr (fn [_env _data] steer-message)})
-                                              (h/capture-llm-output {:as "supervised.md"})))
+          ;; --- watching: pre-steer ---
+          (state {:id :watching}
+            ;; FIRST :llm.idle -> do all three jobs at
+            ;; once: MONITOR (record the turn), STEER
+            ;; (inject once, one-shot via :steer-sent?),
+            ;; CAPTURE (write the artifact). Then park
+            ;; in :supervising (a PLAIN non-final
+            ;; substate, task 001 §P5 — NOT a region
+            ;; final, which would join the parallel
+            ;; early and kill the conversation region).
+            (transition {:event  :llm.idle
+                         :target :supervising
+                         :cond   (fn [_env data]
+                                   (not (:steer-sent? data)))}
+              (script {:expr (fn [_env data]
+                               [(ops/assign :steer-sent? true)
+                                (ops/assign :turns-seen
+                                  (inc (long (:turns-seen data 0))))])})
+              (h/tell-llm
+                {:expr (fn [_env _data] steer-message)})
+              (h/capture-llm-output {:as "supervised.md"})))
 
-                           ;; --- supervising: post-steer park ---
-                           (state {:id :supervising}
-                                  ;; Subsequent turn-ends are still monitored
-                                  ;; AND re-captured (latest-write-wins so the
-                                  ;; artifact ends up holding the final
-                                  ;; post-steer `STEERED BANANA` text). The
-                                  ;; steer is NOT re-injected (one-shot). This
-                                  ;; transition is :type :internal so the park
-                                  ;; stays non-final / non-wedging until a
-                                  ;; terminal signal arrives.
-                                  (transition {:event :llm.idle :type :internal}
-                                              (script {:expr (fn [_env data]
-                                                               [(ops/assign :turns-seen
-                                                                            (inc (long (:turns-seen data 0))))])})
-                                              (h/capture-llm-output {:as "supervised.md"})))
+          ;; --- supervising: post-steer park ---
+          (state {:id :supervising}
+            ;; Subsequent turn-ends are still monitored
+            ;; AND re-captured (latest-write-wins so the
+            ;; artifact ends up holding the final
+            ;; post-steer `STEERED BANANA` text). The
+            ;; steer is NOT re-injected (one-shot). This
+            ;; transition is :type :internal so the park
+            ;; stays non-final / non-wedging until a
+            ;; terminal signal arrives.
+            (transition {:event :llm.idle :type :internal}
+              (script {:expr (fn [_env data]
+                               [(ops/assign :turns-seen
+                                  (inc (long (:turns-seen data 0))))])})
+              (h/capture-llm-output {:as "supervised.md"})))
 
-                           ;; task 001 §1 / acceptance: the supervisor region
-                           ;; MUST have a proper exit so the parallel join
-                           ;; completes and there is no eventless-loop wedge.
-                           ;; The convo's :done / the safety timer move the
-                           ;; supervisor to its own region final; combined with
-                           ;; the convo region reaching :c-done the `parallel`
-                           ;; raises done.state.work cleanly.
-                           (transition {:event :done :target :s-done})
-                           (transition {:event :safety/stop :target :s-done})
-                           (final {:id :s-done})))
+          ;; task 001 §1 / acceptance: the supervisor region
+          ;; MUST have a proper exit so the parallel join
+          ;; completes and there is no eventless-loop wedge.
+          ;; The convo's :done / the safety timer move the
+          ;; supervisor to its own region final; combined with
+          ;; the convo region reaching :c-done the `parallel`
+          ;; raises done.state.work cleanly.
+          (transition {:event :done :target :s-done})
+          (transition {:event :safety/stop :target :s-done})
+          (final {:id :s-done})))
 
-          ;; Both regions reached their region final -> parallel raises
-          ;; done.state.work; this is the clean, non-wedging join.
-          (transition {:event :done.state.work :target :finished})
-          ;; Belt-and-braces terminators (also reachable before both regions
-          ;; finalise): the convo region's :done, or the safety timer.
-          (transition {:event :done :target :finished})
-          (transition {:event :safety/stop :target :finished})
+      ;; Both regions reached their region final -> parallel raises
+      ;; done.state.work; this is the clean, non-wedging join.
+      (transition {:event :done.state.work :target :finished})
+      ;; Belt-and-braces terminators (also reachable before both regions
+      ;; finalise): the convo region's :done, or the safety timer.
+      (transition {:event :done :target :finished})
+      (transition {:event :safety/stop :target :finished})
 
-          (final {:id :finished}))))
+      (final {:id :finished}))))

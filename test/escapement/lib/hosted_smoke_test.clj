@@ -24,15 +24,15 @@
   composition gate proving streaming + facade + event-sink compose end-to-end
   without regressing the CLI path or the embed contract."
   (:require
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.elements :refer [state transition final]]
-   [escapement.chart.helpers :as h]
-   [escapement.lib :as lib]
-   [escapement.lib.event-sink :as es]
-   [escapement.llm.multi :as multi]
-   [escapement.llm.protocol :as proto]
-   [escapement.tools.protocol :as tp]
-   [fulcro-spec.core :refer [specification assertions =>]]))
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.elements :refer [final state transition]]
+    [escapement.chart.helpers :as h]
+    [escapement.lib :as lib]
+    [escapement.lib.event-sink :as es]
+    [escapement.llm.multi :as multi]
+    [escapement.llm.protocol :as proto]
+    [escapement.tools.protocol :as tp]
+    [fulcro-spec.core :refer [=> assertions specification]]))
 
 ;; ---------------------------------------------------------------------------
 ;; Stub STREAMING backend (task-001/002 pattern). Each delta carries the
@@ -44,9 +44,9 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private stub-deltas
-  [{:type :text-delta :text "He"  :usage {:input-tokens 10 :output-tokens 2}}
+  [{:type :text-delta :text "He" :usage {:input-tokens 10 :output-tokens 2}}
    {:type :text-delta :text "llo" :usage {:input-tokens 10 :output-tokens 4}}
-   {:type :text-delta :text "!"   :usage {:input-tokens 10 :output-tokens 6}}])
+   {:type :text-delta :text "!" :usage {:input-tokens 10 :output-tokens 6}}])
 
 (def ^:private first-turn-response
   {:stop-reason :tool_use
@@ -75,21 +75,21 @@
 
 (def ^:private smoke-chart
   (chart/statechart
-   {:initial :work}
-   (state {:id :work :initial :running}
-          (state {:id :running}
-                 (h/llm-conversation
-                  {:id        "main"
-                   :params-fn (fn [_ _]
-                                {:model                "stub-x"
-                                 :stream?              true
-                                 :system               "do it"
-                                 :real-tools           []
-                                 :allowed-events       [{:event       :done
-                                                         :data-schema [:map [:msg :string]]}]
-                                 :initial-user-message "go"})})
-                 (transition {:event :done :target :finished}))
-          (final {:id :finished}))))
+    {:initial :work}
+    (state {:id :work :initial :running}
+      (state {:id :running}
+        (h/llm-conversation
+          {:id        "main"
+           :params-fn (fn [_ _]
+                        {:model                "stub-x"
+                         :stream?              true
+                         :system               "do it"
+                         :real-tools           []
+                         :allowed-events       [{:event       :done
+                                                 :data-schema [:map [:msg :string]]}]
+                         :initial-user-message "go"})})
+        (transition {:event :done :target :finished}))
+      (final {:id :finished}))))
 
 (defn- index-of [types kw]
   (first (keep-indexed (fn [i t] (when (= kw t) i)) types)))
@@ -103,8 +103,8 @@
 
 (specification "hosted-smoke: :llm-conversation + stub streaming backend through facade + event-sink"
   (let [backend (multi/new-backend
-                 {:routes          [[#"^stub-" (new-streaming-stub)]]
-                  :default-backend (new-streaming-stub)})
+                  {:routes          [[#"^stub-" (new-streaming-stub)]]
+                   :default-backend (new-streaming-stub)})
         adapter (es/make-adapter)
         pub     (atom [])
         ;; NO :transcript-path / :checkpoint-dir -> task-005 temp-dir defaults.
@@ -160,7 +160,7 @@
       (mapv #(get-in % [:delta :text]) deltas) => ["He" "llo" "!"]
       "the finalized :llm-response :usage is authoritative (>= last running delta total)"
       (>= (:output-tokens (:usage resp))
-          (or (:output-tokens (last usages)) 0)) => true
+        (or (:output-tokens (last usages)) 0)) => true
       (:usage resp) => {:input-tokens 10 :output-tokens 8}
 
       ;; ---- Stable :run-id on EVERY event, == facade result ----
@@ -180,5 +180,5 @@
       (count (distinct (map :session-id events))) => 1
       "LLM-family events carry the :invokeid correlation field"
       (every? #(contains? % :invokeid)
-              (filter #(#{:llm-request :text-delta :llm-response} (:type %)) events))
+        (filter #(#{:llm-request :text-delta :llm-response} (:type %)) events))
       => true)))

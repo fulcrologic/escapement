@@ -16,8 +16,7 @@
 
    This namespace is intentionally dependency-free."
   (:require
-   [clojure.java.io :as io]
-   [clojure.string :as str]))
+    [clojure.string :as str]))
 
 (def ^:private token-pattern
   ;; Matches {{IDENT}} where IDENT is uppercase letters, digits, and underscores,
@@ -30,8 +29,8 @@
   [subs ident]
   (let [k (keyword ident)]
     (cond
-      (contains? subs k)             (get subs k)
-      (contains? subs ident)         (get subs ident)
+      (contains? subs k) (get subs k)
+      (contains? subs ident) (get subs ident)
       (contains? subs (symbol ident)) (get subs (symbol ident))
       :else ::missing)))
 
@@ -46,18 +45,18 @@
   "Substitutes `{{VAR}}` tokens in `template` using `subs`. Throws
    `ex-info` if any token in the template has no corresponding entry in `subs`."
   [template subs]
-  (let [matches  (re-seq token-pattern template)
-        tokens   (distinct (mapv second matches))
-        missing  (filterv #(= ::missing (lookup subs %)) tokens)]
+  (let [matches (re-seq token-pattern template)
+        tokens  (distinct (mapv second matches))
+        missing (filterv #(= ::missing (lookup subs %)) tokens)]
     (when (seq missing)
       (throw (ex-info (str "Unresolved prompt tokens: " (str/join ", " (map #(str "{{" % "}}") missing)))
-                      {:missing missing
-                       :provided (vec (sort (map (fn [k] (cond-> k (keyword? k) name)) (keys subs))))})))
+               {:missing  missing
+                :provided (vec (sort (map (fn [k] (cond-> k (keyword? k) name)) (keys subs))))})))
     (str/replace template
-                 token-pattern
-                 ;; `str/replace` already wraps the fn's return value with
-                 ;; `Matcher/quoteReplacement`, so we return a plain string.
-                 (fn [[_ ident]] (str (lookup subs ident))))))
+      token-pattern
+      ;; `str/replace` already wraps the fn's return value with
+      ;; `Matcher/quoteReplacement`, so we return a plain string.
+      (fn [[_ ident]] (str (lookup subs ident))))))
 
 (defn render-file
   "Loads the template at `path` and renders it with `subs`. See [[render]]."

@@ -11,18 +11,18 @@
   `:status :done` behavior, and the closed facade schema still rejects unknown
   keys."
   (:require
-   [cheshire.core :as json]
-   [clojure.string :as str]
-   [com.fulcrologic.statecharts.chart :as chart]
-   [com.fulcrologic.statecharts.elements :refer [state transition final]]
-   [com.fulcrologic.statecharts.protocols :as sp]
-   [escapement.engine.store :as store]
-   [escapement.lib :as lib]
-   [escapement.runner :as runner]
-   [fulcro-spec.core :refer [specification assertions =>]])
+    [cheshire.core :as json]
+    [clojure.string :as str]
+    [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.elements :refer [final state transition]]
+    [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.engine.store :as store]
+    [escapement.lib :as lib]
+    [escapement.runner :as runner]
+    [fulcro-spec.core :refer [=> assertions specification]])
   (:import
-   (java.nio.file Files)
-   (java.nio.file.attribute FileAttribute)))
+    (java.nio.file Files)
+    (java.nio.file.attribute FileAttribute)))
 
 (defn- tmp-dir [prefix]
   (str (Files/createTempDirectory prefix (into-array FileAttribute []))))
@@ -37,11 +37,11 @@
 ;; iteration (a safe boundary, before any drain) and aborts promptly.
 (def parked-chart
   (chart/statechart
-   {:initial :work}
-   (state {:id :work :initial :idle}
-          (state {:id :idle}
-                 (transition {:event :go :target :done}))
-          (final {:id :done}))))
+    {:initial :work}
+    (state {:id :work :initial :idle}
+      (state {:id :idle}
+        (transition {:event :go :target :done}))
+      (final {:id :done}))))
 
 (specification "cancel atom armed at on-env-ready aborts a started run promptly"
   (let [dir    (tmp-dir "cancel-atom-")
@@ -132,8 +132,8 @@
                          :credentials  creds
                          :cancel       cancel
                          :on-env-ready (fn [_] (reset! cancel true))})
-        rok    (lib/run {:chart      parked-chart
-                         :session-id :cancel-test/facade-normal
+        rok    (lib/run {:chart       parked-chart
+                         :session-id  :cancel-test/facade-normal
                          :credentials creds})]
     (assertions
       "lib/run surfaces :status :aborted from a cancelled run"
@@ -147,6 +147,6 @@
            (catch clojure.lang.ExceptionInfo e (-> e ex-data :errors some?)))
       => true
       "and :cancel remains a valid (optional) option"
-      (lib/validate-options {:chart parked-chart :session-id :s1
+      (lib/validate-options {:chart       parked-chart :session-id :s1
                              :credentials creds :cancel (atom false)})
       => nil)))

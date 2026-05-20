@@ -8,22 +8,22 @@
    Opt-in via the `ESCAPEMENT_LLM_CACHE=1` env var or by explicitly constructing
    `caching-backend` in code."
   (:require
-   [clojure.edn :as edn]
-   [clojure.java.io :as io]
-   [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
-   [escapement.llm.protocol :as proto])
+    [clojure.edn :as edn]
+    [clojure.java.io :as io]
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [escapement.llm.protocol :as proto])
   (:import
-   (java.nio.file CopyOption Files StandardCopyOption)
-   (java.security MessageDigest)))
+    (java.nio.file CopyOption Files StandardCopyOption)
+    (java.security MessageDigest)))
 
 (>defn ^:private canonical-key
-       "Return the canonicalized subset of `request` used for cache keying."
-       [request]
-       [:map => :map]
-       {:model    (:model request)
-        :system   (:system request)
-        :messages (:messages request)
-        :tools    (:tools request)})
+  "Return the canonicalized subset of `request` used for cache keying."
+  [request]
+  [:map => :map]
+  {:model    (:model request)
+   :system   (:system request)
+   :messages (:messages request)
+   :tools    (:tools request)})
 
 (defn- sha256-hex [^String s]
   (let [md (MessageDigest/getInstance "SHA-256")
@@ -31,10 +31,10 @@
     (apply str (map #(format "%02x" %) bs))))
 
 (>defn cache-key
-       "Return a hex-encoded SHA-256 digest of the canonicalized request."
-       [request]
-       [:map => :string]
-       (sha256-hex (pr-str (canonical-key request))))
+  "Return a hex-encoded SHA-256 digest of the canonicalized request."
+  [request]
+  [:map => :string]
+  (sha256-hex (pr-str (canonical-key request))))
 
 (defn- ensure-dir! [^String dir]
   (let [d (io/file dir)] (when-not (.exists d) (.mkdirs d))))
@@ -45,8 +45,8 @@
     (with-open [w (io/writer tmp)]
       (binding [*out* w] (pr value)))
     (Files/move (.toPath tmp) (.toPath (io/file file))
-                (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
-                                        StandardCopyOption/REPLACE_EXISTING]))
+      (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
+                              StandardCopyOption/REPLACE_EXISTING]))
     nil))
 
 (defn- read-edn-file [file]
@@ -65,15 +65,15 @@
           response)))))
 
 (>defn caching-backend
-       "Wrap `inner` (any `LLMBackend`) with an on-disk replay cache rooted at `cache-dir`.
-   The directory is created if it doesn't exist."
-       [inner cache-dir]
-       [:any :string => :any]
-       (ensure-dir! cache-dir)
-       (->CachingBackend inner cache-dir))
+  "Wrap `inner` (any `LLMBackend`) with an on-disk replay cache rooted at `cache-dir`.
+The directory is created if it doesn't exist."
+  [inner cache-dir]
+  [:any :string => :any]
+  (ensure-dir! cache-dir)
+  (->CachingBackend inner cache-dir))
 
 (>defn enabled-by-env?
-       "Returns true when the `ESCAPEMENT_LLM_CACHE` env var is set to a truthy value (\"1\", \"true\", \"yes\")."
-       []
-       [=> :boolean]
-       (boolean (#{"1" "true" "yes"} (System/getenv "ESCAPEMENT_LLM_CACHE"))))
+  "Returns true when the `ESCAPEMENT_LLM_CACHE` env var is set to a truthy value (\"1\", \"true\", \"yes\")."
+  []
+  [=> :boolean]
+  (boolean (#{"1" "true" "yes"} (System/getenv "ESCAPEMENT_LLM_CACHE"))))

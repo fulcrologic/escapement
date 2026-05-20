@@ -1,4 +1,3 @@
-
 # Quickstart
 
 ## Find Running REPLs
@@ -40,7 +39,8 @@ $ clj-nrepl-eval -p <port> <<'EOF'
 EOF
 ```
 
-Without `(do ...)`, `clj-nrepl-eval` evaluates each top-level form separately and produces output for each: `=> nil\n=> nil\n=> {:cnt 42}`. Callers that parse the output get `"nil\nnil\n{:cnt 42}"` instead of just `"{:cnt 42}"`.
+Without `(do ...)`, `clj-nrepl-eval` evaluates each top-level form separately and produces output for each:
+`=> nil\n=> nil\n=> {:cnt 42}`. Callers that parse the output get `"nil\nnil\n{:cnt 42}"` instead of just `"{:cnt 42}"`.
 
 This is critical when piping nREPL results to other tools (Playwright, scripts, etc.).
 
@@ -64,9 +64,10 @@ $ clojure -A:test:dev -Sdeps '{:deps {nrepl/nrepl {:mvn/version "1.5.1"}}}' -m n
 ```
 
 **Important**: Look for these alias patterns in `deps.edn`:
+
 - PREFER: `:nrepl`, `:test-nrepl`, `:dev-nrepl` - nREPL configurations with JVM opts
 - `:test` / `:dev` - Extra paths and test/dev dependencies
-- `:cljs` - ClojureScript/shadow-cljs dependencies  
+- `:cljs` - ClojureScript/shadow-cljs dependencies
 
 The local project may have special instructions for starting an nREPL.
 
@@ -76,7 +77,7 @@ Shadow-cljs provides the CLJS REPL.
 
 ```clojure
 ;; shadow-cljs.edn may have:
-{:nrepl {:port 9000}
+{:nrepl  {:port 9000}
  :builds {:main {...}}}
 ```
 
@@ -106,4 +107,5 @@ Kill and restart REPL(s) when changing `deps.edn` dependencies.
 
 # Advanced Configuration
 
-See [project-setup.md](project-setup.md) for setting up custom nREPL configurations, guardrails, and multiple REPL environments.
+See [project-setup.md](project-setup.md) for setting up custom nREPL configurations, guardrails, and multiple REPL
+environments.

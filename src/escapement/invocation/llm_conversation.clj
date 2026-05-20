@@ -19,22 +19,22 @@
 
   See `plan.md` for the design."
   (:require
-   [clojure.string :as str]
-   [escapement.chart.service :as service]
-   [escapement.llm.catalog :as catalog]
-   [escapement.llm.needs :as needs]
-   [com.fulcrologic.guardrails.malli.core :refer [>defn =>]]
-   [com.fulcrologic.statecharts :as sc]
-   [com.fulcrologic.statecharts.environment :as env-ns]
-   [com.fulcrologic.statecharts.protocols :as sp]
-   [escapement.llm.protocol :as llm]
-   [escapement.llm.types :as llm-types]
-   [escapement.tools.protocol :as tp]
-   [malli.core :as m]
-   [malli.error :as me]
-   [malli.transform :as mt])
+    [clojure.string :as str]
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.environment :as env-ns]
+    [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.chart.service :as service]
+    [escapement.llm.catalog :as catalog]
+    [escapement.llm.needs :as needs]
+    [escapement.llm.protocol :as llm]
+    [escapement.llm.types :as llm-types]
+    [escapement.tools.protocol :as tp]
+    [malli.core :as m]
+    [malli.error :as me]
+    [malli.transform :as mt])
   (:import
-   (java.util.concurrent ArrayBlockingQueue TimeUnit)))
+    (java.util.concurrent ArrayBlockingQueue TimeUnit)))
 
 ;; ---------------------------------------------------------------------------
 ;; Name encoding for tool defs sent to the LLM
@@ -78,28 +78,28 @@
                 :else
                 (mapv (fn [kw]
                         (or (tp/lookup registry kw)
-                            (throw (ex-info (str "Unknown tool: " kw) {:tool kw}))))
-                      selector))]
+                          (throw (ex-info (str "Unknown tool: " kw) {:tool kw}))))
+                  selector))]
     (reduce
-     (fn [[defs index] tool]
-       (let [d (tp/tool->anthropic-tool-def tool)]
-         [(conj defs d) (assoc index (:name d) (tp/tool-name tool))]))
-     [[] {}]
-     tools)))
+      (fn [[defs index] tool]
+        (let [d (tp/tool->anthropic-tool-def tool)]
+          [(conj defs d) (assoc index (:name d) (tp/tool-name tool))]))
+      [[] {}]
+      tools)))
 
 (defn- event-tool-defs
   "Returns `[anthropic-tool-defs name->entry]` for `:allowed-events` declarations.
    Each `entry` is the original allowed-event map (with `:event`, `:data-schema`, ...)."
   [allowed-events]
   (reduce
-   (fn [[defs index] {:keys [event description data-schema] :as entry}]
-     (let [tname (event-tool-name event)
-           def   {:name         tname
-                  :description  (or description (str "Fire chart event " event))
-                  :input-schema (llm-types/malli->json-schema (or data-schema [:map]))}]
-       [(conj defs def) (assoc index tname entry)]))
-   [[] {}]
-   allowed-events))
+    (fn [[defs index] {:keys [event description data-schema] :as entry}]
+      (let [tname (event-tool-name event)
+            def   {:name         tname
+                   :description  (or description (str "Fire chart event " event))
+                   :input-schema (llm-types/malli->json-schema (or data-schema [:map]))}]
+        [(conj defs def) (assoc index tname entry)]))
+    [[] {}]
+    allowed-events))
 
 ;; ---------------------------------------------------------------------------
 ;; Verdict wrap-up (submit_verdict forced-tool inference at idle boundary)
@@ -125,8 +125,8 @@
   [verdict-schema]
   {:name         submit-verdict-tool-name
    :description  (str "Submit your final structured verdict for this turn. "
-                      "Call this tool exactly once. Your input becomes the "
-                      "chart's typed verdict payload.")
+                   "Call this tool exactly once. Your input becomes the "
+                   "chart's typed verdict payload.")
    :input-schema (llm-types/malli->json-schema (or verdict-schema [:map]))})
 
 ;; ---------------------------------------------------------------------------
@@ -144,9 +144,9 @@
   "True for a Malli `[:map {:closed true} ...]` form."
   [schema]
   (and (vector? schema)
-       (= :map (first schema))
-       (map? (second schema))
-       (true? (:closed (second schema)))))
+    (= :map (first schema))
+    (map? (second schema))
+    (true? (:closed (second schema)))))
 
 (defn- assoc-implicit-timeout
   "Merge an optional `:timeout-ms` field into a region-tool input schema.
@@ -155,15 +155,15 @@
   (let [base (or schema [:map])]
     (when (closed-map-schema? base)
       (throw (ex-info (str "Region-tool input-schema is closed (:closed true); "
-                           "cannot merge implicit :timeout-ms. Make the schema open.")
-                      {:reason :closed-region-tool-schema :schema base})))
+                        "cannot merge implicit :timeout-ms. Make the schema open.")
+               {:reason :closed-region-tool-schema :schema base})))
     (if (and (vector? base) (= :map (first base)))
       ;; Append the optional field, preserving any existing properties map.
       (let [props? (and (> (count base) 1) (map? (second base)))
             head   (if props? (subvec base 0 2) (subvec base 0 1))
             tail   (subvec base (count head))]
         (-> (into head tail)
-            (conj [:timeout-ms {:optional true} [:int {:min 1}]])))
+          (conj [:timeout-ms {:optional true} [:int {:min 1}]])))
       ;; Schema isn't a vanilla :map — wrap it. This is rare; chart authors
       ;; usually pass `[:map ...]`. Caller's schema is preserved via :and.
       [:and base [:map [:timeout-ms {:optional true} [:int {:min 1}]]]])))
@@ -197,49 +197,49 @@
    typically caused by two owners aliased to the same prefix, or an
    undisambiguated multi-owner scenario)."
   [registry-snapshot chart-tools default-timeout-ms]
-  (let [decls (or chart-tools [])
+  (let [decls    (or chart-tools [])
         ;; Group registry entries by owner for fast lookup.
         by-owner (reduce
-                  (fn [acc e] (update acc (:owner e) (fnil conj []) e))
-                  {}
-                  registry-snapshot)
-        pulled (vec
-                (mapcat
-                 (fn [{:keys [owner as]}]
-                   (for [entry (get by-owner owner [])
-                         :let [event-kw (:tool entry)
-                               tool-kw  (if as
-                                          (keyword (name as) (name event-kw))
-                                          event-kw)
-                               raw      (or (:input-schema entry) [:map])]]
-                     {:event-kw         event-kw
-                      :owner            owner
-                      :description      (:description entry)
-                      :raw-input-schema raw
-                      :input-schema     (assoc-implicit-timeout raw)
-                      :timeout-default  default-timeout-ms
-                      :tool-kw          tool-kw}))
-                 decls))]
+                   (fn [acc e] (update acc (:owner e) (fnil conj []) e))
+                   {}
+                   registry-snapshot)
+        pulled   (vec
+                   (mapcat
+                     (fn [{:keys [owner as]}]
+                       (for [entry (get by-owner owner [])
+                             :let [event-kw (:tool entry)
+                                   tool-kw  (if as
+                                              (keyword (name as) (name event-kw))
+                                              event-kw)
+                                   raw      (or (:input-schema entry) [:map])]]
+                         {:event-kw         event-kw
+                          :owner            owner
+                          :description      (:description entry)
+                          :raw-input-schema raw
+                          :input-schema     (assoc-implicit-timeout raw)
+                          :timeout-default  default-timeout-ms
+                          :tool-kw          tool-kw}))
+                     decls))]
     (reduce
-     (fn [[defs index] entry]
-       (let [tname (region-tool-name (:tool-kw entry))]
-         (when (contains? index tname)
-           (let [other (get index tname)]
-             (throw (ex-info (str "Region-tool palette collision: "
-                                  (:tool-kw entry) " resolves to LLM-name "
-                                  tname " for both owner " (:owner other)
-                                  " and owner " (:owner entry)
-                                  ". Disambiguate with :as in :chart-tools.")
-                             {:reason :region-palette-collision
-                              :tool   (:tool-kw entry)
-                              :owners [(:owner other) (:owner entry)]}))))
-         (let [def {:name         tname
-                    :description  (or (:description entry)
-                                      (str "Call chart tool " (:event-kw entry)))
-                    :input-schema (llm-types/malli->json-schema (:input-schema entry))}]
-           [(conj defs def) (assoc index tname entry)])))
-     [[] {}]
-     pulled)))
+      (fn [[defs index] entry]
+        (let [tname (region-tool-name (:tool-kw entry))]
+          (when (contains? index tname)
+            (let [other (get index tname)]
+              (throw (ex-info (str "Region-tool palette collision: "
+                                (:tool-kw entry) " resolves to LLM-name "
+                                tname " for both owner " (:owner other)
+                                " and owner " (:owner entry)
+                                ". Disambiguate with :as in :chart-tools.")
+                       {:reason :region-palette-collision
+                        :tool   (:tool-kw entry)
+                        :owners [(:owner other) (:owner entry)]}))))
+          (let [def {:name         tname
+                     :description  (or (:description entry)
+                                     (str "Call chart tool " (:event-kw entry)))
+                     :input-schema (llm-types/malli->json-schema (:input-schema entry))}]
+            [(conj defs def) (assoc index tname entry)])))
+      [[] {}]
+      pulled)))
 
 ;; ---------------------------------------------------------------------------
 ;; Worker state and helpers
@@ -281,7 +281,7 @@
    thinking strings are capped; tool_use carries `:id :name :input`."
   [b]
   (case (:type b)
-    :text     {:type :text     :text (truncate-for-transcript (:text b))}
+    :text {:type :text :text (truncate-for-transcript (:text b))}
     :thinking {:type :thinking :thinking (truncate-for-transcript (:thinking b))}
     :tool_use {:type :tool_use :id (:id b) :name (:name b) :input (:input b)}
     {:type (:type b)}))
@@ -295,24 +295,24 @@
     (if (= :user (:role last-msg))
       (mapv (fn [b]
               (case (:type b)
-                :text        {:type :text :text (truncate-for-transcript (:text b))}
-                :tool_result {:type :tool_result :tool_use_id (:tool_use_id b)
+                :text {:type :text :text (truncate-for-transcript (:text b))}
+                :tool_result {:type     :tool_result :tool_use_id (:tool_use_id b)
                               :is-error (boolean (:is-error b))
                               :content  (truncate-for-transcript (:content b))}
                 {:type (:type b)}))
-            (or (:content last-msg) []))
+        (or (:content last-msg) []))
       [])))
 
 (defn- post-event-to-parent!
   "Send a chart event back to the parent session."
   [{:keys [env queue parent-session-id invokeid]} event data]
   (sp/send! queue env
-            {:target            parent-session-id
-             :source-session-id parent-session-id
-             :sendid            (str parent-session-id "." invokeid "." (name event))
-             :invokeid          invokeid
-             :event             event
-             :data              data}))
+    {:target            parent-session-id
+     :source-session-id parent-session-id
+     :sendid            (str parent-session-id "." invokeid "." (name event))
+     :invokeid          invokeid
+     :event             event
+     :data              data}))
 
 (defn- humanize-malli-errors [schema input]
   (-> (m/explain schema input) me/humanize pr-str))
@@ -381,15 +381,15 @@
   ;; substantial prefix. Pass `:auto-cache? false` to fully opt out, or
   ;; pass an explicit map / `false` on either individual key.
   (let [system-cache-control (cond
-                               (false? system-cache-control)         nil
-                               (some? system-cache-control)          system-cache-control
-                               auto-cache?                           {:type :ephemeral}
-                               :else                                 nil)
+                               (false? system-cache-control) nil
+                               (some? system-cache-control) system-cache-control
+                               auto-cache? {:type :ephemeral}
+                               :else nil)
         tools-cache-control  (cond
-                               (false? tools-cache-control)          nil
-                               (some? tools-cache-control)           tools-cache-control
-                               auto-cache?                           {:type :ephemeral}
-                               :else                                 nil)]
+                               (false? tools-cache-control) nil
+                               (some? tools-cache-control) tools-cache-control
+                               auto-cache? {:type :ephemeral}
+                               :else nil)]
     ;; Note: :model is omitted from the Request when the caller didn't supply
     ;; one. The backend's `send-turn` fills it from its configured
     ;; `:default-model` before schema validation. That way the chart can simply
@@ -401,21 +401,21 @@
                          ;; cache_control marker. Stamping the last tool with
                          ;; the marker therefore caches all tool defs.
                          (-> (vec tools)
-                             (update (dec (count tools))
-                                     assoc :cache-control tools-cache-control))
+                           (update (dec (count tools))
+                             assoc :cache-control tools-cache-control))
                          tools)}
-      model                (assoc :model model)
-      system               (assoc :system system)
-      max-tokens           (assoc :max-tokens max-tokens)
+      model (assoc :model model)
+      system (assoc :system system)
+      max-tokens (assoc :max-tokens max-tokens)
       system-cache-control (assoc :system-cache-control system-cache-control)
-      (some? temperature)  (assoc :temperature temperature)
-      (some? top-p)        (assoc :top-p top-p)
-      (some? top-k)        (assoc :top-k top-k)
+      (some? temperature) (assoc :temperature temperature)
+      (some? top-p) (assoc :top-p top-p)
+      (some? top-k) (assoc :top-k top-k)
       (seq stop-sequences) (assoc :stop-sequences (vec stop-sequences))
-      thinking             (assoc :thinking thinking)
-      (some? tool-choice)  (assoc :tool-choice tool-choice)
-      (seq metadata)       (assoc :metadata metadata)
-      conv-id              (assoc :conversation/id conv-id))))
+      thinking (assoc :thinking thinking)
+      (some? tool-choice) (assoc :tool-choice tool-choice)
+      (seq metadata) (assoc :metadata metadata)
+      conv-id (assoc :conversation/id conv-id))))
 
 (defn effective-max-tokens
   "The per-turn output cap for `model`, taken purely from the catalog's
@@ -474,7 +474,7 @@
   [a b]
   (merge-with (fn [x y]
                 (if (and (number? x) (number? y)) (+ x y) (or y x)))
-              (or a {}) (or b {})))
+    (or a {}) (or b {})))
 
 (defn- merge-segment-content
   "Append continuation blocks `more` onto accumulated `acc`, merging the
@@ -482,14 +482,14 @@
    stitched message reads as one coherent block."
   [acc more]
   (cond
-    (empty? acc)  (vec more)
+    (empty? acc) (vec more)
     (empty? more) (vec acc)
     (and (= :text (:type (peek acc)))
-         (= :text (:type (first more))))
+      (= :text (:type (first more))))
     (-> (vec (pop (vec acc)))
-        (conj {:type :text
-               :text (str (:text (peek (vec acc))) (:text (first more)))})
-        (into (rest more)))
+      (conj {:type :text
+             :text (str (:text (peek (vec acc))) (:text (first more)))})
+      (into (rest more)))
     :else (into (vec acc) (vec more))))
 
 ;; ---------------------------------------------------------------------------
@@ -519,11 +519,11 @@
    straggler."
   [^ArrayBlockingQueue queue reply-id deadline-ms worker-state transcript-fn invokeid]
   (loop []
-    (let [now      (now-ms)
-          remain   (- deadline-ms now)]
+    (let [now    (now-ms)
+          remain (- deadline-ms now)]
       (cond
         (= :dying @worker-state) nil
-        (<= remain 0)            nil
+        (<= remain 0) nil
         :else
         (let [wait (min (long remain) (long region-tool-poll-step-ms))
               msg  (.poll queue wait TimeUnit/MILLISECONDS)]
@@ -533,11 +533,11 @@
             :else
             (do
               (transcript! transcript-fn
-                           {:event :llm/region-tool-late-reply
-                            :ts    (now-ms)
-                            :data  {:invokeid invokeid
-                                    :expected reply-id
-                                    :got      (:escapement.tool/reply-id msg)}})
+                {:event :llm/region-tool-late-reply
+                 :ts    (now-ms)
+                 :data  {:invokeid invokeid
+                         :expected reply-id
+                         :got      (:escapement.tool/reply-id msg)}})
               (recur))))))))
 
 (defn- handle-tool-use-block
@@ -555,20 +555,20 @@
   (let [{:keys [id name input]} block
         retries (get @retry-counts id 0)
         post-tool-result!
-        (fn post-tool-result!
-          ([tool-label is-error result-content]
-           (post-tool-result! tool-label is-error result-content nil))
-          ([tool-label is-error result-content resolved-path]
-           (when transcript-fn
-             (transcript! transcript-fn
-                          {:event :llm/tool-result :ts (now-ms)
-                           :data  (cond-> {:tool_use_id     id
-                                           :tool            tool-label
-                                           :input           input
-                                           :is-error        (boolean is-error)
-                                           :content-preview (truncate-for-transcript result-content)
-                                           :invokeid        (:invokeid parent-ctx)}
-                                    resolved-path (assoc :resolved-path resolved-path))}))))]
+                (fn post-tool-result!
+                  ([tool-label is-error result-content]
+                   (post-tool-result! tool-label is-error result-content nil))
+                  ([tool-label is-error result-content resolved-path]
+                   (when transcript-fn
+                     (transcript! transcript-fn
+                       {:event :llm/tool-result :ts (now-ms)
+                        :data  (cond-> {:tool_use_id     id
+                                        :tool            tool-label
+                                        :input           input
+                                        :is-error        (boolean is-error)
+                                        :content-preview (truncate-for-transcript result-content)
+                                        :invokeid        (:invokeid parent-ctx)}
+                                 resolved-path (assoc :resolved-path resolved-path))}))))]
     (cond
       ;; Real tool
       (contains? name->tool-kw name)
@@ -579,20 +579,20 @@
           (do
             (post-tool-result! tool-kw true result)
             (if (>= retries 1)
-              {:fatal?     true
-               :error-data {:reason :tool-validation-failed
-                            :tool   tool-kw
-                            :errors result
-                            :tool_use_id id}
-               :result-block {:type :tool_result :tool_use_id id
+              {:fatal?       true
+               :error-data   {:reason      :tool-validation-failed
+                              :tool        tool-kw
+                              :errors      result
+                              :tool_use_id id}
+               :result-block {:type    :tool_result :tool_use_id id
                               :content result :is-error true}}
               (do
                 (swap! retry-counts assoc id (inc retries))
-                {:result-block {:type :tool_result :tool_use_id id
+                {:result-block {:type    :tool_result :tool_use_id id
                                 :content result :is-error true}})))
           (do
             (post-tool-result! tool-kw is-error (or result "") resolved-path)
-            {:result-block {:type :tool_result :tool_use_id id
+            {:result-block {:type    :tool_result :tool_use_id id
                             :content (or result "") :is-error (boolean is-error)}})))
 
       ;; Event tool
@@ -608,16 +608,16 @@
           (let [err (humanize-malli-errors schema input)]
             (post-tool-result! event true err)
             (if (>= retries 1)
-              {:fatal?     true
-               :error-data {:reason :tool-validation-failed
-                            :tool   event
-                            :errors err
-                            :tool_use_id id}
-               :result-block {:type :tool_result :tool_use_id id
+              {:fatal?       true
+               :error-data   {:reason      :tool-validation-failed
+                              :tool        event
+                              :errors      err
+                              :tool_use_id id}
+               :result-block {:type    :tool_result :tool_use_id id
                               :content err :is-error true}}
               (do
                 (swap! retry-counts assoc id (inc retries))
-                {:result-block {:type :tool_result :tool_use_id id
+                {:result-block {:type    :tool_result :tool_use_id id
                                 :content err :is-error true}})))))
 
       ;; Region tool — dispatch synchronously: post the request event,
@@ -633,19 +633,19 @@
                 ;; per-tool default. The wire payload carries the relative
                 ;; duration; the worker computes the absolute deadline.
                 timeout-ms (or (get input :timeout-ms) timeout-default
-                               region-tool-default-timeout-ms)
+                             region-tool-default-timeout-ms)
                 payload    (-> (or input {})
-                               (dissoc :timeout-ms)
-                               (assoc :escapement.tool/reply-id   reply-id
-                                      :escapement.tool/reply-to   (->id-str
-                                                                   (:invokeid parent-ctx))
-                                      :escapement.tool/owner      owner
-                                      :escapement.tool/timeout-ms timeout-ms))
+                             (dissoc :timeout-ms)
+                             (assoc :escapement.tool/reply-id reply-id
+                                    :escapement.tool/reply-to (->id-str
+                                                                (:invokeid parent-ctx))
+                                    :escapement.tool/owner owner
+                                    :escapement.tool/timeout-ms timeout-ms))
                 _          (post-event-to-parent! parent-ctx event-kw payload)
                 deadline   (+ (now-ms) (long timeout-ms))
                 reply      (poll-reply-queue! tool-reply-queue reply-id deadline
-                                              worker-state transcript-fn
-                                              (:invokeid parent-ctx))]
+                             worker-state transcript-fn
+                             (:invokeid parent-ctx))]
             (if reply
               (do
                 (post-tool-result! event-kw (boolean (:is-error reply)) (str (:result reply)))
@@ -655,41 +655,41 @@
                 ;; signal (unlike an event-tool). Do NOT set :posted-event?
                 ;; here or the worker parks in :awaiting-user mid-turn and the
                 ;; region/service/repl/scan flows break (R1 is event-tool only).
-                {:result-block  {:type :tool_result :tool_use_id id
-                                 :content (str (:result reply))
-                                 :is-error (boolean (:is-error reply))}})
+                {:result-block {:type     :tool_result :tool_use_id id
+                                :content  (str (:result reply))
+                                :is-error (boolean (:is-error reply))}})
               (let [msg (str name " timed out after " timeout-ms "ms")]
                 (post-tool-result! event-kw true msg)
                 ;; Timeout still yields a tool_result the conversation
                 ;; continues from — same rationale as above; not end-of-turn.
-                {:result-block  {:type :tool_result :tool_use_id id
-                                 :content msg :is-error true}})))
+                {:result-block {:type    :tool_result :tool_use_id id
+                                :content msg :is-error true}})))
           (let [err (humanize-malli-errors schema input)]
             (post-tool-result! event-kw true err)
             (if (>= retries 1)
-              {:fatal?     true
-               :error-data {:reason :tool-validation-failed
-                            :tool   event-kw
-                            :errors err
-                            :tool_use_id id}
-               :result-block {:type :tool_result :tool_use_id id
+              {:fatal?       true
+               :error-data   {:reason      :tool-validation-failed
+                              :tool        event-kw
+                              :errors      err
+                              :tool_use_id id}
+               :result-block {:type    :tool_result :tool_use_id id
                               :content err :is-error true}}
               (do
                 (swap! retry-counts assoc id (inc retries))
-                {:result-block {:type :tool_result :tool_use_id id
+                {:result-block {:type    :tool_result :tool_use_id id
                                 :content err :is-error true}})))))
 
       :else
       (let [msg (str "Unknown tool: " name)]
         (post-tool-result! name true msg)
         (if (>= retries 1)
-          {:fatal?     true
-           :error-data {:reason :unknown-tool :tool name :tool_use_id id}
-           :result-block {:type :tool_result :tool_use_id id
+          {:fatal?       true
+           :error-data   {:reason :unknown-tool :tool name :tool_use_id id}
+           :result-block {:type    :tool_result :tool_use_id id
                           :content msg :is-error true}}
           (do
             (swap! retry-counts assoc id (inc retries))
-            {:result-block {:type :tool_result :tool_use_id id
+            {:result-block {:type    :tool_result :tool_use_id id
                             :content msg :is-error true}}))))))
 
 (defn ->id-str
@@ -700,8 +700,8 @@
   [x]
   (cond
     (keyword? x) (name x)
-    (nil? x)     nil
-    :else        (str x)))
+    (nil? x) nil
+    :else (str x)))
 
 (defn- error-event
   "Compose the SCXML-style error event name from a `:reason` keyword.
@@ -762,28 +762,28 @@
                     default-models)
         requested (cond
                     (seq (:models params)) (vec (:models params))
-                    (:model params)        [(:model params)]
-                    (seq defaults)         (vec defaults)
-                    :else                  [nil])
+                    (:model params) [(:model params)]
+                    (seq defaults) (vec defaults)
+                    :else [nil])
         status    @model-status
         live      (filterv (fn [m] (or (nil? m) (not= :down (get status m)))) requested)]
     (if (seq live) live requested)))
 
 (defn- throwable->details [^Throwable t]
   (let [message (or (.getMessage t)
-                    (some-> (ex-cause t) .getMessage)
-                    (.toString t))]
+                  (some-> (ex-cause t) .getMessage)
+                  (.toString t))]
     {:message message
      :class   (-> t class .getName)
      :ex-data (when-let [d (ex-data t)]
                 (try (pr-str d)
                      (catch Throwable _ "<unprintable>")))
      :stack   (->> (.getStackTrace t)
-                   (take 6)
-                   (mapv #(str (.getClassName ^StackTraceElement %)
-                               "." (.getMethodName ^StackTraceElement %)
-                               "(" (.getFileName ^StackTraceElement %)
-                               ":" (.getLineNumber ^StackTraceElement %) ")")))}))
+                (take 6)
+                (mapv #(str (.getClassName ^StackTraceElement %)
+                         "." (.getMethodName ^StackTraceElement %)
+                         "(" (.getFileName ^StackTraceElement %)
+                         ":" (.getLineNumber ^StackTraceElement %) ")")))}))
 
 (defn- try-models!
   "Issue the LLM call, falling back across `:models` in order. On every
@@ -812,19 +812,19 @@
            parent-ctx catalog-ratings eligibility-strict?]}
    params messages tools]
   (let [{:keys [max-retries backoff-ms]} (params->resilience params)
-        policy        (params->policy params)
+        policy         (params->policy params)
         auto-fallback? (and (not (seq (:models params)))
-                            (nil? (:model params)))
+                         (nil? (:model params)))
         gate-empties?  (and auto-fallback? policy (seq default-models)
-                            (not-any? #(catalog/satisfies-policy? % policy catalog-ratings)
-                                      default-models))
+                         (not-any? #(catalog/satisfies-policy? % policy catalog-ratings)
+                           default-models))
         _              (when gate-empties?
                          (transcript! transcript-fn
-                                      {:event :llm/model-policy-empty
-                                       :ts    (now-ms)
-                                       :data  {:policy         policy
-                                               :default-models (vec default-models)
-                                               :strict?        (boolean eligibility-strict?)}}))]
+                           {:event :llm/model-policy-empty
+                            :ts    (now-ms)
+                            :data  {:policy         policy
+                                    :default-models (vec default-models)
+                                    :strict?        (boolean eligibility-strict?)}}))]
     (if (and gate-empties? eligibility-strict?)
       ;; Fail-closed: a webapp/lib host opted into never running an
       ;; ineligible model. Surface a categorized error so the node fails
@@ -833,38 +833,38 @@
                            :default-models (vec default-models)}}
       (let [candidates (candidate-models params default-models model-status catalog-ratings)]
         (loop [[m & more] candidates
-               attempts   []]
+               attempts []]
           (let [request  (build-request
-                          {:system               (:system params)
-                           :messages             messages
-                           :tools                tools
-                           :model                m
-                           :max-tokens           (effective-max-tokens m)
-                           :temperature          (:temperature params)
-                           :top-p                (:top-p params)
-                           :top-k                (:top-k params)
-                           :stop-sequences       (:stop-sequences params)
-                           :thinking             (:thinking params)
-                           :tool-choice          (:tool-choice params)
-                           :metadata             (:metadata params)
-                           :system-cache-control (:system-cache-control params)
-                           :tools-cache-control  (:tools-cache-control params)
-                           :auto-cache?          (get params :auto-cache? true)
-                           :conv-id              (:conversation/id params)})
+                           {:system               (:system params)
+                            :messages             messages
+                            :tools                tools
+                            :model                m
+                            :max-tokens           (effective-max-tokens m)
+                            :temperature          (:temperature params)
+                            :top-p                (:top-p params)
+                            :top-k                (:top-k params)
+                            :stop-sequences       (:stop-sequences params)
+                            :thinking             (:thinking params)
+                            :tool-choice          (:tool-choice params)
+                            :metadata             (:metadata params)
+                            :system-cache-control (:system-cache-control params)
+                            :tools-cache-control  (:tools-cache-control params)
+                            :auto-cache?          (get params :auto-cache? true)
+                            :conv-id              (:conversation/id params)})
                 _        (transcript! transcript-fn
-                                      {:event :llm/request :ts (now-ms)
-                                       :data  (cond-> {:n-messages (count (:messages request))
-                                                       :user-blocks (trailing-user-blocks messages)
-                                                       :system-preview (truncate-for-transcript (:system params))
-                                                       :invokeid (:invokeid parent-ctx)}
-                                                m (assoc :model m))})
+                           {:event :llm/request :ts (now-ms)
+                            :data  (cond-> {:n-messages     (count (:messages request))
+                                            :user-blocks    (trailing-user-blocks messages)
+                                            :system-preview (truncate-for-transcript (:system params))
+                                            :invokeid       (:invokeid parent-ctx)}
+                                     m (assoc :model m))})
                 on-delta (when (:stream? params)
                            (fn [d]
                              (transcript! transcript-fn
-                                          {:event :llm/delta :ts (now-ms)
-                                           :data  (assoc d
-                                                         :model    m
-                                                         :invokeid (:invokeid parent-ctx))})))
+                               {:event :llm/delta :ts (now-ms)
+                                :data  (assoc d
+                                         :model m
+                                         :invokeid (:invokeid parent-ctx))})))
                 ;; Bounded same-model retry for *transient* categories
                 ;; (rate-limited/overloaded/timeout/transport) with exponential
                 ;; backoff before falling back to the next candidate. Terminal
@@ -872,33 +872,33 @@
                 ;; uncategorized throws are NOT retried here — they fall straight
                 ;; through to model fallback / :exhausted.
                 response (loop [retry 0]
-                           (let [r (try (llm/send-turn* backend request on-delta)
-                                        (catch Throwable t {:_throw t}))
-                                 t (:_throw r)
+                           (let [r   (try (llm/send-turn* backend request on-delta)
+                                          (catch Throwable t {:_throw t}))
+                                 t   (:_throw r)
                                  cat (when t (llm/error-category t))]
                              (if (and t
-                                      (contains? transient-error-categories cat)
-                                      (< retry (long max-retries))
-                                      (not (instance? InterruptedException t))
-                                      (not (instance? InterruptedException (ex-cause t)))
-                                      (not= :dying @worker-state))
+                                   (contains? transient-error-categories cat)
+                                   (< retry (long max-retries))
+                                   (not (instance? InterruptedException t))
+                                   (not (instance? InterruptedException (ex-cause t)))
+                                   (not= :dying @worker-state))
                                (do
                                  (transcript! transcript-fn
-                                              {:event :llm/retry :ts (now-ms)
-                                               :data  {:model     m
-                                                       :category  cat
-                                                       :attempt   (inc retry)
-                                                       :max-retries max-retries
-                                                       :invokeid  (:invokeid parent-ctx)}})
+                                   {:event :llm/retry :ts (now-ms)
+                                    :data  {:model       m
+                                            :category    cat
+                                            :attempt     (inc retry)
+                                            :max-retries max-retries
+                                            :invokeid    (:invokeid parent-ctx)}})
                                  (sleep-unless-dying!
-                                  (backoff-delay-ms backoff-ms retry t) worker-state)
+                                   (backoff-delay-ms backoff-ms retry t) worker-state)
                                  (recur (inc retry)))
                                r)))]
             (cond
               (and (:_throw response)
-                   (or (instance? InterruptedException (:_throw response))
-                       (instance? InterruptedException (ex-cause (:_throw response)))
-                       (= :dying @worker-state)))
+                (or (instance? InterruptedException (:_throw response))
+                  (instance? InterruptedException (ex-cause (:_throw response)))
+                  (= :dying @worker-state)))
               {:interrupted (:_throw response)}
 
               (:_throw response)
@@ -909,15 +909,15 @@
                     ;; pick) is not a routable identifier.
                     _            (when m (swap! model-status assoc m :down))
                     _            (transcript! transcript-fn
-                                              {:event :llm/model-down :ts (now-ms)
-                                               :data  {:model m
-                                                       :message (:message details)
-                                                       :category category
-                                                       :remaining (vec more)}})
+                                   {:event :llm/model-down :ts (now-ms)
+                                    :data  {:model     m
+                                            :message   (:message details)
+                                            :category  category
+                                            :remaining (vec more)}})
                     attempts'    (conj attempts {:model m :error (select-keys details [:message :class])})]
                 (if (seq more)
                   (recur more attempts')
-                  {:exhausted attempts'
+                  {:exhausted      attempts'
                    :last-throwable t}))
 
               :else
@@ -971,11 +971,11 @@
             :else
             (do
               (transcript! transcript-fn
-                           {:event :llm/continuation :ts (now-ms)
-                            :data  {:segment  (inc seg)
-                                    :blocks   (count content)
-                                    :usage    (or usage {})
-                                    :invokeid (:invokeid parent-ctx)}})
+                {:event :llm/continuation :ts (now-ms)
+                 :data  {:segment  (inc seg)
+                         :blocks   (count content)
+                         :usage    (or usage {})
+                         :invokeid (:invokeid parent-ctx)}})
               (recur merged merged-usage (inc seg)))))))))
 
 (defn- run-verdict-inference!
@@ -999,18 +999,18 @@
    the wrap-up is itself the terminating step) thinking off; everything else
    (system, model, temperature, ...) is carried verbatim."
   [{:keys [transcript-fn parent-ctx] :as ctx} params messages verdict-schema]
-  (let [tool-def       (submit-verdict-tool-def verdict-schema)
-        wrap-params    (assoc params
-                              :tool-choice {:type :tool :name submit-verdict-tool-name})
+  (let [tool-def      (submit-verdict-tool-def verdict-schema)
+        wrap-params   (assoc params
+                        :tool-choice {:type :tool :name submit-verdict-tool-name})
         ;; Append a framework-owned user-message nudge so the model has clear
         ;; context that it is being asked to consolidate, not continue
         ;; working. This is wrap-up-local — the working transcript carried in
         ;; `messages-atom` upstream is NOT mutated.
-        wrap-messages  (conj (vec messages) (text-user-message wrap-up-nudge-text))
-        _              (transcript! transcript-fn
-                                    {:event :llm/verdict-inference :ts (now-ms)
-                                     :data  {:invokeid (:invokeid parent-ctx)}})
-        outcome        (drive-turn! ctx wrap-params wrap-messages [tool-def])]
+        wrap-messages (conj (vec messages) (text-user-message wrap-up-nudge-text))
+        _             (transcript! transcript-fn
+                        {:event :llm/verdict-inference :ts (now-ms)
+                         :data  {:invokeid (:invokeid parent-ctx)}})
+        outcome       (drive-turn! ctx wrap-params wrap-messages [tool-def])]
     (cond
       (not (:ok outcome)) outcome
 
@@ -1020,7 +1020,7 @@
             tool-uses   (find-tool-uses content)
             verdict-blk (some (fn [b]
                                 (when (= submit-verdict-tool-name (:name b)) b))
-                              tool-uses)
+                          tool-uses)
             ;; The LLM returns tool_use input as raw JSON-shaped data
             ;; (strings, numbers, vectors of those, never keywords). When
             ;; the chart-supplied verdict-schema declares keyword shapes
@@ -1030,8 +1030,8 @@
             ;; coercions land before validation.
             decoded     (when verdict-blk
                           (m/decode (or verdict-schema [:map])
-                                    (or (:input verdict-blk) {})
-                                    (mt/json-transformer)))]
+                            (or (:input verdict-blk) {})
+                            (mt/json-transformer)))]
         (cond
           (nil? verdict-blk)
           {:no-tool-use stop-reason}
@@ -1057,16 +1057,16 @@
         (:verdict outcome)
         (do
           (transcript! transcript-fn
-                       {:event :llm/verdict :ts (now-ms)
-                        :data  {:invokeid (->id-str (:invokeid parent-ctx))
-                                :verdict  (:verdict outcome)}})
+            {:event :llm/verdict :ts (now-ms)
+             :data  {:invokeid (->id-str (:invokeid parent-ctx))
+                     :verdict  (:verdict outcome)}})
           {:idle-data (assoc base-idle-data :verdict (:verdict outcome))})
 
         (:validation-failed outcome)
         {:error :verdict-validation
-         :data  {:reason     :verdict-validation
-                 :errors     (:validation-failed outcome)
-                 :raw-input  (:input outcome)}}
+         :data  {:reason    :verdict-validation
+                 :errors    (:validation-failed outcome)
+                 :raw-input (:input outcome)}}
 
         (:no-tool-use outcome)
         {:error :verdict-validation
@@ -1076,8 +1076,8 @@
 
         (:exhausted outcome)
         {:error :backend
-         :data  {:reason :backend
-                 :detail :verdict-inference-failed
+         :data  {:reason   :backend
+                 :detail   :verdict-inference-failed
                  :attempts (:exhausted outcome)}}
 
         (:interrupted outcome)
@@ -1086,14 +1086,14 @@
         (:eligibility-empty outcome)
         {:error :invalid-request
          :data  (assoc (:eligibility-empty outcome)
-                       :reason :invalid-request
-                       :detail :verdict-eligibility-empty)}
+                  :reason :invalid-request
+                  :detail :verdict-eligibility-empty)}
 
         (:no-progress outcome)
         {:error :unexpected-stop
-         :data  {:reason :unexpected-stop
+         :data  {:reason      :unexpected-stop
                  :stop-reason :max_tokens
-                 :detail :verdict-no-progress}}
+                 :detail      :verdict-no-progress}}
 
         :else
         {:error :backend
@@ -1117,11 +1117,11 @@
       (:eligibility-empty outcome)
       (let [{:keys [policy default-models]} (:eligibility-empty outcome)]
         (transcript! transcript-fn
-                     {:event :llm/error :ts (now-ms)
-                      :data  {:reason         :invalid-request
-                              :detail         :eligibility-empty-strict
-                              :policy         policy
-                              :default-models default-models}})
+          {:event :llm/error :ts (now-ms)
+           :data  {:reason         :invalid-request
+                   :detail         :eligibility-empty-strict
+                   :policy         policy
+                   :default-models default-models}})
         ;; Fail-closed: the eligibility gate excluded every fallback
         ;; model and `:llm/eligibility-strict?` is set. Categorize as
         ;; :invalid-request so the chart's :error.llm.* / .invalid-request
@@ -1136,20 +1136,20 @@
       (:no-progress outcome)
       (do
         (transcript! transcript-fn
-                     {:event :llm/error :ts (now-ms)
-                      :data  {:reason :unexpected-stop
-                              :stop-reason :max_tokens
-                              :detail :no-forward-progress}})
+          {:event :llm/error :ts (now-ms)
+           :data  {:reason      :unexpected-stop
+                   :stop-reason :max_tokens
+                   :detail      :no-forward-progress}})
         (post-error! :unexpected-stop {:stop-reason :max_tokens
-                                       :detail :no-forward-progress})
+                                       :detail      :no-forward-progress})
         (reset! worker-state :dying)
         :error-and-die)
 
       (:interrupted outcome)
       (do
         (transcript! transcript-fn
-                     {:event :llm/worker-exit :ts (now-ms)
-                      :data  {:reason :interrupted-mid-turn}})
+          {:event :llm/worker-exit :ts (now-ms)
+           :data  {:reason :interrupted-mid-turn}})
         (reset! worker-state :dying)
         :error-and-die)
 
@@ -1166,54 +1166,54 @@
                        :backend)]
         (transcript! transcript-fn {:event :llm/error :ts (now-ms)
                                     :data  (assoc details
-                                                  :reason   reason
-                                                  :category category
-                                                  :attempts attempts)})
+                                             :reason reason
+                                             :category category
+                                             :attempts attempts)})
         (post-error! reason (-> (select-keys details [:message :class])
-                                (assoc :category category
-                                       :attempts attempts)))
+                              (assoc :category category
+                                     :attempts attempts)))
         (reset! worker-state :dying)
         :error-and-die)
 
       :else
-      (let [response (:ok outcome)
+      (let [response      (:ok outcome)
             {:keys [stop-reason content usage model]} response
             ctx-window    (some-> model catalog/context-window)
             input-tokens  (:input-tokens usage)
             ctx-used-frac (when (and ctx-window input-tokens (pos? ctx-window))
                             (/ (double input-tokens) (double ctx-window)))]
         (transcript! transcript-fn
-                     {:event :llm/response
-                      :ts    (now-ms)
-                      :data  (cond-> {:stop-reason stop-reason
-                                      :n-blocks    (count content)
-                                      :usage       (or usage {})
-                                      :content     (mapv ->transcript-content-block content)
-                                      :invokeid    (:invokeid parent-ctx)}
-                               model         (assoc :model model)
-                               ctx-window    (assoc :context-window ctx-window)
-                               ctx-used-frac (assoc :context-used-frac
-                                                    (Double/parseDouble (format "%.3f" ctx-used-frac))))})
+          {:event :llm/response
+           :ts    (now-ms)
+           :data  (cond-> {:stop-reason stop-reason
+                           :n-blocks    (count content)
+                           :usage       (or usage {})
+                           :content     (mapv ->transcript-content-block content)
+                           :invokeid    (:invokeid parent-ctx)}
+                    model (assoc :model model)
+                    ctx-window (assoc :context-window ctx-window)
+                    ctx-used-frac (assoc :context-used-frac
+                                         (Double/parseDouble (format "%.3f" ctx-used-frac))))})
         (when (and ctx-used-frac (>= ctx-used-frac 0.8))
           (transcript! transcript-fn
-                       {:event :llm/context-warning
-                        :ts    (now-ms)
-                        :data  {:input-tokens   input-tokens
-                                :context-window ctx-window
-                                :used-frac      ctx-used-frac
-                                :model          model}}))
+            {:event :llm/context-warning
+             :ts    (now-ms)
+             :data  {:input-tokens   input-tokens
+                     :context-window ctx-window
+                     :used-frac      ctx-used-frac
+                     :model          model}}))
         (swap! messages-atom conj (assistant-message content))
         (case stop-reason
           :end_turn
-          (let [final-text  (->> content
+          (let [final-text     (->> content
                                  (filter #(= :text (:type %)))
                                  (map :text)
                                  (apply str))
-                base-data   {:text final-text
-                             :from (->id-str (:invokeid parent-ctx))}
+                base-data      {:text final-text
+                                :from (->id-str (:invokeid parent-ctx))}
                 verdict-schema (:verdict-schema params)
-                wrap        (maybe-run-verdict-and-finalize-idle!
-                             ctx params @messages-atom verdict-schema base-data)]
+                wrap           (maybe-run-verdict-and-finalize-idle!
+                                 ctx params @messages-atom verdict-schema base-data)]
             (cond
               (:idle-data wrap)
               (do
@@ -1237,15 +1237,15 @@
               (let [{:keys [result-block fatal? error-data]
                      :as   block-res}
                     (handle-tool-use-block
-                     {:tool-registry     tool-registry
-                      :name->tool-kw     name->tool-kw
-                      :name->event-entry name->event-entry
-                      :name->region-tool (:name->region-tool ctx)
-                      :tool-reply-queue  (:tool-reply-queue ctx)
-                      :worker-state      worker-state
-                      :retry-counts      retry-counts
-                      :transcript-fn     transcript-fn}
-                     parent-ctx b)]
+                      {:tool-registry     tool-registry
+                       :name->tool-kw     name->tool-kw
+                       :name->event-entry name->event-entry
+                       :name->region-tool (:name->region-tool ctx)
+                       :tool-reply-queue  (:tool-reply-queue ctx)
+                       :worker-state      worker-state
+                       :retry-counts      retry-counts
+                       :transcript-fn     transcript-fn}
+                      parent-ctx b)]
                 (swap! results conj result-block)
                 (when (:posted-event? block-res) (reset! posted-event? true))
                 (when fatal? (reset! fatal error-data))))
@@ -1273,16 +1273,16 @@
               ;; :end_turn post-path cannot run again. Hence: exactly one
               ;; on-end-turn-event per logical turn.
               (and @posted-event?
-                   (not (#{:awaiting-user :dying} @worker-state)))
+                (not (#{:awaiting-user :dying} @worker-state)))
               (let [final-text     (->> content
-                                        (filter #(= :text (:type %)))
-                                        (map :text)
-                                        (apply str))
+                                     (filter #(= :text (:type %)))
+                                     (map :text)
+                                     (apply str))
                     base-data      {:text final-text
                                     :from (->id-str (:invokeid parent-ctx))}
                     verdict-schema (:verdict-schema params)
                     wrap           (maybe-run-verdict-and-finalize-idle!
-                                    ctx params @messages-atom verdict-schema base-data)]
+                                     ctx params @messages-atom verdict-schema base-data)]
                 (cond
                   (:idle-data wrap)
                   (do
@@ -1360,7 +1360,7 @@
         turn-count  (atom 0)
         post-error! (fn [reason data]
                       (post-event-to-parent! parent-ctx (error-event reason)
-                                             (assoc data :reason reason)))]
+                        (assoc data :reason reason)))]
     (try
       (loop []
         (let [s @worker-state]
@@ -1377,7 +1377,7 @@
                   (swap! messages-atom conj (text-user-message msg))
                   (transition-state! worker-state :running)
                   (transcript! transcript-fn {:event :llm/user-message :ts (now-ms)
-                                              :data {:text msg :invokeid (:invokeid parent-ctx)}})
+                                              :data  {:text msg :invokeid (:invokeid parent-ctx)}})
                   (recur))
                 (= :dying @worker-state) (recur)
                 :else (recur)))
@@ -1389,20 +1389,20 @@
               (and max-turns (>= @turn-count (long max-turns)))
               (do
                 (transcript! transcript-fn
-                             {:event :llm/error :ts (now-ms)
-                              :data  {:reason :max-turns :limit max-turns}})
+                  {:event :llm/error :ts (now-ms)
+                   :data  {:reason :max-turns :limit max-turns}})
                 (post-error! :max-turns {:limit max-turns :turns @turn-count})
                 (reset! worker-state :dying)
                 (recur))
 
               (and max-conversation-duration-ms
-                   (>= (- (now-ms) started-at) (long max-conversation-duration-ms)))
+                (>= (- (now-ms) started-at) (long max-conversation-duration-ms)))
               (let [elapsed (- (now-ms) started-at)]
                 (transcript! transcript-fn
-                             {:event :llm/error :ts (now-ms)
-                              :data  {:reason :timeout
-                                      :elapsed-ms elapsed
-                                      :limit-ms max-conversation-duration-ms}})
+                  {:event :llm/error :ts (now-ms)
+                   :data  {:reason     :timeout
+                           :elapsed-ms elapsed
+                           :limit-ms   max-conversation-duration-ms}})
                 (post-error! :timeout {:elapsed-ms elapsed
                                        :limit-ms   max-conversation-duration-ms})
                 (reset! worker-state :dying)
@@ -1414,8 +1414,8 @@
                 (case (handle-running-turn! ctx post-error! on-end-turn-event)
                   ;; All three outcomes just re-enter the loop; the inner
                   ;; helper already mutated worker-state and posted events.
-                  :continue      (recur)
-                  :idle          (recur)
+                  :continue (recur)
+                  :idle (recur)
                   :error-and-die (recur))))
 
             :else
@@ -1424,7 +1424,7 @@
         (transcript! transcript-fn {:event :llm/worker-exit :ts (now-ms) :data {:reason :interrupted}}))
       (catch Throwable t
         (transcript! transcript-fn {:event :llm/worker-exit :ts (now-ms)
-                                    :data  {:reason :exception
+                                    :data  {:reason  :exception
                                             :message (.getMessage t)}})
         (try
           (post-error! :worker-exception {:message (.getMessage t)})
@@ -1465,62 +1465,62 @@
                               (reset! (:worker-state old) :dying))
           queue             (::sc/event-queue env)
           {:keys [real-tools allowed-events chart-tools initial-messages initial-user-message]} params
-          [real-defs name->tool-kw]   (resolve-real-tools tool-registry real-tools)
-          [event-defs name->event]    (event-tool-defs (or allowed-events []))
+          [real-defs name->tool-kw] (resolve-real-tools tool-registry real-tools)
+          [event-defs name->event] (event-tool-defs (or allowed-events []))
           ;; Palette snapshot for region tools — built once at start. Late
           ;; registrations or unregistrations are NOT reflected in this
           ;; conversation (see region-tools.md "Timing and executable-content
           ;; order").
-          registry-snapshot           (service/entries env)
-          [region-defs name->region]  (region-tool-palette registry-snapshot
-                                                           chart-tools
-                                                           region-tool-default-timeout-ms)
-          tool-defs                   (into [] (concat real-defs event-defs region-defs))
-          initial-msgs                (cond
-                                        (seq initial-messages) (vec initial-messages)
-                                        initial-user-message [(text-user-message initial-user-message)]
-                                        :else [])
-          messages-atom               (atom initial-msgs)
-          worker-state                (atom (if (seq initial-msgs) :running :awaiting-user))
-          user-msg-queue              (ArrayBlockingQueue. 256)
-          tool-reply-queue            (ArrayBlockingQueue. 64)
-          retry-counts                (atom {})
-          parent-ctx                  {:env env :queue queue
-                                       :parent-session-id parent-session-id
-                                       :invokeid invokeid}
-          ctx                         {:backend            backend
-                                       :tool-registry      tool-registry
-                                       :transcript-fn      (or transcript-fn (fn [_] nil))
-                                       :name->tool-kw      name->tool-kw
-                                       :name->event-entry  name->event
-                                       :name->region-tool  name->region
-                                       :tool-reply-queue   tool-reply-queue
-                                       :tool-defs          tool-defs
-                                       :worker-state       worker-state
-                                       :messages-atom      messages-atom
-                                       :user-msg-queue     user-msg-queue
-                                       :retry-counts       retry-counts
-                                       :model-status       model-status
-                                       :default-models     default-models
-                                       :catalog-ratings     (or catalog-ratings {})
-                                       :eligibility-strict? (boolean eligibility-strict?)
-                                       :params             params
-                                       :parent-ctx         parent-ctx}
-          runnable                    (fn [] (run-worker! ctx))
-          ^Thread thread              (doto (Thread. ^Runnable runnable
-                                                     (str "llm-conv-" parent-session-id "-" invokeid))
-                                        (.setDaemon true))]
+          registry-snapshot (service/entries env)
+          [region-defs name->region] (region-tool-palette registry-snapshot
+                                       chart-tools
+                                       region-tool-default-timeout-ms)
+          tool-defs         (into [] (concat real-defs event-defs region-defs))
+          initial-msgs      (cond
+                              (seq initial-messages) (vec initial-messages)
+                              initial-user-message [(text-user-message initial-user-message)]
+                              :else [])
+          messages-atom     (atom initial-msgs)
+          worker-state      (atom (if (seq initial-msgs) :running :awaiting-user))
+          user-msg-queue    (ArrayBlockingQueue. 256)
+          tool-reply-queue  (ArrayBlockingQueue. 64)
+          retry-counts      (atom {})
+          parent-ctx        {:env               env :queue queue
+                             :parent-session-id parent-session-id
+                             :invokeid          invokeid}
+          ctx               {:backend             backend
+                             :tool-registry       tool-registry
+                             :transcript-fn       (or transcript-fn (fn [_] nil))
+                             :name->tool-kw       name->tool-kw
+                             :name->event-entry   name->event
+                             :name->region-tool   name->region
+                             :tool-reply-queue    tool-reply-queue
+                             :tool-defs           tool-defs
+                             :worker-state        worker-state
+                             :messages-atom       messages-atom
+                             :user-msg-queue      user-msg-queue
+                             :retry-counts        retry-counts
+                             :model-status        model-status
+                             :default-models      default-models
+                             :catalog-ratings     (or catalog-ratings {})
+                             :eligibility-strict? (boolean eligibility-strict?)
+                             :params              params
+                             :parent-ctx          parent-ctx}
+          runnable          (fn [] (run-worker! ctx))
+          ^Thread thread    (doto (Thread. ^Runnable runnable
+                                    (str "llm-conv-" parent-session-id "-" invokeid))
+                              (.setDaemon true))]
       (swap! workers assoc k
-             {:thread           thread
-              :worker-state     worker-state
-              :messages-atom    messages-atom
-              :user-msg-queue   user-msg-queue
-              :tool-reply-queue tool-reply-queue
-              :retry-counts     retry-counts
-              :params           params})
+        {:thread           thread
+         :worker-state     worker-state
+         :messages-atom    messages-atom
+         :user-msg-queue   user-msg-queue
+         :tool-reply-queue tool-reply-queue
+         :retry-counts     retry-counts
+         :params           params})
       (transcript! (or transcript-fn (fn [_] nil))
-                   {:event :llm/start :ts (now-ms)
-                    :data  {:invokeid invokeid :session-id parent-session-id}})
+        {:event :llm/start :ts (now-ms)
+         :data  {:invokeid invokeid :session-id parent-session-id}})
       (.start thread)
       true))
 
@@ -1539,8 +1539,8 @@
           entry             (get @workers k)
           ev-name           (cond
                               (keyword? event) event
-                              (map? event)     (or (:event event) (:name event))
-                              :else            nil)
+                              (map? event) (or (:event event) (:name event))
+                              :else nil)
           ev-data           (when (map? event) (:data event))
           ;; Target filter: when :target is present in the event data, only the
           ;; invocation whose invokeid matches receives the message. Without a
@@ -1549,7 +1549,7 @@
           ;; string form so keyword/string ids match transparently.
           target            (:target ev-data)
           accept?           (or (nil? target)
-                                (= (->id-str target) (->id-str invokeid)))]
+                              (= (->id-str target) (->id-str invokeid)))]
       (cond
         ;; Region-tool reply — hard-routed by `:escapement.tool/reply-to`,
         ;; NOT broadcast. The engine calls `forward-event!` once per live
@@ -1608,24 +1608,24 @@
   (assert backend "backend is required")
   (assert tool-registry "tool-registry is required")
   (->LlmConversationProcessor backend tool-registry (or transcript-fn (fn [_] nil))
-                              (atom {}) (atom {}) (vec default-models)
-                              (or catalog-ratings {}) (boolean eligibility-strict?)))
+    (atom {}) (atom {}) (vec default-models)
+    (or catalog-ratings {}) (boolean eligibility-strict?)))
 
 (>defn active-worker-count
-       "Returns the number of workers whose state is not `:dying`. Used by the runner
-        to decide when it's safe to terminate."
-       [processor]
-       [any? => :int]
-       (reduce-kv
-        (fn [n _ entry]
-          (let [s (some-> (:worker-state entry) deref)]
-            (if (or (nil? s) (= :dying s)) n (inc n))))
-        0
-        @(:workers processor)))
+  "Returns the number of workers whose state is not `:dying`. Used by the runner
+   to decide when it's safe to terminate."
+  [processor]
+  [any? => :int]
+  (reduce-kv
+    (fn [n _ entry]
+      (let [s (some-> (:worker-state entry) deref)]
+        (if (or (nil? s) (= :dying s)) n (inc n))))
+    0
+    @(:workers processor)))
 
 (>defn worker-info
-       "Return a snapshot of the worker entry for `[session-id invokeid]`, for tests/debug."
-       [processor session-id invokeid]
-       [any? any? any? => [:maybe :map]]
-       (some-> (get @(:workers processor) [session-id invokeid])
-               (select-keys [:worker-state :messages-atom :retry-counts])))
+  "Return a snapshot of the worker entry for `[session-id invokeid]`, for tests/debug."
+  [processor session-id invokeid]
+  [any? any? any? => [:maybe :map]]
+  (some-> (get @(:workers processor) [session-id invokeid])
+    (select-keys [:worker-state :messages-atom :retry-counts])))

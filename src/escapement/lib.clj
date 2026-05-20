@@ -48,17 +48,17 @@
 
   Public entry: `run`."
   (:require
-   [babashka.fs :as fs]
-   [com.fulcrologic.guardrails.malli.core :refer [>defn => ?]]
-   [escapement.llm.preferences :as preferences]
-   [escapement.llm.providers :as providers]
-   [escapement.llm.ratings :as ratings]
-   [escapement.runner :as runner]
-   [malli.core :as m]
-   [malli.error :as me]
-   [taoensso.timbre :as log])
+    [babashka.fs :as fs]
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn ?]]
+    [escapement.llm.preferences :as preferences]
+    [escapement.llm.providers :as providers]
+    [escapement.llm.ratings :as ratings]
+    [escapement.runner :as runner]
+    [malli.core :as m]
+    [malli.error :as me]
+    [taoensso.timbre :as log])
   (:import
-   (java.util UUID)))
+    (java.util UUID)))
 
 ;; ---------------------------------------------------------------------------
 ;; Public option schema  (THE PUBLIC API CONTRACT — closed)
@@ -70,8 +70,8 @@
   the event sink, docs, and cancellation all build on it."
   [:map {:closed true}
    ;; --- required ---
-   [:chart       :any]                                  ; statechart value (from chart/statechart)
-   [:session-id  :any]                                  ; session id for this run (keyword/string/uuid)
+   [:chart :any]                                            ; statechart value (from chart/statechart)
+   [:session-id :any]                                       ; session id for this run (keyword/string/uuid)
    ;; --- required: injected credentials (app-lifetime, like a DB pool) ---
    ;; An ordered vector of credential descriptor maps. Each names a
    ;; `:provider` (matching the provider keyword in
@@ -82,50 +82,50 @@
    [:credentials
     [:vector
      [:map
-      [:provider     :keyword]                          ; e.g. :z-ai-plan :anthropic :openai
-      [:api-key      {:optional true} [:maybe :string]]
-      [:base-url     {:optional true} [:maybe :string]]
-       [:model        {:optional true} [:maybe :string]]
-       [:default-model {:optional true} [:maybe :string]]
-       [:auth-mode    {:optional true} :any]
-       [:subscription {:optional true} :any]]]]
+      [:provider :keyword]                                  ; e.g. :z-ai-plan :anthropic :openai
+      [:api-key {:optional true} [:maybe :string]]
+      [:base-url {:optional true} [:maybe :string]]
+      [:model {:optional true} [:maybe :string]]
+      [:default-model {:optional true} [:maybe :string]]
+      [:auth-mode {:optional true} :any]
+      [:subscription {:optional true} :any]]]]
    ;; --- optional: hermetic config (`.escapement.edn`-shaped map) ---
    ;; `:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`. Kept
    ;; permissive (a plain map) — internal keys are not over-constrained. Absent
    ;; ⇒ empty ratings + built-in default preference order (never disk).
-   [:config        {:optional true} [:maybe :map]]
+   [:config {:optional true} [:maybe :map]]
    ;; --- optional: backend / tools / data ---
-   [:backend       {:optional true} :any]               ; an LLMBackend escape hatch; wins verbatim over :credentials assembly
-   [:tool-registry {:optional true} :any]               ; tool registry atom
-   [:initial-data  {:optional true} [:maybe :map]]      ; seed data-model
+   [:backend {:optional true} :any]                         ; an LLMBackend escape hatch; wins verbatim over :credentials assembly
+   [:tool-registry {:optional true} :any]                   ; tool registry atom
+   [:initial-data {:optional true} [:maybe :map]]           ; seed data-model
    ;; --- optional: host callbacks ---
-   [:transcript-tap {:optional true} fn?]               ; (fn [event]) — receives every transcript row in-process
-   [:on-env-ready   {:optional true} fn?]               ; (fn [env])   — called once env is built, before chart start
+   [:transcript-tap {:optional true} fn?]                   ; (fn [event]) — receives every transcript row in-process
+   [:on-env-ready {:optional true} fn?]                     ; (fn [env])   — called once env is built, before chart start
    ;; --- optional: transcript / checkpoint (default to a fresh temp dir) ---
-   [:transcript-path {:optional true} :string]          ; JSONL output path; defaults to <tmp>/transcript.jsonl
-   [:checkpoint-dir  {:optional true} :string]          ; checkpoint dir;   defaults to <tmp>/checkpoints
-   [:session-dir     {:optional true} :string]          ; artifact/session dir; defaults to <tmp>
+   [:transcript-path {:optional true} :string]              ; JSONL output path; defaults to <tmp>/transcript.jsonl
+   [:checkpoint-dir {:optional true} :string]               ; checkpoint dir;   defaults to <tmp>/checkpoints
+   [:session-dir {:optional true} :string]                  ; artifact/session dir; defaults to <tmp>
    ;; --- optional: store passthrough ---
-   [:store {:optional true} :any]                       ; working-memory store override → engine.env/new-env
+   [:store {:optional true} :any]                           ; working-memory store override → engine.env/new-env
    ;; --- optional: logging ---
-   [:quiet? {:optional true} :boolean]                  ; default true — suppress statecharts-impl DEBUG stderr
+   [:quiet? {:optional true} :boolean]                      ; default true — suppress statecharts-impl DEBUG stderr
    ;; --- optional: cancellation (honored: forwarded to runner/run!) ---
-   [:cancel {:optional true} :any]                      ; atom/promise; truthy ⇒ runner aborts at a safe pump boundary
+   [:cancel {:optional true} :any]                          ; atom/promise; truthy ⇒ runner aborts at a safe pump boundary
    ;; --- optional: passthrough knobs (forwarded verbatim to runner/run!) ---
-   [:chart-id           {:optional true} :any]
-   [:resume?            {:optional true} :boolean]
-   [:trace?             {:optional true} :boolean]
-   [:max-iterations     {:optional true} :int]
+   [:chart-id {:optional true} :any]
+   [:resume? {:optional true} :boolean]
+   [:trace? {:optional true} :boolean]
+   [:max-iterations {:optional true} :int]
    [:quiescent-sleep-ms {:optional true} :int]])
 
 (>defn validate-options
-       "Returns nil when `opts` matches the closed `Options` schema; otherwise a
-        humanized error map. Exposed so hosts (and tests) can validate without
-        running."
-       [opts]
-       [:any => (? :any)]
-       (when-not (m/validate Options opts)
-         (me/humanize (m/explain Options opts))))
+  "Returns nil when `opts` matches the closed `Options` schema; otherwise a
+   humanized error map. Exposed so hosts (and tests) can validate without
+   running."
+  [opts]
+  [:any => (? :any)]
+  (when-not (m/validate Options opts)
+    (me/humanize (m/explain Options opts))))
 
 ;; ---------------------------------------------------------------------------
 ;; Quiet logging (hosted-mode default)
@@ -149,86 +149,86 @@
 ;; ---------------------------------------------------------------------------
 
 (>defn run
-       "Run `chart` to quiescence through the hosted facade.
+  "Run `chart` to quiescence through the hosted facade.
 
-       `opts` is validated against the closed `Options` schema (unknown keys
-       are rejected). See the `Options` var for the full contract.
+  `opts` is validated against the closed `Options` schema (unknown keys
+  are rejected). See the `Options` var for the full contract.
 
-       Returns the `runner/run!` summary map augmented with:
-        * `:run-id`         — the generated stable run id (string UUID)
-        * `:transcript`     — the transcript path used (temp dir if defaulted)
-        * `:checkpoint-dir` — the checkpoint dir used (temp dir if defaulted)
-        * `:session-id`, `:final-config`, `:env` — as returned by `runner/run!`
+  Returns the `runner/run!` summary map augmented with:
+   * `:run-id`         — the generated stable run id (string UUID)
+   * `:transcript`     — the transcript path used (temp dir if defaulted)
+   * `:checkpoint-dir` — the checkpoint dir used (temp dir if defaulted)
+   * `:session-id`, `:final-config`, `:env` — as returned by `runner/run!`
 
-       The `:run-id` is also emitted on the `:runner/started` transcript event
-       so every public event can be correlated to this run."
-       [opts]
-       [:map => :map]
-       (when-let [errs (validate-options opts)]
-         (throw (ex-info "escapement.lib/run: invalid options (closed schema rejected the map)"
-                         {:errors errs :provided-keys (vec (keys opts))})))
-       (let [{:keys [chart session-id credentials config backend tool-registry
-                     initial-data transcript-tap on-env-ready transcript-path
-                     checkpoint-dir session-dir store quiet? cancel chart-id resume? trace?
-                     max-iterations quiescent-sleep-ms]
-              :or   {quiet? true}} opts
-             ;; --- Hermetic resolution: ONLY from injected `:config` /
-             ;; `:credentials`. Zero `config/load-config`, zero
-             ;; `System/getenv`. Absent `:config` ⇒ `{}` ratings + built-in
-             ;; `default-preferences`; never a disk fallback. The one-arg
-             ;; (config-map) arities of `preferences`/`ratings` do not touch
-             ;; disk; passing `{}` yields the documented empty/default
-             ;; behavior.
-             cfg            (or config {})
-             resolved-prefs (preferences/preferences cfg)
-             default-models (preferences/model-order resolved-prefs)
-             catalog-ratings (ratings/ratings cfg)
-             strict?        (boolean (or (:llm/eligibility-strict? cfg)
-                                         (get-in cfg [:llm :eligibility-strict?])))
-             ;; Backend assembly: explicit `:backend` escape hatch wins
-             ;; verbatim; otherwise build hermetically from `:credentials`
-             ;; ordered by the resolved preference list.
-             backend  (or backend
+  The `:run-id` is also emitted on the `:runner/started` transcript event
+  so every public event can be correlated to this run."
+  [opts]
+  [:map => :map]
+  (when-let [errs (validate-options opts)]
+    (throw (ex-info "escapement.lib/run: invalid options (closed schema rejected the map)"
+             {:errors errs :provided-keys (vec (keys opts))})))
+  (let [{:keys [chart session-id credentials config backend tool-registry
+                initial-data transcript-tap on-env-ready transcript-path
+                checkpoint-dir session-dir store quiet? cancel chart-id resume? trace?
+                max-iterations quiescent-sleep-ms]
+         :or   {quiet? true}} opts
+        ;; --- Hermetic resolution: ONLY from injected `:config` /
+        ;; `:credentials`. Zero `config/load-config`, zero
+        ;; `System/getenv`. Absent `:config` ⇒ `{}` ratings + built-in
+        ;; `default-preferences`; never a disk fallback. The one-arg
+        ;; (config-map) arities of `preferences`/`ratings` do not touch
+        ;; disk; passing `{}` yields the documented empty/default
+        ;; behavior.
+        cfg             (or config {})
+        resolved-prefs  (preferences/preferences cfg)
+        default-models  (preferences/model-order resolved-prefs)
+        catalog-ratings (ratings/ratings cfg)
+        strict?         (boolean (or (:llm/eligibility-strict? cfg)
+                                   (get-in cfg [:llm :eligibility-strict?])))
+        ;; Backend assembly: explicit `:backend` escape hatch wins
+        ;; verbatim; otherwise build hermetically from `:credentials`
+        ;; ordered by the resolved preference list.
+        backend         (or backend
                           (providers/build-injected-credentials-backend
-                           credentials resolved-prefs))
-             run-id   (str (UUID/randomUUID))
-             tmp-dir  (when (or (nil? transcript-path) (nil? checkpoint-dir))
-                        (str (fs/create-temp-dir {:prefix "escapement-run-"})))
-             t-path   (or transcript-path (str (fs/path tmp-dir "transcript.jsonl")))
-             ckpt-dir (or checkpoint-dir  (str (fs/path tmp-dir "checkpoints")))
-             sess-dir (or session-dir tmp-dir)
-             run-opts (cond-> {:chart                   chart
-                               :session-id              session-id
-                               :transcript-path         t-path
-                               :checkpoint-dir          ckpt-dir
-                               :session-dir             sess-dir
-                               :run-id                  run-id
-                               :store                   store
-                               ;; Step 2 injection seam: resolved ONCE here,
-                               ;; threaded as plain values (no global).
-                               :catalog-ratings         catalog-ratings
-                               :backend-default-models  default-models
-                               :eligibility-strict?     strict?}
-                        backend            (assoc :backend backend)
-                        tool-registry      (assoc :tool-registry tool-registry)
-                        initial-data       (assoc :initial-data initial-data)
-                        transcript-tap     (assoc :transcript-tap transcript-tap)
-                        on-env-ready       (assoc :on-env-ready on-env-ready)
-                        chart-id           (assoc :chart-id chart-id)
-                        resume?            (assoc :resume? resume?)
-                        trace?             (assoc :trace? trace?)
-                        max-iterations     (assoc :max-iterations max-iterations)
-                        quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)
-                        ;; `:cancel` is part of the closed public contract and
-                        ;; is honored: forwarded to `runner/run!`, which aborts
-                        ;; at a safe pump boundary and returns `:status :aborted`.
-                        cancel             (assoc :cancel cancel))
-             do-run   (fn [] (runner/run! run-opts))
-             result   (if quiet?
-                        (with-quiet-logging do-run)
-                        (do-run))]
-         (assoc result
-                :run-id         run-id
-                :transcript     t-path
-                :checkpoint-dir ckpt-dir
-                :session-dir    sess-dir)))
+                            credentials resolved-prefs))
+        run-id          (str (UUID/randomUUID))
+        tmp-dir         (when (or (nil? transcript-path) (nil? checkpoint-dir))
+                          (str (fs/create-temp-dir {:prefix "escapement-run-"})))
+        t-path          (or transcript-path (str (fs/path tmp-dir "transcript.jsonl")))
+        ckpt-dir        (or checkpoint-dir (str (fs/path tmp-dir "checkpoints")))
+        sess-dir        (or session-dir tmp-dir)
+        run-opts        (cond-> {:chart                  chart
+                                 :session-id             session-id
+                                 :transcript-path        t-path
+                                 :checkpoint-dir         ckpt-dir
+                                 :session-dir            sess-dir
+                                 :run-id                 run-id
+                                 :store                  store
+                                 ;; Step 2 injection seam: resolved ONCE here,
+                                 ;; threaded as plain values (no global).
+                                 :catalog-ratings        catalog-ratings
+                                 :backend-default-models default-models
+                                 :eligibility-strict?    strict?}
+                          backend (assoc :backend backend)
+                          tool-registry (assoc :tool-registry tool-registry)
+                          initial-data (assoc :initial-data initial-data)
+                          transcript-tap (assoc :transcript-tap transcript-tap)
+                          on-env-ready (assoc :on-env-ready on-env-ready)
+                          chart-id (assoc :chart-id chart-id)
+                          resume? (assoc :resume? resume?)
+                          trace? (assoc :trace? trace?)
+                          max-iterations (assoc :max-iterations max-iterations)
+                          quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)
+                          ;; `:cancel` is part of the closed public contract and
+                          ;; is honored: forwarded to `runner/run!`, which aborts
+                          ;; at a safe pump boundary and returns `:status :aborted`.
+                          cancel (assoc :cancel cancel))
+        do-run          (fn [] (runner/run! run-opts))
+        result          (if quiet?
+                          (with-quiet-logging do-run)
+                          (do-run))]
+    (assoc result
+      :run-id run-id
+      :transcript t-path
+      :checkpoint-dir ckpt-dir
+      :session-dir sess-dir)))

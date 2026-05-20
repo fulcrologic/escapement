@@ -23,9 +23,9 @@
 
    Babashka-compatible: `clojure.java.io` + `cheshire`."
   (:require
-   [cheshire.core :as json]
-   [clojure.java.io :as io]
-   [clojure.string :as str]))
+    [cheshire.core :as json]
+    [clojure.java.io :as io]
+    [clojure.string :as str]))
 
 (def ^:private resource-path "escapement/llm/models-api.json")
 
@@ -33,11 +33,11 @@
   "Project provider keyword → {:source <models.dev provider id> :auth ..}.
    Order here is the catalog order for `providers`."
   (array-map
-   :anthropic {:source "anthropic"       :auth :metered}
-   :openai    {:source "openai"          :auth :metered}
-   :z-ai      {:source "zai"             :auth :metered}
-   :z-ai-plan {:source "zai-coding-plan" :auth :subscription}
-   :ollama    {:source "ollama-cloud"    :auth :subscription}))
+    :anthropic {:source "anthropic" :auth :metered}
+    :openai {:source "openai" :auth :metered}
+    :z-ai {:source "zai" :auth :metered}
+    :z-ai-plan {:source "zai-coding-plan" :auth :subscription}
+    :ollama {:source "ollama-cloud" :auth :subscription}))
 
 (def ^:private family->company
   "Coarse model family → maker, for display. The dump has no per-model
@@ -62,7 +62,7 @@
   [family]
   (when family
     (some (fn [[pfx co]] (when (str/starts-with? family pfx) co))
-          family->company)))
+      family->company)))
 
 (defn- num->double [x]
   (when (number? x) (double x)))
@@ -96,30 +96,30 @@
    restricted to the curated `allowlist`."
   [dump]
   (reduce
-   (fn [acc [kw {:keys [source auth]}]]
-     (if-let [prov (get dump source)]
-       (let [subscription? (= :subscription auth)
-             prov-models   (get prov "models")]
-         (-> acc
-             (update :models
-                     (fn [ms]
-                       (reduce (fn [ms [id m]]
-                                 (cond-> ms
-                                   (not (contains? ms id))
-                                   (assoc id (normalize-model m))))
-                               ms prov-models)))
-             (assoc-in [:providers kw]
-                       {:display (get prov "name")
-                        :auth    auth
-                        :env     (get prov "env")
-                        :api     (get prov "api")
-                        :models  (into {}
-                                       (map (fn [[id m]]
-                                              [id {:pricing (provider-pricing m subscription?)}]))
-                                       prov-models)})))
-       acc))
-   {:models {} :providers {}}
-   allowlist))
+    (fn [acc [kw {:keys [source auth]}]]
+      (if-let [prov (get dump source)]
+        (let [subscription? (= :subscription auth)
+              prov-models   (get prov "models")]
+          (-> acc
+            (update :models
+              (fn [ms]
+                (reduce (fn [ms [id m]]
+                          (cond-> ms
+                            (not (contains? ms id))
+                            (assoc id (normalize-model m))))
+                  ms prov-models)))
+            (assoc-in [:providers kw]
+              {:display (get prov "name")
+               :auth    auth
+               :env     (get prov "env")
+               :api     (get prov "api")
+               :models  (into {}
+                          (map (fn [[id m]]
+                                 [id {:pricing (provider-pricing m subscription?)}]))
+                          prov-models)})))
+        acc))
+    {:models {} :providers {}}
+    allowlist))
 
 (def ^:private cache
   (delay (build (json/parse-string (slurp (io/resource resource-path))))))

@@ -15,12 +15,12 @@ Two LLM regions — `experimenter` and `tester` — run in parallel:
   that produces the typed verdict (no free-text parsing, no
   framework-mechanics leakage into the prompt).
 * The chart routes the payloads:
-  - Experimenter idles with `:proposed-new-version` → chart `tell-other-llm!`s
-    the tester with the summary+approach.
-  - Tester idles with `:pass` or `:fail` → chart `tell-other-llm!`s the
-    experimenter with the verdict text.
-  - Experimenter idles with `:done` → chart transitions to `:finished`.
-  - Experimenter idles with `:stuck` → chart transitions to `:aborted`.
+    - Experimenter idles with `:proposed-new-version` → chart `tell-other-llm!`s
+      the tester with the summary+approach.
+    - Tester idles with `:pass` or `:fail` → chart `tell-other-llm!`s the
+      experimenter with the verdict text.
+    - Experimenter idles with `:done` → chart transitions to `:finished`.
+    - Experimenter idles with `:stuck` → chart transitions to `:aborted`.
 
 The LLMs themselves never fire chart events and have no awareness of each
 other; from each LLM's perspective the workflow is "react to user messages,
@@ -61,6 +61,7 @@ than reading a wall of logs at the end.
 ## Required env
 
 One of:
+
 * `ZAI_API_KEY`  — for glm-class providers (works well; recommended)
 * `ANTHROPIC_API_KEY` — Anthropic Claude
 * `OPENAI_API_KEY` — OpenAI

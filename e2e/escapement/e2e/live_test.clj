@@ -13,12 +13,11 @@
    caps are tiny by design (tiny + always-on cost posture). A real provider
    misbehaving is the only thing that fails the run (non-zero exit)."
   (:require
-   [clojure.string :as str]
-   [clojure.test :refer [deftest is use-fixtures]]
-   [escapement.llm.catalog :as catalog]
-   [escapement.llm.protocol :as proto]
-   [escapement.llm.providers :as providers]
-   [escapement.llm.types :as types]))
+    [clojure.test :refer [deftest is use-fixtures]]
+    [escapement.llm.catalog :as catalog]
+    [escapement.llm.protocol :as proto]
+    [escapement.llm.providers :as providers]
+    [escapement.llm.types :as types]))
 
 ;; ---------------------------------------------------------------------------
 ;; Result matrix
@@ -30,7 +29,7 @@
   "status ∈ #{:pass :fail :skip}. detail is a short human string (never a secret)."
   [provider capability status detail]
   (swap! results conj {:provider provider :capability capability
-                       :status status :detail detail}))
+                       :status   status :detail detail}))
 
 (defn- mask
   "Never reveal any key bytes — only that one is present and its length."
@@ -43,16 +42,16 @@
   (try {:ok (thunk)} (catch Throwable t {:err t})))
 
 (defn- tiny-text-request [extra]
-  (merge {:messages [{:role :user
-                      :content [{:type :text :text "Reply with exactly: OK"}]}]
+  (merge {:messages   [{:role    :user
+                        :content [{:type :text :text "Reply with exactly: OK"}]}]
           :max-tokens 16}
-         extra))
+    extra))
 
 ;; A 1x1 transparent PNG — enough to prove the vision wire path round-trips
 ;; without shipping a binary fixture.
 (def ^:private tiny-png-b64
   (str "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
-       "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="))
+    "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="))
 
 ;; ---------------------------------------------------------------------------
 ;; Per-provider checks
@@ -63,7 +62,7 @@
     (cond
       err
       (do (record! provider "reachable" :fail
-                   (str "send-turn threw: " (.getMessage ^Throwable err)))
+            (str "send-turn threw: " (.getMessage ^Throwable err)))
           (is false (str provider " reachable: " (.getMessage ^Throwable err)))
           nil)
       (types/validate-response ok)
@@ -73,7 +72,7 @@
       :else
       (let [txt (->> (:content ok) (filter #(= :text (:type %))) (map :text) (apply str))]
         (record! provider "reachable" :pass
-                 (str "stop=" (:stop-reason ok) " text=" (pr-str (subs txt 0 (min 24 (count txt))))))
+          (str "stop=" (:stop-reason ok) " text=" (pr-str (subs txt 0 (min 24 (count txt))))))
         (is true)
         ok))))
 
@@ -82,20 +81,20 @@
     (record! provider "streaming" :skip "backend has no StreamingLLMBackend")
     (let [deltas (atom [])
           {:keys [ok err]} (safe #(proto/stream-turn backend (tiny-text-request nil)
-                                                      (fn [d] (swap! deltas conj d))))]
+                                    (fn [d] (swap! deltas conj d))))]
       (cond
         err
         (do (record! provider "streaming" :fail (.getMessage ^Throwable err))
             (is false (str provider " streaming: " (.getMessage ^Throwable err))))
         (or (empty? @deltas) (types/validate-response ok))
         (do (record! provider "streaming" :fail
-                     (str "deltas=" (count @deltas) " valid?="
-                          (nil? (types/validate-response ok))))
+              (str "deltas=" (count @deltas) " valid?="
+                (nil? (types/validate-response ok))))
             (is false (str provider " streaming produced no/invalid output")))
         :else
         (do (record! provider "streaming" :pass
-                     (str (count @deltas) " deltas, types "
-                          (vec (distinct (map :type @deltas)))))
+              (str (count @deltas) " deltas, types "
+                (vec (distinct (map :type @deltas)))))
             (is true))))))
 
 (defn- check-max-tokens-truncation! [provider backend]
@@ -103,10 +102,10 @@
   ;; continuation/stitch that consumes this lives in
   ;; escapement.invocation.llm-conversation and is unit-covered there.
   (let [req (tiny-text-request
-             {:messages [{:role :user
-                          :content [{:type :text
-                                     :text "Write a 300-word story about the sea."}]}]
-              :max-tokens 16})
+              {:messages   [{:role    :user
+                             :content [{:type :text
+                                        :text "Write a 300-word story about the sea."}]}]
+               :max-tokens 16})
         {:keys [ok err]} (safe #(proto/send-turn backend req))]
     (cond
       err (record! provider "max_tokens-detect" :fail (.getMessage ^Throwable err))
@@ -115,16 +114,16 @@
           (is true))
       :else
       (record! provider "max_tokens-detect" :skip
-               (str "model stopped with " (:stop-reason ok)
-                    " before hitting the 16-token cap")))))
+        (str "model stopped with " (:stop-reason ok)
+          " before hitting the 16-token cap")))))
 
 (defn- check-vision! [provider backend]
-  (let [req {:messages [{:role :user
-                         :content [{:type :image
-                                    :source {:type :base64
-                                             :media-type "image/png"
-                                             :data tiny-png-b64}}
-                                   {:type :text :text "Reply with exactly: SEEN"}]}]
+  (let [req {:messages   [{:role    :user
+                           :content [{:type   :image
+                                      :source {:type       :base64
+                                               :media-type "image/png"
+                                               :data       tiny-png-b64}}
+                                     {:type :text :text "Reply with exactly: SEEN"}]}]
              :max-tokens 16}
         {:keys [ok err]} (safe #(proto/send-turn backend req))]
     (cond
@@ -133,7 +132,7 @@
         (if (= :invalid-request cat)
           (record! provider "vision" :skip "model rejected image (not vision-capable)")
           (do (record! provider "vision" :fail
-                       (str (or cat :uncategorized) ": " (.getMessage ^Throwable err)))
+                (str (or cat :uncategorized) ": " (.getMessage ^Throwable err)))
               (is false (str provider " vision: " (.getMessage ^Throwable err))))))
       (types/validate-response ok)
       (do (record! provider "vision" :fail "response failed Malli validation")
@@ -156,7 +155,7 @@
           (do (record! "api" label :pass (str "category " cat))
               (is true))
           (do (record! "api" label :fail
-                       (str "expected " expected-set " got " (or cat :uncategorized)))
+                (str "expected " expected-set " got " (or cat :uncategorized)))
               (is false (str label ": got " (or cat :uncategorized)))))))))
 
 (deftest credential-independent-error-categories
@@ -164,26 +163,26 @@
   (let [new-backend (resolve 'escapement.llm.api/new-backend)]
     ;; :transport — bogus host, no key needed, no quota.
     (expect-category!
-     "error:transport"
-     (new-backend {:base-url "https://no-such-host.invalid.escapement"
-                   :api-key "x" :default-model "claude-sonnet-4-6"})
-     (tiny-text-request nil)
-     #{:transport})
+      "error:transport"
+      (new-backend {:base-url "https://no-such-host.invalid.escapement"
+                    :api-key  "x" :default-model "claude-sonnet-4-6"})
+      (tiny-text-request nil)
+      #{:transport})
     ;; :timeout — real host, 1ms timeout so the connection cannot complete.
     (expect-category!
-     "error:timeout"
-     (new-backend {:base-url "https://api.anthropic.com" :api-key "x"
-                   :default-model "claude-sonnet-4-6" :http-timeout-ms 1})
-     (tiny-text-request nil)
-     #{:timeout :transport})
+      "error:timeout"
+      (new-backend {:base-url      "https://api.anthropic.com" :api-key "x"
+                    :default-model "claude-sonnet-4-6" :http-timeout-ms 1})
+      (tiny-text-request nil)
+      #{:timeout :transport})
     ;; :auth — real Anthropic endpoint, deliberately bad key. No quota spent.
     (expect-category!
-     "error:auth"
-     (new-backend {:base-url "https://api.anthropic.com"
-                   :api-key "sk-ant-definitely-invalid-key"
-                   :default-model "claude-sonnet-4-6"})
-     (tiny-text-request nil)
-     #{:auth})))
+      "error:auth"
+      (new-backend {:base-url      "https://api.anthropic.com"
+                    :api-key       "sk-ant-definitely-invalid-key"
+                    :default-model "claude-sonnet-4-6"})
+      (tiny-text-request nil)
+      #{:auth})))
 
 ;; ---------------------------------------------------------------------------
 ;; Catalog freshness (no live call)
@@ -196,10 +195,10 @@
             ctx (catalog/context-window m)]
         (if (or out ctx)
           (do (record! (name (:kind c)) "catalog" :pass
-                       (str m " out=" out " ctx=" ctx))
+                (str m " out=" out " ctx=" ctx))
               (is true))
           (record! (name (:kind c)) "catalog" :skip
-                   (str m " not in catalog (backend wire default applies)")))))))
+            (str m " not in catalog (backend wire default applies)")))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Live per-provider sweep
@@ -209,7 +208,7 @@
   (let [creds (providers/detect-available-credentials)]
     (if (empty? creds)
       (record! "—" "providers" :skip
-               "no provider credentials in env; ran only credential-independent checks")
+        "no provider credentials in env; ran only credential-independent checks")
       (doseq [c creds]
         (let [provider (name (:kind c))
               {:keys [ok err]} (safe #(providers/build-credential-backend c))]
@@ -218,8 +217,8 @@
                 (is false (str provider " backend construction failed")))
             (let [backend ok]
               (record! provider "build" :pass
-                       (str "from " (:source c)
-                            (when (:api-key c) (str " key=" (mask (:api-key c))))))
+                (str "from " (:source c)
+                  (when (:api-key c) (str " key=" (mask (:api-key c))))))
               (when (check-basic! provider backend)
                 (check-streaming! provider backend)
                 (check-max-tokens-truncation! provider backend)
@@ -242,7 +241,7 @@
     (println (apply str (repeat 78 "-")))
     (let [f (frequencies (map :status rows))]
       (println (format "totals: %d pass, %d skip, %d fail"
-                       (get f :pass 0) (get f :skip 0) (get f :fail 0))))
+                 (get f :pass 0) (get f :skip 0) (get f :fail 0))))
     (when (zero? (count rows))
       (println "(no checks recorded)"))
     (println "=================================================")
