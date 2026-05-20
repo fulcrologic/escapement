@@ -315,6 +315,56 @@
   (when-let [bb (System/getProperty "babashka.version")]
     (println "babashka" bb))
   (println "cwd" (System/getProperty "user.dir"))
+  (when-let [bb-cfg (System/getProperty "babashka.config")]
+    (println "bb.edn" bb-cfg))
+  (println)
+  (println "Classpath (resolved, in load order):")
+  ;; What `escapement run` will look in when loading a chart-sym. Comes from
+  ;; the bb.edn :paths in effect (resolved absolute, so identical regardless
+  ;; of where you ran from) plus any deps jars. Project-config :source-paths
+  ;; below are layered on top at run time via babashka.classpath/add-classpath.
+  (let [cp     (try
+                 (require 'babashka.classpath)
+                 ((resolve 'babashka.classpath/get-classpath))
+                 (catch Throwable _ nil))
+        parts  (when cp (remove str/blank? (str/split cp #":")))
+        dirs   (filter #(let [f (io/file %)] (and (.exists f) (.isDirectory f))) parts)
+        jars   (filter #(str/ends-with? % ".jar") parts)
+        other  (remove (set (concat dirs jars)) parts)]
+    (if (seq parts)
+      (do
+        (when (seq dirs)
+          (println "  source dirs:")
+          (doseq [d dirs] (println "    " d)))
+        (when (seq jars)
+          (println (str "  jars (" (count jars) "):"))
+          (doseq [j jars] (println "    " j)))
+        (when (seq other)
+          (println "  other:")
+          (doseq [o other] (println "    " o))))
+      (println "  <babashka.classpath unavailable>")))
+  (println)
+  (println ".escapement.edn:")
+  (let [cfg-info (try (config/load-project-config) (catch Throwable _ nil))]
+    (if cfg-info
+      (let [^java.io.File path (:path cfg-info)
+            ^java.io.File root (:root cfg-info)
+            cfg                (:config cfg-info)
+            sps                (:source-paths cfg)
+            deps               (:deps cfg)]
+        (println "  found at:" (.getPath path))
+        (println "  config-root:" (.getPath root))
+        (when (seq sps)
+          (println "  :source-paths (added to classpath at `run` time):")
+          (doseq [p sps]
+            (println "    " (.getAbsolutePath (config/resolve-path root p)))))
+        (when (seq deps)
+          (println (str "  :deps (added at `run` time, " (count deps) " entries):"))
+          (doseq [[k v] deps]
+            (println "    " (pr-str k) "=>" (pr-str v))))
+        (when (:default-chart cfg)
+          (println "  :default-chart:" (:default-chart cfg))))
+      (println "  <none found via walk-up from cwd>")))
   (println)
   (println "LLM backends:")
   (let [anthropic  (System/getenv "ANTHROPIC_API_KEY")

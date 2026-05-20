@@ -912,14 +912,16 @@ You normally want either both flags set to the same value or neither: caching sy
 
 The Anthropic response includes `cache_creation_input_tokens` and
 `cache_read_input_tokens` in `usage`.
-Our `Response.usage` schema already carries both.
+Our `Response.usage` schema renames them kebab-case
+(`:cache-creation-input-tokens` / `:cache-read-input-tokens`) and that's
+how they land in the JSONL transcript.
 Look at them in the transcript:
 
 [source,bash]
 ----
 jq -r 'select(.event == "llm/response") |
-       (.data.usage // {}) | [.cache_creation_input_tokens,
-                              .cache_read_input_tokens] | @tsv' transcript.jsonl
+       (.data.usage // {}) | [."cache-creation-input-tokens",
+                              ."cache-read-input-tokens"] | @tsv' transcript.jsonl
 ----
 
 First request shows a creation count, subsequent ones show reads.
@@ -2380,7 +2382,90 @@ The final stitched turn still arrives as one ordinary `:llm/response`.
 is discovered or runtime deps are resolved.
 * `:transcript/serialize-error`
 
-The `api` backend emits its own `:llm/request` and `:llm/response` rows with the full Anthropic body / parsed response (so you can replay the wire exchange exactly).
+==== What lives where in `:llm/request` and `:llm/response`
+
+The events emitted by the invocation layer (the default for `escapement
+run`) are deliberately compact — full message history is NOT echoed back
+per turn, because it grows monotonically inside a state and would balloon
+the JSONL.
+The schema:
+
+* `:llm/request.data` — `{:n-messages N :user-blocks [...] :system-preview "..."
+:model "..." :invokeid "..."}`.
+The trailing user message blocks (truncated at 8 KB per block) and a
+system-prompt preview only.
+The full prior conversation is in `messages-atom` in memory, not on disk.
+* `:llm/response.data` — `{:stop-reason :end_turn :n-blocks N
+:usage {...} :content [...] :model ... :context-window ...
+:context-used-frac ... :invokeid ...}`.
+**The `:content` array carries the assistant's text and thinking blocks**
+(each truncated at 8 KB) alongside `tool_use` blocks.
+If you only saw tool-uses, you were looking at `tool_use` entries and missing the sibling `text` entries in the same `:content` array.
+
+So to actually read what the LLM said this turn:
+
+[source,bash]
+----
+# Just the assistant text from every turn, one block per line.
+jq -r 'select(.event == "llm/response") |
+       .data.content[]? | select(.type == "text") | .text' \
+   .escapement/<sid>/transcript.jsonl
+
+# Thinking blocks (when :thinking is enabled on the state).
+jq -r 'select(.event == "llm/response") |
+       .data.content[]? | select(.type == "thinking") | .thinking' \
+   .escapement/<sid>/transcript.jsonl
+
+# Tool calls the model emitted (id, name, args).
+jq -c 'select(.event == "llm/response") |
+       .data.content[]? | select(.type == "tool_use")
+       | {id, name, input}' .escapement/<sid>/transcript.jsonl
+----
+
+For live output during a turn, set `:stream? true` on the state's
+`params-fn` map; the worker then emits `:llm/delta` rows
+(`{:type :text-delta|:thinking-delta :text "…"}`) as the model produces each chunk.
+Tap those off the transcript for real-time UI; the buffered
+`:llm/response` still arrives at end-of-turn.
+
+==== Confirming prompt caching from the transcript
+
+`:auto-cache?` is on by default, so every turn's request DOES carry
+`cache_control` markers on the system prompt and (for tool-bearing turns)
+the last tool def — Anthropic's prefix is cached for 5 minutes
+(`{:type :ephemeral}`). The standard CLI does NOT echo request-side cache
+markers into the transcript (they're in the live wire body, not the
+invocation summary). To confirm caching IS happening, read the
+`usage` block on `:llm/response` rows:
+
+[source,bash]
+----
+# Per-turn cache write + cache read counts. First turn in a state typically
+# shows cache_creation > 0; subsequent turns show cache_read > 0 instead.
+jq -r 'select(.event == "llm/response") |
+       (.data.usage // {}) | [(."cache-creation-input-tokens" // 0),
+                              (."cache-read-input-tokens"     // 0),
+                              ."input-tokens"] | @tsv' \
+   .escapement/<sid>/transcript.jsonl
+----
+
+If the second column is consistently zero across a long-running state,
+the cache isn't being used — likely because (a) the prefix is below
+Anthropic's minimum cacheable size (1024 tokens for Sonnet/Opus, 2048
+for Haiku — markers are silently ignored), (b) the system prompt is
+templated with per-turn data so the prefix differs each call, or
+(c) the chart opted out via `:auto-cache? false` /
+`:system-cache-control false`.
+The Anthropic response is authoritative — if the model billed it as a
+cache hit, it was cached.
+
+NOTE: For maximum visibility (full request body with `cache_control`
+markers, full parsed response with provider-specific fields) wire a
+`:transcript-fn` directly into the backend opts in
+`escapement.llm.providers`.
+The `api` and `openai` backends both check for it and write a second,
+unredacted `:llm/request` / `:llm/response` row when present.
+The standard `escapement run` CLI does not enable that by default — it would double the transcript size and echo the secret-laden body even when masked.
 
 === Inspecting with `jq`
 
