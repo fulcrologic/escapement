@@ -213,7 +213,9 @@
                     :summary (str "resp stop=" stop
                                (when-let [m (:model data)] (str " model=" m))
                                " tokens=in:" (:input-tokens usage "?")
-                               "/out:" (:output-tokens usage "?"))}]
+                               "/out:" (:output-tokens usage "?")
+                               (when-let [tps (:output-tps data)] (str " " tps "t/s"))
+                               (when-let [ms (:elapsed-ms data)] (str " " ms "ms")))}]
         (conj entries tail))
 
       :llm/tool-result

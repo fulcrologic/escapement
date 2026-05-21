@@ -1,5 +1,53 @@
 # Changelog
 
+## [unreleased] — n-subagents-dynamic-spawn — 2026-05-21
+
+Adds a bb-safe primitive for spawning sibling statechart sessions at
+runtime, plus a runner mode that pumps every session from one loop. A
+chart can now fan out to an LLM-chosen number of child agents, collect
+their replies, and continue — without `<invoke>` or core.async.
+
+### Added
+
+- `escapement.engine.spawn/spawn-child!` — start a sibling statechart
+  session sharing the parent's env (processor, event queue, working-memory
+  store, invocation processors, transcript-fn). Returns the child sid.
+  Accepts `:chart` (required), optional `:chart-id` (registry key,
+  idempotent across spawns), `:sid`, and `:input` (seeded as the child's
+  initial data, mirroring runner's `:initial-data`). Companion helpers
+  `spawn/random-sid` and `spawn/parent-sid` (read the caller's sid out of
+  `env` for use as `:reply-to`).
+- `runner/run!` `:multi-session? true` option — drains every session's
+  queue per tick and routes each event to the sid named in `(:target
+  event)` (falling back to the parent sid). Required whenever a chart
+  uses `spawn-child!`; without it, child sessions wedge with un-drained
+  events.
+- `escapement run` honours `^:multi-session?` metadata on the chart var
+  and threads it into `runner/run!`. Authors opt in once at the var; no
+  new CLI flag.
+- Transcript surface for multi-session runs: each `spawn-child!` emits
+  a `:session/spawned` row with `{:parent-sid :child-sid :chart-id
+  :input-keys}`, and every `:runner/event-processed` row carries
+  `:session-id` so offline reducers can group events per session and
+  reconstruct the parent→child tree.
+- Example charts under `escapement.examples`: `n_subagents_demo`
+  (deterministic skeleton — fixed N, no LLM), `haiku_tournament` (bounded
+  fan-out of haiku-writing children plus a judge), `haiku_tournament_dynamic`
+  (parent LLM decides N at runtime, then spawns and judges), and `fired`
+  (smallest end-to-end spawn example).
+
+### Notes
+
+- Parent↔child wiring is convention, not framework: parent passes its
+  own sid as `:reply-to` in the child's `:input`; the child `send!`s a
+  reply event targeted at that sid when done. There is no managed
+  lifecycle binding — cancellation is the caller's responsibility (stash
+  child sids in chart data and `send!` a `:cancel` to each, or have
+  children react to a shared event).
+- `spawn-child!` is intentionally *not* SCXML `<invoke>`. It's a sibling
+  session, not a nested one; useful when N is data-dependent (chosen by
+  the LLM) or when children should outlive a single state.
+
 ## [unreleased] — feat/turn-primitive-correctness — 2026-05-19
 
 Makes the `:llm-conversation` turn primitive correct and observable
