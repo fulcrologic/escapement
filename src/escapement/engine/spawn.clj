@@ -1,6 +1,6 @@
 (ns escapement.engine.spawn
-  "Bb-safe child-session primitive (see ../../../n-subagents.md
-  §The prerequisite primitive).
+  "Bb-safe child-session primitive — see Guide.adoc
+  §\"Dynamic sibling sessions: spawn-child! and :multi-session?\".
 
   `spawn-child!` starts a SIBLING statechart session in the same env as the
   caller. Both sessions share the env's processor, event queue, working-memory

@@ -1,13 +1,12 @@
 (ns escapement.examples.n-subagents-demo
-  "Demo of the N-subagents pattern (see ../../../n-subagents.md): one chart
-  with three parallel regions — a BOARD that owns shared state, N WORKER
-  regions that claim tasks and submit results, and a WATCHER that fires
-  the parallel-join.
+  "Demo of the N-subagents pattern: one chart with three parallel regions
+  — a BOARD that owns shared state, N WORKER regions that claim tasks and
+  submit results, and a WATCHER that fires the parallel-join.
 
   This is the deterministic, no-LLM skeleton — it exercises the
   orchestration shape end-to-end without needing the bb-safe child-session
-  path that real LLM subagents would require (n-subagents.md
-  §Escapement-specific constraints). Workers \"work\" by upper-casing the
+  path (`escapement.engine.spawn/spawn-child!`) that real LLM subagents
+  would require. Workers \"work\" by upper-casing the
   task string; the point is the choreography, not the work.
 
   Run from the REPL:

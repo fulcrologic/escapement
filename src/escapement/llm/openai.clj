@@ -298,7 +298,7 @@ Response map."
           (fn [] (http/post url
                    {:headers headers
                     :body    body
-                    :timeout (or http-timeout-ms 300000)
+                    :timeout (or http-timeout-ms 60000)
                     :throw   false})))]
     (when-not (and (>= status 200) (< status 300))
       (throw (proto/llm-error (status->category status body)
@@ -453,7 +453,7 @@ Response map."
                    {:headers headers
                     :body    body
                     :as      :stream
-                    :timeout (or http-timeout-ms 300000)
+                    :timeout (or http-timeout-ms 60000)
                     :throw   false})))]
     (when-not (and (>= status 200) (< status 300))
       (let [body-text (try (slurp body) (catch Throwable _ ""))]

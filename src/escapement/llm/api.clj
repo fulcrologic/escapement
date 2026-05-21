@@ -412,7 +412,7 @@
                                 #(http/post url
                                    {:headers headers
                                     :body    body
-                                    :timeout (or http-timeout-ms 300000)
+                                    :timeout (or http-timeout-ms 60000)
                                     :throw   false}))]
     (when-not (and (>= status 200) (< status 300))
       (non-2xx! status body url))
@@ -440,7 +440,7 @@
                                     :body    (json/generate-string
                                                (assoc body-map "stream" true))
                                     :as      :stream
-                                    :timeout (or http-timeout-ms 300000)
+                                    :timeout (or http-timeout-ms 60000)
                                     :throw   false}))]
     (when-not (and (>= status 200) (< status 300))
       (non-2xx! status (try (slurp body) (catch Throwable _ "")) url))

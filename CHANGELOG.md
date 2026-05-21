@@ -31,10 +31,40 @@ their replies, and continue — without `<invoke>` or core.async.
   `:session-id` so offline reducers can group events per session and
   reconstruct the parent→child tree.
 - Example charts under `escapement.examples`: `n_subagents_demo`
-  (deterministic skeleton — fixed N, no LLM), `haiku_tournament` (bounded
-  fan-out of haiku-writing children plus a judge), `haiku_tournament_dynamic`
-  (parent LLM decides N at runtime, then spawns and judges), and `fired`
-  (smallest end-to-end spawn example).
+  (deterministic skeleton — fixed N, no LLM) and `haiku_tournament_dynamic`
+  (parent LLM decides N at runtime, then spawns and judges, wired for
+  small local models via plain-text I/O — see Changed below).
+- Tool-input coercion: when a tool/event input arrives from the LLM with
+  a nested collection serialized as a JSON string (common with small
+  models, e.g. `{"haikus": "[\"a\",\"b\"]"}`), the runtime now re-parses
+  the string before Malli validation. If parsing fails the original
+  value is preserved and the same humanized validation error is reported.
+- `:llm/turn-complete` transcript rows now carry `:elapsed-ms` and
+  `:output-tps` (output tokens per second) alongside the existing model
+  and context-window fields.
+- OpenAI-compat backend now categorizes HTTP errors (`:rate-limited`,
+  `:overloaded`, `:auth`, `:context-length`, `:invalid-request`,
+  `:timeout`, `:transport`) the same way the Anthropic path does, so
+  the existing retry/backoff/fallback machinery in
+  `llm-conversation/run-turn!` applies uniformly. Honors `Retry-After`
+  on 429.
+- Docs: `docs/structured-output-from-small-models.md` — when to prefer
+  plain-text LLM output over `:allowed-events` with small local models,
+  with measurements against llama3.2:3b on ollama.
+- Authoring skill: `.claude/skills/writing-escapement-statecharts/` —
+  non-obvious chart-authoring gotchas (event naming, conversation
+  lifecycle, transition types, SCI-safe wiring).
+
+### Changed
+
+- `deepseek-v4-pro` `:max-output-tokens` clamped to 16384 in the model
+  catalog. The provider advertises 1 048 576 but the underlying API
+  rejects `max_tokens > 393216`; 16k is well under every observed wire
+  cap and sufficient for a single turn.
+- `haiku_tournament_dynamic` example rewritten to drive each child LLM
+  with `:allowed-events []` and parse plain-text replies, so it runs
+  end-to-end against llama3.2:3b on ollama. The default run command in
+  its docstring now targets ollama instead of ZAI/GLM-4.6.
 
 ### Notes
 
