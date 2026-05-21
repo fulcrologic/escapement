@@ -2,7 +2,8 @@
   (:require
     [escapement.llm.cache :as cache]
     [escapement.llm.protocol :as proto]
-    [fulcro-spec.core :refer [=> assertions component specification]])
+    [fulcro-spec.core :refer [=> assertions component specification]]
+    [com.fulcrologic.statecharts.promise :as p])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
 
@@ -12,8 +13,9 @@
 (defrecord CountingBackend [call-count response]
   proto/LLMBackend
   (send-turn [_ _request]
-    (swap! call-count inc)
-    response))
+    (p/do!
+      (swap! call-count inc)
+      response)))
 
 (def request1
   {:model    "claude-opus"
@@ -41,13 +43,13 @@
     (let [calls   (atom 0)
           inner   (->CountingBackend calls response1)
           backend (cache/caching-backend inner (tmp-dir))
-          r1      (proto/send-turn backend request1)
-          r2      (proto/send-turn backend request1)]
+          r1      (p/await! (proto/send-turn backend request1))
+          r2      (p/await! (proto/send-turn backend request1))]
       (assertions
         "first call delegates to inner backend"
         @calls => 1
         "second call does NOT call inner backend"
-        (do (proto/send-turn backend request1) @calls) => 1
+        (do (p/await! (proto/send-turn backend request1)) @calls) => 1
         "first response matches inner response"
         r1 => response1
         "cached response equals first response"
@@ -57,8 +59,8 @@
     (let [calls   (atom 0)
           inner   (->CountingBackend calls response1)
           backend (cache/caching-backend inner (tmp-dir))]
-      (proto/send-turn backend request1)
-      (proto/send-turn backend (assoc-in request1 [:messages 0 :content 0 :text] "Bye"))
+      (p/await! (proto/send-turn backend request1))
+      (p/await! (proto/send-turn backend (assoc-in request1 [:messages 0 :content 0 :text] "Bye")))
       (assertions
         "each distinct request invokes inner"
         @calls => 2))))

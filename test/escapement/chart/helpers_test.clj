@@ -8,16 +8,18 @@
     [escapement.invocation.llm-conversation :as llmc]
     [escapement.llm.protocol :as llm]
     [escapement.tools.protocol :as tp]
-    [fulcro-spec.core :refer [=> assertions specification]]))
+    [fulcro-spec.core :refer [=> assertions specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 (defrecord MockBackend [responses call-log]
   llm/LLMBackend
   (send-turn [_ request]
-    (swap! call-log conj request)
-    (let [r (ffirst (swap-vals! responses (fn [v] (if (seq v) (subvec v 1) v))))]
-      (when (nil? r)
-        (throw (ex-info "Mock backend out of canned responses" {})))
-      r)))
+    (p/do!
+      (swap! call-log conj request)
+      (let [r (ffirst (swap-vals! responses (fn [v] (if (seq v) (subvec v 1) v))))]
+        (when (nil? r)
+          (throw (ex-info "Mock backend out of canned responses" {})))
+        r))))
 
 (defn- mock-backend [responses]
   (->MockBackend (atom (vec responses)) (atom [])))

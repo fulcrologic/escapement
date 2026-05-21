@@ -12,7 +12,8 @@
 
 (def ^:private now-ms-fn
   ;; Wrapper so tests could mock if needed.
-  (fn [] (System/currentTimeMillis)))
+  #?(:clj  (fn [] (System/currentTimeMillis))
+     :cljs (fn [] (.getTime (js/Date.)))))
 
 (defn- supported-type? [type]
   (or (nil? type)
@@ -65,9 +66,9 @@
                       (get old session-id))]
         (doseq [event to-send]
           (try (handler env event)
-               (catch Throwable e
+               (catch #?(:clj Throwable :cljs :default) e
                  (binding [*out* *err*]
-                   (println "[engine.queue] handler threw:" (.getMessage e))))))))))
+                   (println "[engine.queue] handler threw:" (ex-message e))))))))))
 
 (>defn new-queue
   "Create a new in-process event queue."

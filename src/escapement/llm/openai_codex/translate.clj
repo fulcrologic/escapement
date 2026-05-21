@@ -170,7 +170,7 @@ Notes:
   "Converts an OpenAI `function_call` output item to an Anthropic `:tool_use` block."
   [item]
   (let [input (try (json/parse-string (:arguments item) true)
-                   (catch Throwable _
+                   (catch #?(:clj Throwable :cljs :default) _
                      (binding [*out* *err*]
                        (println "WARN [openai-codex] could not parse function_call arguments as JSON; using {}"))
                      {}))]

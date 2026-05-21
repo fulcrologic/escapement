@@ -6,7 +6,8 @@
     [escapement.llm.protocol :as llm]
     [escapement.test-support :as ts]
     [escapement.tools.protocol :as tp]
-    [fulcro-spec.core :refer [=> assertions specification]]))
+    [fulcro-spec.core :refer [=> assertions specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 ;; A per-invocation backend dispatcher: distinct queues are picked by sniffing
 ;; which tool the assistant is expected to call next. The simplest reliable
@@ -16,13 +17,14 @@
 (defrecord RoutingMockBackend [tool-name->responses call-log]
   llm/LLMBackend
   (send-turn [_ request]
-    (swap! call-log conj request)
-    (let [tool-names (set (map :name (:tools request)))
-          k          (some #(when (contains? tool-names %) %) (keys tool-name->responses))
-          q          (get tool-name->responses k)
-          r          (when q (ts/pop-first! q))]
-      (or r (throw (ex-info "mock out of canned responses"
-                     {:tool-names tool-names :k k}))))))
+    (p/do!
+      (swap! call-log conj request)
+      (let [tool-names (set (map :name (:tools request)))
+            k          (some #(when (contains? tool-names %) %) (keys tool-name->responses))
+            q          (get tool-name->responses k)
+            r          (when q (ts/pop-first! q))]
+        (or r (throw (ex-info "mock out of canned responses"
+                       {:tool-names tool-names :k k})))))))
 
 (defn- routing-backend [m]
   (->RoutingMockBackend

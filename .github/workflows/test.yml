@@ -2,7 +2,7 @@ name: test
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -35,3 +35,45 @@ jobs:
 
       - name: bb test
         run: bb test
+
+  cljs-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Java + Babashka
+        uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          bb:  latest
+          cli: latest
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache Maven + gitlibs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: ${{ runner.os }}-deps-${{ hashFiles('bb.edn', 'deps.edn') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-
+
+      - name: Cache npm + shadow-cljs caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+            .shadow-cljs
+          key: ${{ runner.os }}-cljs-${{ hashFiles('package.json', 'shadow-cljs.edn', 'deps.edn') }}
+          restore-keys: |
+            ${{ runner.os }}-cljs-
+
+      - name: bb cljs-test
+        run: bb cljs-test

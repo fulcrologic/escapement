@@ -5,7 +5,8 @@
     [escapement.llm.api :as api]
     [escapement.llm.protocol :as proto]
     [escapement.llm.types :as types]
-    [fulcro-spec.core :refer [=> assertions component specification]])
+    [fulcro-spec.core :refer [=> assertions component specification]]
+    [com.fulcrologic.statecharts.promise :as p])
   (:import (java.io BufferedReader StringReader)))
 
 (defn- sse
@@ -62,15 +63,16 @@
 
 (defrecord NonStreamingStub [resp]
   proto/LLMBackend
-  (send-turn [_ _] resp))
+  (send-turn [_ _] (p/do! resp)))
 
 (defrecord StreamingStub [resp chunks]
   proto/LLMBackend
-  (send-turn [_ _] resp)
+  (send-turn [_ _] (p/do! resp))
   proto/StreamingLLMBackend
   (stream-turn [_ _ on-delta]
-    (doseq [c chunks] (on-delta {:type :text-delta :text c}))
-    resp))
+    (p/do!
+      (doseq [c chunks] (on-delta {:type :text-delta :text c}))
+      resp)))
 
 (specification "send-turn* is capability-aware"
   (let [r {:stop-reason :end_turn :content [] :usage {} :model "m"}]
@@ -80,16 +82,16 @@
       (proto/streaming? (->StreamingStub r ["a"])) => true
       "non-streaming backend: returns response, on-delta never called"
       (let [seen (atom [])]
-        [(proto/send-turn* (->NonStreamingStub r) {} #(swap! seen conj %))
+        [(p/await! (proto/send-turn* (->NonStreamingStub r) {} #(swap! seen conj %)))
          @seen])
       => [r []]
       "streaming backend with on-delta: deltas flow"
       (let [seen (atom [])]
-        (proto/send-turn* (->StreamingStub r ["x" "y"]) {} #(swap! seen conj %))
+        (p/await! (proto/send-turn* (->StreamingStub r ["x" "y"]) {} #(swap! seen conj %)))
         (mapv :text @seen))
       => ["x" "y"]
       "streaming backend but nil on-delta: falls back to send-turn"
-      (proto/send-turn* (->StreamingStub r ["x"]) {} nil) => r)))
+      (p/await! (proto/send-turn* (->StreamingStub r ["x"]) {} nil)) => r)))
 
 (def sample-request
   {:model                "claude-sonnet-4-6"
@@ -330,7 +332,7 @@
     (let [backend (api/new-backend {:base-url      "https://api.anthropic.com"
                                     :api-key       key
                                     :default-model "claude-sonnet-4-6"})
-          resp    (proto/send-turn backend (short-prompt))]
+          resp    (p/await! (proto/send-turn backend (short-prompt)))]
       (assertions
         "live Anthropic response is Malli-valid"
         (types/validate-response resp) => nil
@@ -344,7 +346,7 @@
     (let [backend (api/new-backend {:base-url      "https://api.z.ai/api/anthropic"
                                     :api-key       key
                                     :default-model "glm-4.6"})
-          resp    (proto/send-turn backend (short-prompt))]
+          resp    (p/await! (proto/send-turn backend (short-prompt)))]
       (assertions
         "live z.ai response is Malli-valid"
         (types/validate-response resp) => nil

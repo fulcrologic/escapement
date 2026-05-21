@@ -13,7 +13,8 @@
     [escapement.test-support :as ts]
     [escapement.tools.builtin :as builtin]
     [escapement.tools.protocol :as tp]
-    [fulcro-spec.core :refer [=> assertions component specification]]))
+    [fulcro-spec.core :refer [=> assertions component specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 ;; ---------------------------------------------------------------------------
 ;; Mock LLMBackend
@@ -22,11 +23,12 @@
 (defrecord MockBackend [responses call-log]
   llm/LLMBackend
   (send-turn [_ request]
-    (swap! call-log conj request)
-    (let [r (ts/pop-first! responses)]
-      (when (nil? r)
-        (throw (ex-info "Mock backend out of canned responses" {:n-calls (count @call-log)})))
-      r)))
+    (p/do!
+      (swap! call-log conj request)
+      (let [r (ts/pop-first! responses)]
+        (when (nil? r)
+          (throw (ex-info "Mock backend out of canned responses" {:n-calls (count @call-log)})))
+        r))))
 
 (defn mock-backend
   "Build a mock backend whose `send-turn` will return canned responses in order."
@@ -51,7 +53,7 @@
 
 (defrecord ThrowingBackend [throw-fn]
   llm/LLMBackend
-  (send-turn [_ _] (throw (throw-fn))))
+  (send-turn [_ _] (p/do! (throw (throw-fn)))))
 
 (defn throwing-backend
   "Build a backend whose every `send-turn` throws `(throw-fn)`."
@@ -750,9 +752,10 @@
         ;; charts use it as a per-invocation tag so we don't need two processors.
         selector        (reify llm/LLMBackend
                           (send-turn [_ request]
-                            (case (:model request)
-                              "main" (llm/send-turn main-backend request)
-                              "advisor" (llm/send-turn advisor-backend request))))
+                            (p/do!
+                              (case (:model request)
+                                "main" (p/await! (llm/send-turn main-backend request))
+                                "advisor" (p/await! (llm/send-turn advisor-backend request))))))
         chart           (chart/statechart
                           {:initial :work}
                           (state {:id :work}
@@ -1233,7 +1236,8 @@
   (let [counter (atom 0)]
     [(reify llm/LLMBackend
        (send-turn [_ _]
-         (if (<= (swap! counter inc) n-fail) (throw (throw-fn)) resp)))
+         (p/do!
+           (if (<= (swap! counter inc) n-fail) (throw (throw-fn)) resp))))
      counter]))
 
 (specification "resilience + continuation pure helpers"

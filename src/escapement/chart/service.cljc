@@ -323,7 +323,7 @@ internal (no `:target`) so the region's state doesn't change."
   ;; service-region state and decide whether the request's owner tag
   ;; matches.
   (let [transition-id (keyword "escapement.chart.service"
-                        (str "tool-handler-" (java.util.UUID/randomUUID)))]
+                        (str "tool-handler-" (random-uuid)))]
     (elt/transition
       {:id    transition-id
        :event event-kw

@@ -32,7 +32,8 @@
     [escapement.tools.protocol :as tp]
     [malli.core :as m]
     [malli.error :as me]
-    [malli.transform :as mt])
+    [malli.transform :as mt]
+    [com.fulcrologic.statecharts.promise :as p])
   (:import
     (java.util.concurrent ArrayBlockingQueue TimeUnit)))
 
@@ -872,7 +873,7 @@
                 ;; uncategorized throws are NOT retried here — they fall straight
                 ;; through to model fallback / :exhausted.
                 response (loop [retry 0]
-                           (let [r   (try (llm/send-turn* backend request on-delta)
+                           (let [r   (try (p/await! (llm/send-turn* backend request on-delta))
                                           (catch Throwable t {:_throw t}))
                                  t   (:_throw r)
                                  cat (when t (llm/error-category t))]

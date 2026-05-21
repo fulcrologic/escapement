@@ -43,18 +43,34 @@ No JVM is required.
 
 ## Statecharts caveats
 
-This project uses `com.fulcrologic/statecharts` but assembles its own env to
-avoid the namespaces that pull `promesa`/`core.async` (which crash SCI). Do
-**not** require any of:
+This project uses `com.fulcrologic/statecharts`. The library's
+`com.fulcrologic.statecharts.promise` namespace provides a host-portable
+promise API (bb, CLJ, CLJS) with no hard dep on `funcool/promesa`, so
+escapement requires no shim. Escapement code uses that namespace directly:
 
-- `com.fulcrologic.statecharts.simple` / `simple-async`
-- `com.fulcrologic.statecharts.testing` / `testing-async`
-- `com.fulcrologic.statecharts.invocation.statechart`
-- any `*_async*` or `core_async_event_loop` namespace
-- `com.fulcrologic.statecharts.integration.fulcro*`
+```clojure
+(:require [com.fulcrologic.statecharts.promise :as p])
+```
 
-Use `escapement.engine.env` to build the env and `escapement.engine.testing`
-as the test harness in place of the library's `testing`.
+The full async family is available without ceremony:
+
+- `com.fulcrologic.statecharts.simple-async`
+- `com.fulcrologic.statecharts.testing-async`
+- `com.fulcrologic.statecharts.invocation.statechart` (chart-as-invokable)
+- `com.fulcrologic.statecharts.execution-model.lambda-async`
+- `com.fulcrologic.statecharts.event-queue.async-event-loop`
+- `com.fulcrologic.statecharts.event-queue.async-event-processing`
+- `com.fulcrologic.statecharts.event-queue.core-async-event-loop`
+- `com.fulcrologic.statecharts.algorithms.v20150901-async` (+ `-impl`)
+
+Still avoid `com.fulcrologic.statecharts.integration.fulcro*` — it pulls
+Fulcro client-side machinery that is not bb-compatible.
+
+`escapement.engine.env` and `escapement.engine.testing` remain in use as
+the project's env builder and InvocationProcessor-mock test harness. They
+are not replaced by the upstream `simple-async` / `testing-async` — those
+serve different layers (chart logic vs. invocation wiring) and can be
+adopted alongside as appropriate.
 
 ## Test conventions
 

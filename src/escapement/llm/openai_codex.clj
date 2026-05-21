@@ -16,46 +16,53 @@
     [escapement.llm.openai-codex.http :as http]
     [escapement.llm.openai-codex.translate :as t]
     [escapement.llm.protocol :as proto]
-    [escapement.llm.types :as types]))
+    [escapement.llm.types :as types]
+    [com.fulcrologic.statecharts.promise :as p]))
 
-(defrecord OpenAICodexBackend [default-model]
+(defrecord OpenAICodexBackend [default-model http-transport]
   proto/LLMBackend
   (send-turn [_ request]
-    (when-let [err (types/validate-request request)]
-      (throw (ex-info "Invalid LLM request" {:errors err :request request})))
-    (let [request  (cond-> request
-                     (not (:model request)) (assoc :model default-model))
-          auth-map (auth/get-auth!)
-          body     (t/build-request-body request)
-          send!    (fn [a]
-                     (http/post-responses-stream!
-                       {:body         body
-                        :access-token (:access-token a)
-                        :account-id   (:account-id a)
-                        :timeout-ms   180000}))
-          raw      (try
-                     (send! auth-map)
-                     (catch clojure.lang.ExceptionInfo e
-                       (if (= 401 (:status (ex-data e)))
-                         ;; token expired between load and use — refresh once then retry
-                         (do (auth/save-auth!
-                               (auth/refresh-token!
-                                 (:refresh-token (auth/load-auth!))))
-                             (send! (auth/get-auth!)))
-                         (throw e))))
-          response (t/openai-response->anthropic-response raw (:model request))]
-      (when-let [err (types/validate-response response)]
-        (throw (ex-info "openai-codex produced an invalid response"
-                 {:errors err :response response})))
-      response)))
+    (p/do!
+      (when-let [err (types/validate-request request)]
+        (throw (ex-info "Invalid LLM request" {:errors err :request request})))
+      (let [request  (cond-> request
+                       (not (:model request)) (assoc :model default-model))
+            auth-map (auth/get-auth!)
+            body     (t/build-request-body request)
+            send!    (fn [a]
+                       (http/post-responses-stream!
+                         (cond-> {:body         body
+                                  :access-token (:access-token a)
+                                  :account-id   (:account-id a)
+                                  :timeout-ms   180000}
+                           http-transport (assoc :http-transport http-transport))))
+            raw      (try
+                       (send! auth-map)
+                       (catch clojure.lang.ExceptionInfo e
+                         (if (= 401 (:status (ex-data e)))
+                           ;; token expired between load and use — refresh once then retry
+                           (do (auth/save-auth!
+                                 (auth/refresh-token!
+                                   (:refresh-token (auth/load-auth!))))
+                               (send! (auth/get-auth!)))
+                           (throw e))))
+            response (t/openai-response->anthropic-response raw (:model request))]
+        (when-let [err (types/validate-response response)]
+          (throw (ex-info "openai-codex produced an invalid response"
+                   {:errors err :response response})))
+        response))))
 
 (>defn new-backend
   "Constructs an OpenAI Codex backend instance.
 
 Optional opts:
-* `:default-model` — model string used when the Request omits `:model`
-                    (default `\"gpt-5.1-codex\"`)."
+* `:default-model`  — model string used when the Request omits `:model`
+                     (default `\"gpt-5.1-codex\"`).
+* `:http-transport` — `escapement.llm.http-transport/HttpTransport`. Defaults
+                     to the bb http-client backed transport. CLJS hosts
+                     must supply their own."
   ([] [=> :any] (new-backend {}))
   ([opts]
    [:map => :any]
-   (->OpenAICodexBackend (or (:default-model opts) "gpt-5.1-codex"))))
+   (->OpenAICodexBackend (or (:default-model opts) "gpt-5.1-codex")
+     (:http-transport opts))))

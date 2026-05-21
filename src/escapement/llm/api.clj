@@ -13,14 +13,15 @@
    key-rename plus content-block serialization. `cache_control` markers are passed through
    verbatim — both Anthropic and z.ai consume them natively."
   (:require
-    [babashka.http-client :as http]
     [cheshire.core :as json]
     [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [escapement.llm.http-transport :as ht]
     [escapement.llm.protocol :as proto]
-    [escapement.llm.types :as types])
+    [escapement.llm.types :as types]
+    [com.fulcrologic.statecharts.promise :as p])
   (:import
-    (java.io BufferedReader InputStreamReader)))
+    (java.io BufferedReader)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Translation: our Request -> Anthropic JSON
@@ -300,22 +301,35 @@
    :model            (or (:model acc) request-model)
    :backend-metadata {:backend :api :streamed true}})
 
+(defn process-sse-line!
+  "Fold one SSE line into the atom-held accumulator. Calls `on-delta` for
+   incremental text/thinking deltas. Non-data lines and `[DONE]` are no-ops.
+
+   This is the per-line entry point the `http-transport` streaming path uses;
+   production streaming code goes through `request-streaming` with this fn
+   as `on-line`."
+  [acc-atom line on-delta]
+  (when (str/starts-with? line "data:")
+    (let [data (str/trim (subs line 5))]
+      (when-not (or (empty? data) (= data "[DONE]"))
+        (swap! acc-atom stream-acc-step (json/parse-string data)
+          (fn [d] (try (when on-delta (on-delta d))
+                       (catch Throwable _ nil))))))))
+
 (defn parse-anthropic-sse!
   "Drive an SSE `BufferedReader` to completion, returning the final Response.
-   Invokes `on-delta` for each incremental text/thinking chunk."
+
+   Test-only convenience: lets tests feed a synthetic `BufferedReader`
+   without going through `http-transport`. Production code uses
+   `process-sse-line!` per line via the streaming transport."
   [^BufferedReader reader request-model on-delta]
-  (loop [acc (stream-acc-init)]
-    (let [line (.readLine reader)]
-      (if (nil? line)
-        (stream-acc-finalize acc request-model)
-        (if (str/starts-with? line "data:")
-          (let [data (str/trim (subs line 5))]
-            (if (or (empty? data) (= data "[DONE]"))
-              (recur acc)
-              (recur (stream-acc-step acc (json/parse-string data)
-                       (fn [d] (try (when on-delta (on-delta d))
-                                    (catch Throwable _ nil)))))))
-          (recur acc))))))
+  (let [acc (atom (stream-acc-init))]
+    (loop []
+      (let [line (.readLine reader)]
+        (when (some? line)
+          (process-sse-line! acc line on-delta)
+          (recur))))
+    (stream-acc-finalize @acc request-model)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; HTTP
@@ -397,8 +411,10 @@
       :x-api-key {"x-api-key"         api-key
                   "anthropic-version" (or anthropic-version "2023-06-01")})))
 
-(defn- post-messages! [{:keys [base-url api-key auth-mode anthropic-version
-                               extra-headers http-timeout-ms]} body-map]
+(defn- post-messages! [transport
+                       {:keys [base-url api-key auth-mode anthropic-version
+                               extra-headers http-timeout-ms]}
+                       body-map]
   (let [url     (str base-url "/v1/messages")
         headers (merge {"Content-Type" "application/json"}
                   (auth-headers {:auth-mode         auth-mode
@@ -406,14 +422,14 @@
                                  :api-key           api-key
                                  :anthropic-version anthropic-version})
                   extra-headers)
-        body    (json/generate-string body-map)
+        req     {:url        url
+                 :method     :post
+                 :headers    headers
+                 :body       (json/generate-string body-map)
+                 :timeout-ms (or http-timeout-ms 60000)}
         {:keys [status body]} (with-timeout-category
                                 url
-                                #(http/post url
-                                   {:headers headers
-                                    :body    body
-                                    :timeout (or http-timeout-ms 60000)
-                                    :throw   false}))]
+                                #(p/await! (ht/request transport req)))]
     (when-not (and (>= status 200) (< status 300))
       (non-2xx! status body url))
     (try
@@ -422,9 +438,10 @@
         (throw (ex-info "Failed to parse API JSON response"
                  {:body body :cause (.getMessage t)}))))))
 
-(defn- stream-messages! [{:keys [base-url api-key auth-mode anthropic-version
-                                 extra-headers http-timeout-ms]} body-map
-                         request-model on-delta]
+(defn- stream-messages! [transport
+                         {:keys [base-url api-key auth-mode anthropic-version
+                                 extra-headers http-timeout-ms]}
+                         body-map request-model on-delta]
   (let [url     (str base-url "/v1/messages")
         headers (merge {"Content-Type" "application/json"
                         "Accept"       "text/event-stream"}
@@ -433,19 +450,19 @@
                                  :api-key           api-key
                                  :anthropic-version anthropic-version})
                   extra-headers)
+        req     {:url        url
+                 :method     :post
+                 :headers    headers
+                 :body       (json/generate-string (assoc body-map "stream" true))
+                 :timeout-ms (or http-timeout-ms 60000)}
+        acc     (atom (stream-acc-init))
+        on-line (fn [line] (process-sse-line! acc line on-delta))
         {:keys [status body]} (with-timeout-category
                                 url
-                                #(http/post url
-                                   {:headers headers
-                                    :body    (json/generate-string
-                                               (assoc body-map "stream" true))
-                                    :as      :stream
-                                    :timeout (or http-timeout-ms 60000)
-                                    :throw   false}))]
-    (when-not (and (>= status 200) (< status 300))
-      (non-2xx! status (try (slurp body) (catch Throwable _ "")) url))
-    (with-open [reader (BufferedReader. (InputStreamReader. body "UTF-8"))]
-      (parse-anthropic-sse! reader request-model on-delta))))
+                                #(p/await! (ht/request-streaming transport req on-line)))]
+    (if (and (>= status 200) (< status 300))
+      (stream-acc-finalize @acc request-model)
+      (non-2xx! status body url))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Backend record
@@ -453,57 +470,61 @@
 (defrecord AnthropicAPIBackend [opts]
   proto/LLMBackend
   (send-turn [_ request]
-    (let [request (cond-> request
-                    (and (nil? (:model request)) (:default-model opts))
-                    (assoc :model (:default-model opts)))]
-      (when-let [err (types/validate-request request)]
-        (throw (ex-info "Invalid LLM request" {:errors err :request request})))
-      (let [transcript-fn (:transcript-fn opts)
-            body-map      (request->anthropic-json request)
-            _             (when transcript-fn
-                            (transcript-fn {:event    :llm/request
-                                            :backend  :api
-                                            :base-url (:base-url opts)
-                                            :api-key  (mask-key (:api-key opts))
-                                            :model    (:model request)
-                                            :body     body-map}))
-            parsed        (post-messages! opts body-map)
-            response      (anthropic-json->response parsed (:model request))]
-        (when transcript-fn
-          (transcript-fn {:event    :llm/response
-                          :backend  :api
-                          :response response}))
-        (when-let [err (types/validate-response response)]
-          (throw (ex-info "API produced an invalid response"
-                   {:errors err :response response :raw parsed})))
-        response)))
+    (p/do!
+      (let [request (cond-> request
+                      (and (nil? (:model request)) (:default-model opts))
+                      (assoc :model (:default-model opts)))]
+        (when-let [err (types/validate-request request)]
+          (throw (ex-info "Invalid LLM request" {:errors err :request request})))
+        (let [transport     (or (:http-transport opts) (ht/default-transport))
+              transcript-fn (:transcript-fn opts)
+              body-map      (request->anthropic-json request)
+              _             (when transcript-fn
+                              (transcript-fn {:event    :llm/request
+                                              :backend  :api
+                                              :base-url (:base-url opts)
+                                              :api-key  (mask-key (:api-key opts))
+                                              :model    (:model request)
+                                              :body     body-map}))
+              parsed        (post-messages! transport opts body-map)
+              response      (anthropic-json->response parsed (:model request))]
+          (when transcript-fn
+            (transcript-fn {:event    :llm/response
+                            :backend  :api
+                            :response response}))
+          (when-let [err (types/validate-response response)]
+            (throw (ex-info "API produced an invalid response"
+                     {:errors err :response response :raw parsed})))
+          response))))
 
   proto/StreamingLLMBackend
   (stream-turn [_ request on-delta]
-    (let [request (cond-> request
-                    (and (nil? (:model request)) (:default-model opts))
-                    (assoc :model (:default-model opts)))]
-      (when-let [err (types/validate-request request)]
-        (throw (ex-info "Invalid LLM request" {:errors err :request request})))
-      (let [transcript-fn (:transcript-fn opts)
-            body-map      (request->anthropic-json request)
-            _             (when transcript-fn
-                            (transcript-fn {:event    :llm/request
-                                            :backend  :api
-                                            :base-url (:base-url opts)
-                                            :api-key  (mask-key (:api-key opts))
-                                            :model    (:model request)
-                                            :stream   true
-                                            :body     body-map}))
-            response      (stream-messages! opts body-map (:model request) on-delta)]
-        (when transcript-fn
-          (transcript-fn {:event    :llm/response
-                          :backend  :api
-                          :response response}))
-        (when-let [err (types/validate-response response)]
-          (throw (ex-info "API produced an invalid response"
-                   {:errors err :response response})))
-        response))))
+    (p/do!
+      (let [request (cond-> request
+                      (and (nil? (:model request)) (:default-model opts))
+                      (assoc :model (:default-model opts)))]
+        (when-let [err (types/validate-request request)]
+          (throw (ex-info "Invalid LLM request" {:errors err :request request})))
+        (let [transport     (or (:http-transport opts) (ht/default-transport))
+              transcript-fn (:transcript-fn opts)
+              body-map      (request->anthropic-json request)
+              _             (when transcript-fn
+                              (transcript-fn {:event    :llm/request
+                                              :backend  :api
+                                              :base-url (:base-url opts)
+                                              :api-key  (mask-key (:api-key opts))
+                                              :model    (:model request)
+                                              :stream   true
+                                              :body     body-map}))
+              response      (stream-messages! transport opts body-map (:model request) on-delta)]
+          (when transcript-fn
+            (transcript-fn {:event    :llm/response
+                            :backend  :api
+                            :response response}))
+          (when-let [err (types/validate-response response)]
+            (throw (ex-info "API produced an invalid response"
+                     {:errors err :response response})))
+          response)))))
 
 (>defn new-backend
   "Construct an Anthropic-compatible API backend.
@@ -519,6 +540,10 @@ Optional opts:
 - `:anthropic-version` — header value for x-api-key mode (default \"2023-06-01\").
 - `:extra-headers`     — map of additional request headers.
 - `:http-timeout-ms`   — request timeout (default 60000).
+- `:http-transport`    — an `escapement.llm.http-transport/HttpTransport`.
+                         Defaults to `(http-transport/default-transport)` which
+                         is bb's http-client on CLJ/bb. CLJS hosts must supply
+                         their own (e.g. one backed by `js/fetch`).
 - `:transcript-fn`     — `(fn [event])` called with `:llm/request` / `:llm/response`."
   ([] [=> :any] (new-backend {}))
   ([opts]

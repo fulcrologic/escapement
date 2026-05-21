@@ -40,7 +40,8 @@
     [com.fulcrologic.statecharts.environment :as env-ns]
     [com.fulcrologic.statecharts.protocols :as sp]
     [malli.core :as m]
-    [malli.error :as me]))
+    [malli.error :as me]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 ;; ---------------------------------------------------------------------------
 ;; Renderer protocol
@@ -48,8 +49,21 @@
 
 (defprotocol HumanRenderer
   "All methods take an `opts` map sharing the chart-author params.
-   Implementations may block. They MUST return promptly when the worker
-   thread is interrupted (so `stop-invocation!` works)."
+
+   Cross-host async contract: the value-returning methods (`prompt-text`,
+   `prompt-select`, `prompt-multi`, `prompt-confirm`, `custom-render`)
+   return a `com.fulcrologic.statecharts.promise` promise that resolves to the user's answer or
+   rejects (e.g. with `{:reason :cancelled}` for an interrupted modal).
+   On CLJ/bb impls may block internally and resolve at the end; on CLJS
+   the impl typically returns a real Promise resolved by a click handler.
+
+   Progress methods (`start-progress`, `update-progress`, `end-progress`)
+   are pure side-effects and stay synchronous — no value to wait on.
+
+   Cancellation is signalled by the worker via `stop-invocation!`; the
+   processor stops awaiting the returned promise and posts the cancel
+   event itself. Renderers SHOULD also reject the promise on user-driven
+   cancellation so consumers using `p/await!` see the throw."
   (prompt-text [this opts])
   (prompt-select [this opts])
   (prompt-multi [this opts])
@@ -110,22 +124,26 @@
 (defrecord StdinRenderer []
   HumanRenderer
   (prompt-text [_ {:keys [prompt]}]
-    (print-prompt! (str (or prompt "?") " "))
-    (or (read-trim-line) ""))
+    (p/do!
+      (print-prompt! (str (or prompt "?") " "))
+      (or (read-trim-line) "")))
   (prompt-select [_ {:keys [prompt options]}]
-    (binding [*out* *err*] (println (or prompt "Select one:")))
-    (print-numbered-options! options)
-    (print-prompt! "> ")
-    (:value (nth options (read-index (count options)))))
+    (p/do!
+      (binding [*out* *err*] (println (or prompt "Select one:")))
+      (print-numbered-options! options)
+      (print-prompt! "> ")
+      (:value (nth options (read-index (count options))))))
   (prompt-multi [_ {:keys [prompt options]}]
-    (binding [*out* *err*] (println (or prompt "Select any (comma-separated, blank=none):")))
-    (print-numbered-options! options)
-    (print-prompt! "> ")
-    (let [idxs (read-index-set (count options))]
-      (mapv :value (keep-indexed (fn [i o] (when (idxs i) o)) options))))
+    (p/do!
+      (binding [*out* *err*] (println (or prompt "Select any (comma-separated, blank=none):")))
+      (print-numbered-options! options)
+      (print-prompt! "> ")
+      (let [idxs (read-index-set (count options))]
+        (mapv :value (keep-indexed (fn [i o] (when (idxs i) o)) options)))))
   (prompt-confirm [_ {:keys [prompt default]}]
-    (print-prompt! (str (or prompt "Confirm?") (if default " [Y/n]: " " [y/N]: ")))
-    (read-yes-no (boolean default)))
+    (p/do!
+      (print-prompt! (str (or prompt "Confirm?") (if default " [Y/n]: " " [y/N]: ")))
+      (read-yes-no (boolean default))))
   (start-progress [_ {:keys [prompt]}]
     (binding [*out* *err*] (println (str "[progress] " (or prompt "Working..."))))
     (atom {:pct 0}))
@@ -136,7 +154,7 @@
       (flush)))
   (end-progress [_ _]
     (binding [*out* *err*] (println)))
-  (custom-render [_ f env data] (f env data)))
+  (custom-render [_ f env data] (p/do! (f env data))))
 
 (defn stdin-renderer [] (->StdinRenderer))
 
@@ -208,7 +226,7 @@
           (post-event-to-parent! parent-ctx on-answer-event {:answer :done}))
 
         :else
-        (let [answer (dispatch-kind! renderer params env data)]
+        (let [answer (p/await! (dispatch-kind! renderer params env data))]
           (cond
             (= :dying @worker-state)
             (transcript! transcript-fn {:event :human-input/cancelled :ts (now-ms) :data {}})

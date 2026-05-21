@@ -22,7 +22,7 @@
    via longest-prefix, same as the catalog."
   (:require
     [clojure.string :as str]
-    [escapement.config :as config]))
+    #?(:clj [escapement.config :as config])))
 
 (comment
   ;; There are deliberately no built-in ratings. To gate model selection
@@ -49,7 +49,9 @@
 
    Zero-arg loads+merges `.escapement.edn`; one-arg takes an already
    loaded config map (no disk read — handy for tests)."
-  ([] (ratings (config/load-config)))
+  ([] #?(:clj  (ratings (config/load-config))
+         :cljs (throw (ex-info "(ratings) zero-arg requires CLJ disk config loading; pass a config map"
+                        {:reason :cljs-no-disk-config}))))
   ([cfg] (or (from-config cfg) {})))
 
 (defn rating-for

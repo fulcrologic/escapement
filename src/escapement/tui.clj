@@ -24,7 +24,8 @@
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.config :as ecfg]
     [escapement.debug.controller :as dbg]
-    [escapement.invocation.human-input :as hi])
+    [escapement.invocation.human-input :as hi]
+    [com.fulcrologic.statecharts.promise :as p])
   (:import
     (java.io Reader)
     (org.jline.terminal Terminal TerminalBuilder)))
@@ -1624,28 +1625,28 @@
   hi/HumanRenderer
   (prompt-text [_ {:keys [prompt]}]
     (if (:enabled? handle)
-      (ask! handle {:kind :text :prompt (or prompt "?") :buffer ""})
+      (p/do! (ask! handle {:kind :text :prompt (or prompt "?") :buffer ""}))
       (hi/prompt-text (hi/stdin-renderer) {:prompt prompt})))
   (prompt-select [_ {:keys [prompt options] :as opts}]
     (if (:enabled? handle)
-      (ask! handle {:kind    :select :prompt (or prompt "Select:")
-                    :options (vec options) :cursor 0})
+      (p/do! (ask! handle {:kind    :select :prompt (or prompt "Select:")
+                           :options (vec options) :cursor 0}))
       (hi/prompt-select (hi/stdin-renderer) opts)))
   (prompt-multi [_ {:keys [prompt options] :as opts}]
     (if (:enabled? handle)
-      (ask! handle {:kind    :multi-select :prompt (or prompt "Select any:")
-                    :options (vec options) :cursor 0 :checked #{}})
+      (p/do! (ask! handle {:kind    :multi-select :prompt (or prompt "Select any:")
+                           :options (vec options) :cursor 0 :checked #{}}))
       (hi/prompt-multi (hi/stdin-renderer) opts)))
   (prompt-confirm [_ {:keys [prompt default] :as opts}]
     (if (:enabled? handle)
-      (ask! handle {:kind   :confirm :prompt (or prompt "Confirm?")
-                    :buffer "" :default (boolean default)})
+      (p/do! (ask! handle {:kind   :confirm :prompt (or prompt "Confirm?")
+                           :buffer "" :default (boolean default)}))
       (hi/prompt-confirm (hi/stdin-renderer) opts)))
   (start-progress [_ opts] (atom {:pct 0 :prompt (:prompt opts)}))
   (update-progress [_ handle' pct label]
     (swap! handle' assoc :pct pct :label label))
   (end-progress [_ _] nil)
-  (custom-render [_ f env data] (f env data)))
+  (custom-render [_ f env data] (p/do! (f env data))))
 
 (defn ->renderer
   "Build a `HumanRenderer` that pops modals into the bottom region of this TUI.

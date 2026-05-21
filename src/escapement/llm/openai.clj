@@ -16,14 +16,15 @@
    .cached_tokens`, which we surface as `:cache-read-input-tokens` for
    transcript symmetry."
   (:require
-    [babashka.http-client :as http]
     [cheshire.core :as json]
     [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [escapement.llm.http-transport :as ht]
     [escapement.llm.protocol :as proto]
-    [escapement.llm.types :as types])
+    [escapement.llm.types :as types]
+    [com.fulcrologic.statecharts.promise :as p])
   (:import
-    (java.io BufferedReader InputStreamReader)))
+    (java.io BufferedReader)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Request translation: our Request -> OpenAI Chat Completions JSON
@@ -233,17 +234,17 @@ Response map."
         (str (subs s 0 4) "..." (subs s (- (count s) 4)))
         "***"))))
 
-(defn- post-chat! [{:keys [base-url api-key extra-headers http-timeout-ms]} body-map]
+(defn- post-chat! [transport {:keys [base-url api-key extra-headers http-timeout-ms]} body-map]
   (let [url     (str base-url "/chat/completions")
         headers (merge {"Content-Type"  "application/json"
                         "Authorization" (str "Bearer " api-key)}
                   extra-headers)
-        body    (json/generate-string body-map)
-        {:keys [status body]} (http/post url
-                                {:headers headers
-                                 :body    body
-                                 :timeout (or http-timeout-ms 60000)
-                                 :throw   false})]
+        req     {:url        url
+                 :method     :post
+                 :headers    headers
+                 :body       (json/generate-string body-map)
+                 :timeout-ms (or http-timeout-ms 60000)}
+        {:keys [status body]} (p/await! (ht/request transport req))]
     (when-not (and (>= status 200) (< status 300))
       (throw (ex-info (str "OpenAI API error: HTTP " status)
                {:status status :body body :url url})))
@@ -352,28 +353,36 @@ Response map."
       (:id acc) (assoc "id" (:id acc))
       (:model acc) (assoc "model" (:model acc)))))
 
+(defn process-sse-line!
+  "Fold one SSE line into the atom-held accumulator. Non-`data:` lines and
+   `[DONE]` are no-ops. The streaming transport calls this per response line."
+  [acc-atom line on-delta]
+  (when (str/starts-with? line "data:")
+    (let [data (str/trim (subs line 5))]
+      (when-not (or (empty? data) (= data "[DONE]"))
+        (swap! acc-atom stream-acc-step (json/parse-string data)
+          (fn [d] (try (when on-delta (on-delta d))
+                       (catch Throwable _ nil))))))))
+
 (defn parse-openai-sse!
   "Drive an SSE `BufferedReader` to completion, returning the final Response
    (translated via the shared `openai-json->response`). Invokes `on-delta`
    for each incremental content chunk. `on-delta` exceptions never abort the
-   turn."
-  [^BufferedReader reader request-model on-delta]
-  (loop [acc (stream-acc-init)]
-    (let [line (.readLine reader)]
-      (if (nil? line)
-        (openai-json->response (stream-acc->openai-body acc)
-          (str request-model))
-        (if (str/starts-with? line "data:")
-          (let [data (str/trim (subs line 5))]
-            (if (or (empty? data) (= data "[DONE]"))
-              (recur acc)
-              (recur (stream-acc-step
-                       acc (json/parse-string data)
-                       (fn [d] (try (when on-delta (on-delta d))
-                                    (catch Throwable _ nil)))))))
-          (recur acc))))))
+   turn.
 
-(defn- stream-chat! [{:keys [base-url api-key extra-headers http-timeout-ms]}
+   Test-only convenience: lets tests feed a synthetic `BufferedReader`
+   without going through `http-transport`. Production code uses
+   `process-sse-line!` per line via the streaming transport."
+  [^BufferedReader reader request-model on-delta]
+  (let [acc (atom (stream-acc-init))]
+    (loop []
+      (let [line (.readLine reader)]
+        (when (some? line)
+          (process-sse-line! acc line on-delta)
+          (recur))))
+    (openai-json->response (stream-acc->openai-body @acc) (str request-model))))
+
+(defn- stream-chat! [transport {:keys [base-url api-key extra-headers http-timeout-ms]}
                      body-map request-model on-delta]
   (let [url     (str base-url "/chat/completions")
         headers (merge {"Content-Type"  "application/json"
@@ -382,23 +391,21 @@ Response map."
                   extra-headers)
         ;; stream:true plus stream_options.include_usage so the final usage
         ;; chunk arrives, matching the buffered path's usage.
-        body    (json/generate-string
-                  (assoc body-map
-                    "stream" true
-                    "stream_options" {"include_usage" true}))
-        {:keys [status body]} (http/post url
-                                {:headers headers
-                                 :body    body
-                                 :as      :stream
-                                 :timeout (or http-timeout-ms 60000)
-                                 :throw   false})]
-    (when-not (and (>= status 200) (< status 300))
+        req     {:url        url
+                 :method     :post
+                 :headers    headers
+                 :body       (json/generate-string
+                               (assoc body-map
+                                 "stream" true
+                                 "stream_options" {"include_usage" true}))
+                 :timeout-ms (or http-timeout-ms 60000)}
+        acc     (atom (stream-acc-init))
+        on-line (fn [line] (process-sse-line! acc line on-delta))
+        {:keys [status body]} (p/await! (ht/request-streaming transport req on-line))]
+    (if (and (>= status 200) (< status 300))
+      (openai-json->response (stream-acc->openai-body @acc) (str request-model))
       (throw (ex-info (str "OpenAI API error: HTTP " status)
-               {:status status
-                :body   (try (slurp body) (catch Throwable _ ""))
-                :url    url})))
-    (with-open [reader (BufferedReader. (InputStreamReader. body "UTF-8"))]
-      (parse-openai-sse! reader request-model on-delta))))
+               {:status status :body body :url url})))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Backend record
@@ -406,57 +413,61 @@ Response map."
 (defrecord OpenAIBackend [opts]
   proto/LLMBackend
   (send-turn [_ request]
-    (let [request (cond-> request
-                    (and (nil? (:model request)) (:default-model opts))
-                    (assoc :model (:default-model opts)))]
-      (when-let [err (types/validate-request request)]
-        (throw (ex-info "Invalid LLM request" {:errors err :request request})))
-      (let [transcript-fn (:transcript-fn opts)
-            body-map      (request->openai-json request)
-            _             (when transcript-fn
-                            (transcript-fn {:event    :llm/request
-                                            :backend  :openai
-                                            :base-url (:base-url opts)
-                                            :api-key  (mask-key (:api-key opts))
-                                            :model    (:model request)
-                                            :body     body-map}))
-            parsed        (post-chat! opts body-map)
-            response      (openai-json->response parsed (:model request))]
-        (when transcript-fn
-          (transcript-fn {:event    :llm/response
-                          :backend  :openai
-                          :response response}))
-        (when-let [err (types/validate-response response)]
-          (throw (ex-info "OpenAI backend produced an invalid response"
-                   {:errors err :response response :raw parsed})))
-        response)))
+    (p/do!
+      (let [request (cond-> request
+                      (and (nil? (:model request)) (:default-model opts))
+                      (assoc :model (:default-model opts)))]
+        (when-let [err (types/validate-request request)]
+          (throw (ex-info "Invalid LLM request" {:errors err :request request})))
+        (let [transport     (or (:http-transport opts) (ht/default-transport))
+              transcript-fn (:transcript-fn opts)
+              body-map      (request->openai-json request)
+              _             (when transcript-fn
+                              (transcript-fn {:event    :llm/request
+                                              :backend  :openai
+                                              :base-url (:base-url opts)
+                                              :api-key  (mask-key (:api-key opts))
+                                              :model    (:model request)
+                                              :body     body-map}))
+              parsed        (post-chat! transport opts body-map)
+              response      (openai-json->response parsed (:model request))]
+          (when transcript-fn
+            (transcript-fn {:event    :llm/response
+                            :backend  :openai
+                            :response response}))
+          (when-let [err (types/validate-response response)]
+            (throw (ex-info "OpenAI backend produced an invalid response"
+                     {:errors err :response response :raw parsed})))
+          response))))
 
   proto/StreamingLLMBackend
   (stream-turn [_ request on-delta]
-    (let [request (cond-> request
-                    (and (nil? (:model request)) (:default-model opts))
-                    (assoc :model (:default-model opts)))]
-      (when-let [err (types/validate-request request)]
-        (throw (ex-info "Invalid LLM request" {:errors err :request request})))
-      (let [transcript-fn (:transcript-fn opts)
-            body-map      (request->openai-json request)
-            _             (when transcript-fn
-                            (transcript-fn {:event    :llm/request
-                                            :backend  :openai
-                                            :base-url (:base-url opts)
-                                            :api-key  (mask-key (:api-key opts))
-                                            :model    (:model request)
-                                            :stream   true
-                                            :body     body-map}))
-            response      (stream-chat! opts body-map (:model request) on-delta)]
-        (when transcript-fn
-          (transcript-fn {:event    :llm/response
-                          :backend  :openai
-                          :response response}))
-        (when-let [err (types/validate-response response)]
-          (throw (ex-info "OpenAI backend produced an invalid response"
-                   {:errors err :response response})))
-        response))))
+    (p/do!
+      (let [request (cond-> request
+                      (and (nil? (:model request)) (:default-model opts))
+                      (assoc :model (:default-model opts)))]
+        (when-let [err (types/validate-request request)]
+          (throw (ex-info "Invalid LLM request" {:errors err :request request})))
+        (let [transport     (or (:http-transport opts) (ht/default-transport))
+              transcript-fn (:transcript-fn opts)
+              body-map      (request->openai-json request)
+              _             (when transcript-fn
+                              (transcript-fn {:event    :llm/request
+                                              :backend  :openai
+                                              :base-url (:base-url opts)
+                                              :api-key  (mask-key (:api-key opts))
+                                              :model    (:model request)
+                                              :stream   true
+                                              :body     body-map}))
+              response      (stream-chat! transport opts body-map (:model request) on-delta)]
+          (when transcript-fn
+            (transcript-fn {:event    :llm/response
+                            :backend  :openai
+                            :response response}))
+          (when-let [err (types/validate-response response)]
+            (throw (ex-info "OpenAI backend produced an invalid response"
+                     {:errors err :response response})))
+          response)))))
 
 (>defn new-backend
   "Construct an OpenAI Chat Completions backend.
@@ -471,6 +482,9 @@ Optional opts:
 - `:default-model`   — string used when Request omits `:model`.
 - `:extra-headers`   — map of additional request headers.
 - `:http-timeout-ms` — request timeout (default 60000).
+- `:http-transport`  — an `escapement.llm.http-transport/HttpTransport`.
+                       Defaults to `(http-transport/default-transport)` (bb
+                       http-client on CLJ/bb). CLJS hosts must supply one.
 - `:transcript-fn`   — `(fn [event])` called with `:llm/request` / `:llm/response`."
   ([] [=> :any] (new-backend {}))
   ([opts]

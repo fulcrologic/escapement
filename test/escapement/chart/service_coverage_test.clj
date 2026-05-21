@@ -26,7 +26,8 @@
     [escapement.llm.protocol :as llm]
     [escapement.test-support :as ts]
     [escapement.tools.protocol :as tp]
-    [fulcro-spec.core :refer [=> assertions specification]]))
+    [fulcro-spec.core :refer [=> assertions specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 ;; ---------------------------------------------------------------------------
 ;; Mock backend + helpers (mirroring service_test.clj)
@@ -35,12 +36,13 @@
 (defrecord MockBackend [responses call-log]
   llm/LLMBackend
   (send-turn [_ request]
-    (swap! call-log conj request)
-    (let [r (ts/pop-first! responses)]
-      (when (nil? r)
-        (throw (ex-info "Mock backend out of canned responses"
-                 {:n-calls (count @call-log)})))
-      r)))
+    (p/do!
+      (swap! call-log conj request)
+      (let [r (ts/pop-first! responses)]
+        (when (nil? r)
+          (throw (ex-info "Mock backend out of canned responses"
+                   {:n-calls (count @call-log)})))
+        r))))
 
 (>defn mock-backend
   "Build a MockBackend seeded with `responses` (a vector of canned send-turn
@@ -523,19 +525,20 @@
         call-log   (atom [])
         backend    (reify llm/LLMBackend
                      (send-turn [_ request]
-                       (swap! call-log conj request)
-                       ;; The SECOND call is the one carrying u1's "not running" tool_result.
-                       ;; Wait for the test to fire :repl/start before letting it through.
-                       (when (= 2 (count @call-log))
-                         (let [deadline (+ (System/currentTimeMillis) 2000)]
-                           (loop []
-                             (cond
-                               (= :open @gate) :ok
-                               (>= (System/currentTimeMillis) deadline) :timeout
-                               :else (do (Thread/sleep 10) (recur))))))
-                       (let [[r & more] @responses]
-                         (reset! responses (vec more))
-                         (or r (throw (ex-info "out of responses" {}))))))
+                       (p/do!
+                         (swap! call-log conj request)
+                         ;; The SECOND call is the one carrying u1's "not running" tool_result.
+                         ;; Wait for the test to fire :repl/start before letting it through.
+                         (when (= 2 (count @call-log))
+                           (let [deadline (+ (System/currentTimeMillis) 2000)]
+                             (loop []
+                               (cond
+                                 (= :open @gate) :ok
+                                 (>= (System/currentTimeMillis) deadline) :timeout
+                                 :else (do (Thread/sleep 10) (recur))))))
+                         (let [[r & more] @responses]
+                           (reset! responses (vec more))
+                           (or r (throw (ex-info "out of responses" {})))))))
         chart      (substate-routing-chart :idle eval-calls)
         processor  (llmc/new-processor {:backend       backend
                                         :tool-registry (tp/new-registry)
