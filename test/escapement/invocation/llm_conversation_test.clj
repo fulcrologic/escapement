@@ -141,6 +141,54 @@
       (some #(= :llm/request (:event %)) @captured) => true
       (some #(= :llm/response (:event %)) @captured) => true)))
 
+(specification "stringified-JSON coercion: nested vector/map in tool_use input is re-parsed"
+  ;; Small open-weight models (e.g. llama3.2:3b) regularly emit nested
+  ;; collections as JSON strings inside a tool_use input — e.g.
+  ;; `{"haikus": "[\"a\",\"b\",\"c\"]"}` instead of `{"haikus": [...]}`.
+  ;; The decoder must JSON-parse the string when the target schema is a
+  ;; collection. Validation still runs after; malformed input still fails.
+  (let [captured (atom [])
+        backend  (mock-backend
+                   [(tool-use-response
+                      [{:id "u1" :name "event__poet_done"
+                        ;; nested array AND nested map arrive as raw strings
+                        :input {:idx     "1"
+                                :haikus  "[\"line1\\nline2\\nline3\",\"a\\nb\\nc\",\"x\\ny\\nz\"]"
+                                :meta    "{\"genre\":\"haiku\"}"}}])
+                    (end-turn-response "ok")])
+        chart    (chart/statechart
+                   {:initial :work}
+                   (state {:id :work :initial :running}
+                     (state {:id :running}
+                       (h/llm-conversation
+                         {:id        "poet"
+                          :params-fn (fn [_ _]
+                                       {:system         "poet"
+                                        :allowed-events [{:event       :poet-done
+                                                          :data-schema [:map
+                                                                        [:idx :int]
+                                                                        [:haikus [:vector :string]]
+                                                                        [:meta [:map [:genre :string]]]]}]
+                                        :initial-user-message "compose"})})
+                       (transition {:event :poet-done :target :done :type :internal}
+                         (script {:expr (fn [_ data]
+                                          (reset! captured (:_event data))
+                                          nil)})))
+                     (final {:id :done})))
+        t        (new-llm-test-env {:statechart chart :backend backend})
+        t        (await-config! t :done 3000)]
+    (assertions
+      "chart received the event (coercion + validation succeeded)"
+      (dct/in? t :done) => true
+      "idx string was coerced to int by string-transformer"
+      (get-in @captured [:data :idx]) => 1
+      "haikus stringified-array was JSON-parsed to a real vector"
+      (vector? (get-in @captured [:data :haikus])) => true
+      "vector has the right size and string elements"
+      (count (get-in @captured [:data :haikus])) => 3
+      "meta stringified-object was JSON-parsed and keys keywordized"
+      (get-in @captured [:data :meta :genre]) => "haiku")))
+
 ;; ---------------------------------------------------------------------------
 ;; #2: Fan-out (3 tool_use in one assistant turn)
 ;; ---------------------------------------------------------------------------

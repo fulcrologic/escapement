@@ -10,6 +10,7 @@
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.debug.controller :as dbg]
     [escapement.engine.env :as engine-env]
+    [escapement.engine.queue :as engine-queue]
     [escapement.invocation.human-input :as human-input]
     [escapement.invocation.llm-conversation :as llm-conv]
     [escapement.transcript :as transcript]))
@@ -105,35 +106,46 @@
    checkpointing after each event. Returns true if at least one event was processed.
 
    When `:controller` is supplied, each event is gated through the debug
-   pause/step controller (see `maybe-pause!`)."
-  [{:keys [env session-id transcript-fn controller human-input-active?]}]
+   pause/step controller (see `maybe-pause!`).
+
+   When `:multi-session?` is true, drain ALL session queues in this env (used
+   by charts that spawn child sessions via `escapement.engine.spawn`). The
+   target sid for each event is read from the event itself, so the parent
+   and every child are pumped from the one loop."
+  [{:keys [env session-id transcript-fn controller human-input-active?
+           multi-session?]}]
   (let [queue       (::sc/event-queue env)
         store       (::sc/working-memory-store env)
         processor   (::sc/processor env)
-        progressed? (atom false)]
-    (sp/receive-events!
-      queue env
-      (fn [_ event]
-        (maybe-pause! {:controller          controller
-                       :transcript-fn       transcript-fn
-                       :human-input-active? human-input-active?}
-          event)
-        (reset! progressed? true)
-        (let [ts            (System/currentTimeMillis)
-              wmem          (sp/get-working-memory store env session-id)
-              config-before (vec (::sc/configuration wmem #{}))
-              wmem'         (sp/process-event! processor env wmem event)
-              config-after  (vec (::sc/configuration wmem' #{}))]
-          (sp/save-working-memory! store env session-id wmem')
-          (transcript-fn {:event :runner/event-processed
-                          :ts    ts
-                          :data  {:event-name    (:name event)
-                                  :config-before config-before
-                                  :config-after  config-after
-                                  :event-data    (:data event)}})
-          (transcript-fn {:event :checkpoint/written
-                          :data  {:session-id (str session-id)}})))
-      {:session-id session-id})
+        progressed? (atom false)
+        handler
+        (fn [_ event]
+          (maybe-pause! {:controller          controller
+                         :transcript-fn       transcript-fn
+                         :human-input-active? human-input-active?}
+            event)
+          (reset! progressed? true)
+          (let [ts            (System/currentTimeMillis)
+                sid           (if multi-session?
+                                (or (:target event) session-id)
+                                session-id)
+                wmem          (sp/get-working-memory store env sid)
+                config-before (vec (::sc/configuration wmem #{}))
+                wmem'         (sp/process-event! processor env wmem event)
+                config-after  (vec (::sc/configuration wmem' #{}))]
+            (sp/save-working-memory! store env sid wmem')
+            (transcript-fn {:event :runner/event-processed
+                            :ts    ts
+                            :data  (cond-> {:event-name    (:name event)
+                                            :config-before config-before
+                                            :config-after  config-after
+                                            :event-data    (:data event)}
+                                     multi-session? (assoc :session-id (str sid)))})
+            (transcript-fn {:event :checkpoint/written
+                            :data  {:session-id (str sid)}})))]
+    (if multi-session?
+      (sp/receive-events! queue env handler)
+      (sp/receive-events! queue env handler {:session-id session-id}))
     @progressed?))
 
 (defn- cancel-requested?
@@ -254,7 +266,7 @@
            tool-registry initial-data resume? trace?
            max-iterations max-frozen-cycles quiescent-sleep-ms human-renderer
            on-env-ready transcript-tap prelude-events store run-id cancel
-           debug-controller human-input-active?]
+           debug-controller human-input-active? multi-session?]
     :or   {chart-id           ::chart
            resume?            false
            trace?             false
@@ -346,13 +358,28 @@
                                                            :session-id          session-id
                                                            :transcript-fn       transcript-fn
                                                            :controller          debug-controller
-                                                           :human-input-active? human-input-active?})]
+                                                           :human-input-active? human-input-active?
+                                                           :multi-session?      multi-session?})]
                              (if progressed?
                                ;; Made progress this pass — the config is moving, so
                                ;; the frozen-config counter resets.
                                (recur (dec i) 0)
-                               (let [live (count-live-invocations env)]
+                               (let [live    (count-live-invocations env)
+                                     pending (engine-queue/pending-count
+                                               (::sc/event-queue env))]
                                  (cond
+                                   ;; A delayed `send` (e.g. a safety-stop timer) sits
+                                   ;; in the queue with a future delivery-time. Until
+                                   ;; that time arrives `drain-once!` returns no events
+                                   ;; AND `count-live-invocations` may be zero, so
+                                   ;; without this check the loop would declare :done
+                                   ;; and lose the timer. Sleep without bumping the
+                                   ;; frozen counter — this is *planned* idle, not a
+                                   ;; wedge.
+                                   (and (zero? live) (pos? pending))
+                                   (do (Thread/sleep ^long quiescent-sleep-ms)
+                                       (recur (dec i) 0))
+
                                    (zero? live)
                                    :done                    ;; done — no live work, counter is moot
 

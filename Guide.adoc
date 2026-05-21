@@ -1546,6 +1546,85 @@ targeted at `:to`.
 Latest write wins.
 Keep history by picking versioned filenames (`(str "draft-" iteration ".md")`).
 
+=== Dynamic sibling sessions: `spawn-child!` and `:multi-session?`
+
+The patterns above route events between LLM conversations that are
+declared statically in one chart.
+Sometimes the number of agents is *not* knowable until the chart is running — e.g. a parent LLM looks at the input and decides "spawn three judges in parallel."
+For that, `escapement.engine.spawn` provides a bb-safe primitive that starts a **sibling statechart session** in the parent's env at runtime.
+
+This is _not_ SCXML `<invoke>`.
+There is no managed lifecycle binding between parent and child.
+Both run as peers sharing one env (processor, event queue, working-memory store, invocation processors, transcript-fn); the queue partitions events by `:target` sid, so each session is isolated even though the env is one.
+
+[source,clojure]
+----
+(require '[escapement.engine.spawn :as spawn]
+         '[com.fulcrologic.statecharts.elements :refer [script]])
+
+(script {:expr (fn [env _]
+                 (let [child-sid (spawn/spawn-child!
+                                   env
+                                   {:chart    judge-chart
+                                    :chart-id ::judge
+                                    :input    {:reply-to (spawn/parent-sid env)
+                                               :poem     "..."}})]
+                   ;; stash child-sid in chart data so parent can correlate
+                   ;; the eventual reply or cancel later
+                   ...))})
+----
+
+`spawn-child!` accepts:
+
+* `:chart` (required) — a statechart value, e.g. from `chart/statechart`.
+* `:chart-id` (optional) — the registry key under which to register `chart`.
+Defaults to `::spawn/child-chart`. Multiple spawns of the same chart should pass the SAME `:chart-id`; registration is idempotent.
+* `:sid` (optional) — explicit session-id; defaults to a random one.
+* `:input` (optional) — initial data seeded into the child's data model (passed as the child's `::sc/invocation-data`, mirroring runner's `:initial-data`).
+
+Returns the child sid.
+The caller typically `ops/assign`s it into chart data so the parent can later cancel it or correlate its reply.
+
+=== `:multi-session?` runner mode
+
+Spawned children only progress if the runner pumps their queues, too.
+Opt in by setting `^:multi-session?` metadata on the chart var; the CLI threads it into `runner/run!`:
+
+[source,clojure]
+----
+(def ^:multi-session? agent
+  (chart/statechart {...}))
+----
+
+With `:multi-session?` on, `drain-once!` calls `receive-events!` without a `:session-id` filter and routes each event to `(:target event)` (falling back to the parent sid).
+Without the flag, the parent's runner only pumps its own sid and any children wedge with un-drained events.
+
+=== Parent↔child convention
+
+`spawn-child!` itself is just session creation.
+The reply wire is convention:
+
+. Parent passes its own sid as `:reply-to` in the child's `:input` (use `(spawn/parent-sid env)`).
+. Child does its work, then `send!`s a reply event targeted at that sid (typically a domain event like `:judge/verdict` with `:target reply-to`).
+. Parent has a transition on that event, reads the payload, and continues.
+. Cancellation is the caller's responsibility — stash child sids in chart data, iterate and `send!` a `:cancel` event, or have children react to a shared event.
+
+=== Transcript surface
+
+Each call to `spawn-child!` emits a `:session/spawned` row:
+
+[source,clojure]
+----
+{:event :session/spawned
+ :data  {:parent-sid "..." :child-sid "..."
+         :chart-id   "..." :input-keys [...]}}
+----
+
+And every `:runner/event-processed` row in a multi-session run carries `:session-id`, so an offline reducer can group every child's events under its parent using the spawn edges.
+
+See `escapement.examples.n-subagents-demo` (deterministic, no LLM), `escapement.examples.haiku-tournament` (bounded fan-out), and
+`escapement.examples.haiku-tournament-dynamic` (parent LLM picks N at runtime).
+
 [[service-regions]]
 == Service regions: subcharts as tools
 

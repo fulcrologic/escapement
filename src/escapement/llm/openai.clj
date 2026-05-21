@@ -233,25 +233,86 @@ Response map."
         (str (subs s 0 4) "..." (subs s (- (count s) 4)))
         "***"))))
 
+(defn- status->category
+  "Map an HTTP status (and best-effort response body) to an
+   `escapement.llm.protocol` error category. Mirrors `escapement.llm.api`
+   so the openai-compat path categorizes errors the same way the Anthropic
+   path does — the retry/backoff/fallback machinery in
+   `llm-conversation/run-turn!` keys off these categories."
+  [status body]
+  (let [b        (str/lower-case (str body))
+        ctx-len? (some #(str/includes? b %)
+                   ["prompt is too long"
+                    "context length"
+                    "context window"
+                    "maximum context"
+                    "exceeds the maximum"
+                    "too many tokens"
+                    "reduce the length"])]
+    (cond
+      (= status 429) :rate-limited
+      (= status 529) :overloaded
+      (= status 503) :overloaded
+      (str/includes? b "overloaded") :overloaded
+      (or (= status 401) (= status 403)) :auth
+      (and (or (= status 400) (= status 422)) ctx-len?) :context-length
+      (or (= status 400) (= status 422)) :invalid-request
+      :else :transport)))
+
+(defn- retry-after-ms
+  "Parse a `Retry-After` header (RFC 7231 — seconds or HTTP-date) into ms.
+   Returns nil if absent/unparseable. Honored by
+   `escapement.invocation.llm-conversation/backoff-delay-ms` when the
+   error is categorized `:rate-limited`."
+  [headers]
+  (when-let [raw (or (get headers "retry-after")
+                   (get headers "Retry-After"))]
+    (try (some-> (Long/parseLong (str/trim (str raw))) (* 1000))
+         (catch Throwable _ nil))))
+
+(defn- with-categorized-timeout
+  "Run `f`; rethrow transport-level failures as categorized
+   `protocol/llm-error`s so the retry machinery can decide. Mirrors
+   `escapement.llm.api/with-timeout-category`."
+  [url f]
+  (try
+    (f)
+    (catch java.net.http.HttpTimeoutException t
+      (throw (proto/llm-error :timeout (str "API request timed out: " url)
+               {:cause t :data {:url url}})))
+    (catch java.net.ConnectException t
+      (throw (proto/llm-error :transport (str "API connection failed: " url)
+               {:cause t :data {:url url}})))
+    (catch java.io.IOException t
+      (throw (proto/llm-error :transport (str "API transport error: " url)
+               {:cause t :data {:url url}})))))
+
 (defn- post-chat! [{:keys [base-url api-key extra-headers http-timeout-ms]} body-map]
   (let [url     (str base-url "/chat/completions")
         headers (merge {"Content-Type"  "application/json"
                         "Authorization" (str "Bearer " api-key)}
                   extra-headers)
         body    (json/generate-string body-map)
-        {:keys [status body]} (http/post url
-                                {:headers headers
-                                 :body    body
-                                 :timeout (or http-timeout-ms 60000)
-                                 :throw   false})]
+        {:keys [status body headers]}
+        (with-categorized-timeout url
+          (fn [] (http/post url
+                   {:headers headers
+                    :body    body
+                    :timeout (or http-timeout-ms 300000)
+                    :throw   false})))]
     (when-not (and (>= status 200) (< status 300))
-      (throw (ex-info (str "OpenAI API error: HTTP " status)
-               {:status status :body body :url url})))
+      (throw (proto/llm-error (status->category status body)
+               (str "OpenAI API error: HTTP " status)
+               {:status status
+                :data   (cond-> {:status status :body body :url url}
+                          (= status 429) (assoc :retry-after-ms
+                                                (retry-after-ms headers)))})))
     (try
       (json/parse-string body)
       (catch Throwable t
-        (throw (ex-info "Failed to parse OpenAI API JSON response"
-                 {:body body :cause (.getMessage t)}))))))
+        (throw (proto/llm-error :transport
+                 "Failed to parse OpenAI API JSON response"
+                 {:cause t :data {:body body}}))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Streaming (SSE) — Chat Completions with "stream": true
@@ -386,17 +447,22 @@ Response map."
                   (assoc body-map
                     "stream" true
                     "stream_options" {"include_usage" true}))
-        {:keys [status body]} (http/post url
-                                {:headers headers
-                                 :body    body
-                                 :as      :stream
-                                 :timeout (or http-timeout-ms 60000)
-                                 :throw   false})]
+        {:keys [status body headers]}
+        (with-categorized-timeout url
+          (fn [] (http/post url
+                   {:headers headers
+                    :body    body
+                    :as      :stream
+                    :timeout (or http-timeout-ms 300000)
+                    :throw   false})))]
     (when-not (and (>= status 200) (< status 300))
-      (throw (ex-info (str "OpenAI API error: HTTP " status)
-               {:status status
-                :body   (try (slurp body) (catch Throwable _ ""))
-                :url    url})))
+      (let [body-text (try (slurp body) (catch Throwable _ ""))]
+        (throw (proto/llm-error (status->category status body-text)
+                 (str "OpenAI API error: HTTP " status)
+                 {:status status
+                  :data   (cond-> {:status status :body body-text :url url}
+                            (= status 429) (assoc :retry-after-ms
+                                                  (retry-after-ms headers)))}))))
     (with-open [reader (BufferedReader. (InputStreamReader. body "UTF-8"))]
       (parse-openai-sse! reader request-model on-delta))))
 

@@ -76,6 +76,10 @@ bb -m escapement.cli run escapement.examples.hello/agent   # run a chart
 bbin install .        # install the CLI
 ```
 
+## Model registry
+
+`src/escapement/llm/models-api.json` is the per-provider model catalog — large; always query with `jq` (e.g. `jq -r '.openai.models|keys[]' …`), never read whole.
+
 ## House rules
 
 - No JVM-only paths in `src/`. If you reach for something SCI does not

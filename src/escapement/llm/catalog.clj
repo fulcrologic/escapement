@@ -42,7 +42,13 @@
                         :vision?        true :tool-call? true :reasoning? true
                         :family         "claude" :company "Anthropic"
                         :name           "Claude Sonnet 4.7"}
-   "deepseek-v4-flash" {:max-output-tokens 65536}})
+   "deepseek-v4-flash" {:max-output-tokens 65536}
+   ;; ollama-cloud advertises `limit.output: 1048576` for this id, but the
+   ;; underlying DeepSeek API rejects max_tokens > 393216 ("Invalid
+   ;; max_tokens value, the valid range of max_tokens is [1, 393216]").
+   ;; Clamp at 16384 — comfortably under every observed wire cap and more
+   ;; than enough for any single LLM turn this project asks for.
+   "deepseek-v4-pro"   {:max-output-tokens 16384}})
 
 (def local-providers
   "Provider entries / model rows not present in the dump:
