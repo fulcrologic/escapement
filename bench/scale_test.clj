@@ -7,12 +7,21 @@
   Arms (identical mock timing; only the orchestration differs):
     sc-ckpt  — real escapement.lib/run + disk FileBackedStore (production)
     sc-mem   — real escapement.lib/run + in-memory store (no checkpoint I/O)
+    sc-wb    — real escapement.lib/run + ONE shared write-behind FileBackedStore
+               across all sessions (coalesced flush; mirrors production shape)
     hand     — hand-written K-turn loop, NO statechart / queue / checkpoint
 
   Usage:
-    bb bench/scale_test.clj <arm> <C> <turns> <ttft-ms> <tokens> <tok-ms>
+    bb bench/scale_test.clj <arm> <C> <turns> <ttft-ms> <tokens> <tok-ms> <qsleep> <state-kb>
   e.g.
-    bb bench/scale_test.clj sc-ckpt 500 6 400 150 20"
+    bb bench/scale_test.clj sc-ckpt 500 6 400 150 20 50 0
+
+  The 8th positional arg `state-kb` (default 0) seeds each session's data-model
+  with an opaque ~state-kb KB payload so every checkpoint snapshot is realistically
+  large; the chart also GROWS state by one chunk per turn, exposing the
+  full-snapshot O(N^2) write cost. Can also be set via the SCALE_STATE_KB env.
+  Set SCALE_WB=1 (or use arm sc-wb) to route the sc-ckpt disk arm through a single
+  shared write-behind store."
   (:require
     [com.fulcrologic.statecharts.chart :as chart]
     [com.fulcrologic.statecharts.data-model.operations :as ops]
@@ -20,7 +29,7 @@
     [com.fulcrologic.statecharts.protocols :as sp]
     [clojure.string :as str]
     [escapement.chart.helpers :as h]
-    [escapement.engine.store]
+    [escapement.engine.store :as store]
     [escapement.lib :as lib]
     [escapement.llm.protocol :as llm]
     [escapement.tools.protocol :as tp]
@@ -58,6 +67,9 @@
 ;;   :tick  -> assign (inc :n); eventless: n<K -> :turn ; n>=K -> :finished
 ;; ---------------------------------------------------------------------------
 
+;; A fixed ~1 KB chunk; conj'd into the data-model each turn so snapshots grow.
+(def ^:private chunk-1kb (apply str (repeat 1024 \x)))
+
 (defn make-chart [turns]
   (chart/statechart
     {:initial :run}
@@ -73,7 +85,9 @@
                          :initial-user-message "go"})})
         (transition {:event :continue :target :decide}
           (script {:expr (fn [_env data]
-                           [(ops/assign :n (inc (long (:n data 0))))])})))
+                           [(ops/assign :n (inc (long (:n data 0))))
+                            ;; grow state by one chunk per turn (O(N^2) snapshots)
+                            (ops/assign :grow (conj (vec (:grow data)) chunk-1kb))])})))
       (state {:id :decide}
         (transition {:cond   (fn [_env data] (>= (long (:n data 0)) (long turns)))
                      :target :finished})
@@ -92,7 +106,13 @@
       (save-working-memory! [_ _ sid w] (swap! cache assoc sid w) nil)
       (delete-working-memory! [_ _ sid] (swap! cache dissoc sid) nil))))
 
-(defn run-statechart-session [{:keys [chart backend ckpt? ckpt-root i qsleep]}]
+;; ~`kb` KB opaque payload seeded into the data-model so every checkpoint
+;; snapshot is realistically large.
+(defn- big-payload [kb]
+  (when (pos? (long kb))
+    {:payload (vec (repeat (long kb) chunk-1kb))}))
+
+(defn run-statechart-session [{:keys [chart backend ckpt? ckpt-root i qsleep state-kb shared-store]}]
   (lib/run
     (cond-> {:chart              chart
              :session-id         (keyword (str "s" i))
@@ -101,9 +121,16 @@
              :backend            backend
              :quiescent-sleep-ms qsleep
              :quiet?             false}       ; log level set ONCE in -main
-      (not ckpt?) (assoc :store (mem-store))
-      ckpt?       (assoc :checkpoint-dir (str ckpt-root "/ck-" i)
-                         :transcript-path (str ckpt-root "/tx-" i ".jsonl")))))
+      (some-> state-kb long pos?) (assoc :initial-data (big-payload state-kb))
+      ;; in-memory arm (no ckpt, no shared store)
+      (and (not ckpt?) (not shared-store)) (assoc :store (mem-store))
+      ;; shared write-behind store across all sessions
+      shared-store (assoc :store shared-store
+                          :transcript-path (str ckpt-root "/tx-" i ".jsonl"))
+      ;; per-session disk store
+      (and ckpt? (not shared-store))
+      (assoc :checkpoint-dir (str ckpt-root "/ck-" i)
+             :transcript-path (str ckpt-root "/tx-" i ".jsonl")))))
 
 (defn run-hand-session [{:keys [backend timing turns]}]
   ;; Plain optimized loop: same K turns, same streamed mock, same state
@@ -155,12 +182,19 @@
 ;; Driver
 ;; ---------------------------------------------------------------------------
 
-(defn run-arm [{:keys [arm c turns ttft tokens tok-ms qsleep]}]
+(defn run-arm [{:keys [arm c turns ttft tokens tok-ms qsleep state-kb]}]
   (let [timing      {:ttft-ms ttft :tokens tokens :tok-ms tok-ms}
         delta-count (AtomicLong. 0)
         backend     (->RealisticMock timing delta-count)
         chart       (make-chart turns)
         ckpt-root   (str "/tmp/scale-" (System/currentTimeMillis))
+        ;; write-behind: explicit `sc-wb` arm OR SCALE_WB=1 over the disk arm.
+        wb?         (or (= arm "sc-wb") (= "1" (System/getenv "SCALE_WB")))
+        ckpt?       (or (= arm "sc-ckpt") (= arm "sc-wb"))
+        shared-store (when wb?
+                       (do (.mkdirs (clojure.java.io/file (str ckpt-root "/wb")))
+                           (store/new-store (str ckpt-root "/wb")
+                             {:write-behind? true :flush-ms 250})))
         latencies   (atom [])
         vt?         (= "1" (System/getenv "SCALE_VT"))
         pool        (if vt?
@@ -173,11 +207,12 @@
                             (try
                               (case arm
                                 "hand"   (run-hand-session {:backend backend :timing timing :turns turns})
-                                ("sc-ckpt" "sc-mem")
+                                ("sc-ckpt" "sc-mem" "sc-wb")
                                 (run-statechart-session
                                   {:chart chart :backend backend
-                                   :ckpt? (= arm "sc-ckpt") :ckpt-root ckpt-root :i i
-                                   :qsleep qsleep}))
+                                   :ckpt? ckpt? :ckpt-root ckpt-root :i i
+                                   :qsleep qsleep :state-kb state-kb
+                                   :shared-store shared-store}))
                               (swap! latencies conj (/ (- (System/nanoTime) t0) 1e6))
                               :ok
                               (catch Throwable t {:err (.getMessage t)}))))))
@@ -190,6 +225,7 @@
         cpu-sec     (/ (- (cpu-ticks) cpu0) 100.0)]
     (.shutdown pool)
     (.awaitTermination pool 1 TimeUnit/MINUTES)
+    (when shared-store (store/close! shared-store))   ; final coalesced drain → durable
     (reset! stop? false)
     (let [errs   (filter map? results)
           oks    (count (filter #(= :ok %) results))
@@ -200,6 +236,8 @@
           nominal-ms (+ ttft (* tokens tok-ms))]   ; ideal single-turn stream time
       {:arm           arm
        :vt            vt?
+       :write-behind  (boolean wb?)
+       :state-kb      (long (or state-kb 0))
        :C             c
        :ok            oks
        :errors        (count errs)
@@ -227,7 +265,9 @@
         tokens (parse-long (or (nth args 4 nil) "150"))
         tok-ms (parse-long (or (nth args 5 nil) "20"))
         qsleep (parse-long (or (nth args 6 nil) "50"))
-        res    (run-arm {:arm arm :c c :turns turns :ttft ttft :tokens tokens :tok-ms tok-ms :qsleep qsleep})]
+        state-kb (parse-long (or (nth args 7 nil) (System/getenv "SCALE_STATE_KB") "0"))
+        res    (run-arm {:arm arm :c c :turns turns :ttft ttft :tokens tokens :tok-ms tok-ms
+                         :qsleep qsleep :state-kb state-kb})]
     (println "RESULT" (pr-str res))
     (doseq [[k v] (sort-by key res)] (println (format "%-18s %s" (str k) v)))))
 

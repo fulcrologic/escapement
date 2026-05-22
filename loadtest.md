@@ -361,3 +361,72 @@ docker build -f bench/Dockerfile.jvm -t escapement-scale-jvm .
 docker run --rm --memory=4g --memory-swap=4g --cpus=4 -e SCALE_VT=1 \
   escapement-scale-jvm sc-ckpt 4000 6 400 150 20
 ```
+
+---
+
+# Part 4 — the next wall: the checkpoint store under realistic state
+
+Parts 1–3 ran with a tiny data-model (the chart just increments `:n`), which hid
+the store entirely (`sc-mem ≈ sc-ckpt`). Real sessions carry a growing
+conversation/data-model snapshot, and `FileBackedStore` re-serializes the
+**entire** working memory with `(pr …)` + an `ATOMIC_MOVE` fsync **on every
+event** (`store.clj`). So write cost is O(N) per event → O(N²) over a session.
+
+## Large-state profile
+
+`bench/scale_test.clj` gained an 8th positional arg `state-kb` (also
+`SCALE_STATE_KB`): it seeds each session's data-model with a ~`state-kb` KB
+opaque payload AND the chart grows state by ~1 KB/turn, so snapshots are large
+and growing (exposing the O(N²) cost). New arm `sc-wb` (or `SCALE_WB=1`) routes
+ALL sessions through ONE shared write-behind `FileBackedStore`.
+
+## Finding 4 — write-behind / coalesced checkpoint removes the store wall
+
+Same 4 GB/4 CPU box, JVM full-VT, **state-kb=50, 12 turns** (snapshots ~60 KB,
+growing). `sc-ckpt` = synchronous full-snapshot-per-event (production today);
+`sc-wb` = coalesced (cache + dirty-set, one daemon flusher writes the latest
+snapshot every 250 ms; `flush!`/`close!` for durability):
+
+| C | sc-ckpt (synchronous) | sc-wb (write-behind) |
+| --- | --- | --- |
+| 2000 | **3.87×** · 26.8 cpu-ms/turn · 643 cpu-s · 3327 MB | **1.07×** · 6.13 · 147 cpu-s · 2314 MB |
+| 4000 | thrashing ~3.2 GB, collapsing (aborted) | **1.36×** · 4.77 · 3262 MB · 0 errors |
+
+**Write-behind cuts CPU/turn 4.4× (26.8 → 6.13) and takes latency from a
+collapsed 3.87× back to ~nominal 1.07× at C=2000**, and scales to C=4000 at 1.36×
+— where the synchronous store was already underwater at C=2000. It also uses
+~31% less RAM at C=2000 because it stops allocating a fresh ~60 KB serialized
+string on the calling thread every event (one serialization per flush interval
+instead).
+
+This confirms the layered diagnosis: bb→JVM+Loom lifted the *thread* wall; with
+realistic state the *next* wall was the full-snapshot-per-event store; write-
+behind removes it.
+
+## The remaining wall: resident RAM
+
+Write-behind cuts *write* cost, not *resident* memory — the cache still holds
+every live session. At state-kb=50 that's ~3.26 GB at C=4000, so C≈6000 (~4.9 GB)
+OOMs the 4 GB box. The next step is the **evictable / bounded cache** (LRU +
+lazy reload via the existing `reload-from-disk!` seam), which bounds RAM by the
+*active* working set and is the precondition for session relocatability →
+horizontal sharding.
+
+## Durability / safety note
+
+Write-behind is **opt-in, default off**: `(new-store dir)` is byte-for-byte the
+original synchronous store; `(new-store dir {:write-behind? true :flush-ms 250})`
+enables coalescing. Durability lag is bounded by `flush-ms`; `flush!` drains
+synchronously and `close!` stops the flusher + does a final drain (call it on
+graceful shutdown). In-process reads are always correct (served from cache).
+
+## Reproduce (store comparison)
+
+```bash
+# synchronous (production today), large growing state:
+docker run --rm --memory=4g --memory-swap=4g --cpus=4 -e SCALE_VT=1 \
+  escapement-scale-jvm sc-ckpt 2000 12 400 150 20 50 50   # …turns ttft tok tok-ms qsleep state-kb
+# coalesced write-behind, one shared store:
+docker run --rm --memory=4g --memory-swap=4g --cpus=4 -e SCALE_VT=1 \
+  escapement-scale-jvm sc-wb   2000 12 400 150 20 50 50
+```
