@@ -8,6 +8,8 @@
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.algorithms.v20150901 :as alg]
     [com.fulcrologic.statecharts.data-model.working-memory-data-model :as wmdm]
+    [com.fulcrologic.statecharts.invocation.multiplex-processor :as mux-proc]
+    [com.fulcrologic.statecharts.invocation.statechart :as chart-invoke]
     [com.fulcrologic.statecharts.registry.local-memory-registry :as lmr]
     [escapement.chart.service :as-alias service]
     [escapement.engine.exec :as exec]
@@ -53,7 +55,13 @@
                     [(human-input/new-processor {:renderer      human-renderer
                                                  :transcript-fn transcript-fn})]
                     [])
-        all-procs (into [] (concat invocation-processors llm-procs hi-procs))]
+        ;; Statechart-as-invokable: needed both for plain <invoke type=::sc/chart>
+        ;; and as a dependency of the multiplex processor (it spawns its own
+        ;; aggregator chart via the statechart processor).
+        chart-procs [(chart-invoke/new-invocation-processor)]
+        ;; Multiplex: general dynamic-N fanout over any registered invocation type.
+        mux-procs [(mux-proc/new-processor)]
+        all-procs (into [] (concat invocation-processors llm-procs hi-procs chart-procs mux-procs))]
     (cond-> {::sc/statechart-registry   registry
              ::sc/data-model            dm
              ::sc/event-queue           queue

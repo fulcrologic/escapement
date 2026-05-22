@@ -1,13 +1,16 @@
 (ns escapement.examples.n-subagents-demo
-  "Demo of the N-subagents pattern: one chart with three parallel regions
-  — a BOARD that owns shared state, N WORKER regions that claim tasks and
-  submit results, and a WATCHER that fires the parallel-join.
+  "Deterministic demo of the dynamic N-subagents pattern using the multiplex
+  invocation processor (`com.fulcrologic.statecharts.invocation.multiplex`).
 
-  This is the deterministic, no-LLM skeleton — it exercises the
-  orchestration shape end-to-end without needing the bb-safe child-session
-  path (`escapement.engine.spawn/spawn-child!`) that real LLM subagents
-  would require. Workers \"work\" by upper-casing the
-  task string; the point is the choreography, not the work.
+  The parent spawns N worker sub-charts — one per task — that upper-case
+  their assigned task and report back via `mux/reply`. The parent
+  accumulates per-child replies by `:idx` and transitions on
+  `:done.invoke.workers` when the multiplex's aggregator says every child
+  has finished.
+
+  No LLM is involved — workers \"work\" by `clojure.string/upper-case`.
+  The point is the choreography: dynamic N at runtime, identity
+  auto-seeded by the multiplex, library-owned done aggregation.
 
   Run from the REPL:
 
@@ -24,112 +27,76 @@
    [com.fulcrologic.statecharts.chart :as chart]
    [com.fulcrologic.statecharts.data-model.operations :as ops]
    [com.fulcrologic.statecharts.elements
-    :refer [final on-entry parallel script state transition]]
+    :refer [final on-entry script state transition]]
+   [com.fulcrologic.statecharts.invocation.multiplex :refer [multiplex]]
+   [com.fulcrologic.statecharts.invocation.multiplex-options :as mo]
+   [com.fulcrologic.statecharts.invocation.multiplex-processor :as mux]
    [com.fulcrologic.statecharts.protocols :as sp]))
 
-(def ^:private default-tasks
+(def default-tasks
   ["alpha" "beta" "gamma" "delta" "epsilon" "zeta"])
 
-(def ^:private worker-count 3)
-
-(defn- raise!
-  "Post a chart event onto our own session's queue from inside a script."
-  [env event data]
-  (let [queue (get env ::sc/event-queue)
-        sid   (some-> env ::sc/vwmem deref ::sc/session-id)]
-    (when (and queue sid)
-      (sp/send! queue env {:target            sid
-                           :source-session-id sid
-                           :event             event
-                           :data              data}))))
-
-(defn- mine? [w]
-  (fn [_env data] (= w (get-in data [:_event :data :worker]))))
-
-(defn- worker-region
-  "Build one worker region. Worker `w` loops idle -> idle by claiming and
-  immediately processing tasks; it terminates when the board says
-  `:no-tasks` for it or a `:wrap-up` arrives."
-  [w]
-  (let [idle (keyword (str "w" w "-idle"))
-        done (keyword (str "w" w "-done"))]
-    (state {:id (keyword (str "worker-" w))
-            :initial idle}
-      (state {:id idle}
-        (on-entry {}
-          (script {:expr (fn [env _data]
-                           (raise! env :claim-task {:worker w})
-                           nil)}))
-        ;; Got a task -> do work, submit, re-enter :idle to claim again.
-        (transition {:event :assign-task
-                     :cond  (mine? w)
-                     :target idle}
-          (script {:expr
-                   (fn [env data]
-                     (let [idx    (get-in data [:_event :data :idx])
-                           task   (get-in data [:_event :data :task])
-                           result (str/upper-case (str task))]
-                       (raise! env :submit-result
-                         {:worker w :idx idx :result result})
-                       nil))}))
-        (transition {:event :no-tasks :cond (mine? w) :target done})
-        (transition {:event :wrap-up :target done}))
-      (final {:id done}))))
-
-(def board-region
-  (state {:id :board :initial :open}
-    (state {:id :open}
-      ;; Internal so we stay in :open across many claim/submit cycles.
-      (transition {:event :claim-task :type :internal}
+(def worker-chart
+  "Child chart: reads its `:task` from invocation params, replies with the
+  upper-cased result via `mux/reply`, and reaches its `:done` final so the
+  multiplex's aggregator can count the completion."
+  (chart/statechart
+    {:initial :work
+     :name    "n-subagents-worker"}
+    (state {:id :work}
+      (on-entry {}
         (script {:expr
                  (fn [env data]
-                   (let [w        (get-in data [:_event :data :worker])
-                         tasks    (:tasks data)
-                         claimed  (or (:claimed data) #{})
-                         next-idx (first (remove claimed
-                                           (range (count tasks))))]
-                     (if next-idx
-                       (do (raise! env :assign-task
-                             {:worker w :idx next-idx
-                              :task (nth tasks next-idx)})
-                           [(ops/assign :claimed (conj claimed next-idx))])
-                       (do (raise! env :no-tasks {:worker w})
-                           nil))))}))
-      (transition {:event :submit-result :type :internal}
-        (script {:expr
-                 (fn [env data]
-                   (let [idx     (get-in data [:_event :data :idx])
-                         result  (get-in data [:_event :data :result])
-                         results (assoc (or (:results data) {})
-                                   idx result)
-                         total   (count (:tasks data))]
-                     (when (= (count results) total)
-                       (raise! env :wrap-up {}))
-                     [(ops/assign :results results)]))}))
-      (transition {:event :wrap-up :target :board-done}))
-    (final {:id :board-done})))
+                   (let [task   (:task data)
+                         result (str/upper-case (str task))]
+                     (mux/reply env :worker/result {:result result})
+                     nil))}))
+      ;; Eventless transition: fires after on-entry actions, sending us
+      ;; to :done so the session reaches final and the algorithm emits
+      ;; the natural done.invoke.<child-sid> the aggregator listens for.
+      (transition {:target :done}))
+    (final {:id :done})))
 
-(def watcher-region
-  (state {:id :watcher :initial :watching}
-    (state {:id :watching}
-      (transition {:event :wrap-up :target :watcher-done}))
-    (final {:id :watcher-done})))
+(def ^:private worker-chart-id
+  "Registry key under which `worker-chart` is registered at parent on-entry.
+   The multiplex's `:src` per child resolves through this key."
+  ::worker-chart)
 
 (def agent
   (chart/statechart
-    {:initial :run}
+    {:initial :run
+     :name    "n-subagents-demo"}
     (state {:id :run :initial :work}
       (on-entry {}
-        (script {:expr (fn [_env data]
-                         (when-not (:tasks data)
-                           [(ops/assign :tasks default-tasks)]))}))
+        (script {:expr
+                 (fn [env data]
+                   (sp/register-statechart!
+                     (::sc/statechart-registry env)
+                     worker-chart-id
+                     worker-chart)
+                   (when-not (:tasks data)
+                     [(ops/assign :tasks default-tasks)]))}))
 
-      (apply parallel {:id :work}
-        board-region
-        watcher-region
-        (map worker-region (range worker-count)))
+      (state {:id :work}
+        (multiplex
+          {:id             :workers
+           mo/child-type   ::sc/chart
+           mo/count        (fn [_ data] (count (:tasks data)))
+           mo/child-params (fn [_ data idx]
+                             {:src    worker-chart-id
+                              :params {:task (nth (:tasks data) idx)}})})
 
-      ;; All regions hit their region-finals -> parallel raises this.
-      (transition {:event :done.state.work :target :finished})
+        ;; Accumulate per-child replies as they arrive.
+        (transition {:event :worker/result :type :internal}
+          (script {:expr
+                   (fn [_ data]
+                     (let [from   (get-in data [:_event :data mo/from])
+                           idx    (:idx from)
+                           result (get-in data [:_event :data :result])]
+                       [(ops/assign :results
+                          (assoc (or (:results data) {}) idx result))]))}))
+
+        ;; All workers done — move to final.
+        (transition {:event :done.invoke.workers :target :finished}))
 
       (final {:id :finished}))))

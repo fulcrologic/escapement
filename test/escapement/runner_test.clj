@@ -4,7 +4,7 @@
     [clojure.java.io :as io]
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.chart :as chart]
-    [com.fulcrologic.statecharts.elements :refer [final on-entry script state transition]]
+    [com.fulcrologic.statecharts.elements :refer [final on-entry script send state transition]]
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.chart.helpers :as h]
     [escapement.invocation.human-input :as human-input]
@@ -99,6 +99,56 @@
       (boolean (or (empty? (:final-config summary))
                  (some #{":done" "done"} (map str (:final-config summary))))) => true
       "transcript file exists" (.exists (io/file transcript)) => true)))
+
+(def event-firing-chart
+  ;; on-entry queues a :go via <send>; the runner pump drains it and we get a
+  ;; real :runner/event-processed row. Wrapped in a compound parent so the
+  ;; :done final stays in the configuration after transition (top-level finals
+  ;; would empty the config on entry).
+  (chart/statechart
+    {:initial :work}
+    (state {:id :work :initial :idle}
+      (state {:id :idle}
+        (on-entry {} (send {:event :go}))
+        (transition {:event :go :target :done}))
+      (final {:id :done}))))
+
+(specification "runner emits :entered/:exited and unconditional :session-id on event-processed"
+  (let [dir        (tmp-dir "runner-enrich")
+        transcript (str dir "/run.jsonl")
+        chk        (str dir "/chk")
+        _          (runner/run! {:chart              event-firing-chart
+                                 :session-id         :runner-test/enrich
+                                 :transcript-path    transcript
+                                 :checkpoint-dir     chk
+                                 :max-iterations     500
+                                 :quiescent-sleep-ms 10})
+        rows       (read-jsonl transcript)
+        ep-rows    (filter #(= "runner/event-processed" (:event %)) rows)
+        ep-data    (mapv :data ep-rows)
+        all-have-sid? (every? #(contains? % :session-id) ep-data)
+        all-have-enter-exit?
+                   (every? #(and (contains? % :entered) (contains? % :exited))
+                     ep-data)
+        any-entered-done?
+                   (some (fn [d]
+                           (some #{":done" "done"} (map str (:entered d))))
+                         ep-data)
+        any-exited-idle?
+                   (some (fn [d]
+                           (some #{":idle" "idle"} (map str (:exited d))))
+                         ep-data)]
+    (assertions
+      "at least one :runner/event-processed row was emitted"
+      (pos? (count ep-rows)) => true
+      ":session-id is present on every event-processed row (single-session mode)"
+      all-have-sid? => true
+      ":entered and :exited vectors are present on every event-processed row"
+      all-have-enter-exit? => true
+      "transition to :done shows :done in :entered"
+      (boolean any-entered-done?) => true
+      "and :idle in :exited"
+      (boolean any-exited-idle?) => true)))
 
 (specification "runner resume — loads checkpointed wmem instead of starting"
   ;; First run completes; second run with :resume? true should NOT restart (start! would
