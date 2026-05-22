@@ -162,7 +162,10 @@
         chart       (make-chart turns)
         ckpt-root   (str "/tmp/scale-" (System/currentTimeMillis))
         latencies   (atom [])
-        pool        (Executors/newFixedThreadPool c)
+        vt?         (= "1" (System/getenv "SCALE_VT"))
+        pool        (if vt?
+                      (Executors/newVirtualThreadPerTaskExecutor)
+                      (Executors/newFixedThreadPool c))
         task        (fn [i]
                       (reify java.util.concurrent.Callable
                         (call [_]
@@ -196,6 +199,7 @@
           turns-done (* oks turns)
           nominal-ms (+ ttft (* tokens tok-ms))]   ; ideal single-turn stream time
       {:arm           arm
+       :vt            vt?
        :C             c
        :ok            oks
        :errors        (count errs)

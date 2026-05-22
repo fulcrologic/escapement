@@ -1,0 +1,11 @@
+FROM clojure:temurin-21-tools-deps
+WORKDIR /app
+# Dep manifests + source; warm the maven cache + compile classpath into a layer
+# so constrained `docker run`s never resolve/download at runtime.
+COPY deps.edn ./
+COPY src ./src
+COPY bench ./bench
+RUN clojure -Sdeps '{:paths ["src" "bench"]}' -P \
+ && clojure -Sdeps '{:paths ["src" "bench"]}' -M -e "(require 'escapement.lib 'scale-test) (println :warmed)"
+# Virtual threads on; let the JVM use most of the cgroup memory for heap.
+ENTRYPOINT ["clojure", "-J-Descapement.virtual-threads=true", "-J-XX:MaxRAMPercentage=75", "-Sdeps", "{:paths [\"src\" \"bench\"]}", "-M", "bench/scale_test.clj"]

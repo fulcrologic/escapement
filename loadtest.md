@@ -274,3 +274,90 @@ docker run --rm --memory=4g --memory-swap=4g --cpus=4 \
 # ramp until collapse/OOM:
 bench/ramp.sh sc-ckpt 6 400 150 20  500 1000 2000 3000 4000
 ```
+
+---
+
+# Part 3 — acting on `makebetter.md`: what actually moved the ceiling
+
+We implemented the cheap consensus fix first, then the deferred JVM+Loom track.
+Two findings, one negative and one decisive. All numbers are the `sc-ckpt` arm
+(realistic mock: 6 turns, ttft 400 ms, 150 tok/turn @ 20 ms), measured with
+`bench/scale_test.clj`.
+
+## Finding 3a — batched transcript flush: real micro-win, NOT a scale lever (negative result)
+
+`transcript.clj` previously `.flush`ed after every JSONL line. We changed it to
+flush on queue-drain or every 256 lines (lossless; `flush-batch-cap`). In
+isolation this is a large win — writing 200k rows:
+
+| | per-line flush | batched flush |
+| --- | --- | --- |
+| `write` syscalls | 200,001 | 3,126 (**64× fewer**) |
+| wall | 2342 ms | 946 ms (**2.5×**) |
+
+But it does **not** move the concurrency knee. Before/after, same 4 GB/4 CPU box:
+
+| C | latency-infl (before → after) | cpu-ms/turn (before → after) |
+| --- | --- | --- |
+| 2000 | 1.55× → 1.58× | 10.23 → 10.83 |
+| 3000 | 2.80× → 3.21× | 12.50 → 14.94 |
+| 4000 | 4.38× → 4.28× | 14.16 → 14.39 |
+
+Indistinguishable (within big-bang run-to-run noise). **This refutes
+`makebetter.md`'s #1 consensus claim** that per-line flush was the cheapest,
+highest-impact change: the async writer thread was never on the critical path.
+The change is kept (it's lossless and cuts I/O CPU) but it is not the lever.
+
+## Finding 3b — JVM + virtual threads (Loom): the decisive lever
+
+The two structural walls (SCI CPU tax, platform thread-per-session) decompose
+cleanly, and both are real. Same-box C=2000 unconstrained, decomposed:
+
+| variant | cpu-ms/turn | peak-threads |
+| --- | --- | --- |
+| bb (SCI, platform pool) | 9.14 | 6151 |
+| JVM (HotSpot, platform pool) | 5.69 | 6068 |
+| JVM+VT (all threads virtual) | 6.04 / 3.80 @C=20k | 4094 / **94** @C=20k |
+
+- **SCI → HotSpot = −38% cpu/turn** (9.14 → 5.69), purely the JIT. VT adds
+  nothing to per-turn CPU.
+- **Virtual threads remove the thread *ceiling*** — but only once the *internal*
+  threads (transcript writer + llm worker) are virtual too. Doing that dropped
+  16,143 platform threads → **94 (flat at any C)** and let an unconstrained
+  C=20000 run complete with 0 errors.
+
+Under the **same 4 GB / 4 CPU constraint** where bb collapses by C≈3000, JVM
+full-VT (`-Descapement.virtual-threads=true`, `SCALE_VT=1`):
+
+| C | bb (SCI) | JVM full-VT |
+| --- | --- | --- |
+| 2000 | 1.55× · 10.2 · 6146 thr | 1.14× · 5.6 · 280 thr |
+| 3000 | 3.21× · 14.9 · 9227 thr (collapsing) | 1.26× · 5.2 · 280 thr |
+| 4000 | 4.28× · 14.4 · 12404 thr | 1.39× · 4.9 · 280 thr |
+| 6000 | (dead) | 1.94× · 4.7 · 280 thr |
+| 8000 | (dead) | 2.53× · 4.6 · 280 thr · 1856 MB |
+
+**~2.5–3× usable concurrency, ~half the cpu/turn, threads flat at 280 vs 6k–12k,
+and it never hit the 4 GB cap.** The synthetic state is tiny, so RAM never bound
+here — the next wall in real use is per-session memory + the full-snapshot
+checkpoint store (Part 2's structural ceiling), not threads/SCI/transcript.
+
+## How this landed in `src/` (bb stays the default; Loom is opt-in)
+
+- `src/escapement/threads.clj` — `unstarted-daemon` factory. Platform daemon
+  threads by default and **always under bb/SCI**; virtual threads only when the
+  JVM is started with `-Descapement.virtual-threads=true`. The `Thread/ofVirtual`
+  interop sits behind that property check, which SCI never evaluates.
+- `transcript.clj` + `invocation/llm_conversation.clj` — the two `(Thread. …)`
+  sites now go through the factory (unchanged behavior under bb).
+- `bench/scale_test.clj` — `SCALE_VT=1` selects a virtual-thread task executor.
+- `bench/Dockerfile.jvm` — JVM (`clojure:temurin-21-tools-deps`) image for the
+  constrained ramp; `MaxRAMPercentage=75`.
+
+## Reproduce (JVM full-VT)
+
+```bash
+docker build -f bench/Dockerfile.jvm -t escapement-scale-jvm .
+docker run --rm --memory=4g --memory-swap=4g --cpus=4 -e SCALE_VT=1 \
+  escapement-scale-jvm sc-ckpt 4000 6 400 150 20
+```

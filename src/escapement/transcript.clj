@@ -14,6 +14,7 @@
   (:require
     [cheshire.core :as json]
     [clojure.java.io :as io]
+    [escapement.threads :as threads]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]])
   (:import
     (java.io BufferedWriter)
@@ -45,56 +46,80 @@
   (.write w ^String (json/generate-string m))
   (.newLine w))
 
-(defn- writer-loop
-  [^LinkedBlockingQueue q ^BufferedWriter w seq-counter fsync? raf-fn]
-  (try
-    (loop []
-      (let [item (.take q)]
-        (cond
-          (identical? item end-sentinel)
-          nil
+(def ^:const flush-batch-cap
+  "Upper bound on lines written between flushes. Bounds worst-case durability
+   latency under sustained load — we flush at least this often even if the
+   queue never drains. The common case flushes on drain (queue empty), so a
+   bursty writer still persists promptly."
+  256)
 
-          :else
-          (let [ev (cond-> item
-                     (not (contains? item :ts)) (assoc :ts (now-ms))
-                     (not (contains? item :seq)) (assoc :seq @seq-counter))]
-            (swap! seq-counter inc)
-            ;; Pre-serialize so a failure can be recovered without leaving a half-written line.
-            (let [s (try (json/generate-string ev)
-                         (catch Throwable t {::ser-fail t}))]
-              (try
-                (if (map? s)
-                  ;; Serialization failed — emit an error marker and a sanitized retry.
-                  (do
-                    (write-line! w {:event               :transcript/serialize-error
-                                    :ts                  (now-ms)
-                                    :seq                 @seq-counter
-                                    :original-event-keys (vec (keys ev))
-                                    :reason              (some-> ^Throwable (::ser-fail s) .getMessage)})
-                    (swap! seq-counter inc)
-                    (write-line! w (assoc (sanitize-value ev)
-                                     :seq @seq-counter
-                                     :transcript/sanitized? true))
-                    (swap! seq-counter inc)
-                    (.flush w))
-                  (do
-                    (.write w ^String s)
-                    (.newLine w)
-                    (.flush w)
+(defn- writer-loop
+  "Single writer thread. Writes JSONL lines to the BufferedWriter but defers
+   `.flush` to batch boundaries instead of flushing per line: we flush when the
+   queue drains (`.peek` is nil) or after `flush-batch-cap` lines, whichever
+   comes first. Lossless — every enqueued event is written and flushed; only the
+   syscall cadence changes (one `.flush`/`fsync` per batch, not per row)."
+  [^LinkedBlockingQueue q ^BufferedWriter w seq-counter fsync? raf-fn]
+  (let [do-fsync! (fn []
                     (when fsync?
                       (try (when-let [raf (raf-fn)] (.sync (.getFD raf)))
-                           (catch Throwable _ nil)))))
-                (catch Throwable t
-                  (binding [*out* *err*]
-                    (println "[transcript] write threw:" (.getMessage t))))))
-            (recur)))))
-    (catch InterruptedException _ nil)
-    (catch Throwable t
-      (binding [*out* *err*]
-        (println "[transcript] writer-loop crashed:" (.getMessage t))))
-    (finally
-      (try (.flush w) (catch Throwable _ nil))
-      (try (.close w) (catch Throwable _ nil)))))
+                           (catch Throwable _ nil))))
+        flush!    (fn []
+                    (try (.flush w) (do-fsync!)
+                         (catch Throwable t
+                           (binding [*out* *err*]
+                             (println "[transcript] flush threw:" (.getMessage t))))))]
+    (try
+      (loop [dirty?       false
+             since-flush  0]
+        (let [item (if dirty? (.poll q) (.take q))]
+          (cond
+            ;; Queue drained while we have buffered writes: flush, then block.
+            (and (nil? item) dirty?)
+            (do (flush!) (recur false 0))
+
+            (identical? item end-sentinel)
+            nil
+
+            :else
+            (let [ev (cond-> item
+                       (not (contains? item :ts)) (assoc :ts (now-ms))
+                       (not (contains? item :seq)) (assoc :seq @seq-counter))]
+              (swap! seq-counter inc)
+              ;; Pre-serialize so a failure can be recovered without leaving a half-written line.
+              (let [s (try (json/generate-string ev)
+                           (catch Throwable t {::ser-fail t}))]
+                (try
+                  (if (map? s)
+                    ;; Serialization failed — emit an error marker and a sanitized retry.
+                    (do
+                      (write-line! w {:event               :transcript/serialize-error
+                                      :ts                  (now-ms)
+                                      :seq                 @seq-counter
+                                      :original-event-keys (vec (keys ev))
+                                      :reason              (some-> ^Throwable (::ser-fail s) .getMessage)})
+                      (swap! seq-counter inc)
+                      (write-line! w (assoc (sanitize-value ev)
+                                       :seq @seq-counter
+                                       :transcript/sanitized? true))
+                      (swap! seq-counter inc))
+                    (do
+                      (.write w ^String s)
+                      (.newLine w)))
+                  (catch Throwable t
+                    (binding [*out* *err*]
+                      (println "[transcript] write threw:" (.getMessage t))))))
+              (let [n (inc since-flush)]
+                (if (>= n flush-batch-cap)
+                  (do (flush!) (recur false 0))
+                  (recur true n)))))))
+      (catch InterruptedException _ nil)
+      (catch Throwable t
+        (binding [*out* *err*]
+          (println "[transcript] writer-loop crashed:" (.getMessage t))))
+      (finally
+        (try (.flush w) (catch Throwable _ nil))
+        (try (.close w) (catch Throwable _ nil))))))
 
 (defrecord TranscriptSink [^LinkedBlockingQueue queue ^Thread thread seq-counter path closed?])
 
@@ -117,8 +142,7 @@
         bw          (BufferedWriter. w)
         raf-fn      (fn [] nil)                             ; fsync support stubbed; would need RandomAccessFile to do properly
         runnable    (fn [] (writer-loop q bw seq-counter fsync? raf-fn))
-        ^Thread t   (doto (Thread. ^Runnable runnable "transcript-writer")
-                      (.setDaemon true))
+        ^Thread t   (threads/unstarted-daemon "transcript-writer" runnable)
         closed?     (atom false)]
     (.start t)
     (->TranscriptSink q t seq-counter path closed?)))

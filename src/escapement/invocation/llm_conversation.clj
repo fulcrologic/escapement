@@ -29,6 +29,7 @@
     [escapement.llm.needs :as needs]
     [escapement.llm.protocol :as llm]
     [escapement.llm.types :as llm-types]
+    [escapement.threads :as threads]
     [escapement.tools.protocol :as tp]
     [malli.core :as m]
     [malli.error :as me]
@@ -1508,9 +1509,9 @@
                              :params              params
                              :parent-ctx          parent-ctx}
           runnable          (fn [] (run-worker! ctx))
-          ^Thread thread    (doto (Thread. ^Runnable runnable
-                                    (str "llm-conv-" parent-session-id "-" invokeid))
-                              (.setDaemon true))]
+          ^Thread thread    (threads/unstarted-daemon
+                              (str "llm-conv-" parent-session-id "-" invokeid)
+                              runnable)]
       (swap! workers assoc k
         {:thread           thread
          :worker-state     worker-state
