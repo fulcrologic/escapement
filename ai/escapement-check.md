@@ -45,7 +45,7 @@ playbook, and its one job. It must not see another concern's reasoning.
 
 | Concern | Run in | Gets | Produces |
 |---|---|---|---|
-| **Coverage & tests** (Gate 1) | fresh subagent | scope + repo | the coverage table, `bb test`/`bb sanity` output, baseline-attribution proof |
+| **Coverage & tests** (Gate 1) | fresh subagent | scope + repo + **the orchestrator's baseline result** (see below) | the coverage table, `bb test`/`bb sanity` output, baseline comparison |
 | **Code review** (Gate 3) | fresh subagent, **no authoring context** — must not be the agent that wrote the code | the raw diff only | the subjective sign-off / debt findings |
 | **Changelog + Guide sync** (Gate 2) | fresh subagent | the diff + `Guide.adoc`'s TOC and the specific sections covering changed areas (orchestrator extracts these, so the subagent does not grep the 2400-line guide blindly) | the `CHANGELOG.md` entry **and** the `Guide.adoc` edits (or a written "no guide change needed" justification) |
 | **Proposal** (Gate 4) | may reuse the Gate 2 agent (same "describe the change" framing) | the diff + CHANGELOG entry | branch/commit/PR draft |
@@ -54,17 +54,52 @@ playbook, and its one job. It must not see another concern's reasoning.
 Rules:
 - The orchestrator **never performs a concern itself** — it only spawns
   subagents and collates their returned results. This keeps each judgment
-  uncontaminated and the orchestrator's context small. **The sole
-  exception is Gate 1.5's credential pause**: subagents cannot prompt the
-  user for secrets, so the orchestrator (and only it) runs that
-  find-or-ask interaction, then hands the live-run result back into the
-  Gate 1 concern. It still never *judges* — it relays.
+  uncontaminated and the orchestrator's context small. **Two carve-outs**,
+  both relaying not judging — the orchestrator does what a subagent
+  structurally cannot do safely, then hands the result down:
+  - **Gate 1.5's credential pause**: subagents cannot prompt the user for
+    secrets, so the orchestrator (and only it) runs that find-or-ask
+    interaction, then hands the live-run result back into Gate 1.
+  - **The test baseline** (see "Establishing the test baseline" below):
+    a subagent must never mutate the shared working tree (stash/checkout)
+    to get a baseline, especially while other gates edit it in parallel.
+    The orchestrator establishes the baseline upfront in an isolated
+    worktree and hands the numbers to Gate 1, which only compares. It
+    still never *judges* — it relays a fact.
 - Gate 3's reviewer being a fresh, non-authoring subagent is **mandatory**,
   not optional. A self-review by the code's author is an automatic Gate 3
   FAIL regardless of its conclusion.
 - The collator transcribes results; it does not re-judge or soften them.
 - If two concerns disagree on a fact (e.g. coverage vs. review), surface
   both in the notes — do not reconcile silently.
+
+### Establishing the test baseline (orchestrator, upfront)
+
+A red `bb test` should not block the branch if `main` was already red — so
+Gate 1 needs a baseline. But "is the merge-base green?" is a fixed
+environmental fact, knowable *before any gate runs* and independent of
+anything Gate 1 produces. The orchestrator establishes it **once, upfront,
+in an isolated worktree** — never by mutating the live tree, and never
+inside a subagent (a stash/checkout there races against Gate 2's
+CHANGELOG/`Guide.adoc` edits on the same shared tree, and orphans stashes).
+
+Right after establishing scope, before spawning any gate:
+
+```
+git worktree add --detach /tmp/escapement-check-baseline <merge-base>
+( cd /tmp/escapement-check-baseline && bb test ; bb sanity )   # capture numbers
+git worktree remove --force /tmp/escapement-check-baseline
+```
+
+(`<merge-base>` = `git merge-base HEAD main`. A worktree shares the object
+store but has its own working dir + index, so the live tree is untouched —
+nothing to stash. Run it serially before spawning gates so two concurrent
+`bb test` runs don't collide on `.escapement/` transcripts or REPL ports.)
+
+Record the baseline `bb test` / `bb sanity` result and hand it to the
+Gate 1 subagent as data. If the baseline cannot be built (e.g. worktree
+fails), say so and let Gate 1 fall back to comparing against a plain
+description of `main`'s known state — but it still must not stash/checkout.
 
 ---
 
@@ -75,12 +110,18 @@ Rules:
    tight cluster of related private helpers, not per-file (hides gaps) and
    not per-trivial-defn (noise).
 2. Run **`bb test`** and **`bb sanity`**. Capture the numeric summary.
-3. **If the suite fails or won't load**, attribute it before judging:
-   `git stash` (or check out clean `HEAD`/`main`) and re-run. If it fails
-   *identically* on the untouched baseline, the failure is **pre-existing
-   and branch-unrelated** — record the proof (file:line, both runs) and do
-   not count it against the branch. If the branch introduces or worsens any
-   failure, Gate 1 FAILs.
+3. **If the suite fails or won't load**, attribute it before judging by
+   comparing against the **baseline result the orchestrator supplied**
+   (established upfront in an isolated worktree — see "Establishing the
+   test baseline"). If a failure is present *identically* in the baseline,
+   it is **pre-existing and branch-unrelated** — record the proof (file:line,
+   both runs: your current-tree run and the supplied baseline) and do not
+   count it against the branch. If the branch introduces or worsens any
+   failure, Gate 1 FAILs. **Do not `git stash`, `git checkout`, reset, or
+   otherwise mutate the working tree** — you run read-only against the
+   current tree; baseline comparison is data handed to you, not something
+   you reproduce by switching the tree. If no baseline was supplied, say so
+   and judge against `main`'s described state, still without mutating the tree.
 4. Build the table. Each changed unit gets exactly one status:
 
    | Changed unit | Test file / deftest | Status |
