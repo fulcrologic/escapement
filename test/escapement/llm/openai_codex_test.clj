@@ -5,7 +5,8 @@
     [escapement.llm.openai-codex.auth :as auth]
     [escapement.llm.openai-codex.http :as http]
     [escapement.llm.protocol :as proto]
-    [fulcro-spec.core :refer [=> assertions specification when-mocking!]]))
+    [fulcro-spec.core :refer [=> assertions specification when-mocking!]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Sample data
@@ -41,7 +42,7 @@
     (http/post-responses-stream! _) => stub-stream-result
 
     (let [backend  (codex/new-backend {:default-model "gpt-5.1-codex"})
-          response (proto/send-turn backend valid-request)]
+          response (p/await! (proto/send-turn backend valid-request))]
       (assertions
         "response has :end_turn stop-reason"
         (:stop-reason response) => :end_turn
@@ -58,7 +59,7 @@
     (assertions
       "throws ex-info for an invalid request (missing :messages)"
       (try
-        (proto/send-turn backend {:model "gpt-5.1"})        ; missing :messages
+        (p/await! (proto/send-turn backend {:model "gpt-5.1"}))        ; missing :messages
         nil
         (catch clojure.lang.ExceptionInfo e
           (some? (:errors (ex-data e))))) => true)))
@@ -80,7 +81,7 @@
                                              stub-stream-result))
 
       (let [backend  (codex/new-backend)
-            response (proto/send-turn backend valid-request)]
+            response (p/await! (proto/send-turn backend valid-request))]
         (assertions
           "eventually returns a valid response after retry"
           (:stop-reason response) => :end_turn
@@ -97,7 +98,7 @@
       (assertions
         "throws ex-info with status 429"
         (try
-          (proto/send-turn backend valid-request)
+          (p/await! (proto/send-turn backend valid-request))
           nil
           (catch clojure.lang.ExceptionInfo e
             (:status (ex-data e)))) => 429))))

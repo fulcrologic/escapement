@@ -5,7 +5,8 @@
 
    Matchers may be:
 
-   - A `java.util.regex.Pattern` — matched against the model string with `re-find`.
+   - A regex pattern (`java.util.regex.Pattern` on CLJ, `js/RegExp` on CLJS) —
+     matched against the model string with `re-find`.
    - A set of strings — exact membership.
    - A function `(fn [model-string] boolean)`.
 
@@ -33,7 +34,9 @@
 (defn- match?
   [matcher ^String model]
   (cond
-    (instance? java.util.regex.Pattern matcher) (boolean (re-find matcher model))
+    #?(:clj  (instance? java.util.regex.Pattern matcher)
+       :cljs (instance? js/RegExp matcher))
+    (boolean (re-find matcher model))
     (set? matcher) (contains? matcher model)
     (fn? matcher) (boolean (matcher model))
     :else false))

@@ -65,6 +65,12 @@ their replies, and continue — without `<invoke>` or core.async.
   with `:allowed-events []` and parse plain-text replies, so it runs
   end-to-end against llama3.2:3b on ollama. The default run command in
   its docstring now targets ollama instead of ZAI/GLM-4.6.
+- `runner/run!` no longer declares a run `:done` while a delayed `send`
+  (e.g. a safety-stop timer) is still queued with a future delivery time.
+  When there are no live invocations but the event queue has pending
+  events, it sleeps the quiescent interval and keeps pumping instead of
+  losing the timer — this is planned idle, not a wedge, so the
+  frozen-config counter is not bumped.
 
 ### Notes
 

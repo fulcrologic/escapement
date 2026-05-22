@@ -27,7 +27,7 @@
    (overriding this priority order from the CLI/a chart) is intentionally
    out of scope here for now — this namespace only expresses the standing
    priority list. That one-off override is a later piece."
-  (:require [escapement.config :as config]
+  (:require #?(:clj [escapement.config :as config])
             [escapement.llm.catalog :as catalog]))
 
 (def default-preferences
@@ -73,7 +73,9 @@
    falling back to `default-preferences` when unset. One-arg: same, but
    against an already-loaded config map (no disk read — handy for tests)."
   ([]
-   (preferences (config/load-config)))
+   #?(:clj  (preferences (config/load-config))
+      :cljs (throw (ex-info "(preferences) zero-arg requires CLJ disk config loading; pass a config map"
+                     {:reason :cljs-no-disk-config}))))
   ([cfg]
    (let [raw (from-config cfg)]
      (if (some? raw)

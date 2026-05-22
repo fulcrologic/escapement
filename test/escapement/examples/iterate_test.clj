@@ -13,14 +13,16 @@
     [escapement.test-support :as ts]
     [escapement.tools.builtin :as builtin]
     [escapement.tools.protocol :as tp]
-    [fulcro-spec.core :refer [=> assertions specification]]))
+    [fulcro-spec.core :refer [=> assertions specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 (defrecord MockBackend [responses call-log]
   llm/LLMBackend
   (send-turn [_ request]
-    (swap! call-log conj request)
-    (or (ts/pop-first! responses)
-      (throw (ex-info "mock out of canned responses" {})))))
+    (p/do!
+      (swap! call-log conj request)
+      (or (ts/pop-first! responses)
+        (throw (ex-info "mock out of canned responses" {}))))))
 
 (defn- mock-backend [responses]
   (->MockBackend (ts/queue responses) (atom [])))

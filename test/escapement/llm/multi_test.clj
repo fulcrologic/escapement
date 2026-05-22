@@ -2,34 +2,38 @@
   (:require
     [escapement.llm.multi :as multi]
     [escapement.llm.protocol :as proto]
-    [fulcro-spec.core :refer [=> assertions component specification]]))
+    [fulcro-spec.core :refer [=> assertions component specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 (defrecord StubBackend [tag]
   proto/LLMBackend
   (send-turn [_ request]
-    {:stop-reason      :end_turn
-     :content          [{:type :text :text (str "from-" (name tag))}]
-     :usage            {:input-tokens 1 :output-tokens 1}
-     :model            (:model request)
-     :backend-metadata {:tag tag}}))
+    (p/do!
+      {:stop-reason      :end_turn
+       :content          [{:type :text :text (str "from-" (name tag))}]
+       :usage            {:input-tokens 1 :output-tokens 1}
+       :model            (:model request)
+       :backend-metadata {:tag tag}})))
 
 (defrecord StreamingStubBackend [tag deltas]
   proto/LLMBackend
   (send-turn [_ request]
-    {:stop-reason      :end_turn
-     :content          [{:type :text :text (apply str deltas)}]
-     :usage            {:input-tokens 1 :output-tokens 1}
-     :model            (:model request)
-     :backend-metadata {:tag tag}})
+    (p/do!
+      {:stop-reason      :end_turn
+       :content          [{:type :text :text (apply str deltas)}]
+       :usage            {:input-tokens 1 :output-tokens 1}
+       :model            (:model request)
+       :backend-metadata {:tag tag}}))
   proto/StreamingLLMBackend
   (stream-turn [_ request on-delta]
-    (doseq [d deltas]
-      (on-delta {:type :text-delta :text d}))
-    {:stop-reason      :end_turn
-     :content          [{:type :text :text (apply str deltas)}]
-     :usage            {:input-tokens 1 :output-tokens 1}
-     :model            (:model request)
-     :backend-metadata {:tag tag :streamed true}}))
+    (p/do!
+      (doseq [d deltas]
+        (on-delta {:type :text-delta :text d}))
+      {:stop-reason      :end_turn
+       :content          [{:type :text :text (apply str deltas)}]
+       :usage            {:input-tokens 1 :output-tokens 1}
+       :model            (:model request)
+       :backend-metadata {:tag tag :streamed true}})))
 
 (def anth (->StubBackend :anthropic))
 (def codex (->StubBackend :codex))
@@ -42,11 +46,11 @@
               {:routes [[#"^claude-" anth] [#"^gpt-5" codex]]})]
       (assertions
         "claude-* routes to anthropic stub"
-        (-> (proto/send-turn b {:model "claude-sonnet-4-6" :messages []})
+        (-> (p/await! (proto/send-turn b {:model "claude-sonnet-4-6" :messages []}))
           :backend-metadata :tag) => :anthropic
 
         "gpt-5* routes to codex stub"
-        (-> (proto/send-turn b {:model "gpt-5.2-codex" :messages []})
+        (-> (p/await! (proto/send-turn b {:model "gpt-5.2-codex" :messages []}))
           :backend-metadata :tag) => :codex)))
 
   (component "set matcher (exact membership)"
@@ -55,11 +59,11 @@
                :default-backend fallback})]
       (assertions
         "membership routes match"
-        (-> (proto/send-turn b {:model "glm-4.6" :messages []})
+        (-> (p/await! (proto/send-turn b {:model "glm-4.6" :messages []}))
           :backend-metadata :tag) => :anthropic
 
         "non-member falls through to default"
-        (-> (proto/send-turn b {:model "haiku" :messages []})
+        (-> (p/await! (proto/send-turn b {:model "haiku" :messages []}))
           :backend-metadata :tag) => :fallback)))
 
   (component "function matcher"
@@ -68,20 +72,20 @@
                :default-backend codex})]
       (assertions
         "fn returns truthy → route taken"
-        (-> (proto/send-turn b {:model "opus-x" :messages []})
+        (-> (p/await! (proto/send-turn b {:model "opus-x" :messages []}))
           :backend-metadata :tag) => :anthropic
 
         "fn returns false → default"
-        (-> (proto/send-turn b {:model "other" :messages []})
+        (-> (p/await! (proto/send-turn b {:model "other" :messages []}))
           :backend-metadata :tag) => :codex)))
 
   (component "no match + no default throws"
     (let [b (multi/new-backend {:routes [[#"^claude-" anth]]})]
       (assertions
         "throws ex-info with model in data"
-        (try (proto/send-turn b {:model "gpt-5" :messages []})
+        (try (p/await! (proto/send-turn b {:model "gpt-5" :messages []}))
              :no-throw
-             (catch clojure.lang.ExceptionInfo e
+             (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) e
                (:model (ex-data e)))) => "gpt-5")))
 
   (component "nil model uses default"
@@ -90,7 +94,7 @@
                :default-backend fallback})]
       (assertions
         "missing :model falls through to default"
-        (-> (proto/send-turn b {:messages []})
+        (-> (p/await! (proto/send-turn b {:messages []}))
           :backend-metadata :tag) => :fallback)))
 
   (component "first matching route wins"
@@ -99,7 +103,7 @@
                         [#"^gpt-" codex]]})]
       (assertions
         "gpt-5-mini matches the -mini rule before gpt-* rule"
-        (-> (proto/send-turn b {:model "gpt-5-mini" :messages []})
+        (-> (p/await! (proto/send-turn b {:model "gpt-5-mini" :messages []}))
           :backend-metadata :tag) => :anthropic))))
 
 (specification "MultiBackend streaming forwarding"
@@ -130,9 +134,9 @@
     (let [b    (multi/new-backend
                  {:routes [[#"^stream-" streamer]]})
           seen (atom [])
-          resp (proto/stream-turn
-                 b {:model "stream-x" :messages []}
-                 #(swap! seen conj %))]
+          resp (p/await! (proto/stream-turn
+                           b {:model "stream-x" :messages []}
+                           #(swap! seen conj %)))]
       (assertions
         "deltas forwarded unchanged, in order"
         @seen => [{:type :text-delta :text "He"}
@@ -152,9 +156,9 @@
     (let [b    (multi/new-backend
                  {:routes [[#"^stream-" streamer]]})
           seen (atom [])
-          resp (proto/send-turn*
-                 b {:model "stream-x" :messages []}
-                 #(swap! seen conj %))]
+          resp (p/await! (proto/send-turn*
+                           b {:model "stream-x" :messages []}
+                           #(swap! seen conj %)))]
       (assertions
         "capability-aware entry point streams via the multi"
         (mapv :text @seen) => ["He" "llo" "!"]
@@ -167,5 +171,5 @@
               {:routes [[#"^stream-" streamer]]})]
       (assertions
         "send-turn still returns the buffered Response"
-        (-> (proto/send-turn b {:model "stream-x" :messages []})
+        (-> (p/await! (proto/send-turn b {:model "stream-x" :messages []}))
           :backend-metadata :tag) => :streamer))))

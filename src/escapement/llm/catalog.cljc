@@ -27,9 +27,20 @@
    (which takes ratings explicitly) — callers never name it directly."
   (:require
     [clojure.string :as str]
-    [escapement.config :as config]
+    #?(:clj [escapement.config :as config])
     [escapement.llm.catalog-source :as src]
     [escapement.llm.ratings :as ratings]))
+
+(defn- deep-merge
+  "Inlined copy of `escapement.config/deep-merge` so catalog stays CLJC.
+   Recursively merges maps; non-map values from later args replace earlier ones."
+  [& maps]
+  (let [maps (remove nil? maps)]
+    (cond
+      (empty? maps) nil
+      (= 1 (count maps)) (first maps)
+      (every? map? maps) (apply merge-with deep-merge maps)
+      :else (last maps))))
 
 ;; =============================================================================
 ;; Layer 2 — small local fact overlay (deep-merged over the dump; local wins)
@@ -69,15 +80,19 @@
 
 (def models
   "Canonical model id → intrinsic fact map (objective only; subjective
-   `:intelligence` is overlaid by `info`, not stored here)."
+   `:intelligence` is overlaid by `info`, not stored here). Loaded from
+   the models.dev dump and deep-merged with the local overlay on every
+   host; on CLJS the dump is baked in at compile time via
+   `escapement.llm.catalog-macros/embedded-catalog`."
   (let [{:keys [models]} (src/load-catalog)]
-    (config/deep-merge models local-models)))
+    (deep-merge models local-models)))
 
 (def providers
   "Provider keyword → `{:display :auth :env :api :models}`. Same id may
-   appear under several providers with different pricing."
+   appear under several providers with different pricing. Loaded from the
+   models.dev dump on every host."
   (let [{:keys [providers]} (src/load-catalog)]
-    (config/deep-merge providers local-providers)))
+    (deep-merge providers local-providers)))
 
 (defn- prefix-lookup
   "Exact key match in `table`, else longest-prefix match so dated ids like
@@ -202,7 +217,9 @@
    from the merged `.escapement.edn` on each call (no process global, no
    `def`-of-`delay`). New callers thread ratings explicitly via 3-arg."
   ([model policy]
-   (satisfies-policy? model policy (ratings/ratings (config/load-config))))
+   (satisfies-policy? model policy
+     #?(:clj  (ratings/ratings (config/load-config))
+        :cljs {})))
   ([model policy ratings]
    (let [{:keys [require min max]} policy]
      (if (and (empty? require) (empty? min) (empty? max))

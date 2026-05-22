@@ -11,7 +11,8 @@
     [clojure.edn :as edn]
     [clojure.java.io :as io]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
-    [escapement.llm.protocol :as proto])
+    [escapement.llm.protocol :as proto]
+    [com.fulcrologic.statecharts.promise :as p])
   (:import
     (java.nio.file CopyOption Files StandardCopyOption)
     (java.security MessageDigest)))
@@ -59,10 +60,11 @@
     (let [k    (cache-key request)
           file (io/file dir (str k ".edn"))]
       (if-let [hit (read-edn-file file)]
-        hit
-        (let [response (proto/send-turn inner request)]
-          (atomic-write-edn! file response)
-          response)))))
+        (p/resolved hit)
+        (p/then (proto/send-turn inner request)
+          (fn [response]
+            (atomic-write-edn! file response)
+            response))))))
 
 (>defn caching-backend
   "Wrap `inner` (any `LLMBackend`) with an on-disk replay cache rooted at `cache-dir`.

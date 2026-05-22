@@ -21,11 +21,16 @@
    Nothing subjective lives here (no `:intelligence`). Opinion is layered
    on separately by `escapement.llm.ratings`.
 
-   Babashka-compatible: `clojure.java.io` + `cheshire`."
+   Pure transformation (`build`) is CLJC. On CLJ/bb, `load-catalog` reads
+   `models-api.json` from the classpath at runtime. On CLJS, the same
+   data is baked in at compile time by the `embedded-catalog` macro
+   (see `escapement.llm.catalog-macros`), so the catalog is available
+   at runtime with no disk I/O and no cheshire dep in the JS output."
   (:require
-    [cheshire.core :as json]
-    [clojure.java.io :as io]
-    [clojure.string :as str]))
+    #?@(:clj  [[cheshire.core :as json]
+               [clojure.java.io :as io]])
+    [clojure.string :as str]
+    #?(:cljs [escapement.llm.catalog-macros :refer-macros [embedded-catalog]])))
 
 (def ^:private resource-path "escapement/llm/models-api.json")
 
@@ -122,10 +127,15 @@
     allowlist))
 
 (def ^:private cache
-  (delay (build (json/parse-string (slurp (io/resource resource-path))))))
+  (delay
+    (build
+      #?(:clj  (json/parse-string (slurp (io/resource resource-path)))
+         :cljs (embedded-catalog)))))
 
 (defn load-catalog
   "Normalized objective catalog `{:models :providers}` from the bundled
-   dump. Parsed once and cached."
+   dump. Parsed once and cached. On CLJ/bb the dump is read from the
+   classpath at runtime; on CLJS the same data is baked in at compile
+   time (see `escapement.llm.catalog-macros`)."
   []
   @cache)

@@ -15,7 +15,8 @@
     [escapement.llm.protocol :as llm]
     [escapement.test-support :as ts]
     [escapement.tools.protocol :as tp]
-    [fulcro-spec.core :refer [=> assertions specification]]))
+    [fulcro-spec.core :refer [=> assertions specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 ;; ---------------------------------------------------------------------------
 ;; Tiny mock LLMBackend (same shape as the llm-conversation tests).
@@ -24,11 +25,12 @@
 (defrecord MockBackend [responses call-log]
   llm/LLMBackend
   (send-turn [_ request]
-    (swap! call-log conj request)
-    (let [r (ts/pop-first! responses)]
-      (when (nil? r)
-        (throw (ex-info "Mock backend out of canned responses" {:n-calls (count @call-log)})))
-      r)))
+    (p/do!
+      (swap! call-log conj request)
+      (let [r (ts/pop-first! responses)]
+        (when (nil? r)
+          (throw (ex-info "Mock backend out of canned responses" {:n-calls (count @call-log)})))
+        r))))
 
 (defn- mock-backend [responses]
   (->MockBackend (ts/queue responses) (atom [])))

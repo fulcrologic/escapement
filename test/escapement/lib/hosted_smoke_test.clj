@@ -32,7 +32,8 @@
     [escapement.llm.multi :as multi]
     [escapement.llm.protocol :as proto]
     [escapement.tools.protocol :as tp]
-    [fulcro-spec.core :refer [=> assertions specification]]))
+    [fulcro-spec.core :refer [=> assertions specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 ;; ---------------------------------------------------------------------------
 ;; Stub STREAMING backend (task-001/002 pattern). Each delta carries the
@@ -62,13 +63,14 @@
 
 (defrecord OneShotStreamStub [turns]
   proto/LLMBackend
-  (send-turn [_ _] end-turn-response)
+  (send-turn [_ _] (p/do! end-turn-response))
   proto/StreamingLLMBackend
   (stream-turn [_ _ on-delta]
-    (if (zero? (first (swap-vals! turns inc)))
-      (do (doseq [d stub-deltas] (on-delta d))
-          first-turn-response)
-      end-turn-response)))
+    (p/do!
+      (if (zero? (first (swap-vals! turns inc)))
+        (do (doseq [d stub-deltas] (on-delta d))
+            first-turn-response)
+        end-turn-response))))
 
 (defn- new-streaming-stub []
   (->OneShotStreamStub (atom 0)))

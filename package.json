@@ -1,0 +1,9 @@
+{
+  "name": "escapement-cljs-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "shadow-cljs harness used solely by `bb cljs-test` to compile and run the .cljc test files under Node. Escapement itself does not ship JS.",
+  "devDependencies": {
+    "shadow-cljs": "^3.3.4"
+  }
+}

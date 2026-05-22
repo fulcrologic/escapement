@@ -13,7 +13,7 @@
   IMPORTANT: `tell-llm` must execute inside the state that owns the binding (or a
   descendant thereof); the invocation only exists while that state is active."
   (:require
-    [clojure.java.io :as io]
+    #?(:clj [clojure.java.io :as io])
     [clojure.string :as str]
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.data-model.operations :as ops]
@@ -22,9 +22,10 @@
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.chart.service :as service]
     [escapement.invocation.llm-conversation :as llmc])
-  (:import
-    (java.nio.file Files Paths StandardCopyOption)
-    (java.nio.file.attribute FileAttribute)))
+  #?(:clj
+     (:import
+       (java.nio.file Files Paths StandardCopyOption)
+       (java.nio.file.attribute FileAttribute))))
 
 ;; ---------------------------------------------------------------------------
 ;; Region-tool authoring sugar (re-exported from escapement.chart.service)
@@ -316,30 +317,43 @@
   (str (session-dir env) "/artifacts/" name))
 
 (defn- atomic-write!
-  "Write `s` to `path`, durably and atomically. Creates parent dirs."
+  "Write `s` to `path`, durably and atomically. Creates parent dirs.
+
+   CLJ/bb only: requires a real filesystem. CLJS hosts that want artifact
+   semantics must supply their own storage layer (no protocol exists yet)."
   [^String path ^String s]
-  (let [target (Paths/get path (into-array String []))
-        parent (.getParent target)
-        _      (when parent
-                 (Files/createDirectories parent (into-array FileAttribute [])))
-        tmp    (Files/createTempFile parent ".artifact-" ".tmp"
-                 (into-array FileAttribute []))]
-    (Files/writeString tmp s (into-array java.nio.file.OpenOption []))
-    (Files/move tmp target
-      (into-array java.nio.file.CopyOption
-        [StandardCopyOption/ATOMIC_MOVE
-         StandardCopyOption/REPLACE_EXISTING]))))
+  #?(:clj
+     (let [target (Paths/get path (into-array String []))
+           parent (.getParent target)
+           _      (when parent
+                    (Files/createDirectories parent (into-array FileAttribute [])))
+           tmp    (Files/createTempFile parent ".artifact-" ".tmp"
+                    (into-array FileAttribute []))]
+       (Files/writeString tmp s (into-array java.nio.file.OpenOption []))
+       (Files/move tmp target
+         (into-array java.nio.file.CopyOption
+           [StandardCopyOption/ATOMIC_MOVE
+            StandardCopyOption/REPLACE_EXISTING])))
+     :cljs
+     (throw (ex-info "atomic-write! is CLJ/bb only — no filesystem in CLJS host"
+              {:reason :no-fs :path path}))))
 
 (defn- read-artifact!
   "Read the artifact named `name` in `env`'s session. Throws ex-info with
-   {:reason :missing-artifact :name name :path path} if the file isn't there."
+   {:reason :missing-artifact :name name :path path} if the file isn't there.
+
+   CLJ/bb only (see [[atomic-write!]])."
   [env name]
-  (let [path (artifact-path env name)
-        f    (io/file path)]
-    (when-not (.exists f)
-      (throw (ex-info (str "Missing artifact: " name)
-               {:reason :missing-artifact :name name :path path})))
-    (slurp f)))
+  #?(:clj
+     (let [path (artifact-path env name)
+           f    (io/file path)]
+       (when-not (.exists f)
+         (throw (ex-info (str "Missing artifact: " name)
+                  {:reason :missing-artifact :name name :path path})))
+       (slurp f))
+     :cljs
+     (throw (ex-info "read-artifact! is CLJ/bb only — no filesystem in CLJS host"
+              {:reason :no-fs :name name}))))
 
 (defn capture-llm-output
   "Returns a `script` element. When executed inside a transition on

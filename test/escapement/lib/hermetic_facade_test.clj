@@ -20,7 +20,8 @@
     [escapement.lib :as lib]
     [escapement.llm.protocol :as proto]
     [escapement.tools.protocol :as tp]
-    [fulcro-spec.core :refer [=> assertions component specification]]))
+    [fulcro-spec.core :refer [=> assertions component specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 (defn- event-tool
   "The Anthropic-tool name the llm-conversation processor expects for a chart
@@ -41,18 +42,19 @@
     ;; A `:tool_use` makes the worker loop (`:continue`); a subsequent
     ;; `:end_turn` parks it (`:awaiting-user`) so it stops spinning while the
     ;; chart processes the raised event and cancels the invocation.
-    (if (zero? (first (swap-vals! turns inc)))
-      (do
-        (swap! seen conj (:model request))
-        {:stop-reason :tool_use
-         :content     [{:type :tool_use :id "u1"
-                        :name (event-tool done-event) :input {}}]
+    (p/do!
+      (if (zero? (first (swap-vals! turns inc)))
+        (do
+          (swap! seen conj (:model request))
+          {:stop-reason :tool_use
+           :content     [{:type :tool_use :id "u1"
+                          :name (event-tool done-event) :input {}}]
+           :usage       {:input-tokens 1 :output-tokens 1}
+           :model       (or (:model request) "mock")})
+        {:stop-reason :end_turn
+         :content     [{:type :text :text "done"}]
          :usage       {:input-tokens 1 :output-tokens 1}
-         :model       (or (:model request) "mock")})
-      {:stop-reason :end_turn
-       :content     [{:type :text :text "done"}]
-       :usage       {:input-tokens 1 :output-tokens 1}
-       :model       (or (:model request) "mock")})))
+         :model       (or (:model request) "mock")}))))
 
 (defn- new-stub [done-event] (->ModelRecordingStub (atom []) done-event (atom 0)))
 
@@ -245,25 +247,26 @@
         node   (atom 0)
         stub   (reify proto/LLMBackend
                  (send-turn [_ request]
-                   (let [n (count @seen)]
-                     (if (or (zero? n)
-                           (not= (peek @seen) (:model request)))
-                       ;; first turn of a (new) node
-                       (do
-                         (swap! seen conj (:model request))
-                         (let [k (swap! node inc)]
-                           {:stop-reason :tool_use
-                            :content     [{:type  :tool_use :id (str "u" k)
-                                           :name  (if (= 1 k) (event-tool :refactor-done)
-                                                              (event-tool :review-done))
-                                           :input {}}]
-                            :usage       {:input-tokens 1 :output-tokens 1}
-                            :model       (:model request)}))
-                       ;; subsequent turn of the same node — park the worker
-                       {:stop-reason :end_turn
-                        :content     [{:type :text :text "done"}]
-                        :usage       {:input-tokens 1 :output-tokens 1}
-                        :model       (:model request)}))))
+                   (p/do!
+                     (let [n (count @seen)]
+                       (if (or (zero? n)
+                             (not= (peek @seen) (:model request)))
+                         ;; first turn of a (new) node
+                         (do
+                           (swap! seen conj (:model request))
+                           (let [k (swap! node inc)]
+                             {:stop-reason :tool_use
+                              :content     [{:type  :tool_use :id (str "u" k)
+                                             :name  (if (= 1 k) (event-tool :refactor-done)
+                                                                (event-tool :review-done))
+                                             :input {}}]
+                              :usage       {:input-tokens 1 :output-tokens 1}
+                              :model       (:model request)}))
+                         ;; subsequent turn of the same node — park the worker
+                         {:stop-reason :end_turn
+                          :content     [{:type :text :text "done"}]
+                          :usage       {:input-tokens 1 :output-tokens 1}
+                          :model       (:model request)})))))
         agent
                (chart/statechart
                  {:initial :refactor}

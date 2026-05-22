@@ -33,7 +33,8 @@
     [escapement.tools.protocol :as tp]
     [malli.core :as m]
     [malli.error :as me]
-    [malli.transform :as mt])
+    [malli.transform :as mt]
+    [com.fulcrologic.statecharts.promise :as p])
   (:import
     (java.util.concurrent ArrayBlockingQueue TimeUnit)))
 
@@ -902,7 +903,7 @@
                 ;; through to model fallback / :exhausted.
                 response (loop [retry 0]
                            (let [t0  (now-ms)
-                                 r   (try (let [resp (llm/send-turn* backend request on-delta)]
+                                 r   (try (let [resp (p/await! (llm/send-turn* backend request on-delta))]
                                             (assoc resp :elapsed-ms (- (now-ms) t0)))
                                           (catch Throwable t {:_throw t}))
                                  t   (:_throw r)

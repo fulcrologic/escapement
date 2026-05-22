@@ -1,5 +1,5 @@
 {:paths    ["src" "bb_test" "demos"]
- :deps     {com.fulcrologic/statecharts {:mvn/version "1.4.0-RC13"}
+ :deps     {com.fulcrologic/statecharts {:mvn/version "1.4.0-RC15"}
             com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
             metosin/malli               {:mvn/version "0.16.4"}
             cheshire/cheshire           {:mvn/version "5.13.0"}}
@@ -12,10 +12,18 @@
                                           (deref (promise)))}
             sanity {:doc  "Run the bb sanity script for the engine."
                     :task (shell "bb bb_test/sanity.clj")}
-            test   {:doc         "Run all tests under bb (test/**/*_test.clj)."
+            test   {:doc         "Run all tests under bb (test/**/*_test.{clj,cljc})."
                     :extra-paths ["test"]
                     :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
                     :task        (exec 'escapement.test.runner/run!)}
+            cljs-test
+            {:doc  "Compile + run .cljc tests under Node via shadow-cljs."
+             :task (do
+                     (when-not (.exists (clojure.java.io/file "node_modules"))
+                       (println "[cljs-test] installing npm deps...")
+                       (shell "npm install --no-fund --no-audit"))
+                     (shell "npx shadow-cljs compile node-test")
+                     (shell "node out/node-tests.js"))}
             test-demo-unit-test
             {:doc         "Run the unit_test demo's own tests (segment-composition pattern)."
              :extra-paths ["demos/unit_test/test"]

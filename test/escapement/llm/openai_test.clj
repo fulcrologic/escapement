@@ -6,7 +6,8 @@
     [escapement.llm.openai :as oai]
     [escapement.llm.protocol :as proto]
     [escapement.llm.types :as types]
-    [fulcro-spec.core :refer [=> assertions specification]])
+    [fulcro-spec.core :refer [=> assertions specification]]
+    [com.fulcrologic.statecharts.promise :as p])
   (:import (java.io BufferedReader StringReader)))
 
 (def sample-request
@@ -305,7 +306,7 @@
          {:status 200
           :body   (java.io.ByteArrayInputStream.
                     (.getBytes ^String (sse streamed-chunks) "UTF-8"))})]
-      (let [resp (proto/stream-turn b req #(swap! deltas conj %))]
+      (let [resp (p/await! (proto/stream-turn b req #(swap! deltas conj %)))]
         (assertions
           "deltas emitted during the stream"
           (mapv :text (filter #(= :text-delta (:type %)) @deltas))
@@ -318,7 +319,7 @@
         (assertions
           "send-turn* routes to streaming when on-delta present"
           (let [d2 (atom [])]
-            (proto/send-turn* b req #(swap! d2 conj %))
+            (p/await! (proto/send-turn* b req #(swap! d2 conj %)))
             (count @d2)) => 2)))))
 
 

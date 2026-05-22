@@ -1,9 +1,26 @@
 (ns escapement.llm.protocol-test
   (:require
-    [babashka.http-client :as http]
     [escapement.llm.api :as api]
+    [escapement.llm.http-transport :as ht]
     [escapement.llm.protocol :as proto]
-    [fulcro-spec.core :refer [=> assertions component specification]]))
+    [fulcro-spec.core :refer [=> assertions component specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
+
+(defn- response-transport
+  "Mock transport whose `request` always resolves with the supplied
+   `{:status :body}` map. `request-streaming` is not used by these tests."
+  [response-map]
+  (reify ht/HttpTransport
+    (request [_ _req] (p/resolved response-map))
+    (request-streaming [_ _req _on-line] (p/resolved response-map))))
+
+(defn- throwing-transport
+  "Mock transport whose `request` always rejects with the supplied
+   throwable."
+  [throwable]
+  (reify ht/HttpTransport
+    (request [_ _req] (p/rejected throwable))
+    (request-streaming [_ _req _on-line] (p/rejected throwable))))
 
 (specification "llm-error / error-category round-trip"
   (component "llm-error carries the category in ex-data"
@@ -45,35 +62,40 @@
 
 (specification "native api backend throws categorized errors on non-2xx"
   (component "429 → :rate-limited (preserves :status/:body/:url ex-data)"
-    (with-redefs [http/post (fn [_ _] {:status 429 :body "{\"type\":\"rate_limit_error\"}"})]
-      (let [backend (api/new-backend {:base-url      "http://test" :api-key "k"
-                                      :default-model "claude-x"})
-            t       (try (proto/send-turn backend
-                           {:messages [{:role    :user
-                                        :content [{:type :text :text "hi"}]}]})
-                         nil
-                         (catch Throwable e e))]
-        (assertions
-          "an error was thrown"
-          (some? t) => true
-          "it is categorized :rate-limited"
-          (proto/error-category t) => :rate-limited
-          "legacy message text preserved"
-          (ex-message t) => "API error: HTTP 429"
-          "legacy ex-data keys preserved"
-          (:status (ex-data t)) => 429
-          (:url (ex-data t)) => "http://test/v1/messages"))))
+    (let [backend (api/new-backend
+                    {:base-url       "http://test" :api-key "k"
+                     :default-model  "claude-x"
+                     :http-transport (response-transport
+                                       {:status 429
+                                        :body   "{\"type\":\"rate_limit_error\"}"})})
+          t       (try (p/await! (proto/send-turn backend
+                                    {:messages [{:role    :user
+                                                 :content [{:type :text :text "hi"}]}]}))
+                       nil
+                       (catch Throwable e e))]
+      (assertions
+        "an error was thrown"
+        (some? t) => true
+        "it is categorized :rate-limited"
+        (proto/error-category t) => :rate-limited
+        "legacy message text preserved"
+        (ex-message t) => "API error: HTTP 429"
+        "legacy ex-data keys preserved"
+        (:status (ex-data t)) => 429
+        (:url (ex-data t)) => "http://test/v1/messages")))
 
   (component "401 → :auth, 529 → :overloaded, 500 → :transport"
     (letfn [(cat-for [status body]
-              (with-redefs [http/post (fn [_ _] {:status status :body body})]
-                (let [backend (api/new-backend {:base-url      "http://t" :api-key "k"
-                                                :default-model "m"})]
-                  (proto/error-category
-                    (try (proto/send-turn backend
-                           {:messages [{:role    :user
-                                        :content [{:type :text :text "hi"}]}]})
-                         (catch Throwable e e))))))]
+              (let [backend (api/new-backend
+                              {:base-url       "http://t" :api-key "k"
+                               :default-model  "m"
+                               :http-transport (response-transport
+                                                 {:status status :body body})})]
+                (proto/error-category
+                  (try (p/await! (proto/send-turn backend
+                                   {:messages [{:role    :user
+                                                :content [{:type :text :text "hi"}]}]}))
+                       (catch Throwable e e)))))]
       (assertions
         "401 unauthorized"
         (cat-for 401 "{}") => :auth
@@ -90,15 +112,16 @@
         (cat-for 500 "boom") => :transport)))
 
   (component "a refused/failed connection is :transport (not :timeout)"
-    (let [cat (with-redefs [http/post (fn [_ _]
-                                        (throw (java.net.ConnectException. "refused")))]
-                (let [backend (api/new-backend {:base-url      "http://t" :api-key "k"
-                                                :default-model "m"})]
-                  (proto/error-category
-                    (try (proto/send-turn backend
-                           {:messages [{:role    :user
-                                        :content [{:type :text :text "hi"}]}]})
-                         (catch Throwable e e)))))]
+    (let [backend (api/new-backend
+                    {:base-url       "http://t" :api-key "k"
+                     :default-model  "m"
+                     :http-transport (throwing-transport
+                                       (java.net.ConnectException. "refused"))})
+          cat     (proto/error-category
+                    (try (p/await! (proto/send-turn backend
+                                     {:messages [{:role    :user
+                                                  :content [{:type :text :text "hi"}]}]}))
+                         (catch Throwable e e)))]
       (assertions
         "ConnectException categorized as :transport"
         cat => :transport))))

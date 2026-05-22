@@ -1,6 +1,6 @@
 {:paths ["src"]
  :deps  {org.clojure/clojure         {:mvn/version "1.12.0"}
-         com.fulcrologic/statecharts {:mvn/version "1.4.0-RC13"}
+         com.fulcrologic/statecharts {:mvn/version "1.4.0-RC15"}
          com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
          metosin/malli               {:mvn/version "0.16.4"}
          cheshire/cheshire           {:mvn/version "5.13.0"}
@@ -17,4 +17,14 @@
   ;; optional JVM REPL/IDE workflow; the project itself does not require it.
   :test  {:extra-paths ["test" "bb_test" "demos"]
           :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
-          :jvm-opts    ["-Dguardrails.enabled=true" "-Dguardrails.mode=:all"]}}}
+          :jvm-opts    ["-Dguardrails.enabled=true" "-Dguardrails.mode=:all"]}
+
+  ;; CLJS test build (shadow-cljs :node-test target).  Pulls the *.cljc
+  ;; tests under test/ and runs them under Node. Invoked via
+  ;; `bb cljs-test` (which calls `shadow-cljs compile node-test` then
+  ;; `node out/node-tests.js`).
+  :cljs-test
+  {:extra-paths ["test"]
+   :extra-deps  {org.clojure/clojurescript {:mvn/version "1.12.116"}
+                 thheller/shadow-cljs      {:mvn/version "3.3.4"}
+                 fulcrologic/fulcro-spec   {:mvn/version "3.2.9"}}}}}

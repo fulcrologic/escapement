@@ -16,7 +16,8 @@
     [escapement.llm.protocol :as llm]
     [escapement.test-support :as ts]
     [escapement.tools.builtin :as builtin]
-    [fulcro-spec.core :refer [=> assertions specification]]))
+    [fulcro-spec.core :refer [=> assertions specification]]
+    [com.fulcrologic.statecharts.promise :as p]))
 
 ;; ---------------------------------------------------------------------------
 ;; Discovery parser — pure, no shell-out
@@ -39,11 +40,12 @@
 (defrecord MockBackend [responses call-log]
   llm/LLMBackend
   (send-turn [_ request]
-    (swap! call-log conj request)
-    (let [r (ts/pop-first! responses)]
-      (when (nil? r)
-        (throw (ex-info "Mock backend out of canned responses" {})))
-      r)))
+    (p/do!
+      (swap! call-log conj request)
+      (let [r (ts/pop-first! responses)]
+        (when (nil? r)
+          (throw (ex-info "Mock backend out of canned responses" {})))
+        r))))
 
 (defn- mock-backend [responses]
   (->MockBackend (ts/queue responses) (atom [])))
