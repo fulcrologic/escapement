@@ -1,16 +1,19 @@
 (ns escapement.examples.haiku-tournament-dynamic
-  "TRUE dynamic-N haiku tournament — parent LLM picks N at runtime, then
-  spawns N sibling sessions via `escapement.engine.spawn/spawn-child!` and
-  routes their replies back. This chart contains NO `MAX-*`. The parent has one `:composing` state, one
-  `:judging-r1` state, and one `:judging-r2` state. Each `on-entry` spawns
-  child SESSIONS via `escapement.engine.spawn/spawn-child!`: `:composing`
-  spawns N poets, `:judging-r1` spawns M × N judge1 children (each judges
-  ONE poet's 3 haiku in isolation), `:judging-r2` spawns M judge2 children
-  (each ranks all finalists together). Each child runs a standalone
-  top-level chart (`poet-chart` / `judge1-chart` / `judge2-chart`) in its
-  own sid. Children `send!` their reply event to `:reply-to` (= parent sid).
-  The parent decrements a `:pending` counter on each reply and transitions
-  out when the counter hits zero.
+  "TRUE dynamic-N haiku tournament built on the multiplex invocation
+  processor (`com.fulcrologic.statecharts.invocation.multiplex`). The
+  parent LLM (planner) picks N and M at runtime; the chart then drives:
+
+    Phase 2 (composing)   — multiplex of N poet sub-charts.
+    Phase 3 (judging-r1)  — multiplex of M × N judge1 sub-charts (each
+                            judges one poet's 3 haiku).
+    Phase 5 (judging-r2)  — multiplex of M judge2 sub-charts (each ranks
+                            all finalists together).
+
+  Each child runs a standalone top-level chart (`poet-chart` /
+  `judge1-chart` / `judge2-chart`). Children call `mux/reply` to send
+  result events back to the grandparent; the multiplex's library-owned
+  aggregator fires `done.invoke.<phase>` when every child has reached
+  its `:reported` final.
 
   ## Plain-text I/O instead of tool calls
 
@@ -23,13 +26,12 @@
 
   So every child here drives its LLM with `:allowed-events []` (no tool
   defs at all) and transitions on `:llm.idle`, parsing the captured text
-  in a script. The host LLM already worked this way for the summary
-  artifact.
+  in a script.
 
   Requires the runner be invoked with `:multi-session? true`, which makes
-  the pump loop drain every session's queue (parent + every child) on each
-  iteration. The chart var carries `^:multi-session?` metadata so the CLI
-  picks this up automatically.
+  the pump loop drain every session's queue (parent + every child +
+  aggregator) on each iteration. The chart var carries `^:multi-session?`
+  metadata so the CLI picks this up automatically.
 
   Run:
     OLLAMA_API_KEY=dummy bb -m escapement.cli run \\
@@ -46,9 +48,11 @@
    [com.fulcrologic.statecharts.data-model.operations :as ops]
    [com.fulcrologic.statecharts.elements
     :refer [final on-entry script send state transition]]
+   [com.fulcrologic.statecharts.invocation.multiplex :refer [multiplex]]
+   [com.fulcrologic.statecharts.invocation.multiplex-options :as mo]
+   [com.fulcrologic.statecharts.invocation.multiplex-processor :as mux]
    [com.fulcrologic.statecharts.protocols :as sp]
-   [escapement.chart.helpers :as h]
-   [escapement.engine.spawn :as spawn]))
+   [escapement.chart.helpers :as h]))
 
 ;; True-hang backstop only. Clean conversation termination (`:llm.idle` /
 ;; `:error.llm`) is handled by explicit transitions in each child chart, so
@@ -73,22 +77,18 @@
 
 (declare format-haikus format-finalists)
 
-(defn- send-to!
-  [env target-sid event-kw payload]
-  (let [queue  (get env ::sc/event-queue)
-        my-sid (some-> env ::sc/vwmem deref ::sc/session-id)]
-    (when (and queue my-sid)
-      (sp/send! queue env
-        {:target            target-sid
-         :source-session-id my-sid
-         :event             event-kw
-         :data              payload}))))
-
 (defn- raise!
+  "Self-targeted event send, used for chart-internal transitions out of
+  on-entry scripts (e.g. routing decisions)."
   ([env event-kw] (raise! env event-kw {}))
   ([env event-kw payload]
-   (let [my-sid (some-> env ::sc/vwmem deref ::sc/session-id)]
-     (send-to! env my-sid event-kw payload))))
+   (let [queue  (get env ::sc/event-queue)
+         my-sid (some-> env ::sc/vwmem deref ::sc/session-id)]
+     (when (and queue my-sid)
+       (sp/send! queue env {:target            my-sid
+                            :source-session-id my-sid
+                            :event             event-kw
+                            :data              payload})))))
 
 (defn- captured-text
   "Pull the assistant text out of a `:llm.idle` event in a chart `script`'s
@@ -97,7 +97,8 @@
   (some-> (get-in data [:_event :data :text]) str/trim not-empty))
 
 (defn- from-id
-  "Pull the invokeid string of the conversation that fired this `:llm.idle`."
+  "Pull the invokeid string of the conversation that fired this `:llm.idle`.
+  This is the LLM conversation invokeid (unrelated to multiplex `mo/from`)."
   [data]
   (let [v (get-in data [:_event :data :from])]
     (cond
@@ -107,8 +108,7 @@
 
 (defn- parse-three-lines
   "Trim, drop blanks, take the first 3 non-blank lines and join with \\n.
-  Tolerates leading prose by greedy-stripping anything before the first
-  short-looking line, but in practice the prompt is strict enough that the
+  Tolerates leading prose; in practice the prompt is strict enough that the
   raw response is just the haiku."
   [text]
   (when text
@@ -261,14 +261,12 @@
 ;; CHILD: poet — 3 sequential single-haiku LLM calls.
 ;; Each `:haiku-N` state runs one llm-conversation with the poet system
 ;; prompt. On `:llm.idle` we capture the text, parse it down to 3 lines,
-;; accumulate into `:haikus`, then advance. The third state additionally
-;; sends `:poet-result` back to the tournament parent.
+;; accumulate into `:haikus`, then advance. The third step calls
+;; `mux/reply` to send the per-poet `:poet-result` event back to the
+;; tournament parent (the grandparent).
 ;; ---------------------------------------------------------------------------
 
 (defn- poet-step
-  "Builds one of the three sequential poet states. `n` is 1-based for the
-  invokeid; `next-id` is the state to transition to on success (or
-  `:reported` for the last step, which also fires the parent send)."
   [n next-id last?]
   (let [id    (keyword (str "haiku-" n))
         invk  (str "poet-" n)]
@@ -287,7 +285,6 @@
             (str "Theme: \"" (:theme data) "\". "
               "Write haiku #" n " of 3. Output only the three lines.")})})
 
-      ;; Success path: capture text, parse 3 lines, accumulate, advance.
       (transition {:event :llm.idle
                    :cond  (fn [_env data] (= invk (from-id data)))
                    :target next-id}
@@ -298,33 +295,30 @@
                          haikus (cond-> (or (:haikus data) [])
                                   haiku (conj haiku))]
                      (when (and last? (= 3 (count haikus)))
-                       (send-to! env (:reply-to data)
-                         :poet-result {:idx (:idx data) :haikus haikus}))
+                       (mux/reply env :poet-result
+                         {:idx (:idx data) :haikus haikus}))
                      [(ops/assign :haikus haikus)]))}))
 
-      ;; LLM errored — abstain and stop trying (no more sequential calls).
       (transition {:event :error.llm :target :reported}
         (script {:expr
                  (fn [env data]
-                   (send-to! env (:reply-to data)
-                     :poet-result
+                   (mux/reply env :poet-result
                      {:idx        (:idx data)
                       :abstained? true
                       :error      (get-in data [:_event :data])})
                    nil)}))
 
-      ;; True-hang backstop.
       (transition {:event :child/safety-stop :target :reported}
         (script {:expr
                  (fn [env data]
-                   (send-to! env (:reply-to data)
-                     :poet-result
+                   (mux/reply env :poet-result
                      {:idx (:idx data) :abstained? true :hang? true})
                    nil)})))))
 
 (def poet-chart
   (chart/statechart
-    {:initial :haiku-1}
+    {:initial :haiku-1
+     :name    "haiku-poet"}
     (poet-step 1 :haiku-2 false)
     (poet-step 2 :haiku-3 false)
     (poet-step 3 :reported true)
@@ -332,12 +326,12 @@
 
 ;; ---------------------------------------------------------------------------
 ;; CHILD: judge1 — single LLM call, pick 1-of-3 for ONE poet.
-;; Plain text reply: `<digit>\n<reason>`. Parsed in script.
 ;; ---------------------------------------------------------------------------
 
 (def judge1-chart
   (chart/statechart
-    {:initial :working}
+    {:initial :working
+     :name    "haiku-judge1"}
     (state {:id :working}
       (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms}))
       (h/llm-conversation
@@ -362,14 +356,12 @@
                          parsed (parse-pick text 3)]
                      (if parsed
                        (let [[idx0 reason] parsed]
-                         (send-to! env (:reply-to data)
-                           :judge1-result
+                         (mux/reply env :judge1-result
                            {:idx       (:idx data)
                             :poet-idx  (:poet-idx data)
                             :haiku-idx idx0
                             :reason    reason}))
-                       (send-to! env (:reply-to data)
-                         :judge1-result
+                       (mux/reply env :judge1-result
                          {:idx (:idx data) :poet-idx (:poet-idx data)
                           :abstained? true :raw text}))
                      nil))}))
@@ -377,8 +369,7 @@
       (transition {:event :error.llm :target :reported}
         (script {:expr
                  (fn [env data]
-                   (send-to! env (:reply-to data)
-                     :judge1-result
+                   (mux/reply env :judge1-result
                      {:idx (:idx data) :poet-idx (:poet-idx data)
                       :abstained? true
                       :error (get-in data [:_event :data])})
@@ -387,8 +378,7 @@
       (transition {:event :child/safety-stop :target :reported}
         (script {:expr
                  (fn [env data]
-                   (send-to! env (:reply-to data)
-                     :judge1-result
+                   (mux/reply env :judge1-result
                      {:idx (:idx data) :poet-idx (:poet-idx data)
                       :abstained? true :hang? true})
                    nil)})))
@@ -400,7 +390,8 @@
 
 (def judge2-chart
   (chart/statechart
-    {:initial :working}
+    {:initial :working
+     :name    "haiku-judge2"}
     (state {:id :working}
       (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms}))
       (h/llm-conversation
@@ -429,21 +420,18 @@
                          parsed (parse-pick text n)]
                      (if parsed
                        (let [[idx0 reason] parsed]
-                         (send-to! env (:reply-to data)
-                           :judge2-result
+                         (mux/reply env :judge2-result
                            {:idx          (:idx data)
                             :finalist_idx idx0
                             :reason       reason}))
-                       (send-to! env (:reply-to data)
-                         :judge2-result
+                       (mux/reply env :judge2-result
                          {:idx (:idx data) :abstained? true :raw text}))
                      nil))}))
 
       (transition {:event :error.llm :target :reported}
         (script {:expr
                  (fn [env data]
-                   (send-to! env (:reply-to data)
-                     :judge2-result
+                   (mux/reply env :judge2-result
                      {:idx (:idx data) :abstained? true
                       :error (get-in data [:_event :data])})
                    nil)}))
@@ -451,8 +439,7 @@
       (transition {:event :child/safety-stop :target :reported}
         (script {:expr
                  (fn [env data]
-                   (send-to! env (:reply-to data)
-                     :judge2-result
+                   (mux/reply env :judge2-result
                      {:idx (:idx data) :abstained? true :hang? true})
                    nil)})))
     (final {:id :reported})))
@@ -491,19 +478,26 @@
       {:tie leaders :votes top :standings (vec counts)})))
 
 ;; ---------------------------------------------------------------------------
-;; PARENT — planner uses plain text, then spawns N poets, then M×N judge1s,
-;; then M judge2s, then host writes the summary.
+;; Child chart registry keys
 ;; ---------------------------------------------------------------------------
 
-(defn- spawn-many!
-  [env n chart chart-id input-fn]
-  (let [parent (spawn/parent-sid env)]
-    (vec
-      (for [i (range n)]
-        (spawn/spawn-child! env
-          {:chart    chart
-           :chart-id chart-id
-           :input    (assoc (input-fn i) :reply-to parent)})))))
+(def ^:private poet-chart-id   ::poet)
+(def ^:private judge1-chart-id ::judge1)
+(def ^:private judge2-chart-id ::judge2)
+
+(defn- register-child-charts!
+  "Register the three child charts in env's statechart registry so the
+  underlying statechart processor can resolve them by `:src`."
+  [env]
+  (let [reg (::sc/statechart-registry env)]
+    (sp/register-statechart! reg poet-chart-id   poet-chart)
+    (sp/register-statechart! reg judge1-chart-id judge1-chart)
+    (sp/register-statechart! reg judge2-chart-id judge2-chart)))
+
+;; ---------------------------------------------------------------------------
+;; PARENT — planner uses plain text, then multiplex of N poets, then M×N
+;; judge1s, then M judge2s, then host writes the summary.
+;; ---------------------------------------------------------------------------
 
 (defn- parse-planner
   "Parse planner output. Returns one of:
@@ -537,8 +531,14 @@
 
 (def ^{:multi-session? true} agent
   (chart/statechart
-    {:initial :run}
+    {:initial :run
+     :name    "haiku-tournament-dynamic"}
     (state {:id :run :initial :planning}
+
+      (on-entry {}
+        (script {:expr (fn [env _data]
+                         (register-child-charts! env)
+                         nil)}))
 
       ;; ---------- PHASE 1: planner (plain text START/ABORT) ----------
       (state {:id :planning}
@@ -592,58 +592,55 @@
                           (str "planner output not parseable: "
                             (pr-str (:raw (:plan data))))))])})))
 
-      ;; ---------- PHASE 2: composing ----------
+      ;; ---------- PHASE 2: composing — multiplex of N poets ----------
       (state {:id :composing}
-        (on-entry {}
-          (script {:expr
-                   (fn [env data]
-                     (let [n (:poet-count data)
-                           t (:theme data)]
-                       (spawn-many! env n
-                         poet-chart ::poet
-                         (fn [i] {:idx i :theme t}))
-                       [(ops/assign :pending n)
-                        (ops/assign :haikus {})]))}))
+        (multiplex
+          {:id             :poets
+           mo/child-type   ::sc/chart
+           mo/count        (fn [_env data] (:poet-count data))
+           mo/child-params (fn [_env data idx]
+                             {:src    poet-chart-id
+                              :params {:idx   idx
+                                       :theme (:theme data)}})})
+
+        ;; Accumulate per-poet results as they reply.
         (transition {:event :poet-result :type :internal}
           (script {:expr
-                   (fn [env data]
+                   (fn [_env data]
                      (let [{:keys [idx haikus abstained?]}
                            (get-in data [:_event :data])
                            h' (cond-> (or (:haikus data) {})
                                 (and (not abstained?) (seq haikus))
-                                (assoc idx haikus))
-                           p' (dec (long (:pending data)))]
-                       (when (zero? p')
-                         (raise! env :composing-done))
-                       [(ops/assign :haikus h')
-                        (ops/assign :pending p')]))}))
-        (transition {:event :composing-done :target :judging-r1}))
+                                (assoc idx haikus))]
+                       [(ops/assign :haikus h')]))}))
 
-      ;; ---------- PHASE 3: judging round 1 ----------
+        ;; Library-emitted cohort done — every poet has reported.
+        (transition {:event :done.invoke.poets :target :judging-r1}))
+
+      ;; ---------- PHASE 3: judging round 1 — multiplex of M × N judges ----------
+      ;; Each child judges ONE poet. The multiplex's :idx is a flat 0..(M*N - 1);
+      ;; we derive judge-idx and poet-idx from it using the current haiku keys.
       (state {:id :judging-r1}
-        (on-entry {}
-          (script {:expr
-                   (fn [env data]
-                     (let [m       (:audience-count data)
-                           hs      (:haikus data)
-                           parent  (spawn/parent-sid env)
-                           pairs   (for [i (range m)
-                                         p (sort (keys hs))]
-                                     [i p])]
-                       (doseq [[i p] pairs]
-                         (spawn/spawn-child! env
-                           {:chart    judge1-chart
-                            :chart-id ::judge1
-                            :input    {:idx      i
-                                       :persona  (persona-for i)
-                                       :poet-idx p
-                                       :haikus   (get hs p)
-                                       :reply-to parent}}))
-                       [(ops/assign :pending (count pairs))
-                        (ops/assign :judge1-picks {})]))}))
+        (multiplex
+          {:id             :judges-r1
+           mo/child-type   ::sc/chart
+           mo/count        (fn [_env data]
+                             (* (long (:audience-count data))
+                                (count (:haikus data))))
+           mo/child-params (fn [_env data idx]
+                             (let [poet-keys (vec (sort (keys (:haikus data))))
+                                   n         (count poet-keys)
+                                   judge-i   (long (quot idx n))
+                                   poet-i    (nth poet-keys (mod idx n))]
+                               {:src    judge1-chart-id
+                                :params {:idx      judge-i
+                                         :persona  (persona-for judge-i)
+                                         :poet-idx poet-i
+                                         :haikus   (get-in data [:haikus poet-i])}}))})
+
         (transition {:event :judge1-result :type :internal}
           (script {:expr
-                   (fn [env data]
+                   (fn [_env data]
                      (let [{:keys [idx poet-idx haiku-idx reason abstained?]}
                            (get-in data [:_event :data])
                            jp  (or (:judge1-picks data) {})
@@ -652,13 +649,10 @@
                                  (update jp idx (fnil conj [])
                                    {:poet_idx  poet-idx
                                     :haiku_idx haiku-idx
-                                    :reason    reason}))
-                           p'  (dec (long (:pending data)))]
-                       (when (zero? p')
-                         (raise! env :judging-r1-done))
-                       [(ops/assign :judge1-picks jp')
-                        (ops/assign :pending p')]))}))
-        (transition {:event :judging-r1-done :target :tallying-r1}))
+                                    :reason    reason}))]
+                       [(ops/assign :judge1-picks jp')]))}))
+
+        (transition {:event :done.invoke.judges-r1 :target :tallying-r1}))
 
       ;; ---------- PHASE 4: tally R1 → finalists ----------
       (state {:id :tallying-r1}
@@ -671,35 +665,30 @@
                        [(ops/assign :finalists f)]))}))
         (transition {:event :tally-r1-done :target :judging-r2}))
 
-      ;; ---------- PHASE 5: judging round 2 ----------
+      ;; ---------- PHASE 5: judging round 2 — multiplex of M judges ----------
       (state {:id :judging-r2}
-        (on-entry {}
-          (script {:expr
-                   (fn [env data]
-                     (let [m (:audience-count data)
-                           fs (:finalists data)]
-                       (spawn-many! env m
-                         judge2-chart ::judge2
-                         (fn [i] {:idx       i
-                                  :persona   (persona-for i)
-                                  :finalists fs}))
-                       [(ops/assign :pending m)
-                        (ops/assign :judge2-votes {})]))}))
+        (multiplex
+          {:id             :judges-r2
+           mo/child-type   ::sc/chart
+           mo/count        (fn [_env data] (:audience-count data))
+           mo/child-params (fn [_env data idx]
+                             {:src    judge2-chart-id
+                              :params {:idx       idx
+                                       :persona   (persona-for idx)
+                                       :finalists (:finalists data)}})})
+
         (transition {:event :judge2-result :type :internal}
           (script {:expr
-                   (fn [env data]
+                   (fn [_env data]
                      (let [{:keys [idx finalist_idx reason abstained?]}
                            (get-in data [:_event :data])
                            v' (cond-> (or (:judge2-votes data) {})
                                 (not abstained?)
                                 (assoc idx {:finalist_idx finalist_idx
-                                            :reason       reason}))
-                           p' (dec (long (:pending data)))]
-                       (when (zero? p')
-                         (raise! env :judging-r2-done))
-                       [(ops/assign :judge2-votes v')
-                        (ops/assign :pending p')]))}))
-        (transition {:event :judging-r2-done :target :tallying-r2}))
+                                            :reason       reason}))]
+                       [(ops/assign :judge2-votes v')]))}))
+
+        (transition {:event :done.invoke.judges-r2 :target :tallying-r2}))
 
       ;; ---------- PHASE 6: tally R2 → winner ----------
       (state {:id :tallying-r2}

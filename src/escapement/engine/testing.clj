@@ -78,6 +78,38 @@
        (pump-once! t) (recur (dec i))
        :else t))))
 
+(defn- pump-multi-once!
+  "Like `pump-once!`, but drains events for every session: routes each
+   event to the working-memory keyed by its `:target` (falling back to
+   the test's session-id when absent). Used to exercise charts that
+   spawn sibling sessions via invocation processors like the multiplex."
+  [{:keys [env session-id]}]
+  (let [queue       (::sc/event-queue env)
+        store       (::sc/working-memory-store env)
+        processor   (::sc/processor env)
+        progressed? (atom false)]
+    (sp/receive-events! queue env
+      (fn [_ event]
+        (reset! progressed? true)
+        (let [sid   (or (:target event) session-id)
+              wmem  (sp/get-working-memory store env sid)]
+          (when wmem
+            (let [wmem' (sp/process-event! processor env wmem event)]
+              (sp/save-working-memory! store env sid wmem'))))))
+    @progressed?))
+
+(defn drain-multi!
+  "Multi-session variant of `drain!`. Pumps every session known to the
+   working-memory store until quiescent. Use when the chart under test
+   spawns sibling sessions (e.g. via the multiplex invocation processor)."
+  ([t] (drain-multi! t 1000))
+  ([t max-iters]
+   (loop [i max-iters]
+     (cond
+       (zero? i)            (throw (ex-info "drain-multi! exceeded max iterations" {:max max-iters}))
+       (pump-multi-once! t) (recur (dec i))
+       :else                t))))
+
 (defn run-events!
   "Post each event onto the queue (as a chart-self send) then drain."
   [{:keys [env session-id] :as t} & events]

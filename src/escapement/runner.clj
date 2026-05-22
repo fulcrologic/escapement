@@ -109,9 +109,10 @@
    pause/step controller (see `maybe-pause!`).
 
    When `:multi-session?` is true, drain ALL session queues in this env (used
-   by charts that spawn child sessions via `escapement.engine.spawn`). The
-   target sid for each event is read from the event itself, so the parent
-   and every child are pumped from the one loop."
+   by charts that spawn child sessions via the multiplex invocation
+   processor, `com.fulcrologic.statecharts.invocation.multiplex`). The
+   target sid for each event is read from the event itself, so the parent,
+   the multiplex aggregator, and every child are pumped from the one loop."
   [{:keys [env session-id transcript-fn controller human-input-active?
            multi-session?]}]
   (let [queue       (::sc/event-queue env)
@@ -130,17 +131,29 @@
                                 (or (:target event) session-id)
                                 session-id)
                 wmem          (sp/get-working-memory store env sid)
-                config-before (vec (::sc/configuration wmem #{}))
+                before-set    (set (::sc/configuration wmem #{}))
+                config-before (vec before-set)
                 wmem'         (sp/process-event! processor env wmem event)
-                config-after  (vec (::sc/configuration wmem' #{}))]
+                after-set     (set (::sc/configuration wmem' #{}))
+                config-after  (vec after-set)
+                entered       (vec (clojure.set/difference after-set before-set))
+                exited        (vec (clojure.set/difference before-set after-set))]
             (sp/save-working-memory! store env sid wmem')
+            ;; `:session-id` is now unconditional so a timeline UI has a
+            ;; uniform join key across single- and multi-session runs.
+            ;; `:entered`/`:exited` make the per-event state-membership
+            ;; change first-class data — derivable from before/after, but
+            ;; pre-computed here so the UI doesn't have to diff config
+            ;; vectors itself.
             (transcript-fn {:event :runner/event-processed
                             :ts    ts
-                            :data  (cond-> {:event-name    (:name event)
-                                            :config-before config-before
-                                            :config-after  config-after
-                                            :event-data    (:data event)}
-                                     multi-session? (assoc :session-id (str sid)))})
+                            :data  {:event-name    (:name event)
+                                    :config-before config-before
+                                    :config-after  config-after
+                                    :entered       entered
+                                    :exited        exited
+                                    :event-data    (:data event)
+                                    :session-id    (str sid)}})
             (transcript-fn {:event :checkpoint/written
                             :data  {:session-id (str sid)}})))]
     (if multi-session?

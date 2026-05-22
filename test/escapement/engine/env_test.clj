@@ -3,6 +3,7 @@
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.chart :as chart]
     [com.fulcrologic.statecharts.elements :refer [final state transition]]
+    [com.fulcrologic.statecharts.invocation.multiplex-options :as mo]
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.engine.env :as env]
     [fulcro-spec.core :refer [=> assertions specification]])
@@ -40,3 +41,14 @@
         (contains? cfg1 :done) => true
         "leaves :idle"
         (contains? cfg1 :idle) => false))))
+
+(specification "engine.env — invocation processors include multiplex and statechart-as-invokable"
+  (let [e     (env/new-env {:checkpoint-dir (tmp-dir)})
+        procs (::sc/invocation-processors e)]
+    (assertions
+      "the multiplex processor is registered"
+      (boolean (some #(sp/supports-invocation-type? % mo/type) procs))
+      => true
+      "the statechart-as-invokable processor is registered (required by multiplex)"
+      (boolean (some #(sp/supports-invocation-type? % ::sc/chart) procs))
+      => true)))
