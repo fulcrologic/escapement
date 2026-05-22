@@ -161,3 +161,116 @@ At thousands of users × ~100 streams = potentially **100k+ concurrent charts**:
 - The mock backend returns instantly; with `token-sleep-ms > 0` you can model a
   realistic token rate, which keeps runner threads parked longer and makes the
   thread-count ceiling (Finding 4) bind sooner.
+
+---
+
+# Part 2 — Constrained-box scale test (4 GB / 4 CPU, Docker)
+
+Follow-up question: on a **4 GB / 4 CPU** box, what is the upper bound on
+concurrent sessions, what is Escapement's overhead, and how does it compare to
+the same logic written as plain code with **no statechart**?
+
+## Method
+
+`bench/scale_test.clj` runs ONE arm at ONE concurrency `C` and reports peak
+RSS / threads / process-CPU / latency (read from `/proc/self/{status,stat}`).
+`bench/Dockerfile` bakes the repo + warmed maven cache; `bench/ramp.sh` runs it
+under `docker run --memory=4g --memory-swap=4g --cpus=4` and ramps `C` until
+OOM (exit 137) or latency collapse. Babashka is a GraalVM native binary, so its
+heap auto-sizes from the cgroup limit and thread stacks count against it — the
+4 GB ceiling is real, not simulated.
+
+Three arms, identical mock timing (only orchestration differs):
+- **`hand`** — plain K-turn loop, no statechart / queue / checkpoint ("just code").
+- **`sc-mem`** — real `escapement.lib/run`, in-memory store (no checkpoint I/O).
+- **`sc-ckpt`** — real `lib/run` + disk `FileBackedStore` (production Escapement).
+
+Workload (the profile we agreed on): **realistic chat** — 400 ms TTFT, 150
+streamed tokens at 20 ms each ≈ **3.4 s/turn**, **6 turns/session** ≈ 20.4 s of
+nominal work per session, launched all at once (steady-state overlap).
+`latency-infl` = actual / nominal; 1.0× means perfectly I/O-bound, higher means
+the orchestration is stealing time.
+
+## Headline results (4 GB / 4 CPU)
+
+Latency inflation vs concurrency:
+
+| C    | hand   | sc-mem | sc-ckpt |
+| ---- | ------ | ------ | ------- |
+| 1000 | 1.01×  | 1.08×  | 1.08×   |
+| 2000 | 1.01×  | 1.65×  | 1.53×   |
+| 3000 | —      | —      | 3.30×   |
+| 4000 | 1.05×  | —      | 4.77×   |
+| 8000 | 1.27×  | —      | —       |
+
+**Upper bound on a 4 GB / 4 CPU box (realistic streaming):**
+- **Escapement (statechart): ~1500–2000 concurrent sessions.** Past ~2000,
+  latency degrades fast (3000 → 3.3×, 4000 → 4.77×).
+- **Hand-written: ~8000+ concurrent** before it even reaches 1.3× — roughly
+  **4× denser** on the same hardware.
+
+**The binding constraint is CPU, not RAM.** At C=4000 sc-ckpt used only ~1.6 GB
+of the 4 GB and ~12k threads, but ~92 % of 4 CPUs (376 cpu-sec over 103 s wall).
+Neither arm OOM-killed at this profile — sessions are mostly *sleeping* on the
+mock's token delays, so they cost CPU only in bursts and memory only for state.
+
+> Caveat: memory never bound because the synthetic per-session state is tiny.
+> Real conversations carry full message history, all sessions resident in the
+> store's single shared cache atom (Part 1, Finding 3) — at large histories the
+> bound shifts toward RAM and that atom.
+
+## The overhead of the statechart (vs plain code)
+
+Measured per-turn / per-session, away from saturation (C≈1000):
+
+| Metric                  | hand        | statechart   | overhead |
+| ----------------------- | ----------- | ------------ | -------- |
+| CPU per turn            | ~1.5 ms     | ~9–16 ms     | **~6–10×** |
+| Threads per session     | 1           | ~3           | **~3×**  |
+| Marginal RSS per session| ~0.05–0.1 MB| ~0.4–0.9 MB  | **~8×**  |
+| Concurrency ceiling @4c | ~8000       | ~2000        | **~4×**  |
+
+`hand` stays flat at ~1.0× through C=4000 (CPU ~15–20 %) — it is thread/memory
+bound, not CPU bound, so it has large headroom. The statechart arms are
+**CPU-bound** and that ~6–10× CPU/turn is exactly what caps their concurrency.
+
+Where the statechart CPU goes (attributed by experiment):
+- **Per-token delta plumbing under SCI** — the invocation builds a delta map
+  and calls the transcript fn for *every* streamed token (1.8M delta calls at
+  C=2000). `hand`'s on-delta is a `StringBuilder` append. This is the largest
+  share.
+- **Interpreted engine per turn** — transition selection, entry/exit,
+  data-model assigns, eventless microsteps, all under Babashka/SCI.
+- **The 50 ms quiescent poll** — a *minor* share: raising
+  `:quiescent-sleep-ms` 50→200 ms at C=2000 cut CPU ~13 % and latency
+  1.84×→1.60×. Helps, but is not the dominant cost.
+- **`sc-mem` ≈ `sc-ckpt`** at every C → at this state size, checkpoint disk I/O
+  is *not* a meaningful cost; the cost is CPU (engine + delta plumbing).
+
+## What this means / how to lift the statechart ceiling
+
+The statechart ceiling on 4 CPUs is set by per-turn + per-token CPU, in order of
+payoff:
+1. **Throttle/disable per-token transcript deltas** when not needed (sample, or
+   only emit on turn boundaries). Biggest CPU lever for streaming workloads.
+2. **Event-driven runner** instead of the 50 ms sleep-poll (≈10–15 % CPU at high C).
+3. The Part 1 logging fix is already assumed here (level set once).
+4. For order-of-magnitude more concurrency on a small box, the architectural
+   move is a lighter-weight invocation/runner (fewer threads/session, compiled
+   rather than SCI-interpreted hot path) — i.e. the engine, not the box, is the
+   limit.
+
+Rule of thumb from these runs: **budget ~2 ms of CPU per streamed token per turn
+for the statechart path.** On 4 CPUs that's the ~2000-session ceiling at 150
+tok/turn × 6 turns; halve the per-token cost and the ceiling roughly doubles.
+
+## Reproduce
+
+```bash
+docker build -f bench/Dockerfile -t escapement-scale .
+# single point:
+docker run --rm --memory=4g --memory-swap=4g --cpus=4 \
+  escapement-scale sc-ckpt 2000 6 400 150 20      # arm C turns ttft tokens tok-ms [qsleep]
+# ramp until collapse/OOM:
+bench/ramp.sh sc-ckpt 6 400 150 20  500 1000 2000 3000 4000
+```
