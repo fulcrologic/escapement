@@ -5,6 +5,7 @@
 
   Public entry: `run!`. Public helper: `load-chart`."
   (:require
+    [clojure.set :as set]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.protocols :as sp]
@@ -101,6 +102,8 @@
     (when (pos? (:step-budget @controller))
       (dbg/consume-step-budget! controller))))
 
+(declare process-targeted-event!)
+
 (defn- drain-once!
   "Drain currently-deliverable events for `session-id` through the processor exactly once,
    checkpointing after each event. Returns true if at least one event was processed.
@@ -130,36 +133,59 @@
                 sid           (if multi-session?
                                 (or (:target event) session-id)
                                 session-id)
-                wmem          (sp/get-working-memory store env sid)
-                before-set    (set (::sc/configuration wmem #{}))
-                config-before (vec before-set)
-                wmem'         (sp/process-event! processor env wmem event)
-                after-set     (set (::sc/configuration wmem' #{}))
-                config-after  (vec after-set)
-                entered       (vec (clojure.set/difference after-set before-set))
-                exited        (vec (clojure.set/difference before-set after-set))]
-            (sp/save-working-memory! store env sid wmem')
-            ;; `:session-id` is now unconditional so a timeline UI has a
-            ;; uniform join key across single- and multi-session runs.
-            ;; `:entered`/`:exited` make the per-event state-membership
-            ;; change first-class data — derivable from before/after, but
-            ;; pre-computed here so the UI doesn't have to diff config
-            ;; vectors itself.
-            (transcript-fn {:event :runner/event-processed
-                            :ts    ts
-                            :data  {:event-name    (:name event)
-                                    :config-before config-before
-                                    :config-after  config-after
-                                    :entered       entered
-                                    :exited        exited
-                                    :event-data    (:data event)
-                                    :session-id    (str sid)}})
-            (transcript-fn {:event :checkpoint/written
-                            :data  {:session-id (str sid)}})))]
+                wmem          (sp/get-working-memory store env sid)]
+            ;; A child session that has already reached its final state is
+            ;; torn down, so a late event still queued for it (e.g. a
+            ;; trailing `:done.invoke.*`) has no working memory to advance —
+            ;; delivering it would make the processor throw "Statechart not
+            ;; found". In the multi-session drain that is benign teardown
+            ;; noise, so skip it. (Single-session always targets the live
+            ;; root, so `wmem` is present and this never triggers.)
+            (if (nil? wmem)
+              (transcript-fn {:event :runner/event-dropped
+                              :ts    ts
+                              :data  {:event-name (:name event)
+                                      :session-id (str sid)
+                                      :reason     :session-finished}})
+              (process-targeted-event! {:store store :env env :processor processor
+                                        :transcript-fn transcript-fn
+                                        :sid sid :wmem wmem :event event :ts ts}))))]
     (if multi-session?
       (sp/receive-events! queue env handler)
       (sp/receive-events! queue env handler {:session-id session-id}))
     @progressed?))
+
+(defn- process-targeted-event!
+  "Advance session `sid` by `event` against its current `wmem`, checkpoint,
+   and emit the `:runner/event-processed` transcript row (with the
+   `:entered`/`:exited` state-membership delta and an unconditional
+   `:session-id` join key)."
+  [{:keys [store env processor transcript-fn sid wmem event ts]}]
+  (let [before-set    (set (::sc/configuration wmem #{}))
+        config-before (vec before-set)
+        wmem'         (sp/process-event! processor env wmem event)
+        after-set     (set (::sc/configuration wmem' #{}))
+        config-after  (vec after-set)
+        entered       (vec (set/difference after-set before-set))
+        exited        (vec (set/difference before-set after-set))]
+    (sp/save-working-memory! store env sid wmem')
+    ;; `:session-id` is now unconditional so a timeline UI has a
+    ;; uniform join key across single- and multi-session runs.
+    ;; `:entered`/`:exited` make the per-event state-membership
+    ;; change first-class data — derivable from before/after, but
+    ;; pre-computed here so the UI doesn't have to diff config
+    ;; vectors itself.
+    (transcript-fn {:event :runner/event-processed
+                    :ts    ts
+                    :data  {:event-name    (:name event)
+                            :config-before config-before
+                            :config-after  config-after
+                            :entered       entered
+                            :exited        exited
+                            :event-data    (:data event)
+                            :session-id    (str sid)}})
+    (transcript-fn {:event :checkpoint/written
+                    :data  {:session-id (str sid)}})))
 
 (defn- cancel-requested?
   "True when the optional host-supplied cancel `signal` is requesting abort.
@@ -377,24 +403,32 @@
                                ;; Made progress this pass — the config is moving, so
                                ;; the frozen-config counter resets.
                                (recur (dec i) 0)
-                               (let [live    (count-live-invocations env)
-                                     pending (engine-queue/pending-count
-                                               (::sc/event-queue env))]
+                               (let [live        (count-live-invocations env)
+                                     pending     (engine-queue/pending-count
+                                                   (::sc/event-queue env))
+                                     deliverable (engine-queue/deliverable-now-count
+                                                   (::sc/event-queue env))]
                                  (cond
                                    ;; A delayed `send` (e.g. a safety-stop timer) sits
-                                   ;; in the queue with a future delivery-time. Until
+                                   ;; in the queue with a *future* delivery-time. Until
                                    ;; that time arrives `drain-once!` returns no events
                                    ;; AND `count-live-invocations` may be zero, so
                                    ;; without this check the loop would declare :done
                                    ;; and lose the timer. Sleep without bumping the
                                    ;; frozen counter — this is *planned* idle, not a
-                                   ;; wedge.
-                                   (and (zero? live) (pos? pending))
+                                   ;; wedge. Gated on `(zero? deliverable)`: if events
+                                   ;; are deliverable NOW yet drain made no progress,
+                                   ;; they are stranded on sessions this run does not
+                                   ;; pump (e.g. a multiplex chart run without
+                                   ;; `:multi-session?`) — that is a wedge, not a
+                                   ;; timer, so fall through to the frozen path rather
+                                   ;; than spinning here forever.
+                                   (and (zero? live) (pos? pending) (zero? deliverable))
                                    (do (Thread/sleep ^long quiescent-sleep-ms)
                                        (recur (dec i) 0))
 
-                                   (zero? live)
-                                   :done                    ;; done — no live work, counter is moot
+                                   (and (zero? live) (zero? deliverable))
+                                   :done                    ;; done — no live work, nothing deliverable stuck
 
                                    ;; No progress AND live invocations exist: this
                                    ;; quiescent cycle may be the frozen-config wedge.
@@ -407,7 +441,14 @@
                                    (do (transcript-fn {:event :runner/error
                                                        :data  {:reason           :frozen-config
                                                                :live-invocations live
-                                                               :cycles           (inc frozen-cycles)}})
+                                                               :pending          pending
+                                                               :deliverable-now  deliverable
+                                                               :cycles           (inc frozen-cycles)
+                                                               ;; `deliverable-now > 0` with no live work means events
+                                                               ;; are stranded on un-pumped sessions — almost always a
+                                                               ;; multiplex chart missing `^:multi-session?`.
+                                                               :hint             (when (and (zero? live) (pos? deliverable))
+                                                                                   "deliverable events stranded on un-drained sessions — does this chart need ^:multi-session?")}})
                                        :frozen-config)
 
                                    :else

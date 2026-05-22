@@ -28,9 +28,8 @@
    [com.fulcrologic.statecharts.data-model.operations :as ops]
    [com.fulcrologic.statecharts.elements
     :refer [final on-entry script state transition]]
-   [com.fulcrologic.statecharts.invocation.multiplex :refer [multiplex]]
+   [com.fulcrologic.statecharts.invocation.multiplex :as mux :refer [multiplex]]
    [com.fulcrologic.statecharts.invocation.multiplex-options :as mo]
-   [com.fulcrologic.statecharts.invocation.multiplex-processor :as mux]
    [com.fulcrologic.statecharts.protocols :as sp]))
 
 (def default-tasks
@@ -62,7 +61,13 @@
    The multiplex's `:src` per child resolves through this key."
   ::worker-chart)
 
-(def agent
+;; `^:multi-session?` is REQUIRED: this chart spawns child sessions via the
+;; multiplex invocation, so the runner must drain every session's queue (parent
+;; + aggregator + each child), not just the parent's. The CLI reads this var
+;; metadata and threads it into `runner/run!`. Without it the run wedges — the
+;; children's `done.invoke.*` events queue on un-drained child sessions and the
+;; parent never sees `:done.invoke.workers`.
+(def ^{:multi-session? true} agent
   (chart/statechart
     {:initial :run
      :name    "n-subagents-demo"}

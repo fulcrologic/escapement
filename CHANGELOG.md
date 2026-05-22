@@ -1,47 +1,49 @@
 # Changelog
 
-## [unreleased] — n-subagents-dynamic-spawn — 2026-05-21
+## [unreleased] — n-subagents-dynamic-spawn — 2026-05-22
 
-Adds a bb-safe primitive for spawning sibling statechart sessions at
-runtime, plus a runner mode that pumps every session from one loop. A
-chart can now fan out to an LLM-chosen number of child agents, collect
-their replies, and continue — without `<invoke>` or core.async.
+Adds a runner mode that pumps every statechart session in one env from a
+single loop, so a chart can fan out to a runtime-sized fleet of child
+sessions via the upstream multiplex invocation processor, collect their
+replies, and continue. A chart can now spawn an LLM-chosen number of
+child agents without core.async.
 
 ### Added
 
-- `escapement.engine.spawn/spawn-child!` — start a sibling statechart
-  session sharing the parent's env (processor, event queue, working-memory
-  store, invocation processors, transcript-fn). Returns the child sid.
-  Accepts `:chart` (required), optional `:chart-id` (registry key,
-  idempotent across spawns), `:sid`, and `:input` (seeded as the child's
-  initial data, mirroring runner's `:initial-data`). Companion helpers
-  `spawn/random-sid` and `spawn/parent-sid` (read the caller's sid out of
-  `env` for use as `:reply-to`).
-- `runner/run!` `:multi-session? true` option — drains every session's
-  queue per tick and routes each event to the sid named in `(:target
-  event)` (falling back to the parent sid). Required whenever a chart
-  uses `spawn-child!`; without it, child sessions wedge with un-drained
+- `runner/run!` `:multi-session? true` option — drains ALL session
+  queues in the env per tick and routes each event to the sid named in
+  `(:target event)` (falling back to the parent sid). Required whenever a
+  chart fans out with the multiplex invocation processor
+  (`com.fulcrologic.statecharts.invocation.multiplex`); without it the
+  parent only pumps its own sid and child sessions wedge with un-drained
   events.
 - `escapement run` honours `^:multi-session?` metadata on the chart var
   and threads it into `runner/run!`. Authors opt in once at the var; no
   new CLI flag.
-- Transcript surface for multi-session runs: each `spawn-child!` emits
-  a `:session/spawned` row with `{:parent-sid :child-sid :chart-id
-  :input-keys}`, and every `:runner/event-processed` row carries
-  `:session-id` so offline reducers can group events per session and
-  reconstruct the parent→child tree.
+- `:runner/event-processed` transcript rows now carry `:session-id`
+  unconditionally (single- and multi-session runs alike), giving offline
+  reducers and a timeline UI a uniform per-session join key; rows also
+  gained `:entered`/`:exited` (the state-membership delta for that event).
+- `:runner/event-dropped` transcript row — in `:multi-session?` runs, a
+  trailing event still queued for a child session that has already reached
+  its final state (e.g. a late `:done.invoke.*`) is now dropped and logged
+  with `:reason :session-finished` instead of being delivered to a
+  torn-down session (which printed a benign but noisy `Statechart not
+  found` to stderr). Normal multiplex teardown, not an error.
 - Example charts under `escapement.examples`: `n_subagents_demo`
-  (deterministic skeleton — fixed N, no LLM) and `haiku_tournament_dynamic`
-  (parent LLM decides N at runtime, then spawns and judges, wired for
-  small local models via plain-text I/O — see Changed below).
+  (deterministic skeleton — workers chosen from data, no LLM) and
+  `haiku_tournament_dynamic` (parent LLM decides N poets / M judges at
+  runtime, then spawns and judges via multiplex, wired for small local
+  models via plain-text I/O — see Changed below).
 - Tool-input coercion: when a tool/event input arrives from the LLM with
   a nested collection serialized as a JSON string (common with small
   models, e.g. `{"haikus": "[\"a\",\"b\"]"}`), the runtime now re-parses
   the string before Malli validation. If parsing fails the original
   value is preserved and the same humanized validation error is reported.
-- `:llm/turn-complete` transcript rows now carry `:elapsed-ms` and
+- `:llm/response` transcript rows now carry `:elapsed-ms` and
   `:output-tps` (output tokens per second) alongside the existing model
-  and context-window fields.
+  and context-window fields; the TUI shows them inline on the response
+  line (`… 42.5t/s 1200ms`).
 - OpenAI-compat backend now categorizes HTTP errors (`:rate-limited`,
   `:overloaded`, `:auth`, `:context-length`, `:invalid-request`,
   `:timeout`, `:transport`) the same way the Anthropic path does, so
@@ -65,18 +67,49 @@ their replies, and continue — without `<invoke>` or core.async.
   with `:allowed-events []` and parse plain-text replies, so it runs
   end-to-end against llama3.2:3b on ollama. The default run command in
   its docstring now targets ollama instead of ZAI/GLM-4.6.
+- `runner/run!` no longer declares a run `:done` while a delayed `send`
+  (e.g. a safety-stop timer) is still queued with a future delivery time.
+  When there are no live invocations but the event queue has pending
+  events whose delivery time has **not** yet arrived, it sleeps the
+  quiescent interval and keeps pumping instead of losing the timer — this
+  is planned idle, not a wedge, so the frozen-config counter is not bumped.
+- `runner/run!` now fails fast instead of hanging when events are
+  deliverable *now* but stranded on sessions the pump is not draining —
+  the classic symptom of a multiplex chart run without `:multi-session?`.
+  Previously such a run spun forever in the planned-idle branch; it now
+  trips `:frozen-config` (bounded by `:max-frozen-cycles`) and the
+  `:runner/error` row carries `:pending`, `:deliverable-now`, and a `:hint`
+  pointing at the missing `^:multi-session?`. Backed by
+  `engine.queue/deliverable-now-count`.
+
+### Fixed
+
+- `n_subagents_demo`'s `agent` var was missing the `^:multi-session?`
+  metadata its sibling `haiku_tournament_dynamic` carries, so `escapement
+  run` drove it single-session and it wedged (children's `done.invoke.*`
+  events stranded; parent never reached `:finished`). The chart passed its
+  own test only because that test drives it via the in-memory testing-env
+  drain, not the CLI runner. Metadata added; it now completes via
+  `escapement run`.
 
 ### Notes
 
-- Parent↔child wiring is convention, not framework: parent passes its
-  own sid as `:reply-to` in the child's `:input`; the child `send!`s a
-  reply event targeted at that sid when done. There is no managed
-  lifecycle binding — cancellation is the caller's responsibility (stash
-  child sids in chart data and `send!` a `:cancel` to each, or have
-  children react to a shared event).
-- `spawn-child!` is intentionally *not* SCXML `<invoke>`. It's a sibling
-  session, not a nested one; useful when N is data-dependent (chosen by
-  the LLM) or when children should outlive a single state.
+- Children are spawned with the upstream `multiplex` invocation element
+  (`com.fulcrologic.statecharts.invocation.multiplex`): the parent
+  declares a `multiplex` with `mo/count` (runtime N) and `mo/child-params`
+  (per-child `:src` chart + `:params`); each child auto-receives an
+  identity (`mo/from`/`:idx`), replies to the parent via `mux/reply`, and
+  the library's aggregator fires `:done.invoke.<id>` once every child
+  reaches a final state. Result accumulation per child is the parent's
+  job (an internal transition keyed off the reply event).
+- This is real SCXML `<invoke>`-style child sessions, not a bespoke
+  primitive; the only escapement-side requirement is `:multi-session?` so
+  the one runner loop pumps the parent, the multiplex aggregator, and
+  every child session together.
+- Bumps `com.fulcrologic/statecharts` `1.4.0-RC15` → `1.4.0-RC16-SNAPSHOT`
+  (bb.edn + deps.edn) — the snapshot ships the multiplex/statechart-as-
+  invokable processors this feature is built on. Both are now registered
+  in every env.
 
 ## [unreleased] — feat/turn-primitive-correctness — 2026-05-19
 
