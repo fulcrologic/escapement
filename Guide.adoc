@@ -1555,48 +1555,53 @@ targeted at `:to`.
 Latest write wins.
 Keep history by picking versioned filenames (`(str "draft-" iteration ".md")`).
 
-=== Dynamic sibling sessions: `spawn-child!` and `:multi-session?`
+=== Dynamic child sessions: multiplex + `:multi-session?`
 
 The patterns above route events between LLM conversations that are
 declared statically in one chart.
 Sometimes the number of agents is *not* knowable until the chart is running — e.g. a parent LLM looks at the input and decides "spawn three judges in parallel."
-For that, `escapement.engine.spawn` provides a bb-safe primitive that starts a **sibling statechart session** in the parent's env at runtime.
+For that, use the upstream **multiplex invocation processor** (`com.fulcrologic.statecharts.invocation.multiplex`): a single `multiplex` element in a state spins up a runtime-sized cohort of child statechart sessions, each its own session in the parent's env, and the library aggregates their completion for you.
 
-This is _not_ SCXML `<invoke>`.
-There is no managed lifecycle binding between parent and child.
-Both run as peers sharing one env (processor, event queue, working-memory store, invocation processors, transcript-fn); the queue partitions events by `:target` sid, so each session is isolated even though the env is one.
+Each child runs as a peer session sharing one env (processor, event queue, working-memory store, invocation processors, transcript-fn); the queue partitions events by `:target` sid, so each session is isolated even though the env is one.
 
 [source,clojure]
 ----
-(require '[escapement.engine.spawn :as spawn]
-         '[com.fulcrologic.statecharts.elements :refer [script]])
+(require '[com.fulcrologic.statecharts :as sc]
+         '[com.fulcrologic.statecharts.invocation.multiplex :as mux :refer [multiplex]]
+         '[com.fulcrologic.statecharts.invocation.multiplex-options :as mo])
 
-(script {:expr (fn [env _]
-                 (let [child-sid (spawn/spawn-child!
-                                   env
-                                   {:chart    judge-chart
-                                    :chart-id ::judge
-                                    :input    {:reply-to (spawn/parent-sid env)
-                                               :poem     "..."}})]
-                   ;; stash child-sid in chart data so parent can correlate
-                   ;; the eventual reply or cancel later
-                   ...))})
+;; In the parent chart, inside the state that should fan out:
+(state {:id :composing}
+  (multiplex
+    {:id             :poets
+     mo/child-type   ::sc/chart
+     mo/count        (fn [_env data] (:poet-count data))   ; runtime N
+     mo/child-params (fn [_env data idx]                   ; per-child config
+                       {:src    poet-chart-id              ; registry key
+                        :params {:idx idx :theme (:theme data)}})})
+
+  ;; Accumulate replies as each child reports (internal transition).
+  (transition {:event :poet-result :type :internal}
+    (script {:expr (fn [_env data]
+                     (let [{:keys [idx haikus]} (get-in data [:_event :data])]
+                       [(ops/assign :haikus
+                          (assoc (or (:haikus data) {}) idx haikus))]))}))
+
+  ;; Library fires this once EVERY child has reached a final state.
+  (transition {:event :done.invoke.poets :target :judging}))
 ----
 
-`spawn-child!` accepts:
+The `multiplex` options:
 
-* `:chart` (required) — a statechart value, e.g. from `chart/statechart`.
-* `:chart-id` (optional) — the registry key under which to register `chart`.
-Defaults to `::spawn/child-chart`. Multiple spawns of the same chart should pass the SAME `:chart-id`; registration is idempotent.
-* `:sid` (optional) — explicit session-id; defaults to a random one.
-* `:input` (optional) — initial data seeded into the child's data model (passed as the child's `::sc/invocation-data`, mirroring runner's `:initial-data`).
+* `mo/child-type ::sc/chart` — children are statecharts.
+* `mo/count` — `(fn [env data] -> n)`, evaluated at invoke time; this is the dynamic N.
+* `mo/child-params` — `(fn [env data idx] -> {:src <registry-key> :params {...}})`. `:src` is the key the child chart was registered under (register it in the parent's `on-entry` via `sp/register-statechart!`). `:params` becomes the child's initial data, and the multiplex auto-seeds an identity (the flat `idx`) reachable as `mo/from` on its replies.
 
-Returns the child sid.
-The caller typically `ops/assign`s it into chart data so the parent can later cancel it or correlate its reply.
+The child does its work and replies with `(mux/reply env :poet-result {...})`; the reply carries `mo/from` (its `:idx`) so the parent can correlate. When the child reaches a final state, the library counts the completion and, once all `count` children are done, emits `:done.invoke.<multiplex-id>` (here `:done.invoke.poets`) to the parent.
 
 === `:multi-session?` runner mode
 
-Spawned children only progress if the runner pumps their queues, too.
+Multiplex children only progress if the runner pumps their queues, too.
 Opt in by setting `^:multi-session?` metadata on the chart var; the CLI threads it into `runner/run!`:
 
 [source,clojure]
@@ -1605,34 +1610,15 @@ Opt in by setting `^:multi-session?` metadata on the chart var; the CLI threads 
   (chart/statechart {...}))
 ----
 
-With `:multi-session?` on, `drain-once!` calls `receive-events!` without a `:session-id` filter and routes each event to `(:target event)` (falling back to the parent sid).
+With `:multi-session?` on, the runner's `drain-once!` calls `receive-events!` without a `:session-id` filter and routes each event to `(:target event)` (falling back to the parent sid), so the parent, the multiplex aggregator, and every child session are pumped from the one loop.
 Without the flag, the parent's runner only pumps its own sid and any children wedge with un-drained events.
-
-=== Parent↔child convention
-
-`spawn-child!` itself is just session creation.
-The reply wire is convention:
-
-. Parent passes its own sid as `:reply-to` in the child's `:input` (use `(spawn/parent-sid env)`).
-. Child does its work, then `send!`s a reply event targeted at that sid (typically a domain event like `:judge/verdict` with `:target reply-to`).
-. Parent has a transition on that event, reads the payload, and continues.
-. Cancellation is the caller's responsibility — stash child sids in chart data, iterate and `send!` a `:cancel` event, or have children react to a shared event.
 
 === Transcript surface
 
-Each call to `spawn-child!` emits a `:session/spawned` row:
-
-[source,clojure]
-----
-{:event :session/spawned
- :data  {:parent-sid "..." :child-sid "..."
-         :chart-id   "..." :input-keys [...]}}
-----
-
-And every `:runner/event-processed` row in a multi-session run carries `:session-id`, so an offline reducer can group every child's events under its parent using the spawn edges.
+Every `:runner/event-processed` row carries `:session-id` (unconditionally, in single- and multi-session runs alike), plus `:entered`/`:exited` (the set of states gained/lost on that event), so an offline reducer can group each child's events under its session and reconstruct the cohort timeline.
 
 See `escapement.examples.n-subagents-demo` (deterministic, no LLM) and
-`escapement.examples.haiku-tournament-dynamic` (parent LLM picks N at runtime).
+`escapement.examples.haiku-tournament-dynamic` (parent LLM picks N poets / M judges at runtime).
 
 [[service-regions]]
 == Service regions: subcharts as tools

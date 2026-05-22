@@ -48,9 +48,8 @@
    [com.fulcrologic.statecharts.data-model.operations :as ops]
    [com.fulcrologic.statecharts.elements
     :refer [final on-entry script send state transition]]
-   [com.fulcrologic.statecharts.invocation.multiplex :refer [multiplex]]
+   [com.fulcrologic.statecharts.invocation.multiplex :as mux :refer [multiplex]]
    [com.fulcrologic.statecharts.invocation.multiplex-options :as mo]
-   [com.fulcrologic.statecharts.invocation.multiplex-processor :as mux]
    [com.fulcrologic.statecharts.protocols :as sp]
    [escapement.chart.helpers :as h]))
 
@@ -118,6 +117,7 @@
                      vec)]
       (when (>= (count lines) 3)
         (str/join "\n" (take 3 lines))))))
+
 
 (defn- parse-pick
   "Parse `<digit>\\n<reason>` from a judge's reply. Returns `[idx0 reason]`
