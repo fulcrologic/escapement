@@ -102,7 +102,37 @@
     (when (pos? (:step-budget @controller))
       (dbg/consume-step-budget! controller))))
 
-(declare process-targeted-event!)
+(defn- process-targeted-event!
+  "Advance session `sid` by `event` against its current `wmem`, checkpoint,
+   and emit the `:runner/event-processed` transcript row (with the
+   `:entered`/`:exited` state-membership delta and an unconditional
+   `:session-id` join key)."
+  [{:keys [store env processor transcript-fn sid wmem event ts]}]
+  (let [before-set    (set (::sc/configuration wmem #{}))
+        config-before (vec before-set)
+        wmem'         (sp/process-event! processor env wmem event)
+        after-set     (set (::sc/configuration wmem' #{}))
+        config-after  (vec after-set)
+        entered       (vec (set/difference after-set before-set))
+        exited        (vec (set/difference before-set after-set))]
+    (sp/save-working-memory! store env sid wmem')
+    ;; `:session-id` is now unconditional so a timeline UI has a
+    ;; uniform join key across single- and multi-session runs.
+    ;; `:entered`/`:exited` make the per-event state-membership
+    ;; change first-class data — derivable from before/after, but
+    ;; pre-computed here so the UI doesn't have to diff config
+    ;; vectors itself.
+    (transcript-fn {:event :runner/event-processed
+                    :ts    ts
+                    :data  {:event-name    (:name event)
+                            :config-before config-before
+                            :config-after  config-after
+                            :entered       entered
+                            :exited        exited
+                            :event-data    (:data event)
+                            :session-id    (str sid)}})
+    (transcript-fn {:event :checkpoint/written
+                    :data  {:session-id (str sid)}})))
 
 (defn- drain-once!
   "Drain currently-deliverable events for `session-id` through the processor exactly once,
@@ -154,38 +184,6 @@
       (sp/receive-events! queue env handler)
       (sp/receive-events! queue env handler {:session-id session-id}))
     @progressed?))
-
-(defn- process-targeted-event!
-  "Advance session `sid` by `event` against its current `wmem`, checkpoint,
-   and emit the `:runner/event-processed` transcript row (with the
-   `:entered`/`:exited` state-membership delta and an unconditional
-   `:session-id` join key)."
-  [{:keys [store env processor transcript-fn sid wmem event ts]}]
-  (let [before-set    (set (::sc/configuration wmem #{}))
-        config-before (vec before-set)
-        wmem'         (sp/process-event! processor env wmem event)
-        after-set     (set (::sc/configuration wmem' #{}))
-        config-after  (vec after-set)
-        entered       (vec (set/difference after-set before-set))
-        exited        (vec (set/difference before-set after-set))]
-    (sp/save-working-memory! store env sid wmem')
-    ;; `:session-id` is now unconditional so a timeline UI has a
-    ;; uniform join key across single- and multi-session runs.
-    ;; `:entered`/`:exited` make the per-event state-membership
-    ;; change first-class data — derivable from before/after, but
-    ;; pre-computed here so the UI doesn't have to diff config
-    ;; vectors itself.
-    (transcript-fn {:event :runner/event-processed
-                    :ts    ts
-                    :data  {:event-name    (:name event)
-                            :config-before config-before
-                            :config-after  config-after
-                            :entered       entered
-                            :exited        exited
-                            :event-data    (:data event)
-                            :session-id    (str sid)}})
-    (transcript-fn {:event :checkpoint/written
-                    :data  {:session-id (str sid)}})))
 
 (defn- cancel-requested?
   "True when the optional host-supplied cancel `signal` is requesting abort.
