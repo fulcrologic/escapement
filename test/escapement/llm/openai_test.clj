@@ -322,3 +322,30 @@
             (p/await! (proto/send-turn* b req #(swap! d2 conj %)))
             (count @d2)) => 2)))))
 
+
+
+(specification "status->category — error categorization parity with Anthropic backend"
+  (let [c (fn [s b] (#'oai/status->category s b))]
+    (assertions
+      "429 -> rate-limited"        (c 429 "")                                         => :rate-limited
+      "529 -> overloaded"          (c 529 "")                                         => :overloaded
+      "503 -> overloaded"          (c 503 "")                                         => :overloaded
+      "body says overloaded"       (c 500 "server is Overloaded right now")           => :overloaded
+      "401 -> auth"                (c 401 "")                                         => :auth
+      "403 -> auth"                (c 403 "")                                         => :auth
+      "400 + ctx phrase -> context-length"
+      (c 400 "Your prompt is too long for the model")                                 => :context-length
+      "422 + ctx phrase -> context-length"
+      (c 422 "context window exceeded")                                               => :context-length
+      "400 plain -> invalid-request" (c 400 "bad json")                               => :invalid-request
+      "422 plain -> invalid-request" (c 422 "unprocessable")                          => :invalid-request
+      "500 generic -> transport"   (c 500 "")                                         => :transport)))
+
+(specification "retry-after-ms — Retry-After header parsing"
+  (let [r (fn [h] (#'oai/retry-after-ms h))]
+    (assertions
+      "lowercase header, integer seconds" (r {"retry-after" "12"})                    => 12000
+      "canonical-case header"             (r {"Retry-After" "30"})                    => 30000
+      "whitespace tolerated"              (r {"retry-after" "  5 "})                  => 5000
+      "absent header -> nil"              (r {})                                      => nil
+      "unparseable -> nil"                (r {"retry-after" "Wed, 21 Oct 2026 07:28:00 GMT"}) => nil)))

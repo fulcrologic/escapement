@@ -81,3 +81,21 @@
   [queue]
   [any? => :int]
   (reduce + 0 (map count (vals @(:session-queues queue)))))
+
+(>defn deliverable-now-count
+  "Number of queued events across all sessions whose delivery-time has already
+   arrived — i.e. events the next `receive-events!` would hand to the handler.
+   Excludes future-dated delayed sends still waiting on their timer.
+
+   The runner uses this to tell a *planned* idle (pending events that are all
+   future-dated, e.g. a safety-stop timer — wait for it) apart from a *wedge*
+   (events deliverable now but stranded on sessions this run does not drain,
+   e.g. a multiplex chart run without `:multi-session?` — fail fast)."
+  [queue]
+  [any? => :int]
+  (let [now (now-ms-fn)]
+    (reduce
+      (fn [n evs]
+        (+ n (count (filter (fn [evt] (<= (::delivery-time (meta evt) 0) now)) evs))))
+      0
+      (vals @(:session-queues queue)))))

@@ -748,8 +748,8 @@ entries (oldest first) so the chart can see which models were tried and what eac
 `:error.llm.context-length` / `:error.llm.timeout` /
 `:error.llm.transport` — a backend threw a **categorized** failure (`escapement.llm.protocol/llm-error`); the consumer maps the category (∈ `escapement.llm.protocol/error-categories`) to the matching
 `:error.llm.<category>` event so a chart can branch on the failure class — e.g. "rate-limited → wait & resume" vs "invalid-request → fail".
-The bundled Anthropic/z.ai api backend categorizes non-2xx HTTP by status (429 → `:rate-limited`, 529/overloaded → `:overloaded`, 401/403 → `:auth`, 400/422 → `:invalid-request` or `:context-length`, timeouts → `:timeout`, connection/IO failures → `:transport`) and SSE
-`error` events as `:overloaded`/`:transport`.
+Both bundled backends — the Anthropic/z.ai api backend (`escapement.llm.api`) and the OpenAI-compat backend (`escapement.llm.openai`, used for OpenRouter, ollama, etc.) — categorize non-2xx HTTP by status (429 → `:rate-limited`, 529/503/`"overloaded"` body → `:overloaded`, 401/403 → `:auth`, 400/422 → `:invalid-request` or `:context-length`, timeouts → `:timeout`, connection/IO failures → `:transport`) and honor `Retry-After` on 429. SSE
+`error` events surface as `:overloaded`/`:transport`.
 As with
 `:error.llm.backend`, these fire only after every candidate model has been exhausted and carry the same `:attempts` data. (`:error.llm.timeout`
 is shared: it also fires when `:max-conversation-duration-ms` is exceeded — see above.)
@@ -819,6 +819,13 @@ Qualified keywords are flattened: `:my.ns/foo-bar` becomes `event__my_ns_foo_bar
 Anthropic enforces alphanum/underscore in tool names, so any other character in the keyword is replaced by `_`.
 See `kw->anthropic-name` in
 `src/escapement/invocation/llm_conversation.clj:41`.
+
+=== JSON-string coercion for nested collections
+
+Small open-source models (notably llama3.2:3b) sometimes emit nested collections inside a `tool_use` input as a stringified JSON value — e.g. `{"haikus": "[\"a\",\"b\"]"}` instead of `{"haikus": ["a","b"]}`.
+Before Malli validation the runtime makes one attempt to re-parse such a string when the target schema is a collection (`:vector` / `:sequential` / `:set` / `:map`) and the value opens with `[` or `{`.
+If parsing fails the original string is preserved and the same humanized validation error is reported — so authors do not need to opt in or change their schemas.
+If even with coercion a small model is still unreliable at tool-calling for your task, see `docs/structured-output-from-small-models.md` for the plain-text-output pattern.
 
 [[prompt-caching]]
 === Prompt caching and the conversation lifecycle
@@ -980,6 +987,8 @@ The worker stamps every `:llm/response` event with:
 * `:model` — the model id reported by the API (or our request model)
 * `:context-window` — the lookup-table value for that model, when known
 * `:context-used-frac` — `:input-tokens` / `:context-window`, rounded to three decimals; absent when we can't look up the model
+* `:elapsed-ms` — wall-clock time spent in the backend call for this turn
+* `:output-tps` — output tokens per second (`:output-tokens` / `:elapsed-ms`), rounded to two decimals; absent when the backend reported no output tokens or elapsed time was zero. Handy when comparing local vs remote models, or watching a slow model degrade.
 
 Additionally, whenever `:context-used-frac` ≥ 0.8 a separate
 `:llm/context-warning` event is emitted into the transcript with the same data.
@@ -1545,6 +1554,71 @@ targeted at `:to`.
 
 Latest write wins.
 Keep history by picking versioned filenames (`(str "draft-" iteration ".md")`).
+
+=== Dynamic child sessions: multiplex + `:multi-session?`
+
+The patterns above route events between LLM conversations that are
+declared statically in one chart.
+Sometimes the number of agents is *not* knowable until the chart is running — e.g. a parent LLM looks at the input and decides "spawn three judges in parallel."
+For that, use the upstream **multiplex invocation processor** (`com.fulcrologic.statecharts.invocation.multiplex`): a single `multiplex` element in a state spins up a runtime-sized cohort of child statechart sessions, each its own session in the parent's env, and the library aggregates their completion for you.
+
+Each child runs as a peer session sharing one env (processor, event queue, working-memory store, invocation processors, transcript-fn); the queue partitions events by `:target` sid, so each session is isolated even though the env is one.
+
+[source,clojure]
+----
+(require '[com.fulcrologic.statecharts :as sc]
+         '[com.fulcrologic.statecharts.invocation.multiplex :as mux :refer [multiplex]]
+         '[com.fulcrologic.statecharts.invocation.multiplex-options :as mo])
+
+;; In the parent chart, inside the state that should fan out:
+(state {:id :composing}
+  (multiplex
+    {:id             :poets
+     mo/child-type   ::sc/chart
+     mo/count        (fn [_env data] (:poet-count data))   ; runtime N
+     mo/child-params (fn [_env data idx]                   ; per-child config
+                       {:src    poet-chart-id              ; registry key
+                        :params {:idx idx :theme (:theme data)}})})
+
+  ;; Accumulate replies as each child reports (internal transition).
+  (transition {:event :poet-result :type :internal}
+    (script {:expr (fn [_env data]
+                     (let [{:keys [idx haikus]} (get-in data [:_event :data])]
+                       [(ops/assign :haikus
+                          (assoc (or (:haikus data) {}) idx haikus))]))}))
+
+  ;; Library fires this once EVERY child has reached a final state.
+  (transition {:event :done.invoke.poets :target :judging}))
+----
+
+The `multiplex` options:
+
+* `mo/child-type ::sc/chart` — children are statecharts.
+* `mo/count` — `(fn [env data] -> n)`, evaluated at invoke time; this is the dynamic N.
+* `mo/child-params` — `(fn [env data idx] -> {:src <registry-key> :params {...}})`. `:src` is the key the child chart was registered under (register it in the parent's `on-entry` via `sp/register-statechart!`). `:params` becomes the child's initial data, and the multiplex auto-seeds an identity (the flat `idx`) reachable as `mo/from` on its replies.
+
+The child does its work and replies with `(mux/reply env :poet-result {...})`; the reply carries `mo/from` (its `:idx`) so the parent can correlate. When the child reaches a final state, the library counts the completion and, once all `count` children are done, emits `:done.invoke.<multiplex-id>` (here `:done.invoke.poets`) to the parent.
+
+=== `:multi-session?` runner mode
+
+Multiplex children only progress if the runner pumps their queues, too.
+Opt in by setting `^:multi-session?` metadata on the chart var; the CLI threads it into `runner/run!`:
+
+[source,clojure]
+----
+(def ^:multi-session? agent
+  (chart/statechart {...}))
+----
+
+With `:multi-session?` on, the runner's `drain-once!` calls `receive-events!` without a `:session-id` filter and routes each event to `(:target event)` (falling back to the parent sid), so the parent, the multiplex aggregator, and every child session are pumped from the one loop.
+Without the flag, the parent's runner only pumps its own sid and any children wedge with un-drained events.
+
+=== Transcript surface
+
+Every `:runner/event-processed` row carries `:session-id` (unconditionally, in single- and multi-session runs alike), plus `:entered`/`:exited` (the set of states gained/lost on that event), so an offline reducer can group each child's events under its session and reconstruct the cohort timeline.
+
+See `escapement.examples.n-subagents-demo` (deterministic, no LLM) and
+`escapement.examples.haiku-tournament-dynamic` (parent LLM picks N poets / M judges at runtime).
 
 [[service-regions]]
 == Service regions: subcharts as tools

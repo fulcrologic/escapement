@@ -19,6 +19,7 @@
 
   See `plan.md` for the design."
   (:require
+    [cheshire.core :as json]
     [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [com.fulcrologic.statecharts :as sc]
@@ -318,6 +319,32 @@
 (defn- humanize-malli-errors [schema input]
   (-> (m/explain schema input) me/humanize pr-str))
 
+;; Coercion: small LLMs (e.g. llama3.2:3b) often emit nested collections as
+;; stringified JSON inside a tool_use input — `{"haikus": "[\"a\",\"b\"]"}`
+;; instead of `{"haikus": ["a","b"]}`. We attempt one round of JSON re-parse
+;; when the target schema is a collection and the value is a string opening
+;; with `[`/`{`. If the re-parse fails the original string is preserved and
+;; validation reports the same humanized error as before.
+(def ^:private json-string-decoder-vec
+  (fn [x] (if (and (string? x) (re-find #"^\s*\[" x))
+            (try (json/parse-string x true) (catch Exception _ x))
+            x)))
+
+(def ^:private json-string-decoder-map
+  (fn [x] (if (and (string? x) (re-find #"^\s*\{" x))
+            (try (json/parse-string x true) (catch Exception _ x))
+            x)))
+
+(def ^:private json-string-transformer
+  (mt/transformer
+    {:decoders {:vector     json-string-decoder-vec
+                :sequential json-string-decoder-vec
+                :set        json-string-decoder-vec
+                :map        json-string-decoder-map}}))
+
+(def ^:private tool-input-transformer
+  (mt/transformer json-string-transformer mt/string-transformer))
+
 (defn- find-tool-uses [content-blocks]
   (filterv #(= :tool_use (:type %)) content-blocks))
 
@@ -599,14 +626,15 @@
       ;; Event tool
       (contains? name->event-entry name)
       (let [{:keys [event data-schema]} (get name->event-entry name)
-            schema (or data-schema [:map])]
-        (if (m/validate schema (or input {}))
+            schema  (or data-schema [:map])
+            decoded (m/decode schema (or input {}) tool-input-transformer)]
+        (if (m/validate schema decoded)
           (do
-            (post-event-to-parent! parent-ctx event (or input {}))
+            (post-event-to-parent! parent-ctx event decoded)
             (post-tool-result! event false "ok")
             {:result-block  {:type :tool_result :tool_use_id id :content "ok"}
              :posted-event? true})
-          (let [err (humanize-malli-errors schema input)]
+          (let [err (humanize-malli-errors schema decoded)]
             (post-tool-result! event true err)
             (if (>= retries 1)
               {:fatal?       true
@@ -627,15 +655,16 @@
       (contains? name->region-tool name)
       (let [{:keys [event-kw owner input-schema timeout-default]}
             (get name->region-tool name)
-            schema (or input-schema [:map])]
-        (if (m/validate schema (or input {}))
+            schema  (or input-schema [:map])
+            decoded (m/decode schema (or input {}) tool-input-transformer)]
+        (if (m/validate schema decoded)
           (let [reply-id   (str "tr_" (java.util.UUID/randomUUID))
                 ;; LLM may supply :timeout-ms; otherwise fall back to the
                 ;; per-tool default. The wire payload carries the relative
                 ;; duration; the worker computes the absolute deadline.
-                timeout-ms (or (get input :timeout-ms) timeout-default
+                timeout-ms (or (get decoded :timeout-ms) timeout-default
                              region-tool-default-timeout-ms)
-                payload    (-> (or input {})
+                payload    (-> decoded
                              (dissoc :timeout-ms)
                              (assoc :escapement.tool/reply-id reply-id
                                     :escapement.tool/reply-to (->id-str
@@ -665,7 +694,7 @@
                 ;; continues from — same rationale as above; not end-of-turn.
                 {:result-block {:type    :tool_result :tool_use_id id
                                 :content msg :is-error true}})))
-          (let [err (humanize-malli-errors schema input)]
+          (let [err (humanize-malli-errors schema decoded)]
             (post-tool-result! event-kw true err)
             (if (>= retries 1)
               {:fatal?       true
@@ -873,7 +902,9 @@
                 ;; uncategorized throws are NOT retried here — they fall straight
                 ;; through to model fallback / :exhausted.
                 response (loop [retry 0]
-                           (let [r   (try (p/await! (llm/send-turn* backend request on-delta))
+                           (let [t0  (now-ms)
+                                 r   (try (let [resp (p/await! (llm/send-turn* backend request on-delta))]
+                                            (assoc resp :elapsed-ms (- (now-ms) t0)))
                                           (catch Throwable t {:_throw t}))
                                  t   (:_throw r)
                                  cat (when t (llm/error-category t))]
@@ -1178,9 +1209,13 @@
 
       :else
       (let [response      (:ok outcome)
-            {:keys [stop-reason content usage model]} response
+            {:keys [stop-reason content usage model elapsed-ms]} response
             ctx-window    (some-> model catalog/context-window)
             input-tokens  (:input-tokens usage)
+            output-tokens (:output-tokens usage)
+            output-tps    (when (and elapsed-ms output-tokens (pos? (long elapsed-ms)))
+                            (Double/parseDouble
+                              (format "%.2f" (/ (double output-tokens) (/ (double elapsed-ms) 1000.0)))))
             ctx-used-frac (when (and ctx-window input-tokens (pos? ctx-window))
                             (/ (double input-tokens) (double ctx-window)))]
         (transcript! transcript-fn
@@ -1192,6 +1227,8 @@
                            :content     (mapv ->transcript-content-block content)
                            :invokeid    (:invokeid parent-ctx)}
                     model (assoc :model model)
+                    elapsed-ms (assoc :elapsed-ms elapsed-ms)
+                    output-tps (assoc :output-tps output-tps)
                     ctx-window (assoc :context-window ctx-window)
                     ctx-used-frac (assoc :context-used-frac
                                          (Double/parseDouble (format "%.3f" ctx-used-frac))))})

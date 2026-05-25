@@ -4,7 +4,9 @@
     [clojure.java.io :as io]
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.chart :as chart]
-    [com.fulcrologic.statecharts.elements :refer [final on-entry script state transition]]
+    [com.fulcrologic.statecharts.elements :refer [final on-entry script send state transition]]
+    [com.fulcrologic.statecharts.invocation.multiplex :as mux :refer [multiplex]]
+    [com.fulcrologic.statecharts.invocation.multiplex-options :as mo]
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.chart.helpers :as h]
     [escapement.invocation.human-input :as human-input]
@@ -99,6 +101,56 @@
       (boolean (or (empty? (:final-config summary))
                  (some #{":done" "done"} (map str (:final-config summary))))) => true
       "transcript file exists" (.exists (io/file transcript)) => true)))
+
+(def event-firing-chart
+  ;; on-entry queues a :go via <send>; the runner pump drains it and we get a
+  ;; real :runner/event-processed row. Wrapped in a compound parent so the
+  ;; :done final stays in the configuration after transition (top-level finals
+  ;; would empty the config on entry).
+  (chart/statechart
+    {:initial :work}
+    (state {:id :work :initial :idle}
+      (state {:id :idle}
+        (on-entry {} (send {:event :go}))
+        (transition {:event :go :target :done}))
+      (final {:id :done}))))
+
+(specification "runner emits :entered/:exited and unconditional :session-id on event-processed"
+  (let [dir        (tmp-dir "runner-enrich")
+        transcript (str dir "/run.jsonl")
+        chk        (str dir "/chk")
+        _          (runner/run! {:chart              event-firing-chart
+                                 :session-id         :runner-test/enrich
+                                 :transcript-path    transcript
+                                 :checkpoint-dir     chk
+                                 :max-iterations     500
+                                 :quiescent-sleep-ms 10})
+        rows       (read-jsonl transcript)
+        ep-rows    (filter #(= "runner/event-processed" (:event %)) rows)
+        ep-data    (mapv :data ep-rows)
+        all-have-sid? (every? #(contains? % :session-id) ep-data)
+        all-have-enter-exit?
+                   (every? #(and (contains? % :entered) (contains? % :exited))
+                     ep-data)
+        any-entered-done?
+                   (some (fn [d]
+                           (some #{":done" "done"} (map str (:entered d))))
+                         ep-data)
+        any-exited-idle?
+                   (some (fn [d]
+                           (some #{":idle" "idle"} (map str (:exited d))))
+                         ep-data)]
+    (assertions
+      "at least one :runner/event-processed row was emitted"
+      (pos? (count ep-rows)) => true
+      ":session-id is present on every event-processed row (single-session mode)"
+      all-have-sid? => true
+      ":entered and :exited vectors are present on every event-processed row"
+      all-have-enter-exit? => true
+      "transition to :done shows :done in :entered"
+      (boolean any-entered-done?) => true
+      "and :idle in :exited"
+      (boolean any-exited-idle?) => true)))
 
 (specification "runner resume — loads checkpointed wmem instead of starting"
   ;; First run completes; second run with :resume? true should NOT restart (start! would
@@ -290,6 +342,89 @@
         (get-in err [:data :live-invocations]) => 1
         "still reached the normal :runner/done path"
         (contains? evs "runner/done") => true))))
+
+;; -- multi-session multiplex drain + single-session wedge detection ----------
+
+(def ^:private mux-worker-chart-id ::runner-test-worker)
+
+(def ^:private mux-worker-chart
+  ;; Replies to the parent then reaches final so the multiplex aggregator can
+  ;; count the completion.
+  (chart/statechart
+    {:initial :work :name "runner-test-worker"}
+    (state {:id :work}
+      (on-entry {}
+        (script {:expr (fn [env _data] (mux/reply env :w/result {:ok true}) nil)}))
+      (transition {:target :done}))
+    (final {:id :done})))
+
+(def ^:private mux-parent-chart
+  ;; Fans out to two child sessions via the multiplex. Reaching :finished
+  ;; requires the runner to drain every child + the aggregator, i.e.
+  ;; `:multi-session? true`. Without it the children's `done.invoke.*` events
+  ;; strand on un-pumped sessions and the parent never sees :done.invoke.kids.
+  (chart/statechart
+    {:initial :run :name "runner-test-mux-parent"}
+    (state {:id :run :initial :work}
+      (on-entry {}
+        (script {:expr (fn [env _data]
+                         (sp/register-statechart! (::sc/statechart-registry env)
+                           mux-worker-chart-id mux-worker-chart)
+                         nil)}))
+      (state {:id :work}
+        (multiplex
+          {:id             :kids
+           mo/child-type   ::sc/chart
+           mo/count        (fn [_ _] 2)
+           mo/child-params (fn [_ _ _] {:src mux-worker-chart-id :params {}})})
+        (transition {:event :w/result :type :internal})
+        (transition {:event :done.invoke.kids :target :finished}))
+      (final {:id :finished}))))
+
+(specification "runner :multi-session? drains child sessions to completion"
+  (let [dir     (tmp-dir "runner-mux-multi")
+        summary (runner/run! {:chart              mux-parent-chart
+                              :session-id         :runner-test/mux-multi
+                              :transcript-path    (str dir "/run.jsonl")
+                              :checkpoint-dir     (str dir "/chk")
+                              :multi-session?     true
+                              :max-iterations     5000
+                              :max-frozen-cycles  200
+                              :quiescent-sleep-ms 1})]
+    (assertions
+      "the parent reaches its final state via :done.invoke.kids"
+      (:final-config summary) => [:run :finished]
+      "with a normal :done status"
+      (:status summary) => :done)))
+
+(specification "runner fails fast (not a hang) when a multiplex chart is run single-session"
+  ;; Regression: a multiplex chart needs :multi-session?. Run without it, the
+  ;; children's done events are deliverable NOW but stranded on sessions the
+  ;; single-session pump never drains. The runner must distinguish this wedge
+  ;; from a future-dated timer and terminate via :frozen-config, not spin
+  ;; forever in the planned-idle branch.
+  (let [dir     (tmp-dir "runner-mux-single")
+        t0      (System/currentTimeMillis)
+        summary (runner/run! {:chart              mux-parent-chart
+                              :session-id         :runner-test/mux-single
+                              :transcript-path    (str dir "/run.jsonl")
+                              :checkpoint-dir     (str dir "/chk")
+                              :multi-session?     false
+                              :max-iterations     5000
+                              :max-frozen-cycles  20
+                              :quiescent-sleep-ms 1})
+        elapsed (- (System/currentTimeMillis) t0)
+        rows    (read-jsonl (str dir "/run.jsonl"))
+        err     (first (filter #(= "runner/error" (:event %)) rows))]
+    (assertions
+      "terminates instead of hanging"
+      (:status summary) => :frozen-config
+      "and does so promptly (bounded by max-frozen-cycles, not max-iterations)"
+      (< elapsed 4000) => true
+      "emitting a :frozen-config error with the stranded-deliverable hint"
+      (get-in err [:data :reason]) => "frozen-config"
+      (pos? (get-in err [:data :deliverable-now])) => true
+      (some? (get-in err [:data :hint])) => true)))
 
 ;; This test is omitted from the suite for now because hooking a custom invocation
 ;; processor into the runner requires the runner to accept arbitrary processors —

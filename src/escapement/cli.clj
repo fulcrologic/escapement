@@ -658,6 +658,7 @@
                                           :initial-data           initial-data
                                           :resume?                (boolean (:resume opts))
                                           :trace?                 (boolean (:trace opts))
+                                          :multi-session?         (boolean (:multi-session? chart-meta))
                                           :prelude-events         prelude-events
                                           :transcript-tap         (when tui-handle
                                                                     (fn [ev] (tui/event! tui-handle ev)))
