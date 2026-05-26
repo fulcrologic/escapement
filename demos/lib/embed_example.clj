@@ -79,7 +79,7 @@
 ;; artifact phase 1 produced.
 ;; ---------------------------------------------------------------------------
 
-(defn embed-chart [model]
+(defn embed-chart [alias-kw]
   (chart/statechart
     {:initial :run}
     (state {:id :run :initial :brief}
@@ -90,7 +90,7 @@
            :params-fn
            (fn [_env data]
              {:system                       "You are a crisp product writer. Reply with prose only, no preamble."
-              :model                        model
+              :model                        alias-kw
               :max-conversation-duration-ms 60000
               :initial-user-message
               (str "Write a 3-sentence product brief for: " (:idea data))})})
@@ -103,7 +103,7 @@
            :params-fn
            (fn [env _data]
              {:system                       "You are a punchy startup pitch writer. One paragraph, no preamble."
-              :model                        model
+              :model                        alias-kw
               :stream?                      true
               :max-conversation-duration-ms 60000
               :initial-user-message
@@ -128,10 +128,14 @@
 (defn -main [& args]
   (let [idea     (or (first args) "a CLI that turns terminal recordings into shareable GIFs")
         [credential model] (host-credential)
+        ;; Aliases are the only target definition: name one alias :agent that
+        ;; points at the resolved provider+model, then reference it by keyword
+        ;; in the chart (:model :agent) and as the sole preference.
+        aliases  {:agent [{:provider (:provider credential) :model model}]}
         adapter  (sink/make-adapter)
         result
                  (escapement/run
-                   {:chart         (embed-chart model)
+                   {:chart         (embed-chart :agent)
                     :session-id    "embed-example"
                     :session-dir   (.getPath (io/file "demos/lib/.session"))
                     ;; REQUIRED for any chart with an :llm-conversation: the lib facade
@@ -142,7 +146,8 @@
                     ;; also expose the built-ins, or pass your own.
                     :tool-registry (tools/new-registry)
                     :credentials   [credential]
-                    :config        {:llm/preferences         [(assoc credential :model model)]
+                    :config        {:llm/aliases             aliases
+                                    :llm/preferences         [:agent]
                                     :llm/eligibility-strict? false}
                     :initial-data  {:idea idea}
                     :transcript-tap
@@ -185,6 +190,6 @@
 ;;   ;; in the params-fn:
 ;;   {:system "You are a visual design analyst."
 ;;    :needs  {:vision? true}                ; eligibility gate (filters)
-;;    :models ["claude-sonnet-4-6"]          ; plural = explicit ordered
+;;    :models [:vision-agent]                ; plural = explicit ordered ALIAS keywords
 ;;    :initial-messages [(image-message path)]}  ; fallback, no auto-substitution
 ;; ---------------------------------------------------------------------------
