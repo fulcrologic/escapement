@@ -2,6 +2,7 @@
 
 WARNING: Not even alpha yet. Breaking changes will be common until we finish exploring the space.
 
+[![Clojars Project](https://img.shields.io/clojars/v/com.fulcrologic/escapement.svg)](https://clojars.org/com.fulcrologic/escapement)
 [![test](https://github.com/fulcrologic/escapement/actions/workflows/test.yml/badge.svg)](https://github.com/fulcrologic/escapement/actions/workflows/test.yml)
 
 *Escapement regulates LLM agents the way a watch escapement regulates a mainspring.*
