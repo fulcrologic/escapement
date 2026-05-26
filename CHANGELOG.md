@@ -1,5 +1,16 @@
 # Changelog
 
+## [unreleased] — flat-authoring-api — 2026-05-26
+
+### Changed
+
+- **BREAKING-CHANGE:** `llm-conversation` / `human-input` / `with-llm-questions`
+  now take flat, literal-or-fn keys (`:system` / `:message` / `:max-turns` /
+  `:budget-ms` / `:allowed-events` / …). The `:params` and `:params-fn` keys
+  are removed. `:message` aliases `:initial-user-message`; `:budget-ms` aliases
+  `:max-conversation-duration-ms`; `human-input` `:render` passes through as a
+  raw function.
+
 ## [unreleased] — n-subagents-dynamic-spawn — 2026-05-22
 
 Adds a runner mode that pumps every statechart session in one env from a

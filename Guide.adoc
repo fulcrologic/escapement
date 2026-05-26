@@ -90,7 +90,7 @@ Two ways for a chart to influence the auto-fallback list:
 When set, the auto-list is *not* consulted; only your strings are tried (with the same `:down`-marking fallback when you give a multi-element list).
 * `:needs {...}` on the `:llm-conversation` node — a declarative
 **eligibility gate** over the auto-list (see <<params-fn,the
-`params-fn` map>>).
+conversation authoring keys>>).
 A flat `fact → constraint` map over *any* model fact — objective (`:vision?`, `:tool-call?`, `:context-tokens`, …) or subjective (`:intelligence` plus any opinion key defined via
 `:llm/ratings`).
 Useful when a state genuinely requires, say, vision plus Sonnet-class reasoning.
@@ -158,7 +158,7 @@ skill or the library docs for the algorithm; this guide assumes familiarity with
 
 LLM-bound state::
 A compound state whose body contains
-`(invoke {:type :llm-conversation :id ... :params <fn>})`.
+`(invoke {:type :llm-conversation :id ... ...flat keys...})`.
 While the state is active, the runtime spawns a worker thread that holds a live LLM conversation.
 When the chart leaves the state, the worker is interrupted and the conversation dies.
 The authoring sugar is
@@ -176,7 +176,7 @@ One synthetic tool per entry in the binding's `:allowed-events`.
 When the LLM calls `event__<name>(<args>)`, the worker validates `<args>` against the entry's `:data-schema` and posts a chart event named `<name>` with the validated input as event data.
 
 Conversation lifecycle::
-Starts on state entry (with `:initial-user-message` if provided).
+Starts on state entry (with `:message` if provided).
 Re-entered idempotently if the chart re-enters the bound state (the old worker is interrupted and a new one is spawned).
 Dies on state exit.
 See
@@ -246,13 +246,12 @@ The chart itself:
    (state {:id :run :initial :greeting}
           (state {:id :greeting}
                  (h/llm-conversation
-                  {:id        "hello"
-                   :params-fn (fn [_env _data]
-                                {:system               system-prompt
-                                 :real-tools           []
-                                 :allowed-events       [{:event       :done
-                                                         :data-schema [:map [:greeting :string]]}]
-                                 :initial-user-message "Say hello."})})
+                  {:id             "hello"
+                   :system         system-prompt
+                   :real-tools     []
+                   :allowed-events [{:event       :done
+                                     :data-schema [:map [:greeting :string]]}]
+                   :message        "Say hello."})
                  (transition {:event :done :target :finished}
                              (script {:expr (fn [_env data]
                                               [(ops/assign :greeting
@@ -267,9 +266,11 @@ The convention throughout this project is to wrap the final in a compound parent
 * `h/llm-conversation` (see <<llm-conversation-helper>>) expands to
 `(invoke {:type :llm-conversation ...})` with `:autoforward? true` set so
 `tell-llm` works.
-* `:params-fn` is `(fn [env data] params-map)`.
-It is called every time the binding starts.
-It is the chart's chance to compute LLM parameters from current data-model state.
+* Authoring keys are **flat**: each value is a literal OR a `(fn [env data])`
+resolved every time the binding starts.
+Wrap only the data-dependent slots (e.g. `:message`, `:system`) in a lambda to
+compute LLM parameters from current data-model state; leave static config as
+literals.
 * `:allowed-events` declares the event vocabulary.
 Each entry is a map with
 `:event` (chart event keyword) and `:data-schema` (Malli).
@@ -285,7 +286,7 @@ Three common shapes, all first-class and all built from the same machinery:
 
 Concentrated query::
 A short conversation that decides one transition or produces one structured payload.
-Usually one `:initial-user-message`, zero or one event-tools, and the chart transitions out on `:llm.idle` (whose data carries the final assistant text).
+Usually one `:message`, zero or one event-tools, and the chart transitions out on `:llm.idle` (whose data carries the final assistant text).
 Useful for routing, classification, summarization, structured-output extraction, or "ask the model which of these branches to take." The conversation typically lives for a handful of round-trips and then the chart moves on.
 
 Explore / agent state::
@@ -304,7 +305,7 @@ The autonomous worker keeps running with its full context intact; from its point
 These are blends of one knob — *what event-tools you declare* — not different invocation types.
 A chart can have all three shapes in different states (or in parallel regions) at the same time.
 See
-<<tokens-and-turns>> for the mechanics that make long runs work (separate catalog-driven output budget per round-trip, prompt caching across turns) and the `:max-turns` / `:max-conversation-duration-ms` options below for the worst-case guards.
+<<tokens-and-turns>> for the mechanics that make long runs work (separate catalog-driven output budget per round-trip, prompt caching across turns) and the `:max-turns` / `:budget-ms` options below for the worst-case guards.
 
 === Worked example: `scan.clj` — fan-out with a real tool
 
@@ -443,7 +444,7 @@ Values are coerced via `str`.
 Prompts must not ship with literal placeholders.
 * No dependencies — `slurp` plus `clojure.string`, bb-safe.
 
-The unit-test demo wires this into a small per-phase template registry (`demos/unit_test/prompts.clj`) so each chart state's `params-fn` just calls `(prompts/render-phase :write data)`.
+The unit-test demo wires this into a small per-phase template registry (`demos/unit_test/prompts.clj`) so each chart state's `:message` lambda just calls `(prompts/render-phase :write data)`.
 That keeps phase prompts authoring-ergonomic on disk while the chart code stays focused on control flow.
 
 [[invocation]]
@@ -465,20 +466,25 @@ element of type `:llm-conversation` with `:autoforward? true` set.
 [source,clojure]
 ----
 (h/llm-conversation
- {:id        "scanner"      ; required; becomes the :invokeid
-  :params-fn (fn [env data] ; required; returns the params map below
-               { ... })
-  :autoforward? true})      ; optional; defaults to true
+ {:id             "scanner"        ; required; becomes the :invokeid
+  :system         "..."            ; flat key: literal OR (fn [env data] ...)
+  :allowed-events [ ... ]          ; flat key
+  :message        (fn [env data]   ; flat key; computed from data
+                    "...")
+  :autoforward?   true})           ; optional; defaults to true
 ----
 
 `:autoforward?` controls whether the library hands chart events back to the processor's `forward-event!`.
 You almost always want this true (it is what makes `tell-llm` work).
 
 [[params-fn]]
-=== The `params-fn` map
+=== Conversation authoring keys
 
-`params-fn` returns a map consumed by the processor.
-The keys it understands:
+Authoring keys are **flat**: each value is a literal OR a `(fn [env data])`
+resolved at invoke time (`fn?` is the "compute me" signal). Static config stays
+a literal; only data-dependent slots are lambdas. There is no `:params` /
+`:params-fn` escape hatch — to compute several keys from `data`, write one
+lambda per key. The keys the conversation understands:
 
 `:system`::
 Optional string.
@@ -511,10 +517,12 @@ Tools declared by the named owner state are added to this conversation's palette
 The palette is **snapshotted at conversation start** — tools registered after that point are not callable.
 See <<service-regions>> for the full pattern.
 
-`:initial-user-message`::
+`:message` (alias for `:initial-user-message`)::
 Optional string.
 If present, the worker starts in `:running` and sends this as the first user turn.
 Otherwise it starts in `:awaiting-user` and parks until a `:llm.user-message` event arrives via `tell-llm`.
+The friendly authoring name is `:message`; it aliases the canonical processor
+key `:initial-user-message` (if you supply both, the canonical key wins).
 
 `:initial-messages`::
 Optional vector of pre-built message maps to seed the conversation with (e.g. a multi-block first user message carrying an `:image`, or a short prior exchange).
@@ -605,7 +613,7 @@ With no ratings configured, a subjective clause matches nothing.
 `:max-tokens`::
 **Not a chart param.** The per-turn output cap is resolved automatically from the model catalog — it is the selected model's
 `catalog/max-output-tokens` (sourced from models-api.json `limit.output`).
-Setting `:max-tokens` in `params-fn` has no effect; remove it from charts.
+Setting `:max-tokens` as a conversation key has no effect; remove it from charts.
 Models the catalog does not know fall back to the api backend's wire default (**8192**).
 This caps generation in ONE assistant HTTP response — not the whole conversation, not a tool round-trip.
 See
@@ -720,10 +728,12 @@ Size it for the shape of work the state is doing — a concentrated-query state 
 When exceeded the worker self-cancels with
 `:error.llm.max-turns {:limit N :turns N}` and dies.
 
-`:max-conversation-duration-ms`::
+`:budget-ms` (alias for `:max-conversation-duration-ms`)::
 Optional positive integer.
 Wall-clock budget from worker start to a clean
 `:end_turn`.
+The friendly authoring name is `:budget-ms`; it aliases the canonical processor
+key `:max-conversation-duration-ms` (if you supply both, the canonical key wins).
 Like `:max-turns`, scale it to the state's shape; an autonomous refactor / exploration state may want a long ceiling or none.
 When exceeded fires `:error.llm.timeout
 {:elapsed-ms M :limit-ms N}` and dies.
@@ -830,7 +840,7 @@ If even with coercion a small model is still unreliable at tool-calling for your
 [[prompt-caching]]
 === Prompt caching and the conversation lifecycle
 
-This is one of the more impactful knobs in the `params-fn` map and it is not obvious.
+This is one of the more impactful conversation authoring keys and it is not obvious.
 Read the lifecycle paragraph first, then the caching recipe.
 
 ==== Conversation lifecycle is state lifecycle
@@ -897,7 +907,7 @@ Set the explicit map:
  :tools-cache-control  {:type :ephemeral :ttl :1h}
  :real-tools           [:fs/read :fs/edit :shell/run]
  :allowed-events       [...]
- :initial-user-message "..."}
+ :message              "..."}
 ----
 
 `tools-cache-control` stamps the *last* tool def because Anthropic caches everything up through the marker — stamping the tail therefore covers every tool.
@@ -1217,11 +1227,10 @@ Authoring sugar lives in `escapement.chart.helpers`:
 ----
 (state {:id :ask-name}
   (h/human-input
-    {:id "ask"
-     :params-fn (fn [_env _data]
-                  {:kind          :text
-                   :prompt        "What's your name?"
-                   :answer-schema [:string {:min 1}]})})
+    {:id            "ask"
+     :kind          :text
+     :prompt        "What's your name?"
+     :answer-schema [:string {:min 1}]})
   (transition {:event :human.answer :target :greet}
               (script {:expr (fn [_ d]
                                [(ops/assign :name
@@ -1272,11 +1281,10 @@ Two event-tools are injected into the LLM's `:allowed-events`:
 ----
 (state {:id :run :initial :work}
   (h/with-llm-questions
-    {:id        :work
-     :params-fn (fn [_ _]
-                  {:system "..."
-                   :real-tools [:fs/read :fs/write]
-                   :initial-user-message "go"})
+    {:id         :work
+     :system     "..."
+     :real-tools [:fs/read :fs/write]
+     :message    "go"
      :exit-transitions
      [(transition {:event :done :target :finished})]})
   (final {:id :finished}))
@@ -1413,14 +1421,14 @@ When the invocation declares `:verdict-schema`, the event data also carries `:ve
 [[verdicts]]
 === Verdicts: typed payloads on `:on-end-turn-event`
 
-Set `:verdict-schema <malli>` on the invocation's `params-fn` and the worker will run one extra inference at every turn end with
+Set `:verdict-schema <malli>` as an invocation key and the worker will run one extra inference at every turn end with
 `:tool-choice {:type "tool" :name "submit_verdict"}`.
 The model's structured input becomes `:verdict` in the `:on-end-turn-event` data — alongside the existing `:text` and `:from`.
 The chart can then guard transitions on `:verdict :status` (or any other key) without parsing free text.
 
 [source,clojure]
 ----
-;; In the invocation's params-fn:
+;; As an invocation key:
 {:verdict-schema [:map
                   [:status [:enum :proposed-new-version :done :stuck]]
                   [:summary :string]
@@ -1524,30 +1532,28 @@ targeted at `:to`.
 ;; Five-state agent pipeline (researcher → writer → editor)
 (state {:id :researching}
   (h/llm-conversation
-    {:id "researcher"
-     :params-fn (fn [_ _] {:initial-user-message "Research X"})})
+    {:id      "researcher"
+     :message "Research X"})
   (transition {:event :llm.idle :target :writing}
     (h/capture-llm-output)))                ; → artifacts/researcher
 
 (state {:id :writing}
   (h/llm-conversation
-    {:id "writer"
-     :params-fn (fn [env _]
-                  {:initial-user-message
-                   (h/render-template
-                    "Research:\n\n{{researcher}}\n\nWrite a draft."
-                    env)})})
+    {:id      "writer"
+     :message (fn [env _]
+                (h/render-template
+                 "Research:\n\n{{researcher}}\n\nWrite a draft."
+                 env))})
   (transition {:event :llm.idle :target :editing}
     (h/capture-llm-output)))                ; → artifacts/writer
 
 (state {:id :editing}
   (h/llm-conversation
-    {:id "editor"
-     :params-fn (fn [env _]
-                  {:initial-user-message
-                   (h/render-template
-                    "Draft:\n\n{{writer}}\n\nPolish for clarity."
-                    env)})})
+    {:id      "editor"
+     :message (fn [env _]
+                (h/render-template
+                 "Draft:\n\n{{writer}}\n\nPolish for clarity."
+                 env))})
   (transition {:event :llm.idle :target :done}
     (h/capture-llm-output)))                ; → artifacts/editor
 ----
@@ -1659,10 +1665,9 @@ The framework is a thin layer over it:
     (state {:id :consumer :initial :running}
       (state {:id :running}
         (h/llm-conversation
-          {:id        "coder"
-           :params-fn (fn [_ _]
-                        {:initial-user-message "evaluate (+ 1 2)"
-                         :chart-tools          [{:owner :repl-A}]})})
+          {:id          "coder"
+           :message     "evaluate (+ 1 2)"
+           :chart-tools [{:owner :repl-A}]})
         (transition {:event :llm.idle :target :done}))
       (final {:id :done})))
 
@@ -1755,7 +1760,7 @@ Use either; the codebase prefers `h/handle-tool` for symmetry with other
 
 === Consumer side: `:chart-tools`
 
-The consumer conversation opts in via its `params-fn`:
+The consumer conversation opts in via its `:chart-tools` key:
 
 [source,clojure]
 ----
@@ -1864,10 +1869,9 @@ The chart's state IS the policy.
     (state {:id :consumer :initial :running}
       (state {:id :running}
         (h/llm-conversation
-          {:id        "coder"
-           :params-fn (fn [_ _]
-                        {:initial-user-message "Refactor foo.clj"
-                         :chart-tools          [{:owner :repl-mgr}]})})))))
+          {:id          "coder"
+           :message     "Refactor foo.clj"
+           :chart-tools [{:owner :repl-mgr}]})))))
 ----
 
 Defaults to in-process SCI eval via the `:repl/eval` builtin tool.
@@ -1923,7 +1927,7 @@ Useful for the "specialist consultation" shape: an implementer LLM needs to ask 
    :verdict-schema      [:map [:file :string] [:rationale :string]]
    :system              "You are an expert at file/namespace placement..."})
 
-;; And on the asker's params-fn:
+;; And on the asker's conversation keys:
 {:chart-tools [{:owner :placement-consult}]
  :real-tools  [...]
  ...}
@@ -2359,7 +2363,7 @@ Then have your chart namespace require it:
    [my.app.tools]))   ;; <-- require triggers registration
 ----
 
-Now the chart's `params-fn` can name the tool in `:real-tools`:
+Now the chart's conversation can name the tool in `:real-tools`:
 
 [source,clojure]
 ----
@@ -2497,7 +2501,7 @@ jq -c 'select(.event == "llm/response") |
 ----
 
 For live output during a turn, set `:stream? true` on the state's
-`params-fn` map; the worker then emits `:llm/delta` rows
+conversation keys; the worker then emits `:llm/delta` rows
 (`{:type :text-delta|:thinking-delta :text "…"}`) as the model produces each chunk.
 Tap those off the transcript for real-time UI; the buffered
 `:llm/response` still arrives at end-of-turn.
@@ -2652,7 +2656,7 @@ LLM backend selection:
 A blank/empty value in any of these env vars is treated as unset (it no longer registers a dead route).
 With a single credential the bare sub-backend is used.
 With two or more, a `escapement.llm.multi`
-dispatcher is built so that a per-state `:model` keyword in `params-fn`
+dispatcher is built so that a per-state `:model` conversation key
 automatically reaches the right provider.
 The default backend and the auto-fallback model order follow `:llm/preferences` (see
 <<project-config>>) when set, otherwise a built-in default order.
@@ -2923,7 +2927,7 @@ just rolls them up into a registered chart value.
 So nothing prevents extracting one (or several) states into top-level `def`s, dropping them into the production chart unchanged, AND reusing the same vars inside minimal *shim* charts whose only job is to drive that segment through the testing harness.
 
 This is how you write integration tests for a large chart without booting the whole thing.
-The shim chart wraps the segment with the minimum parent state + finals required for its transition targets to resolve; the mocked `LLMBackend` scripts only the turns that segment issues; the real engine, real invocation processor, real `params-fn`, and real tool dispatch all run.
+The shim chart wraps the segment with the minimum parent state + finals required for its transition targets to resolve; the mocked `LLMBackend` scripts only the turns that segment issues; the real engine, real invocation processor, real conversation key resolution, and real tool dispatch all run.
 
 The pattern, distilled:
 
@@ -2934,7 +2938,7 @@ The assembled chart references the var; behavior is unchanged.
 ----
 (def refine-state               ; isolatable segment
   (state {:id :refine}
-    (h/llm-conversation {:id "refine" :params-fn ...})
+    (h/llm-conversation {:id "refine" :system ... :message ...})
     (transition {:event :refine/sealed :target :pipeline-done} ...)
     (transition {:event :refine/give-up :target :pipeline-done} ...)))
 
@@ -3222,7 +3226,7 @@ Absent `:config` ⇒ an empty ratings table (`{}`) and the built-in
 Nothing else reorders.
 Absent ⇒ `default-preferences`.
 
-The `:needs` gate (a chart-node `params-fn` key; see
+The `:needs` gate (a chart-node conversation key; see
 <<params-fn,`:needs`>>) — **filters, never ranks.** It removes ineligible models from the preference-ordered list; the survivors stay in preference order.
 A model rated `:clojure 7` and one rated
 `:clojure 10` are interchangeable under `[:>= 6]` — preference order alone decides which survivor runs.
@@ -3261,7 +3265,7 @@ These mix into the *same* keyspace; the invocation layer never special-cases a k
 
 `:needs` is the ergonomic eligibility-gate surface.
 See
-<<params-fn,the `params-fn` map>> for the full reference.
+<<params-fn,the conversation authoring keys>> for the full reference.
 
 ==== Fail-open vs fail-closed
 
@@ -3294,30 +3298,26 @@ A two-node chart expresses a different `:needs` gate per node, mixing an objecti
    ;; (:clojure, from :llm/ratings). Filter, not rank.
    (state {:id :refactor}
           (h/llm-conversation
-           {:id        "refactor"
-            :params-fn (fn [_env _data]
-                         {:system "You are a Clojure refactoring agent."
-                          :needs  {:tool-call? true
-                                   :clojure    [:>= 7]}
-                          :real-tools []
-                          :allowed-events [{:event :refactor-done}]
-                          :initial-user-message
-                          "Rename `foo` to `bar` across src/, then emit :refactor-done."})})
+           {:id             "refactor"
+            :system         "You are a Clojure refactoring agent."
+            :needs          {:tool-call? true
+                             :clojure    [:>= 7]}
+            :real-tools     []
+            :allowed-events [{:event :refactor-done}]
+            :message        "Rename `foo` to `bar` across src/, then emit :refactor-done."})
           (transition {:event :refactor-done :target :design-review}))
 
    ;; NODE 2 — Design review. :needs mixes the OBJECTIVE fact :vision?
    ;; with the SUBJECTIVE rating :ux. Same chart, different gate.
    (state {:id :design-review}
           (h/llm-conversation
-           {:id        "design-review"
-            :params-fn (fn [_env _data]
-                         {:system "You are a UX/design reviewer."
-                          :needs  {:vision? true
-                                   :ux      [:>= 6]}
-                          :real-tools []
-                          :allowed-events [{:event :review-done}]
-                          :initial-user-message
-                          "Critique the attached mockups, then emit :review-done."})})
+           {:id             "design-review"
+            :system         "You are a UX/design reviewer."
+            :needs          {:vision? true
+                             :ux      [:>= 6]}
+            :real-tools     []
+            :allowed-events [{:event :review-done}]
+            :message        "Critique the attached mockups, then emit :review-done."})
           (transition {:event :review-done :target :finished}))
 
    (final {:id :finished})))

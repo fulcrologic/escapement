@@ -122,13 +122,12 @@
                    (state {:id :work :initial :running}
                      (state {:id :running}
                        (h/llm-conversation
-                         {:id        "main"
-                          :params-fn (fn [_ _]
-                                       {:system               "do it"
-                                        :real-tools           []
-                                        :allowed-events       [{:event       :ok
-                                                                :data-schema [:map [:msg :string]]}]
-                                        :initial-user-message "go"})})
+                         {:id             "main"
+                          :system         "do it"
+                          :real-tools     []
+                          :allowed-events [{:event       :ok
+                                            :data-schema [:map [:msg :string]]}]
+                          :message        "go"})
                        (transition {:event :ok :target :done}))
                      (final {:id :done})))
         t        (new-llm-test-env
@@ -163,15 +162,14 @@
                    (state {:id :work :initial :running}
                      (state {:id :running}
                        (h/llm-conversation
-                         {:id        "poet"
-                          :params-fn (fn [_ _]
-                                       {:system         "poet"
-                                        :allowed-events [{:event       :poet-done
-                                                          :data-schema [:map
-                                                                        [:idx :int]
-                                                                        [:haikus [:vector :string]]
-                                                                        [:meta [:map [:genre :string]]]]}]
-                                        :initial-user-message "compose"})})
+                         {:id             "poet"
+                          :system         "poet"
+                          :allowed-events [{:event       :poet-done
+                                            :data-schema [:map
+                                                          [:idx :int]
+                                                          [:haikus [:vector :string]]
+                                                          [:meta [:map [:genre :string]]]]}]
+                          :message        "compose"})
                        (transition {:event :poet-done :target :done :type :internal}
                          (script {:expr (fn [_ data]
                                           (reset! captured (:_event data))
@@ -207,12 +205,11 @@
                    (state {:id :wrap :initial :scanning}
                      (state {:id :scanning}
                        (h/llm-conversation
-                         {:id        "scan"
-                          :params-fn (fn [_ _]
-                                       {:system               "scan"
-                                        :allowed-events       [{:event       :found-bug
-                                                                :data-schema [:map [:n :int]]}]
-                                        :initial-user-message "scan"})})
+                         {:id             "scan"
+                          :system         "scan"
+                          :allowed-events [{:event       :found-bug
+                                            :data-schema [:map [:n :int]]}]
+                          :message        "scan"})
                        (transition {:event :llm.idle :target :done}))
                      (final {:id :done})))
         ;; We need to capture the findings during traversal; track via an atom and a script.
@@ -222,12 +219,11 @@
                    (state {:id :wrap :initial :scanning}
                      (state {:id :scanning}
                        (h/llm-conversation
-                         {:id        "scan"
-                          :params-fn (fn [_ _]
-                                       {:system               "scan"
-                                        :allowed-events       [{:event       :found-bug
-                                                                :data-schema [:map [:n :int]]}]
-                                        :initial-user-message "scan"})})
+                         {:id             "scan"
+                          :system         "scan"
+                          :allowed-events [{:event       :found-bug
+                                            :data-schema [:map [:n :int]]}]
+                          :message        "scan"})
                        (transition {:event :found-bug :target :scanning :type :internal}
                          (script {:expr (fn [env data]
                                           (swap! captured conj (:_event data))
@@ -269,11 +265,10 @@
                    (state {:id :wrap :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "rw"
-                          :params-fn (fn [_ _]
-                                       {:real-tools           [:fs/read]
-                                        :allowed-events       [{:event :done :data-schema [:map]}]
-                                        :initial-user-message "go"})})
+                         {:id             "rw"
+                          :real-tools     [:fs/read]
+                          :allowed-events [{:event :done :data-schema [:map]}]
+                          :message        "go"})
                        (transition {:event :done :target :finished}
                          (script {:expr (fn [_ d] (swap! seen conj (:_event d)) nil)})))
                      (final {:id :finished})))
@@ -314,12 +309,11 @@
                    (state {:id :wrap :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "all"
-                          :params-fn (fn [_ _]
-                                       {:system               "go"
-                                        ;; :real-tools intentionally omitted
-                                        :allowed-events       [{:event :done :data-schema [:map]}]
-                                        :initial-user-message "go"})})
+                         {:id             "all"
+                          :system         "go"
+                          ;; :real-tools intentionally omitted
+                          :allowed-events [{:event :done :data-schema [:map]}]
+                          :message        "go"})
                        (transition {:event :done :target :finished}))
                      (final {:id :finished})))
         t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
@@ -341,12 +335,11 @@
                    (state {:id :wrap :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "subset"
-                          :params-fn (fn [_ _]
-                                       {:system               "go"
-                                        :real-tools           [:fs/read :fs/grep]
-                                        :allowed-events       [{:event :done :data-schema [:map]}]
-                                        :initial-user-message "go"})})
+                         {:id             "subset"
+                          :system         "go"
+                          :real-tools     [:fs/read :fs/grep]
+                          :allowed-events [{:event :done :data-schema [:map]}]
+                          :message        "go"})
                        (transition {:event :done :target :finished}))
                      (final {:id :finished})))
         t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
@@ -357,10 +350,10 @@
       => #{"fs_read" "fs_grep" "event__done"})))
 
 ;; ---------------------------------------------------------------------------
-;; #3c: prompt caching flows from params-fn through to the Request
+;; #3c: prompt caching flows from flat authoring keys through to the Request
 ;; ---------------------------------------------------------------------------
 
-(specification "params-fn cache-control flags reach the Request"
+(specification "flat cache-control flags reach the Request"
   (let [backend   (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
                                  (end-turn-response "ok")])
         registry  (builtin/new-builtin-registry)
@@ -369,14 +362,13 @@
                     (state {:id :wrap :initial :work}
                       (state {:id :work}
                         (h/llm-conversation
-                          {:id        "cached"
-                           :params-fn (fn [_ _]
-                                        {:system               "stable system prompt"
-                                         :real-tools           [:fs/read :fs/grep]
-                                         :system-cache-control {:type :ephemeral}
-                                         :tools-cache-control  {:type :ephemeral}
-                                         :allowed-events       [{:event :done :data-schema [:map]}]
-                                         :initial-user-message "go"})})
+                          {:id                   "cached"
+                           :system               "stable system prompt"
+                           :real-tools           [:fs/read :fs/grep]
+                           :system-cache-control {:type :ephemeral}
+                           :tools-cache-control  {:type :ephemeral}
+                           :allowed-events       [{:event :done :data-schema [:map]}]
+                           :message              "go"})
                         (transition {:event :done :target :finished}))
                       (final {:id :finished})))
         t         (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
@@ -400,24 +392,23 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- run-cache-chart!
-  "Spin up a tiny one-turn chart whose params-fn returns `params-extra` merged
-   over a stable base, and return the first Request that landed on the mock
-   backend."
+  "Spin up a tiny one-turn chart whose conversation flat opts are `params-extra`
+   merged over a stable base, and return the first Request that landed on the
+   mock backend."
   [params-extra]
   (let [backend  (mock-backend [(tool-use-response [{:id "e" :name "event__done" :input {}}])
                                 (end-turn-response "ok")])
         registry (builtin/new-builtin-registry)
-        base     {:system               "stable system prompt"
-                  :real-tools           [:fs/read :fs/grep]
-                  :allowed-events       [{:event :done :data-schema [:map]}]
-                  :initial-user-message "go"}
+        base     {:system         "stable system prompt"
+                  :real-tools     [:fs/read :fs/grep]
+                  :allowed-events [{:event :done :data-schema [:map]}]
+                  :message        "go"}
         chart    (chart/statechart
                    {:initial :wrap}
                    (state {:id :wrap :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "auto"
-                          :params-fn (fn [_ _] (merge base params-extra))})
+                         (assoc (merge base params-extra) :id "auto"))
                        (transition {:event :done :target :finished}))
                      (final {:id :finished})))
         t        (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
@@ -476,11 +467,10 @@
                    (state {:id :wrap :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "p"
-                          :params-fn (fn [_ _]
-                                       {:allowed-events       [{:event       :pick
-                                                                :data-schema [:map [:choice :string]]}]
-                                        :initial-user-message "pick one"})})
+                         {:id             "p"
+                          :allowed-events [{:event       :pick
+                                            :data-schema [:map [:choice :string]]}]
+                          :message        "pick one"})
                        (transition {:event :error.llm.tool-validation :target :failed}
                          (script {:expr (fn [_ d]
                                           (reset! err-seen (:_event d))
@@ -509,11 +499,10 @@
                   (state {:id :wrap :initial :work}
                     (state {:id :work}
                       (h/llm-conversation
-                        {:id        "p"
-                         :params-fn (fn [_ _]
-                                      {:allowed-events       [{:event       :pick
-                                                               :data-schema [:map [:choice :string]]}]
-                                       :initial-user-message "pick one"})})
+                        {:id             "p"
+                         :allowed-events [{:event       :pick
+                                           :data-schema [:map [:choice :string]]}]
+                         :message        "pick one"})
                       (transition {:event :pick :target :done}
                         (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
                     (final {:id :done})))
@@ -540,9 +529,8 @@
                   (state {:id :wrap :initial :bound}
                     (state {:id :bound}
                       (h/llm-conversation
-                        {:id        "main"
-                         :params-fn (fn [_ _]
-                                      {:initial-user-message "hi"})})
+                        {:id      "main"
+                         :message "hi"})
                       (transition {:event :leave :target :done}))
                     (final {:id :done})))
         t       (-> (dct/new-testing-env {:statechart chart} proc)
@@ -611,9 +599,8 @@
                   (state {:id :wrap :initial :bound}
                     (state {:id :bound :initial :a}
                       (h/llm-conversation
-                        {:id        "main"
-                         :params-fn (fn [_ _]
-                                      {:initial-user-message "hi"})})
+                        {:id      "main"
+                         :message "hi"})
                       (transition {:event :llm.idle :target :a-saw-idle :type :internal})
                       (state {:id :a})
                       (state {:id :a-saw-idle}
@@ -664,11 +651,10 @@
                       (state {:id :wrap :initial :work}
                         (state {:id :work}
                           (h/llm-conversation
-                            {:id        "p"
-                             :params-fn (fn [_ _]
-                                          {:max-turns            3
-                                           :real-tools           [:test/noop]
-                                           :initial-user-message "go"})})
+                            {:id         "p"
+                             :max-turns  3
+                             :real-tools [:test/noop]
+                             :message    "go"})
                           ;; Catch-all per-family.
                           (transition {:event :error.llm.* :target :failed}
                             (script {:expr (fn [_ d] (reset! err-seen (:_event d)) nil)})))
@@ -691,8 +677,8 @@
                   (state {:id :wrap :initial :work}
                     (state {:id :work}
                       (h/llm-conversation
-                        {:id        "advisor"
-                         :params-fn (fn [_ _] {:initial-user-message "go"})})
+                        {:id      "advisor"
+                         :message "go"})
                       (transition {:event :llm.idle :target :done}
                         (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
                     (final {:id :done})))
@@ -725,11 +711,10 @@
                      (state {:id :wrap :initial :work}
                        (state {:id :work}
                          (h/llm-conversation
-                           {:id        "glm"
-                            :params-fn (fn [_ _]
-                                         {:real-tools           []
-                                          :allowed-events       [{:event :done}]
-                                          :initial-user-message "go"})})
+                           {:id             "glm"
+                            :real-tools     []
+                            :allowed-events [{:event :done}]
+                            :message        "go"})
                          (transition {:event :llm.idle :target :finished}
                            (script {:expr (fn [_ d]
                                             (swap! idle-count inc)
@@ -764,11 +749,10 @@
                      (state {:id :wrap :initial :work}
                        (state {:id :work}
                          (h/llm-conversation
-                           {:id        "glm"
-                            :params-fn (fn [_ _]
-                                         {:real-tools           []
-                                          :allowed-events       [{:event :done}]
-                                          :initial-user-message "go"})})
+                           {:id             "glm"
+                            :real-tools     []
+                            :allowed-events [{:event :done}]
+                            :message        "go"})
                          (transition {:event :llm.idle :target :finished}
                            (script {:expr (fn [_ _]
                                             (swap! idle-count inc)
@@ -808,13 +792,13 @@
                           {:initial :work}
                           (state {:id :work}
                             (h/llm-conversation
-                              {:id        "main"
-                               :params-fn (fn [_ _]
-                                            {:model "main" :initial-user-message "hello-main"})})
+                              {:id      "main"
+                               :model   "main"
+                               :message "hello-main"})
                             (h/llm-conversation
-                              {:id        "advisor"
-                               :params-fn (fn [_ _]
-                                            {:model "advisor" :initial-user-message "hello-advisor"})})))
+                              {:id      "advisor"
+                               :model   "advisor"
+                               :message "hello-advisor"})))
         proc            (llmc/new-processor {:backend       selector
                                              :tool-registry (tp/new-registry)})
         t               (-> (dct/new-testing-env {:statechart chart} proc)
@@ -857,8 +841,8 @@
                   (state {:id :wrap :initial :work}
                     (state {:id :work}
                       (h/llm-conversation
-                        {:id        :researcher             ;; <-- keyword
-                         :params-fn (fn [_ _] {:initial-user-message "go"})})
+                        {:id      :researcher             ;; <-- keyword
+                         :message "go"})
                       (transition {:event :llm.idle :target :done}
                         (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
                     (final {:id :done})))
@@ -901,13 +885,12 @@
                        (state {:id :wrap :initial :work}
                          (state {:id :work}
                            (h/llm-conversation
-                             {:id        "trans"
-                              :params-fn (fn [_ _]
-                                           {:system               "long-and-static system prompt"
-                                            :real-tools           []
-                                            :allowed-events       [{:event       :done
-                                                                    :data-schema [:map [:n :int]]}]
-                                            :initial-user-message "go"})})
+                             {:id             "trans"
+                              :system         "long-and-static system prompt"
+                              :real-tools     []
+                              :allowed-events [{:event       :done
+                                                :data-schema [:map [:n :int]]}]
+                              :message        "go"})
                            (transition {:event :done :target :finished}))
                          (final {:id :finished})))
         t            (new-llm-test-env
@@ -968,11 +951,10 @@
                    (state {:id :wrap :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "r3w"
-                          :params-fn (fn [_ _]
-                                       {:real-tools           [:fs/write]
-                                        :allowed-events       [{:event :done :data-schema [:map]}]
-                                        :initial-user-message "go"})})
+                         {:id             "r3w"
+                          :real-tools     [:fs/write]
+                          :allowed-events [{:event :done :data-schema [:map]}]
+                          :message        "go"})
                        (transition {:event :done :target :finished}))
                      (final {:id :finished})))
         t        (new-llm-test-env
@@ -1013,10 +995,9 @@
                    (state {:id :wrap :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "trunc"
-                          :params-fn (fn [_ _]
-                                       {:allowed-events       [{:event :done :data-schema [:map]}]
-                                        :initial-user-message "go"})})
+                         {:id             "trunc"
+                          :allowed-events [{:event :done :data-schema [:map]}]
+                          :message        "go"})
                        (transition {:event :done :target :finished}))
                      (final {:id :finished})))
         t        (new-llm-test-env
@@ -1123,14 +1104,14 @@
                    (state {:id :wrap :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "p"
+                         {:id         "p"
+                          :message    "go"
                           ;; These specs assert the category→event
                           ;; mapping, not recovery. Disable the default
                           ;; transient retry so a thrown rate-limited/
                           ;; timeout/etc. fails fast deterministically
                           ;; instead of backing off past the timeout.
-                          :params-fn (fn [_ _] {:initial-user-message "go"
-                                                :resilience           {:max-retries 0}})})
+                          :resilience {:max-retries 0}})
                        (transition {:event :error.llm.* :target :failed}
                          (script {:expr (fn [_ d]
                                           (reset! err-seen (:_event d))
@@ -1407,12 +1388,11 @@
                           (state {:id :wrap :initial :work}
                             (state {:id :work}
                               (h/llm-conversation
-                                {:id        "judge"
-                                 :params-fn (fn [_ _]
-                                              {:initial-user-message "go"
-                                               :verdict-schema       [:map
-                                                                      [:status :keyword]
-                                                                      [:note :string]]})})
+                                {:id             "judge"
+                                 :message        "go"
+                                 :verdict-schema [:map
+                                                  [:status :keyword]
+                                                  [:note :string]]})
                               (transition {:event :llm.idle :target :done}
                                 (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
                             (final {:id :done})))
@@ -1477,10 +1457,9 @@
                          (state {:id :wrap :initial :work}
                            (state {:id :work}
                              (h/llm-conversation
-                               {:id        "judge"
-                                :params-fn (fn [_ _]
-                                             {:initial-user-message "go"
-                                              :verdict-schema       keyword-schema})})
+                               {:id             "judge"
+                                :message        "go"
+                                :verdict-schema keyword-schema})
                              (transition {:event :llm.idle :target :done}
                                (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
                            (final {:id :done})))
@@ -1502,9 +1481,8 @@
                     (state {:id :wrap :initial :work}
                       (state {:id :work}
                         (h/llm-conversation
-                          {:id        "free"
-                           :params-fn (fn [_ _]
-                                        {:initial-user-message "go"})})
+                          {:id      "free"
+                           :message "go"})
                         (transition {:event :llm.idle :target :done}
                           (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
                       (final {:id :done})))
@@ -1531,12 +1509,11 @@
                    (state {:id :wrap :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "judge"
-                          :params-fn (fn [_ _]
-                                       {:initial-user-message "go"
-                                        :verdict-schema       [:map
-                                                               [:status :keyword]
-                                                               [:note :string]]})})
+                         {:id             "judge"
+                          :message        "go"
+                          :verdict-schema [:map
+                                           [:status :keyword]
+                                           [:note :string]]})
                        (transition {:event :error.llm.verdict-validation :target :failed}
                          (script {:expr (fn [_ d] (reset! seen-err (:_event d)) nil)})))
                      (final {:id :failed})))
@@ -1564,11 +1541,10 @@
                         (state {:id :wrap :initial :work}
                           (state {:id :work}
                             (h/llm-conversation
-                              {:id        "glm"
-                               :params-fn (fn [_ _]
-                                            {:initial-user-message "go"
-                                             :allowed-events       [{:event :finish :data-schema [:map]}]
-                                             :verdict-schema       [:map [:done? :boolean]]})})
+                              {:id             "glm"
+                               :message        "go"
+                               :allowed-events [{:event :finish :data-schema [:map]}]
+                               :verdict-schema [:map [:done? :boolean]]})
                             (transition {:event :llm.idle :target :done}
                               (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
                           (final {:id :done})))

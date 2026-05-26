@@ -17,11 +17,10 @@
 
       (state {:id :ask-name}
         (h/human-input
-          {:id        "ask-name"
-           :params-fn (fn [_env _data]
-                        {:kind          :text
-                         :prompt        "What's your name?"
-                         :answer-schema [:string {:min 1}]})})
+          {:id            "ask-name"
+           :kind          :text
+           :prompt        "What's your name?"
+           :answer-schema [:string {:min 1}]})
         (transition {:event :human.answer :target :confirm-name}
           (script {:expr (fn [_ data]
                            [(ops/assign :name
@@ -29,11 +28,10 @@
 
       (state {:id :confirm-name}
         (h/human-input
-          {:id        "confirm-name"
-           :params-fn (fn [_env data]
-                        {:kind    :confirm
-                         :prompt  (str "Hello " (:name data) " — is that right?")
-                         :default true})})
+          {:id      "confirm-name"
+           :kind    :confirm
+           :prompt  (fn [_env data] (str "Hello " (:name data) " — is that right?"))
+           :default true})
         (transition {:event :human.answer :target :greeted
                      :cond  (fn [_ data] (get-in data [:_event :data :answer]))})
         (transition {:event :human.answer :target :ask-name}))

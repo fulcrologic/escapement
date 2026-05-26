@@ -127,50 +127,15 @@
      (ops/assign :existing? existing?)]))
 
 ;; ---------------------------------------------------------------------------
-;; Per-phase params builders
+;; Per-phase event declarations
+;;
+;; Conversation params are authored inline at each call site as flat keys:
+;; static config is a literal; only the data-dependent slots (`:system`,
+;; `:message`) are `(fn [_ data])`.
 ;; ---------------------------------------------------------------------------
 
 (def ^:private done-event
   {:event :phase/done :data-schema [:map [:summary :string]]})
-
-(defn- analysis-params [phase data]
-  {:system               (p/render-phase phase data)
-   :real-tools           [:fs/read :fs/write]
-   :allowed-events       [done-event]
-   :initial-user-message (str "Begin the `" (name phase)
-                           "` phase for `" (:function data)
-                           "` in `" (:source-path data) "`. Follow the instructions exactly.")})
-
-(defn- mutation-params [phase data]
-  {:system               (p/render-phase phase data)
-   :real-tools           [:fs/read :fs/write :fs/edit]
-   :allowed-events       [done-event]
-   :initial-user-message (str "Begin the `" (name phase) "` phase. The test file is `"
-                           (:test-file data) "`. Follow the instructions exactly.")})
-
-(defn- refine-params [data]
-  {:system               (p/render-phase :refine data)
-   :real-tools           [:fs/read :fs/write :fs/edit :shell/run]
-   :allowed-events       [{:event       :refine/sealed
-                           :data-schema [:map
-                                         [:signature :string]
-                                         [:iterations {:optional true} :int]]}
-                          {:event       :refine/give-up
-                           :data-schema [:map [:reason :string]]}]
-   :initial-user-message (str "Refine the tests in `" (:test-file data)
-                           "` for `" (:function data) "` until they pass and seal `:covers`."
-                           " REPL port: " (:nrepl-port data) ".")})
-
-(defn- repl-mgr-params [data]
-  {:system               (p/render-phase :repl-manager data)
-   :real-tools           [:fs/read :shell/run]
-   :allowed-events       [{:event       :repl/ready-evt
-                           :data-schema [:map [:port :int]]}
-                          {:event       :repl/failed
-                           :data-schema [:map [:reason :string]]}]
-   :initial-user-message (str "Establish a TEST-mode nREPL for the project at `"
-                           (:project-dir data)
-                           "`. Follow the procedure exactly.")})
 
 ;; ---------------------------------------------------------------------------
 ;; REPL discovery (scripted cheap path)
@@ -257,8 +222,19 @@
    Transitions out: `:pipeline-done` (on `:refine/sealed` or `:refine/give-up`)."
   (state {:id :refine}
     (h/llm-conversation
-      {:id        "refine"
-       :params-fn (fn [_env data] (refine-params data))})
+      {:id             "refine"
+       :system         (fn [_ data] (p/render-phase :refine data))
+       :real-tools     [:fs/read :fs/write :fs/edit :shell/run]
+       :allowed-events [{:event       :refine/sealed
+                         :data-schema [:map
+                                       [:signature :string]
+                                       [:iterations {:optional true} :int]]}
+                        {:event       :refine/give-up
+                         :data-schema [:map [:reason :string]]}]
+       :message        (fn [_ data]
+                         (str "Refine the tests in `" (:test-file data)
+                           "` for `" (:function data) "` until they pass and seal `:covers`."
+                           " REPL port: " (:nrepl-port data) "."))})
     (transition {:event :refine/sealed :target :pipeline-done}
       (script {:expr (fn [_env data]
                        [(ops/assign :final-status :sealed)
@@ -294,14 +270,26 @@
 
           (state {:id :behaviors}
             (h/llm-conversation
-              {:id        "behaviors"
-               :params-fn (fn [_env data] (analysis-params :behaviors data))})
+              {:id             "behaviors"
+               :system         (fn [_ data] (p/render-phase :behaviors data))
+               :real-tools     [:fs/read :fs/write]
+               :allowed-events [done-event]
+               :message        (fn [_ data]
+                                 (str "Begin the `behaviors` phase for `"
+                                   (:function data) "` in `" (:source-path data)
+                                   "`. Follow the instructions exactly."))})
             (transition {:event :phase/done :target :abstraction}))
 
           (state {:id :abstraction}
             (h/llm-conversation
-              {:id        "abstraction"
-               :params-fn (fn [_env data] (analysis-params :abstraction data))})
+              {:id             "abstraction"
+               :system         (fn [_ data] (p/render-phase :abstraction data))
+               :real-tools     [:fs/read :fs/write]
+               :allowed-events [done-event]
+               :message        (fn [_ data]
+                                 (str "Begin the `abstraction` phase for `"
+                                   (:function data) "` in `" (:source-path data)
+                                   "`. Follow the instructions exactly."))})
             (transition {:event :phase/done :target :choose-path}))
 
           (state {:id :choose-path}
@@ -312,27 +300,48 @@
           ;; NEW path
           (state {:id :write}
             (h/llm-conversation
-              {:id        "write"
-               :params-fn (fn [_env data] (mutation-params :write data))})
+              {:id             "write"
+               :system         (fn [_ data] (p/render-phase :write data))
+               :real-tools     [:fs/read :fs/write :fs/edit]
+               :allowed-events [done-event]
+               :message        (fn [_ data]
+                                 (str "Begin the `write` phase. The test file is `"
+                                   (:test-file data) "`. Follow the instructions exactly."))})
             (transition {:event :phase/done :target :critique}))
 
           (state {:id :critique}
             (h/llm-conversation
-              {:id        "critique"
-               :params-fn (fn [_env data] (mutation-params :critique data))})
+              {:id             "critique"
+               :system         (fn [_ data] (p/render-phase :critique data))
+               :real-tools     [:fs/read :fs/write :fs/edit]
+               :allowed-events [done-event]
+               :message        (fn [_ data]
+                                 (str "Begin the `critique` phase. The test file is `"
+                                   (:test-file data) "`. Follow the instructions exactly."))})
             (transition {:event :phase/done :target :await-repl}))
 
           ;; EXISTING path
           (state {:id :gap-analysis}
             (h/llm-conversation
-              {:id        "gap-analysis"
-               :params-fn (fn [_env data] (analysis-params :gap-analysis data))})
+              {:id             "gap-analysis"
+               :system         (fn [_ data] (p/render-phase :gap-analysis data))
+               :real-tools     [:fs/read :fs/write]
+               :allowed-events [done-event]
+               :message        (fn [_ data]
+                                 (str "Begin the `gap-analysis` phase for `"
+                                   (:function data) "` in `" (:source-path data)
+                                   "`. Follow the instructions exactly."))})
             (transition {:event :phase/done :target :patch}))
 
           (state {:id :patch}
             (h/llm-conversation
-              {:id        "patch"
-               :params-fn (fn [_env data] (mutation-params :patch data))})
+              {:id             "patch"
+               :system         (fn [_ data] (p/render-phase :patch data))
+               :real-tools     [:fs/read :fs/write :fs/edit]
+               :allowed-events [done-event]
+               :message        (fn [_ data]
+                                 (str "Begin the `patch` phase. The test file is `"
+                                   (:test-file data) "`. Follow the instructions exactly."))})
             (transition {:event :phase/done :target :await-repl}))
 
           ;; Wait for the REPL manager region to publish a port.
@@ -376,8 +385,17 @@
 
           (state {:id :inspecting}
             (h/llm-conversation
-              {:id        "repl-mgr"
-               :params-fn (fn [_env data] (repl-mgr-params data))})
+              {:id             "repl-mgr"
+               :system         (fn [_ data] (p/render-phase :repl-manager data))
+               :real-tools     [:fs/read :shell/run]
+               :allowed-events [{:event       :repl/ready-evt
+                                 :data-schema [:map [:port :int]]}
+                                {:event       :repl/failed
+                                 :data-schema [:map [:reason :string]]}]
+               :message        (fn [_ data]
+                                 (str "Establish a TEST-mode nREPL for the project at `"
+                                   (:project-dir data)
+                                   "`. Follow the procedure exactly."))})
             (transition {:event :repl/ready-evt :target :repl-ready}
               (script {:expr (fn [_env data]
                                [(ops/assign :nrepl-port

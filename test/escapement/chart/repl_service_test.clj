@@ -105,10 +105,9 @@
                          (state {:id :consumer :initial :running}
                            (state {:id :running}
                              (h/llm-conversation
-                               {:id        "coder"
-                                :params-fn (fn [_ _]
-                                             {:chart-tools          [{:owner :repl-mgr}]
-                                              :initial-user-message "go"})})
+                               {:id          "coder"
+                                :chart-tools [{:owner :repl-mgr}]
+                                :message     "go"})
                              (transition {:event :llm.idle :target :consumer-done}))
                            (final {:id :consumer-done}))
                          (repl-service/repl-service-region {:id      :repl-mgr

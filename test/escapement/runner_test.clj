@@ -285,11 +285,10 @@
     (state {:id :run :initial :ask}
       (state {:id :ask}
         (h/human-input
-          {:id        "ask"
-           :params-fn (fn [_env _data]
-                        {:kind          :text
-                         :prompt        "blocks forever"
-                         :answer-schema [:string {:min 1}]})})
+          {:id            "ask"
+           :kind          :text
+           :prompt        "blocks forever"
+           :answer-schema [:string {:min 1}]})
         (transition {:event :human.answer :target :done}))
       (final {:id :done}))))
 

@@ -81,15 +81,14 @@
     (state {:id :work :initial :running}
       (state {:id :running}
         (h/llm-conversation
-          {:id        "main"
-           :params-fn (fn [_ _]
-                        {:model                "stub-x"
-                         :stream?              true
-                         :system               "do it"
-                         :real-tools           []
-                         :allowed-events       [{:event       :done
-                                                 :data-schema [:map [:msg :string]]}]
-                         :initial-user-message "go"})})
+          {:id             "main"
+           :model          "stub-x"
+           :stream?        true
+           :system         "do it"
+           :real-tools     []
+           :allowed-events [{:event       :done
+                             :data-schema [:map [:msg :string]]}]
+           :message        "go"})
         (transition {:event :done :target :finished}))
       (final {:id :finished}))))
 

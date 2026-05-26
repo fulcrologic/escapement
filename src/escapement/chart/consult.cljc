@@ -152,10 +152,11 @@
       ;; lifecycle is the consult state's lifecycle. The verdict-schema
       ;; on the specialist's params drives the submit_verdict wrap-up
       ;; inference that produces the typed answer this helper forwards
-      ;; back to the asker as tool_result.
+      ;; back to the asker as tool_result. `specialist-params'` is a
+      ;; runtime-computed map of literal values; merge it as flat keys
+      ;; (none are functions) and add the invoke :id.
       (h/llm-conversation
-        {:id        specialist-invokeid
-         :params-fn (fn [_ _] specialist-params')})
+        (assoc specialist-params' :id specialist-invokeid))
 
       ;; Asker called the tool → enqueue correlation, send the request
       ;; to the specialist as a targeted user-message, then defer the

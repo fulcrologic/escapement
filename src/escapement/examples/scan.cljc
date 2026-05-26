@@ -39,18 +39,17 @@
     (state {:id :run :initial :scanning}
       (state {:id :scanning}
         (h/llm-conversation
-          {:id        "scanner"
-           :params-fn (fn [_env data]
-                        {:system               system-prompt
-                         :real-tools           [:fs/read]
-                         :allowed-events       [{:event       :found-bug
-                                                 :data-schema [:map
-                                                               [:file :string]
-                                                               [:line :int]
-                                                               [:summary :string]]}
-                                                {:event       :scan-complete
-                                                 :data-schema [:map [:total_findings :int]]}]
-                         :initial-user-message (user-message data)})})
+          {:id             "scanner"
+           :system         system-prompt
+           :real-tools     [:fs/read]
+           :allowed-events [{:event       :found-bug
+                             :data-schema [:map
+                                           [:file :string]
+                                           [:line :int]
+                                           [:summary :string]]}
+                            {:event       :scan-complete
+                             :data-schema [:map [:total_findings :int]]}]
+           :message        (fn [_env data] (user-message data))})
         ;; Accumulate findings without leaving :scanning (internal transition).
         ;; An event-tool turn ends the LLM turn (the worker parks in
         ;; :awaiting-user — see system-prompt "and end your turn"), so we

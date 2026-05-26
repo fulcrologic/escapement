@@ -273,17 +273,15 @@
     (state {:id id}
       (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms}))
       (h/llm-conversation
-        {:id   invk
-         :params-fn
-         (fn [_env data]
-           {:system                       (poet-system (:idx data))
-            :real-tools                   []
-            :allowed-events               []
-            :max-turns                    1
-            :max-conversation-duration-ms 60000
-            :initial-user-message
-            (str "Theme: \"" (:theme data) "\". "
-              "Write haiku #" n " of 3. Output only the three lines.")})})
+        {:id             invk
+         :system         (fn [_env data] (poet-system (:idx data)))
+         :real-tools     []
+         :allowed-events []
+         :max-turns      1
+         :budget-ms      60000
+         :message        (fn [_env data]
+                           (str "Theme: \"" (:theme data) "\". "
+                             "Write haiku #" n " of 3. Output only the three lines."))})
 
       (transition {:event :llm.idle
                    :cond  (fn [_env data] (= invk (from-id data)))
@@ -335,19 +333,18 @@
     (state {:id :working}
       (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms}))
       (h/llm-conversation
-        {:id "judge1"
-         :params-fn
-         (fn [_env data]
-           {:system     (judge1-system (:idx data) (:persona data)
-                          (:poet-idx data))
-            :real-tools []
-            :allowed-events []
-            :max-turns                    1
-            :max-conversation-duration-ms 60000
-            :initial-user-message
-            (str "Here are the three haiku by Poet #" (:poet-idx data) ":\n\n"
-              (format-numbered-haikus (:haikus data))
-              "\n\nNow reply: number on line 1, reason on line 2.")})})
+        {:id             "judge1"
+         :system         (fn [_env data]
+                           (judge1-system (:idx data) (:persona data)
+                             (:poet-idx data)))
+         :real-tools     []
+         :allowed-events []
+         :max-turns      1
+         :budget-ms      60000
+         :message        (fn [_env data]
+                           (str "Here are the three haiku by Poet #" (:poet-idx data) ":\n\n"
+                             (format-numbered-haikus (:haikus data))
+                             "\n\nNow reply: number on line 1, reason on line 2."))})
 
       (transition {:event :llm.idle :target :reported}
         (script {:expr
@@ -395,22 +392,22 @@
     (state {:id :working}
       (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms}))
       (h/llm-conversation
-        {:id "judge2"
-         :params-fn
-         (fn [_env data]
-           (let [n (count (:finalists data))]
-             {:system     (judge2-system (:idx data) (:persona data) n)
-              :real-tools []
-              :allowed-events []
-              :max-turns                    1
-              :max-conversation-duration-ms 60000
-              :initial-user-message
-              (str "Here are the " n " finalist haiku:\n\n"
-                (str/join "\n\n"
-                  (map-indexed (fn [i {:keys [poet-idx haiku]}]
-                                 (str (inc i) ". (Poet " poet-idx ")\n" haiku))
-                    (:finalists data)))
-                "\n\nNow reply: number on line 1, reason on line 2.")}))})
+        {:id             "judge2"
+         :system         (fn [_env data]
+                           (judge2-system (:idx data) (:persona data)
+                             (count (:finalists data))))
+         :real-tools     []
+         :allowed-events []
+         :max-turns      1
+         :budget-ms      60000
+         :message        (fn [_env data]
+                           (let [n (count (:finalists data))]
+                             (str "Here are the " n " finalist haiku:\n\n"
+                               (str/join "\n\n"
+                                 (map-indexed (fn [i {:keys [poet-idx haiku]}]
+                                                (str (inc i) ". (Poet " poet-idx ")\n" haiku))
+                                   (:finalists data)))
+                               "\n\nNow reply: number on line 1, reason on line 2.")))})
 
       (transition {:event :llm.idle :target :reported}
         (script {:expr
@@ -543,16 +540,14 @@
       ;; ---------- PHASE 1: planner (plain text START/ABORT) ----------
       (state {:id :planning}
         (h/llm-conversation
-          {:id "planner"
-           :params-fn
-           (fn [_env data]
-             {:system                       planner-prompt
-              :real-tools                   []
-              :allowed-events               []
-              :max-turns                    1
-              :max-conversation-duration-ms 60000
-              :initial-user-message
-              (str "USER INPUT:\n" (pr-str (:user-input data "")))})})
+          {:id             "planner"
+           :system         planner-prompt
+           :real-tools     []
+           :allowed-events []
+           :max-turns      1
+           :budget-ms      60000
+           :message        (fn [_env data]
+                             (str "USER INPUT:\n" (pr-str (:user-input data ""))))})
 
         (transition {:event :llm.idle
                      :cond  (fn [_env data] (= "planner" (from-id data)))
@@ -703,15 +698,13 @@
       ;; ---------- PHASE 7: host LLM writes tournament-summary.md ----------
       (state {:id :summarizing}
         (h/llm-conversation
-          {:id "host"
-           :params-fn
-           (fn [_env data]
-             {:system                       host-system
-              :real-tools                   []
-              :allowed-events               []
-              :max-turns                    2
-              :max-conversation-duration-ms 120000
-              :initial-user-message         (host-user-message data)})})
+          {:id             "host"
+           :system         host-system
+           :real-tools     []
+           :allowed-events []
+           :max-turns      2
+           :budget-ms      120000
+           :message        (fn [_env data] (host-user-message data))})
         (transition {:event :llm.idle
                      :cond  (fn [_env data] (= "host" (from-id data)))
                      :target :finished}

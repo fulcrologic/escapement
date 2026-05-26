@@ -32,13 +32,13 @@
         (state {:id :translator :initial :translating}
           (state {:id :translating}
             (h/llm-conversation
-              {:id        "translator"
-               :params-fn (fn [_env data]
-                            {:system               translator-system
-                             :allowed-events       [{:event       :translated
-                                                     :data-schema [:map [:text :string]]}]
-                             :initial-user-message (str "Translate to French: "
-                                                     (pr-str (:phrase data "Hello, world.")))})})
+              {:id             "translator"
+               :system         translator-system
+               :allowed-events [{:event       :translated
+                                 :data-schema [:map [:text :string]]}]
+               :message        (fn [_env data]
+                                 (str "Translate to French: "
+                                   (pr-str (:phrase data "Hello, world."))))})
             (transition {:event :translated :target :t-done}
               (script {:expr (fn [_env data]
                                [(ops/assign :translation
@@ -48,13 +48,13 @@
         (state {:id :summarizer :initial :summarizing}
           (state {:id :summarizing}
             (h/llm-conversation
-              {:id        "summarizer"
-               :params-fn (fn [_env data]
-                            {:system               summarizer-system
-                             :allowed-events       [{:event       :summarized
-                                                     :data-schema [:map [:text :string]]}]
-                             :initial-user-message (str "Summarize this passage: "
-                                                     (pr-str (:passage data "Once upon a time there was a cat.")))})})
+              {:id             "summarizer"
+               :system         summarizer-system
+               :allowed-events [{:event       :summarized
+                                 :data-schema [:map [:text :string]]}]
+               :message        (fn [_env data]
+                                 (str "Summarize this passage: "
+                                   (pr-str (:passage data "Once upon a time there was a cat."))))})
             (transition {:event :summarized :target :s-done}
               (script {:expr (fn [_env data]
                                [(ops/assign :summary

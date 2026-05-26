@@ -146,22 +146,19 @@
         (h/llm-conversation
           {:id "inspectable"
            ;; autoforward? defaults true; not needed here (no steering).
-           :params-fn
-           (fn [_env _data]
-             {:system                       system-prompt
-              ;; Real-tool: built-in fs/write writes a real scratch
-              ;; file under --work-dir (non-destructive). Whitelisted
-              ;; so the model can ONLY write, nothing else.
-              :real-tools                   [:fs/write]
-              ;; Event-tool that advances the chart to :finished.
-              :allowed-events               [{:event       :done
-                                              :data-schema [:map [:summary :string]]}]
-              ;; Conservative budgets so a live run can never hang
-              ;; (cheat-sheet §1: ALWAYS bound the loop).
-              :max-turns                    5
-              :max-conversation-duration-ms 120000
-              :initial-user-message
-              "Record the fact \"sky is blue\" and report it."})})
+           :system         system-prompt
+           ;; Real-tool: built-in fs/write writes a real scratch
+           ;; file under --work-dir (non-destructive). Whitelisted
+           ;; so the model can ONLY write, nothing else.
+           :real-tools     [:fs/write]
+           ;; Event-tool that advances the chart to :finished.
+           :allowed-events [{:event       :done
+                             :data-schema [:map [:summary :string]]}]
+           ;; Conservative budgets so a live run can never hang
+           ;; (cheat-sheet §1: ALWAYS bound the loop).
+           :max-turns      5
+           :budget-ms      120000
+           :message        "Record the fact \"sky is blue\" and report it."})
 
         ;; Event-tool fires :done FIRST (task 001 P1: posted before
         ;; :llm.idle for the same turn). It is `:type :internal` so

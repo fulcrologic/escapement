@@ -43,24 +43,22 @@
       ;; ---- Stage 1: writer ---------------------------------------------
       (state {:id :writing}
         (h/llm-conversation
-          {:id        "writer"
-           :params-fn (fn [_env _data]
-                        {:system               writer-system
-                         :initial-user-message "Write a haiku about debugging a statechart at midnight."})})
+          {:id      "writer"
+           :system  writer-system
+           :message "Write a haiku about debugging a statechart at midnight."})
         (transition {:event :llm.idle :target :critiquing}
           (h/capture-llm-output {:as "writer.md"})))
 
       ;; ---- Stage 2: critic (reads writer.md via template) --------------
       (state {:id :critiquing}
         (h/llm-conversation
-          {:id        "critic"
-           :params-fn (fn [env _data]
-                        {:system critic-system
-                         :initial-user-message
-                         (h/render-template
-                           (str "Please critique the following haiku:\n\n"
-                             "{{writer.md}}\n")
-                           env)})})
+          {:id      "critic"
+           :system  critic-system
+           :message (fn [env _data]
+                      (h/render-template
+                        (str "Please critique the following haiku:\n\n"
+                          "{{writer.md}}\n")
+                        env))})
         (transition {:event :llm.idle :target :done}
           (h/capture-llm-output {:as "critic.md"})))
 

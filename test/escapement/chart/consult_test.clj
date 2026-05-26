@@ -104,10 +104,9 @@
                              (state {:id :asker :initial :running}
                                (state {:id :running}
                                  (h/llm-conversation
-                                   {:id        "asker"
-                                    :params-fn (fn [_ _]
-                                                 {:chart-tools          [{:owner :consult-placer}]
-                                                  :initial-user-message "place this function"})})
+                                   {:id          "asker"
+                                    :chart-tools [{:owner :consult-placer}]
+                                    :message     "place this function"})
                                  (transition {:event  :llm.idle :cond (fn [_env data]
                                                                         (= "asker" (get-in data [:_event :data :from])))
                                               :target :asker-done}))

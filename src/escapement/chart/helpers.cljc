@@ -42,23 +42,97 @@
   (slow-work pattern). See that ns for the full contract."}
   post-reply service/post-reply)
 
+;; ---------------------------------------------------------------------------
+;; Flat authoring-key resolution
+;;
+;; Every authored key is a literal OR a `(fn [env data])`, resolved at invoke
+;; time. `fn?` is the "compute me" signal, so a param whose legitimate VALUE is
+;; a function (e.g. human-input's `:render`) must be listed in `raw-ks` to skip
+;; resolution. There is no `:params`/`:params-fn` escape hatch — compute several
+;; params from `data` with a `(fn [env data])` per key.
+;; ---------------------------------------------------------------------------
+
+(def ^:private llm-aliases
+  "Friendly authoring names → canonical processor keys for `llm-conversation`."
+  {:message   :initial-user-message
+   :budget-ms :max-conversation-duration-ms})
+
+(defn- apply-aliases
+  "Rename alias keys in `m` to their canonical names per `aliases`
+   (alias→canonical). If both the alias and the canonical key are present, the
+   canonical key wins and the alias is dropped."
+  [m aliases]
+  (reduce-kv
+    (fn [m a c]
+      (if (contains? m a)
+        (cond-> m
+          (not (contains? m c)) (assoc c (get m a))
+          true                  (dissoc a))
+        m))
+    m aliases))
+
+(defn- resolve-flat-params
+  "Returns the params map a processor consumes from flat authoring `opts`.
+
+   Drops the control keys in `:drop-ks`; for every remaining key applies the
+   value-or-expression rule `(if (fn? v) (v env data) v)`, EXCEPT keys in
+   `:raw-ks` which pass through untouched (they are legitimately
+   function-valued, e.g. `:render`); finally applies `:aliases`
+   (alias→canonical, canonical wins).
+
+   `cfg` keys: `:drop-ks` (coll), `:raw-ks` (set, default `#{}`),
+   `:aliases` (map, optional)."
+  [opts env data {:keys [drop-ks raw-ks aliases] :or {raw-ks #{}}}]
+  (let [named    (apply dissoc opts drop-ks)
+        resolved (reduce-kv
+                   (fn [m k v]
+                     (assoc m k (if (and (fn? v) (not (contains? raw-ks k)))
+                                  (v env data)
+                                  v)))
+                   {} named)]
+    (cond-> resolved
+      aliases (apply-aliases aliases))))
+
 (defn llm-conversation
   "Returns an `invoke` element of type `:llm-conversation`.
 
-   `opts`:
-    * `:id` (required) — invoke id (used as the `invokeid` in the processor)
-    * `:params-fn` (required) — `(fn [env data] params-map)` returning the params
-      consumed by the processor (see `escapement.invocation.llm-conversation`).
-    * `:autoforward?` (optional, default true) — whether to autoforward chart events
-      to the invocation so `tell-llm` works."
-  [{:keys [id params-fn autoforward?] :or {autoforward? true}}]
+   Authoring keys are flat: each value is a literal OR a `(fn [env data])`
+   resolved at invoke time. Static config stays a literal; only data-dependent
+   slots are lambdas. There is no `:params`/`:params-fn` — to compute several
+   params from `data`, write a lambda per key.
+
+   Curated keys (others the processor accepts pass through verbatim under the
+   same literal-or-fn rule):
+
+     * `:id` (required)       — invoke id / `invokeid` in the processor.
+     * `:system`              — system prompt.
+     * `:message`             — initial user message; alias for the processor's
+                                `:initial-user-message`. Usually a lambda.
+     * `:max-turns`           — turn cap.
+     * `:budget-ms`           — wall-clock budget; alias for the processor's
+                                `:max-conversation-duration-ms`.
+     * `:allowed-events`      — event-tool declarations the LLM may emit.
+     * `:real-tools`          — real tool ids exposed to the LLM.
+     * `:chart-tools`         — chart/region tools exposed to the LLM.
+     * `:model`/`:models`/`:needs` — model selection policy.
+     * `:verdict-schema`      — schema for the `submit_verdict` wrap-up inference.
+     * `:autoforward?` (default true) — whether to autoforward chart events to
+                                the invocation so `tell-llm` works. Control key
+                                (not a param).
+
+   If both `:message` and `:initial-user-message` (or both `:budget-ms` and
+   `:max-conversation-duration-ms`) are given, the canonical processor key wins."
+  [{:keys [id autoforward?] :or {autoforward? true} :as opts}]
   (assert id "llm-conversation requires :id")
-  (assert (fn? params-fn) "llm-conversation requires :params-fn")
   (elt/invoke {:type          :llm-conversation
                :id            id
                :autoforward   autoforward?
                :auto-forward? autoforward?
-               :params        params-fn}))
+               :params        (fn [env data]
+                                (resolve-flat-params opts env data
+                                  {:drop-ks [:id :autoforward?]
+                                   :raw-ks  #{}
+                                   :aliases llm-aliases}))}))
 
 (defn human-input
   "Returns an `invoke` element of type `:human-input`.
@@ -69,23 +143,32 @@
    `:human.answer {:answer …}` (or `:on-answer-event`) to the chart's session
    when the user responds, then dies.
 
+   Authoring keys are flat: each value is a literal OR a `(fn [env data])`
+   resolved at invoke time — EXCEPT `:render`, which passes through untouched
+   because it IS the function the processor calls.
+
    `opts`:
-    * `:id` (required) — invoke id.
-    * `:params-fn` (required) — `(fn [env data] params-map)`. params-map keys:
-        :kind             :text | :select | :multi-select | :confirm | :progress | :custom
-        :prompt           string shown to the user
-        :options          [{:label … :value …}]  ; :select / :multi-select
-        :answer-schema    optional Malli schema validating the answer
-        :on-answer-event  default :human.answer
-        :on-cancel-event  default :human.cancelled
-        ;; Errors fire SCXML canonical :error.human.<reason> events.
-        :render           required for :custom; (fn [env data] answer)"
-  [{:keys [id params-fn]}]
+    * `:id` (required)       — invoke id. Control key (not a param).
+    * `:kind`                — `:text` | `:select` | `:multi-select` | `:confirm` | `:progress` | `:custom`
+    * `:prompt`              — string shown to the user (or a lambda).
+    * `:options`             — `[{:label … :value …}]` for `:select`/`:multi-select`.
+    * `:answer-schema`       — optional Malli schema validating the answer.
+    * `:on-answer-event`     — default `:human.answer`.
+    * `:on-cancel-event`     — default `:human.cancelled`.
+    * `:render`              — required for `:custom`; `(fn [env data] answer)`.
+                               Passed through RAW (never resolved against env/data).
+
+   Errors fire SCXML canonical `:error.human.<reason>` events; transition on
+   `:error.human.*` to catch any human-side failure."
+  [{:keys [id] :as opts}]
   (assert id "human-input requires :id")
-  (assert (fn? params-fn) "human-input requires :params-fn")
   (elt/invoke {:type   :human-input
                :id     id
-               :params params-fn}))
+               :params (fn [env data]
+                         (resolve-flat-params opts env data
+                           {:drop-ks [:id]
+                            :raw-ks  #{:render}
+                            :aliases nil}))}))
 
 (declare tell-llm)
 
@@ -117,18 +200,18 @@
 
    `opts`:
     * `:id` (required) — id of the compound state.
-    * `:params-fn` (required) — `(fn [env data] params-map)` for the underlying
-      `llm-conversation`. Your params-fn's `:allowed-events` (if any) are
-      concatenated with the two question events; the helper rewrites the
-      returned map.
+    * any `llm-conversation` flat keys (`:system`, `:message`, `:allowed-events`,
+      `:real-tools`, …) for the underlying conversation. Each is a literal or a
+      `(fn [env data])`. Your `:allowed-events` (if any) are concatenated with
+      the two injected question events.
     * `:exit-transitions` (optional) — vector of `transition` elements installed
       on the `:converse` child state. Use these to leave the bubble when the
       LLM signals completion (e.g. `(transition {:event :done :target ...})`).
     * `:autoforward?` (optional, default true)."
-  [{:keys [id params-fn exit-transitions autoforward?]
-    :or   {autoforward? true exit-transitions []}}]
+  [{:keys [id exit-transitions autoforward?]
+    :or   {autoforward? true exit-transitions []}
+    :as   opts}]
   (assert id "with-llm-questions requires :id")
-  (assert (fn? params-fn) "with-llm-questions requires :params-fn")
   (let [base-name     (name id)
         converse-id   (keyword (str base-name ".converse"))
         ask-choice-id (keyword (str base-name ".ask-choice"))
@@ -144,18 +227,22 @@
                        {:event       :question/ask-text
                         :description "Ask the human a free-text question. Use when you need clarification or a value the human must supply."
                         :data-schema [:map [:question :string]]}]
-        wrapped-params-fn
-                      (fn [env data]
-                        (let [p (params-fn env data)]
-                          (update p :allowed-events
-                            (fn [evs] (vec (concat (or evs []) question-events))))))]
+        ;; Forward the caller's flat conversation keys, but always resolve
+        ;; :allowed-events (literal or fn) at invoke time and append the two
+        ;; injected question events.
+        conv-opts     (-> (dissoc opts :id :exit-transitions :autoforward?)
+                        (assoc :allowed-events
+                          (fn [env data]
+                            (let [evs  (:allowed-events opts)
+                                  base (if (fn? evs) (evs env data) (or evs []))]
+                              (vec (concat base question-events))))))]
     (apply elt/state {:id id :initial converse-id}
       ;; Conversation owned by the PARENT so child-state transitions
       ;; don't tear it down.
       (llm-conversation
-        {:id           (str base-name "/conv")
-         :autoforward? autoforward?
-         :params-fn    wrapped-params-fn})
+        (assoc conv-opts
+          :id           (str base-name "/conv")
+          :autoforward? autoforward?))
       (apply elt/state {:id converse-id}
         (elt/transition
           {:event :question/ask-choice :target ask-choice-id}
@@ -174,11 +261,10 @@
         exit-transitions)
       [(elt/state {:id ask-choice-id}
          (human-input
-           {:id        (str base-name "/ask-choice")
-            :params-fn (fn [_ data]
-                         {:kind    :select
-                          :prompt  (:question/pending-question data)
-                          :options (:question/pending-options data)})})
+           {:id      (str base-name "/ask-choice")
+            :kind    :select
+            :prompt  (fn [_ data] (:question/pending-question data))
+            :options (fn [_ data] (:question/pending-options data))})
          (elt/transition
            {:event :human.answer :target converse-id}
            (tell-llm
@@ -198,10 +284,9 @@
 
        (elt/state {:id ask-text-id}
          (human-input
-           {:id        (str base-name "/ask-text")
-            :params-fn (fn [_ data]
-                         {:kind   :text
-                          :prompt (:question/pending-question data)})})
+           {:id     (str base-name "/ask-text")
+            :kind   :text
+            :prompt (fn [_ data] (:question/pending-question data))})
          (elt/transition
            {:event :human.answer :target converse-id}
            (tell-llm
@@ -409,8 +494,9 @@
    `{{output}}` is reserved for the in-flight assistant text and resolves
    only when callers pass `:output` in `extras`.
 
-   Use this in `params-fn` (where `env` is available) to compose initial
-   user messages or system prompts from prior agents' outputs."
+   Use this inside a `(fn [env data])` authoring key (e.g. `:message`/`:system`,
+   where `env` is available) to compose initial user messages or system prompts
+   from prior agents' outputs."
   ([template env]
    (render-template template env nil))
   ([template env extras]

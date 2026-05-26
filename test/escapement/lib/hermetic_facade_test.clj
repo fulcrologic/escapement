@@ -108,13 +108,12 @@
     (state {:id :work :initial :running}
       (state {:id :running}
         (h/llm-conversation
-          {:id        "gate"
-           :params-fn (fn [_ _]
-                        {:system               "go"
-                         :needs                needs
-                         :real-tools           []
-                         :allowed-events       [{:event :gate-done}]
-                         :initial-user-message "do it"})})
+          {:id             "gate"
+           :system         "go"
+           :needs          needs
+           :real-tools     []
+           :allowed-events [{:event :gate-done}]
+           :message        "do it"})
         (transition {:event :gate-done :target :finished}))
       (final {:id :finished}))))
 
@@ -272,23 +271,21 @@
                  {:initial :refactor}
                  (state {:id :refactor}
                    (h/llm-conversation
-                     {:id        "refactor"
-                      :params-fn (fn [_ _]
-                                   {:system               "You are a Clojure refactoring agent."
-                                    :needs                {:tool-call? true :clojure [:>= 7]}
-                                    :real-tools           []
-                                    :allowed-events       [{:event :refactor-done}]
-                                    :initial-user-message "rename foo to bar"})})
+                     {:id             "refactor"
+                      :system         "You are a Clojure refactoring agent."
+                      :needs          {:tool-call? true :clojure [:>= 7]}
+                      :real-tools     []
+                      :allowed-events [{:event :refactor-done}]
+                      :message        "rename foo to bar"})
                    (transition {:event :refactor-done :target :design-review}))
                  (state {:id :design-review}
                    (h/llm-conversation
-                     {:id        "design-review"
-                      :params-fn (fn [_ _]
-                                   {:system               "You are a UX/design reviewer."
-                                    :needs                {:vision? true :ux [:>= 6]}
-                                    :real-tools           []
-                                    :allowed-events       [{:event :review-done}]
-                                    :initial-user-message "critique the mockups"})})
+                     {:id             "design-review"
+                      :system         "You are a UX/design reviewer."
+                      :needs          {:vision? true :ux [:>= 6]}
+                      :real-tools     []
+                      :allowed-events [{:event :review-done}]
+                      :message        "critique the mockups"})
                    (transition {:event :review-done :target :finished}))
                  (final {:id :finished}))
         result (hermetic

@@ -104,20 +104,18 @@
       (state {:id :work :initial :read-spec}
 
         (h/llm-conversation
-          {:id "coder"
-           :params-fn
-           (fn [_env data]
-             {:system               system-prompt
-              :real-tools           [:fs/read :fs/edit :fs/write]
-              :allowed-events       [{:event       :spec-ready
-                                      :data-schema [:map [:summary :string]]}
-                                     {:event       :patch-applied
-                                      :data-schema [:map [:rationale :string]]}
-                                     {:event       :retry
-                                      :data-schema [:map [:reasoning :string]]}
-                                     {:event       :give-up
-                                      :data-schema [:map [:reason :string]]}]
-              :initial-user-message (user-message-for-read-spec data)})})
+          {:id             "coder"
+           :system         system-prompt
+           :real-tools     [:fs/read :fs/edit :fs/write]
+           :allowed-events [{:event       :spec-ready
+                             :data-schema [:map [:summary :string]]}
+                            {:event       :patch-applied
+                             :data-schema [:map [:rationale :string]]}
+                            {:event       :retry
+                             :data-schema [:map [:reasoning :string]]}
+                            {:event       :give-up
+                             :data-schema [:map [:reason :string]]}]
+           :message        (fn [_env data] (user-message-for-read-spec data))})
 
         (state {:id :read-spec}
           (transition {:event :spec-ready :target :propose-patch :type :internal}))

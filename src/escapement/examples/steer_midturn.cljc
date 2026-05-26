@@ -152,21 +152,18 @@
                ;; reaches this conversation. region-tools
                ;; are auto-discovered from the service
                ;; registry — no :real-tools needed here.
-               :params-fn
-               (fn [_env _data]
-                 {:system                       system-prompt
-                  :real-tools                   []
-                  :allowed-events
-                  [{:event       :tick
-                    :description "Record one counting step."
-                    :data-schema [:map [:n :int]]}
-                   {:event       :done
-                    :description "End the counting task."
-                    :data-schema [:map [:reason :string]]}]
-                  :max-turns                    8
-                  :max-conversation-duration-ms 120000
-                  :initial-user-message
-                  "Begin the counting task at turn 1, n=1."})})
+               :system         system-prompt
+               :real-tools     []
+               :allowed-events
+               [{:event       :tick
+                 :description "Record one counting step."
+                 :data-schema [:map [:n :int]]}
+                {:event       :done
+                 :description "End the counting task."
+                 :data-schema [:map [:reason :string]]}]
+               :max-turns      8
+               :budget-ms      120000
+               :message        "Begin the counting task at turn 1, n=1."})
             ;; 001 §P1 ORDERING RULE: keep the
             ;; event-tool's chart event :type :internal
             ;; so it never tears down :counting before

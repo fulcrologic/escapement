@@ -71,11 +71,14 @@
 ;; ---------------------------------------------------------------------------
 ;; 2. The chart — authored with escapement.chart.helpers.
 ;;
-;; `h/llm-conversation` expands to the `:llm-conversation` invoke; the
-;; `:params-fn` returns the per-binding params (system prompt, model,
-;; messages, budgets). `h/capture-llm-output` writes the final assistant
-;; text to <session-dir>/artifacts/<:as>. `h/render-template` (used inside a
-;; params-fn, where `env` is in scope) substitutes {{brief.md}} with the
+;; `h/llm-conversation` expands to the `:llm-conversation` invoke. Params are
+;; authored as FLAT keys: each is a literal OR a `(fn [env data])` resolved at
+;; invoke time. Static config (`:system`, `:model`, `:budget-ms`, `:stream?`)
+;; stays a literal; only data-dependent slots (`:message`) are lambdas. Note
+;; the friendly aliases: `:message` (the initial user message) and `:budget-ms`
+;; (wall-clock budget). `h/capture-llm-output` writes the final assistant text
+;; to <session-dir>/artifacts/<:as>. `h/render-template` (used inside a
+;; `:message` lambda, where `env` is in scope) substitutes {{brief.md}} with the
 ;; artifact phase 1 produced.
 ;; ---------------------------------------------------------------------------
 
@@ -86,31 +89,27 @@
 
       (state {:id :brief}
         (h/llm-conversation
-          {:id "brief"
-           :params-fn
-           (fn [_env data]
-             {:system                       "You are a crisp product writer. Reply with prose only, no preamble."
-              :model                        model
-              :max-conversation-duration-ms 60000
-              :initial-user-message
-              (str "Write a 3-sentence product brief for: " (:idea data))})})
+          {:id        "brief"
+           :system    "You are a crisp product writer. Reply with prose only, no preamble."
+           :model     model
+           :budget-ms 60000
+           :message   (fn [_env data]
+                        (str "Write a 3-sentence product brief for: " (:idea data)))})
         (transition {:event :llm.idle :target :pitch}
           (h/capture-llm-output {:as "brief.md"})))
 
       (state {:id :pitch}
         (h/llm-conversation
-          {:id "pitch"
-           :params-fn
-           (fn [env _data]
-             {:system                       "You are a punchy startup pitch writer. One paragraph, no preamble."
-              :model                        model
-              :stream?                      true
-              :max-conversation-duration-ms 60000
-              :initial-user-message
-              (h/render-template
-                (str "Turn this brief into a single-paragraph elevator pitch:\n\n"
-                  "{{brief.md}}")
-                env)})})
+          {:id        "pitch"
+           :system    "You are a punchy startup pitch writer. One paragraph, no preamble."
+           :model     model
+           :stream?   true
+           :budget-ms 60000
+           :message   (fn [env _data]
+                        (h/render-template
+                          (str "Turn this brief into a single-paragraph elevator pitch:\n\n"
+                            "{{brief.md}}")
+                          env))})
         (transition {:event :llm.idle :target :done}
           (h/capture-llm-output {:as "pitch.md"})))
 
@@ -182,9 +181,10 @@
 ;;                            :data b64}}
 ;;                  {:type :text :text "Describe this screenshot."}]}))
 ;;
-;;   ;; in the params-fn:
-;;   {:system "You are a visual design analyst."
-;;    :needs  {:vision? true}                ; eligibility gate (filters)
-;;    :models ["claude-sonnet-4-6"]          ; plural = explicit ordered
+;;   ;; as flat keys on the h/llm-conversation opts map:
+;;   {:id      "vision"
+;;    :system  "You are a visual design analyst."
+;;    :needs   {:vision? true}               ; eligibility gate (filters)
+;;    :models  ["claude-sonnet-4-6"]         ; plural = explicit ordered
 ;;    :initial-messages [(image-message path)]}  ; fallback, no auto-substitution
 ;; ---------------------------------------------------------------------------
