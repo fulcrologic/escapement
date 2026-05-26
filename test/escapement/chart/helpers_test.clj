@@ -57,8 +57,43 @@
         (>= (System/currentTimeMillis) deadline) t
         :else (do (Thread/sleep 25) (recur))))))
 
+(specification "llm-conversation resolves flat authoring keys into params"
+  (let [params (fn [opts] ((:params (h/llm-conversation opts)) {} {:n 7}))]
+    (assertions
+      "literal keys pass through"
+      (params {:id "x" :system "sys" :max-turns 2}) => {:system "sys" :max-turns 2}
+      "a (fn [env data]) key is resolved against env+data"
+      (params {:id "x" :message (fn [_ d] (str "hi " (:n d)))})
+      => {:initial-user-message "hi 7"}
+      ":message aliases to :initial-user-message, :budget-ms to the duration key"
+      (params {:id "x" :message "go" :budget-ms 1000})
+      => {:initial-user-message "go" :max-conversation-duration-ms 1000}
+      "the canonical processor key wins when both alias and canonical are given"
+      (params {:id "x" :message "alias" :initial-user-message "canonical"})
+      => {:initial-user-message "canonical"}
+      "control keys :id and :autoforward? are dropped from params"
+      (params {:id "x" :autoforward? false :system "s"}) => {:system "s"}
+      "uncurated processor keys pass through (literal and fn)"
+      (params {:id "x" :temperature 0.2 :model (fn [_ d] (:n d))})
+      => {:temperature 0.2 :model 7})))
+
+(specification "human-input passes :render through as a raw function"
+  (let [render (fn [_ _] :RENDERED)
+        params ((:params (h/human-input {:id     "c"
+                                         :kind   :custom
+                                         :prompt (fn [_ d] (:q d))
+                                         :render render}))
+                {} {:q "Q?"})]
+    (assertions
+      "non-:render fn keys are resolved"
+      (:prompt params) => "Q?"
+      "literal keys pass through"
+      (:kind params) => :custom
+      ":render is the original function, NOT called"
+      (:render params) => render)))
+
 (specification "with-llm-questions produces a runnable compound state"
-  (let [s (h/with-llm-questions {:id :bubble :params-fn (fn [_ _] {:system "s"})})]
+  (let [s (h/with-llm-questions {:id :bubble :system "s"})]
     (assertions
       "outer state has the requested id"
       (:id s) => :bubble
@@ -89,11 +124,10 @@
                    {:initial :run}
                    (state {:id :run :initial :work}
                      (h/with-llm-questions
-                       {:id        :work
-                        :params-fn (fn [_ _]
-                                     {:system               "s"
-                                      :real-tools           []
-                                      :initial-user-message "go"})
+                       {:id         :work
+                        :system     "s"
+                        :real-tools []
+                        :message    "go"
                         :exit-transitions
                         [(transition {:event :llm.idle :target :done})]})
                      (final {:id :done})))
@@ -170,8 +204,8 @@
                    (state {:id :run :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "researcher"
-                          :params-fn (fn [_ _] {:initial-user-message "go"})})
+                         {:id      "researcher"
+                          :message "go"})
                        (transition {:event :llm.idle :target :done}
                          (h/capture-llm-output)))
                      (final {:id :done})))
@@ -197,8 +231,8 @@
                    (state {:id :run :initial :work}
                      (state {:id :work}
                        (h/llm-conversation
-                         {:id        "writer"
-                          :params-fn (fn [_ _] {:initial-user-message "go"})})
+                         {:id      "writer"
+                          :message "go"})
                        (transition {:event :llm.idle :target :done}
                          (h/capture-llm-output {:as "draft.md"})))
                      (final {:id :done})))

@@ -195,28 +195,26 @@
           {:id "showcase"
            ;; autoforward? defaults true — REQUIRED so the phase-2
            ;; h/tell-llm steer reaches this conversation (task 001 P2).
-           :params-fn
-           (fn [_env _data]
-             {:system                       system-prompt
-              ;; Real-tool: built-in fs/write writes a real scratch
-              ;; file under --work-dir (non-destructive). Whitelisted
-              ;; so the model can ONLY write, nothing else.
-              :real-tools                   [:fs/write]
-              ;; Two event-tools: one per phase boundary.
-              :allowed-events
-              [{:event       :step
-                :data-schema [:map [:phase :string]]}
-               {:event       :done
-                :data-schema [:map [:summary :string]]}]
-              ;; Conservative budgets so a live run can never hang
-              ;; (cheat-sheet §1: ALWAYS bound the loop). Two phases
-              ;; need >=2 turns; 6 leaves slack for tool round-trips.
-              :max-turns                    6
-              :max-conversation-duration-ms 120000
-              :initial-user-message
-              (str "Question: In one paragraph, what is a statechart "
-                "and why is it useful for driving an autonomous "
-                "agent? Begin with PHASE 1: produce the PLAN only.")})})
+           :system         system-prompt
+           ;; Real-tool: built-in fs/write writes a real scratch
+           ;; file under --work-dir (non-destructive). Whitelisted
+           ;; so the model can ONLY write, nothing else.
+           :real-tools     [:fs/write]
+           ;; Two event-tools: one per phase boundary.
+           :allowed-events
+           [{:event       :step
+             :data-schema [:map [:phase :string]]}
+            {:event       :done
+             :data-schema [:map [:summary :string]]}]
+           ;; Conservative budgets so a live run can never hang
+           ;; (cheat-sheet §1: ALWAYS bound the loop). Two phases
+           ;; need >=2 turns; 6 leaves slack for tool round-trips.
+           :max-turns      6
+           :budget-ms      120000
+           :message
+           (str "Question: In one paragraph, what is a statechart "
+             "and why is it useful for driving an autonomous "
+             "agent? Begin with PHASE 1: produce the PLAN only.")})
 
         ;; --- Event-tool events (task 001 P1: posted BEFORE :llm.idle
         ;; for the same turn). BOTH are `:type :internal` — they

@@ -55,22 +55,19 @@
     (state {:id :run :initial :refactor}
       (state {:id :refactor}
         (h/llm-conversation
-          {:id        "clj-refactor"
-           :params-fn (fn [_env _data]
-                        {:system     system-prompt
-                         ;; Multi-dimensional eligibility gate over
-                         ;; the ratings overlay: strong Clojure AND
-                         ;; usable tool-calling, or this model is
-                         ;; not eligible for the auto-fallback list.
-                         :needs      {:clojure [:>= 8] :tool-calling [:>= 6]}
-                         :real-tools []
-                         :allowed-events
-                         [{:event       :done
-                           :data-schema [:map [:summary :string]]}]
-                         :initial-user-message
-                         (str "Rename the function `foo` to `bar` "
-                           "across `src/example.clj` and update "
-                           "its call sites.")})})
+          {:id             "clj-refactor"
+           :system         system-prompt
+           ;; Multi-dimensional eligibility gate over
+           ;; the ratings overlay: strong Clojure AND
+           ;; usable tool-calling, or this model is
+           ;; not eligible for the auto-fallback list.
+           :needs          {:clojure [:>= 8] :tool-calling [:>= 6]}
+           :real-tools     []
+           :allowed-events [{:event       :done
+                             :data-schema [:map [:summary :string]]}]
+           :message        (str "Rename the function `foo` to `bar` "
+                             "across `src/example.clj` and update "
+                             "its call sites.")})
         (transition {:event :done :target :finished}
           (script {:expr (fn [_env data]
                            [(ops/assign :summary

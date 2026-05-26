@@ -100,23 +100,20 @@
             (h/llm-conversation
               {:id "subject"
                ;; autoforward? defaults true -> tell-llm reaches it.
-               :params-fn
-               (fn [_env _data]
-                 {:system                       system-prompt
-                  :real-tools                   []
-                  :allowed-events
-                  [{:event       :tick
-                    :description "Record one counting step."
-                    :data-schema [:map [:n :int]]}
-                   {:event       :done
-                    :description "End the counting task."
-                    :data-schema [:map [:reason :string]]}]
-                  ;; Conservative budgets so the run can
-                  ;; never hang on a flaky model.
-                  :max-turns                    8
-                  :max-conversation-duration-ms 120000
-                  :initial-user-message
-                  "Begin the counting task at n=1."})})
+               :system         system-prompt
+               :real-tools     []
+               :allowed-events
+               [{:event       :tick
+                 :description "Record one counting step."
+                 :data-schema [:map [:n :int]]}
+                {:event       :done
+                 :description "End the counting task."
+                 :data-schema [:map [:reason :string]]}]
+               ;; Conservative budgets so the run can
+               ;; never hang on a flaky model.
+               :max-turns      8
+               :budget-ms      120000
+               :message        "Begin the counting task at n=1."})
             ;; 001 §P1 ORDERING RULE: the event-tool's
             ;; chart event (:tick/:done) is posted to the
             ;; parent STRICTLY BEFORE :llm.idle for the

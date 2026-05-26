@@ -347,46 +347,38 @@
    [:details {:optional true} :string]])                    ;; only when :fail
 
 ;; ===========================================================================
-;; Per-agent params-fns
-;; ===========================================================================
-
-(defn- experimenter-params [data]
-  {:system         (p/render :experimenter data)
-   :real-tools     [:fs/read :fs/write :fs/edit :shell/run]
-   :chart-tools    [{:owner :exp-repl}]
-   :verdict-schema experimenter-verdict-schema
-   :initial-user-message
-   (str "Begin work on `com.example.matrix/mult` in `"
-     (:project-dir data) "/src/com/example/matrix.clj`. "
-     "Follow the instructions exactly.")})
-
-(defn- tester-params [data]
-  {:system         (p/render :tester data)
-   :real-tools     [:fs/read :fs/write :fs/edit]
-   :chart-tools    [{:owner :test-repl}]
-   :verdict-schema tester-verdict-schema
-   ;; No :initial-user-message — the tester parks in :awaiting-user until the
-   ;; experimenter's first verdict arrives via tell-other-llm!.
-   })
-
-;; ===========================================================================
 ;; LLM regions
+;;
+;; Conversation params are authored as flat keys: static config is a literal;
+;; only the data-dependent slots (`:system`, `:message`) are `(fn [_ data])`.
 ;; ===========================================================================
 
 (defn- experimenter-region []
   (state {:id :experimenter :initial :experimenter-running}
     (state {:id :experimenter-running}
       (h/llm-conversation
-        {:id        "experimenter"
-         :params-fn (fn [_env data] (experimenter-params data))}))
+        {:id             "experimenter"
+         :system         (fn [_ data] (p/render :experimenter data))
+         :real-tools     [:fs/read :fs/write :fs/edit :shell/run]
+         :chart-tools    [{:owner :exp-repl}]
+         :verdict-schema experimenter-verdict-schema
+         :message        (fn [_ data]
+                           (str "Begin work on `com.example.matrix/mult` in `"
+                             (:project-dir data) "/src/com/example/matrix.clj`. "
+                             "Follow the instructions exactly."))}))
     (final {:id :experimenter-finished})))
 
 (defn- tester-region []
   (state {:id :tester :initial :tester-running}
     (state {:id :tester-running}
       (h/llm-conversation
-        {:id        "tester"
-         :params-fn (fn [_env data] (tester-params data))}))
+        ;; No :message — the tester parks in :awaiting-user until the
+        ;; experimenter's first verdict arrives via tell-other-llm!.
+        {:id             "tester"
+         :system         (fn [_ data] (p/render :tester data))
+         :real-tools     [:fs/read :fs/write :fs/edit]
+         :chart-tools    [{:owner :test-repl}]
+         :verdict-schema tester-verdict-schema}))
     (final {:id :tester-finished})))
 
 ;; ===========================================================================

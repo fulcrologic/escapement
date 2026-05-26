@@ -23,7 +23,7 @@ A statechart-driven autonomous coding agent in Clojure/Babashka.
   scrollback, and modal input. Esc sends `:ui.interrupt` to the chart.
 - **File-backed artifacts** under `<session>/artifacts/` so agent outputs can be addressed by name in follow-on prompts
   via mustache-style `{{name}}` templates.
-- **Self-cancelling invocations** via `:max-turns` and `:max-conversation-duration-ms` budgets that fire SCXML-canonical
+- **Self-cancelling invocations** via `:max-turns` and `:budget-ms` budgets that fire SCXML-canonical
   `:error.llm.*` events.
 - Parallel regions get **independent workers**. Fan-out is natural.
 - **JSONL transcript** of every LLM request, response, tool call, transition, and checkpoint. Full replay possible.
@@ -213,7 +213,7 @@ The guide covers:
 - **Core concepts** — chart, bound state, real tool vs event tool, lifecycle, transcript, checkpoint, resume
 - **Authoring a chart** — line-by-line walkthrough of `hello.clj` plus annotated excerpts of `scan`, `parallel_demo`,
   `iterate`
-- **The `:llm-conversation` invocation** — every `params-fn` key (incl. `:max-turns` / `:max-conversation-duration-ms`),
+- **The `:llm-conversation` invocation** — every flat authoring key (incl. `:max-turns` / `:budget-ms`),
   `h/llm-conversation` / `h/tell-llm` / `h/tell-other-llm`, SCXML-canonical `:error.llm.*` events, internal-vs-external
   transitions, bad-tool-use retry, event-tool naming
 - **Human interaction and the TUI** — `:human-input` invocation kinds, `human-input` chart helper, `with-llm-questions`

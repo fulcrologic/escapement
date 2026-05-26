@@ -64,18 +64,16 @@
     (state {:id :run :initial :converse}                    ; compound parent so :finished final is non-fatal
       (state {:id :converse}
         (h/llm-conversation
-          {:id        "coder"
-           :params-fn (fn [_env _data]
-                        {:system                       system-prompt
-                         :real-tools                   [:fs/read :fs/write]
-                         :allowed-events               [{:event       :done
-                                                         :description "Signal the turn-loop task is complete."
-                                                         :data-schema [:map [:summary :string]]}]
-                         :max-turns                    8
-                         :max-conversation-duration-ms 120000
-                         :initial-user-message
-                         (str "Run the scratch-file turn-loop task now: "
-                           "plan, read, write, re-read, then call event__done.")})})
+          {:id             "coder"
+           :system         system-prompt
+           :real-tools     [:fs/read :fs/write]
+           :allowed-events [{:event       :done
+                             :description "Signal the turn-loop task is complete."
+                             :data-schema [:map [:summary :string]]}]
+           :max-turns      8
+           :budget-ms      120000
+           :message        (str "Run the scratch-file turn-loop task now: "
+                             "plan, read, write, re-read, then call event__done.")})
         (transition {:event :done :target :finished}
           (script {:expr (fn [_env data]
                            [(ops/assign :summary

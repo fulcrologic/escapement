@@ -7,7 +7,8 @@
    tests against just that state. The full `unit-test.chart/agent` boots two
    parallel regions and seven LLM-bound states; this test exercises ONLY
    `refine-state` with the real engine, real invocation processor, real
-   `params-fn`, and a mocked LLM backend."
+   flat conversation keys (`:system`/`:message` lambdas resolved at invoke
+   time), and a mocked LLM backend."
   (:require
     [com.fulcrologic.statecharts.chart :as chart]
     [com.fulcrologic.statecharts.elements :refer [final state]]
@@ -59,7 +60,8 @@
   {:stop-reason :end_turn :content [{:type :text :text "ok"}] :usage {} :model "mock"})
 
 ;; ---------------------------------------------------------------------------
-;; Minimum data required by `refine-params` -> `prompts/render-phase :refine`.
+;; Minimum data required by refine-state's flat conversation keys ->
+;; `prompts/render-phase :refine`.
 ;; The prompt files on disk (demos/unit_test/prompts/refine.md) are real, so
 ;; these substitution keys must all be present.
 ;; ---------------------------------------------------------------------------

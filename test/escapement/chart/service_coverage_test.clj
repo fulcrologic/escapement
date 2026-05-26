@@ -115,10 +115,9 @@
                          (state {:id :consumer :initial :running}
                            (state {:id :running}
                              (h/llm-conversation
-                               {:id        "coder"
-                                :params-fn (fn [_ _]
-                                             {:chart-tools          [{:owner :repl-A}]
-                                              :initial-user-message "go"})})
+                               {:id          "coder"
+                                :chart-tools [{:owner :repl-A}]
+                                :message     "go"})
                              (transition {:event :llm.idle :target :consumer-done}))
                            (final {:id :consumer-done}))
                          (state {:id :repl-A :initial :idle}
@@ -166,10 +165,9 @@
                          (state {:id :consumer :initial :running}
                            (state {:id :running}
                              (h/llm-conversation
-                               {:id        "coder"
-                                :params-fn (fn [_ _]
-                                             {:chart-tools          [{:owner :repl-A}]
-                                              :initial-user-message "go"})})
+                               {:id          "coder"
+                                :chart-tools [{:owner :repl-A}]
+                                :message     "go"})
                              (transition {:event :llm.idle :target :consumer-done}))
                            (final {:id :consumer-done}))
                          (state {:id :repl-A :initial :idle}
@@ -234,10 +232,9 @@
                                (state {:id :consumer :initial :coder-running}
                                  (state {:id :coder-running}
                                    (h/llm-conversation
-                                     {:id        "coder"
-                                      :params-fn (fn [_ _]
-                                                   {:chart-tools          [{:owner :repl-A}]
-                                                    :initial-user-message "go"})})
+                                     {:id          "coder"
+                                      :chart-tools [{:owner :repl-A}]
+                                      :message     "go"})
                                    (transition {:event :llm.idle :target :consumer-done}))
                                  (final {:id :consumer-done}))
                                (state {:id :repl-A :initial :idle}
@@ -335,10 +332,9 @@
                          (state {:id :consumer :initial :coder-running}
                            (state {:id :coder-running}
                              (h/llm-conversation
-                               {:id        "coder"
-                                :params-fn (fn [_ _]
-                                             {:chart-tools          [{:owner :repl-A}]
-                                              :initial-user-message "go"})})
+                               {:id          "coder"
+                                :chart-tools [{:owner :repl-A}]
+                                :message     "go"})
                              (transition {:event :llm.idle :target :consumer-done}))
                            (final {:id :consumer-done}))
                          (state {:id :repl-A :initial :idle}
@@ -403,10 +399,9 @@
         (state {:id :consumer :initial :coder-running}
           (state {:id :coder-running}
             (h/llm-conversation
-              {:id        "coder"
-               :params-fn (fn [_ _]
-                            {:chart-tools          [{:owner :repl-A}]
-                             :initial-user-message "go"})})
+              {:id          "coder"
+               :chart-tools [{:owner :repl-A}]
+               :message     "go"})
             (transition {:event :llm.idle :target :consumer-done}))
           (final {:id :consumer-done}))
         (state {:id :repl-A :initial start-substate}
@@ -592,10 +587,9 @@
                          (state {:id :consumer :initial :running}
                            (state {:id :running}
                              (h/llm-conversation
-                               {:id        "coder"
-                                :params-fn (fn [_ _]
-                                             {:chart-tools          [{:owner :repl-A}]
-                                              :initial-user-message "go"})})
+                               {:id          "coder"
+                                :chart-tools [{:owner :repl-A}]
+                                :message     "go"})
                              (transition {:event :llm.idle :target :consumer-done}))
                            (final {:id :consumer-done}))
                          (state {:id :repl-A :initial :idle}

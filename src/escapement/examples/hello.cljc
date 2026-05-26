@@ -22,13 +22,12 @@
     (state {:id :run :initial :greeting}
       (state {:id :greeting}
         (h/llm-conversation
-          {:id        "hello"
-           :params-fn (fn [_env _data]
-                        {:system               system-prompt
-                         :real-tools           []
-                         :allowed-events       [{:event       :done
-                                                 :data-schema [:map [:greeting :string]]}]
-                         :initial-user-message "Say hello."})})
+          {:id             "hello"
+           :system         system-prompt
+           :real-tools     []
+           :allowed-events [{:event       :done
+                             :data-schema [:map [:greeting :string]]}]
+           :message        "Say hello."})
         (transition {:event :done :target :finished}
           (script {:expr (fn [_env data]
                            [(ops/assign :greeting

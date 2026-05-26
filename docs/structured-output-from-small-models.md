@@ -84,14 +84,12 @@ The plain-text path is **2-4× faster per call** in addition to being
 (state {:id :working}
   (on-entry {} (send {:event :child/safety-stop :delay 60000}))
   (h/llm-conversation
-    {:id "judge"
-     :params-fn
-     (fn [_env data]
-       {:system               (judge-system-prompt …)
-        :real-tools           []
-        :allowed-events       []         ; <-- no tool calls
-        :max-turns            1
-        :initial-user-message (judge-user-message data)})})
+    {:id             "judge"
+     :system         (fn [_env data] (judge-system-prompt …))
+     :real-tools     []
+     :allowed-events []                  ; <-- no tool calls
+     :max-turns      1
+     :message        (fn [_env data] (judge-user-message data))})
 
   ;; Success — parse and forward to parent.
   (transition {:event :llm.idle :target :reported}

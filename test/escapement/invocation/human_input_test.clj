@@ -50,13 +50,15 @@
 (defn- ask-chart
   "Build a 3-state chart that invokes :human-input in :ask, captures the answer
   into :captured on :human.answer, and ends in :done. On :error.human.* or
-  :human.cancelled it transitions to :errored."
-  [params-fn]
+  :human.cancelled it transitions to :errored.
+
+  `params` is the flat human-input opts map (e.g. `{:kind :text :prompt \"?\"}`)."
+  [params]
   (chart/statechart
     {:initial :run}
     (state {:id :run :initial :ask}
       (state {:id :ask}
-        (h/human-input {:id "ask" :params-fn params-fn})
+        (h/human-input (assoc params :id "ask"))
         (transition {:event :human.answer :target :done}
           (script {:expr (fn [_ data]
                            [(ops/assign :captured
@@ -68,7 +70,7 @@
 
 (specification ":text kind round-trips answer to :human.answer"
   (let [r (stub {:text "alice"})
-        c (ask-chart (fn [_ _] {:kind :text :prompt "name?"}))
+        c (ask-chart {:kind :text :prompt "name?"})
         t (new-env-with-renderer c r)
         t (await-config! t :done 2000)]
     (assertions
@@ -81,9 +83,9 @@
 
 (specification ":select kind"
   (let [r (stub {:select :b})
-        c (ask-chart (fn [_ _] {:kind    :select :prompt "pick"
-                                :options [{:label "A" :value :a}
-                                          {:label "B" :value :b}]}))
+        c (ask-chart {:kind    :select :prompt "pick"
+                      :options [{:label "A" :value :a}
+                                {:label "B" :value :b}]})
         t (await-config! (new-env-with-renderer c r) :done 2000)]
     (assertions
       (dct/in? t :done) => true
@@ -91,10 +93,10 @@
 
 (specification ":multi-select kind"
   (let [r (stub {:multi [:x :z]})
-        c (ask-chart (fn [_ _] {:kind    :multi-select :prompt "any"
-                                :options [{:label "X" :value :x}
-                                          {:label "Y" :value :y}
-                                          {:label "Z" :value :z}]}))
+        c (ask-chart {:kind    :multi-select :prompt "any"
+                      :options [{:label "X" :value :x}
+                                {:label "Y" :value :y}
+                                {:label "Z" :value :z}]})
         t (await-config! (new-env-with-renderer c r) :done 2000)]
     (assertions
       (dct/in? t :done) => true
@@ -102,7 +104,7 @@
 
 (specification ":confirm kind"
   (let [r (stub {:confirm true})
-        c (ask-chart (fn [_ _] {:kind :confirm :prompt "ok?"}))
+        c (ask-chart {:kind :confirm :prompt "ok?"})
         t (await-config! (new-env-with-renderer c r) :done 2000)]
     (assertions
       (dct/in? t :done) => true
@@ -111,9 +113,9 @@
 (specification "schema validation routes to :error.human.invalid-answer"
   ;; Stub returns a number when schema demands a non-empty string.
   (let [r (stub {:text ""})
-        c (ask-chart (fn [_ _] {:kind          :text
-                                :prompt        "name?"
-                                :answer-schema [:string {:min 1}]}))
+        c (ask-chart {:kind          :text
+                      :prompt        "name?"
+                      :answer-schema [:string {:min 1}]})
         t (await-config! (new-env-with-renderer c r) :errored 2000)]
     (assertions
       "validation failure posts :error.human.invalid-answer → :errored"
@@ -121,8 +123,8 @@
 
 (specification ":custom kind"
   (let [r (stub {})
-        c (ask-chart (fn [_ _] {:kind   :custom
-                                :render (fn [_ _] 42)}))
+        c (ask-chart {:kind   :custom
+                      :render (fn [_ _] 42)})
         t (await-config! (new-env-with-renderer c r) :done 2000)]
     (assertions
       (dct/in? t :done) => true
@@ -135,10 +137,10 @@
             (state {:id :run :initial :ask}
               (state {:id :ask}
                 (h/human-input
-                  {:id        "ask"
-                   :params-fn (fn [_ _]
-                                {:kind            :text :prompt "?"
-                                 :on-answer-event :greet})})
+                  {:id              "ask"
+                   :kind            :text
+                   :prompt          "?"
+                   :on-answer-event :greet})
                 (transition {:event :greet :target :done}))
               (final {:id :done})))
         t (await-config! (new-env-with-renderer c r) :done 2000)]

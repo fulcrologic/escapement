@@ -21,15 +21,18 @@
   * `stdin-renderer` (this namespace) — fallback for headless / `--no-tui` runs.
     Reads from `*in*`; uses bb-tui-style ANSI for select / multi-select.
 
-  Params (chart side, via `:params-fn` returning):
+  Params (chart side) are FLAT authoring keys on the `h/human-input` opts map.
+  Each value is a literal OR a `(fn [env data])` resolved at invoke time —
+  EXCEPT `:render`, which passes through RAW (it IS the function the processor
+  calls):
 
     {:kind             :text | :select | :multi-select | :confirm | :progress | :custom
-     :prompt           string
-     :options          [{:label string :value any}]  ; :select / :multi-select
+     :prompt           string                         ; literal or (fn [env data])
+     :options          [{:label string :value any}]  ; :select / :multi-select; literal or (fn [env data])
      :answer-schema    optional Malli schema for the answer
      :on-answer-event  default :human.answer
      :on-cancel-event  default :human.cancelled
-     :render           (fn [env data] answer)        ; required for :custom
+     :render           (fn [env data] answer)         ; required for :custom; passed through RAW
 
    Errors fire canonical `:error.human.<reason>` events (see ns docstring);
    chart authors transition on `:error.human.*` rather than configuring an
