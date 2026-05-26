@@ -31,6 +31,23 @@
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [escapement.llm.protocol :as proto]))
 
+(defn routes->provider-index
+  "Build a `{provider-kw -> sub-backend}` map from routes that carry an
+   optional third element (their provider keyword). Routes are the 2-tuple
+   `[matcher sub-backend]` (no provider tag → not indexed) or the 3-tuple
+   `[matcher sub-backend provider-kw]`. The first occurrence of a provider
+   wins (mirrors first-match-wins for matcher routes). Routes without a
+   provider tag contribute nothing, so the index is empty for legacy callers
+   and the provider branch stays inert."
+  [routes]
+  (reduce (fn [idx route]
+            (let [provider (when (> (count route) 2) (nth route 2))
+                  b        (nth route 1)]
+              (if (and (some? provider) (not (contains? idx provider)))
+                (assoc idx provider b)
+                idx)))
+    {} routes))
+
 (defn- match?
   [matcher ^String model]
   (cond
@@ -53,9 +70,20 @@
 (defn- select-backend
   "Shared sub-backend selection used by both `send-turn` and `stream-turn`,
    so streaming dispatch uses the exact same routing logic (no duplication,
-   no separate selection side effects)."
-  [{:keys [routes default-backend]} request]
-  (pick-backend routes default-backend (:model request)))
+   no separate selection side effects).
+
+   Provider-keyed dispatch (R3): when the request carries an explicit
+   `:provider` keyword AND a sub-backend is tagged with that provider, route
+   straight to it — bypassing the model-string regex entirely. This is the
+   path that lets `:llm/aliases` candidates target a provider by name instead
+   of re-guessing it from the model string. When `:provider` is absent (the
+   legacy path), or names an untagged provider, selection falls back to the
+   existing matcher logic, so behavior is byte-for-byte unchanged for every
+   bare-string-model request."
+  [{:keys [routes default-backend provider-index]} request]
+  (or (when-let [provider (:provider request)]
+        (get provider-index provider))
+    (pick-backend routes default-backend (:model request))))
 
 (defn- delegate-stream-turn
   "Pure forwarding: select the sub-backend with the SAME logic as
@@ -76,12 +104,12 @@
 ;; picked: a `StreamingMultiBackend` is only constructed when every
 ;; selectable sub-backend implements `StreamingLLMBackend`.
 
-(defrecord MultiBackend [routes default-backend]
+(defrecord MultiBackend [routes default-backend provider-index]
   proto/LLMBackend
   (send-turn [this request]
     (proto/send-turn (select-backend this request) request)))
 
-(defrecord StreamingMultiBackend [routes default-backend]
+(defrecord StreamingMultiBackend [routes default-backend provider-index]
   proto/LLMBackend
   (send-turn [this request]
     (proto/send-turn (select-backend this request) request))
@@ -94,7 +122,12 @@
   "Construct a routing backend.
 
    `opts`:
-   - `:routes`           — vector of `[matcher sub-backend]` pairs (required)
+   - `:routes`           — vector of routes (required). Each route is either
+                           the 2-tuple `[matcher sub-backend]` (legacy) or the
+                           3-tuple `[matcher sub-backend provider-kw]`. The
+                           optional third element tags the sub-backend with its
+                           provider keyword so a request carrying `:provider`
+                           can be dispatched directly (see `select-backend`).
    - `:default-backend`  — backend used when no route matches (optional)
 
    Returns a backend that also implements `StreamingLLMBackend` iff every
@@ -103,12 +136,13 @@
    `stream-turn` delegates via the same routing logic as `send-turn`."
   [opts]
   [[:map
-    [:routes [:vector [:tuple :any :any]]]
+    [:routes [:vector [:or [:tuple :any :any] [:tuple :any :any :any]]]]
     [:default-backend {:optional true} :any]]
    => :any]
-  (let [routes  (vec (:routes opts))
-        default (:default-backend opts)
-        subs    (cond-> (mapv second routes) default (conj default))]
+  (let [routes   (vec (:routes opts))
+        default  (:default-backend opts)
+        prov-idx (routes->provider-index routes)
+        subs     (cond-> (mapv second routes) default (conj default))]
     (if (and (seq subs) (every? proto/streaming? subs))
-      (->StreamingMultiBackend routes default)
-      (->MultiBackend routes default))))
+      (->StreamingMultiBackend routes default prov-idx)
+      (->MultiBackend routes default prov-idx))))

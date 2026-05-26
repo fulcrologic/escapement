@@ -182,27 +182,133 @@
   ;; these tripped the closed-map check and `escapement run`
   ;; died before the chart loaded, so the surface documented in
   ;; CHANGELOG/Guide/clj_refactor was non-functional.
-  (component "documented :llm/preferences and :llm/ratings survive validation (flat keys)"
-    (let [root  (tmp-dir)
-          prefs [{:provider :anthropic :model "claude-opus-4-7"}]
-          rate  {"claude-opus-4-7" {:clojure 10 :tool-calling 9}}]
+  ;; Mandatory-aliases model: :llm/preferences is a vector of ALIAS KEYWORDS
+  ;; and :llm/ratings is keyed by ALIAS KEYWORD; both reference :llm/aliases.
+  (component "alias-keyword :llm/preferences + alias-keyed :llm/ratings survive validation (flat keys)"
+    (let [root    (tmp-dir)
+          aliases {:opus [{:provider :anthropic :model "claude-opus-4-7"}]
+                   :gpt  [{:provider :openai :model "gpt-5"}]}
+          prefs   [:opus :gpt]
+          rate    {:opus {:clojure 10 :tool-calling 9}}]
       (spit (io/file root ".escapement.edn")
-        (pr-str {:llm/preferences prefs
+        (pr-str {:llm/aliases     aliases
+                 :llm/preferences prefs
                  :llm/ratings     rate}))
       (let [cfg (:config (config/load-project-config root))]
         (assertions
           "load-project-config does not throw and preserves the keys"
           (:llm/preferences cfg) => prefs
-          (:llm/ratings cfg) => rate))))
+          (:llm/ratings cfg) => rate
+          (:llm/aliases cfg) => aliases))))
 
-  (component "documented :llm overlays survive validation (nested map form)"
-    (let [root (tmp-dir)
-          rate {"gpt-5" {:intelligence 9}}]
+  (component "alias-keyword prefs resolve against the built-in default aliases (no :llm/aliases configured)"
+    (let [root (tmp-dir)]
       (spit (io/file root ".escapement.edn")
-        (pr-str {:llm {:ratings rate}}))
+        (pr-str {:llm/preferences [:default-opus :default-gpt]}))
+      (assertions
+        "preferences referencing built-in default aliases load"
+        (:llm/preferences (:config (config/load-project-config root)))
+        => [:default-opus :default-gpt])))
+
+  (component "R2/R3/R4: invalid overlay shapes are categorized errors, never a passthrough"
+    ;; `err!` returns :err when load rejects (with humanized :errors in ex-data
+    ;; — whether from the structural malli pass for the old pair/string shapes,
+    ;; or from the cross-key referential check for dangling/unknown keywords).
+    (let [root  (tmp-dir)
+          err!  (fn [m]
+                  (spit (io/file root ".escapement.edn") (pr-str m))
+                  (try (config/load-project-config root) :ok
+                       (catch clojure.lang.ExceptionInfo e
+                         (if (-> (ex-data e) :errors some?) :err :no-errors))))
+          ;; The referential check produces a vector of message strings; assert
+          ;; the dangling/unknown cases carry a clear, alias-naming message.
+          msgs! (fn [m]
+                  (spit (io/file root ".escapement.edn") (pr-str m))
+                  (try (config/load-project-config root) []
+                       (catch clojure.lang.ExceptionInfo e (-> (ex-data e) :errors))))
+          opus  {:opus [{:provider :anthropic :model "claude-opus-4-7"}]}]
+      (assertions
+        "old pair-shaped :llm/preferences entry rejected (R2/R4)"
+        (err! {:llm/aliases opus :llm/preferences [{:provider :anthropic :model "claude-opus-4-7"}]})
+        => :err
+        "string-keyed :llm/ratings rejected (R3/R4)"
+        (err! {:llm/aliases opus :llm/ratings {"claude-opus-4-7" {:clojure 10}}})
+        => :err
+        "dangling :llm/preferences keyword rejected with an alias-naming message (R2)"
+        (boolean (some #(re-find #":llm/preferences references unknown alias" (str %))
+                   (msgs! {:llm/aliases opus :llm/preferences [:opus :nope]})))
+        => true
+        "unknown :llm/ratings alias key rejected with an alias-naming message (R3)"
+        (boolean (some #(re-find #":llm/ratings references unknown alias" (str %))
+                   (msgs! {:llm/aliases opus :llm/ratings {:nope {:clojure 10}}})))
+        => true)))
+
+  (component ":llm/aliases — valid multi-target vector loads"
+    (let [root    (tmp-dir)
+          aliases {:kimi2.6 [{:provider :baseten :model "moonshotai/Kimi-K2.6"
+                              :temperature 0.7 :thinking {:type :enabled :budget-tokens 4096}}
+                             {:provider :fireworks-ai :model "accounts/fireworks/models/kimi-k2p6"}]
+                   :fast    [{:provider :ollama :model "glm-5.1"}]}]
+      (spit (io/file root ".escapement.edn")
+        (pr-str {:llm/aliases aliases}))
       (let [cfg (:config (config/load-project-config root))]
         (assertions
-          "nested [:llm :ratings] passes the closed schema"
+          "alias map preserved verbatim"
+          (:llm/aliases cfg) => aliases))))
+
+  (component ":llm/aliases — malformed entries rejected"
+    (let [root (tmp-dir)
+          bad! (fn [v]
+                 (spit (io/file root ".escapement.edn") (pr-str {:llm/aliases v}))
+                 (try (config/load-project-config root) :ok
+                      (catch clojure.lang.ExceptionInfo _ :err)))]
+      (assertions
+        "value not a vector"
+        (bad! {:x {:provider :ollama :model "m"}}) => :err
+        "empty vector"
+        (bad! {:x []}) => :err
+        "target missing :provider"
+        (bad! {:x [{:model "m"}]}) => :err
+        "target missing :model"
+        (bad! {:x [{:provider :ollama}]}) => :err
+        "target not a map"
+        (bad! {:x ["m"]}) => :err
+        "temperature out of (0,1] range"
+        (bad! {:x [{:provider :ollama :model "m" :temperature 2}]}) => :err)))
+
+  (component "config WITHOUT :llm/aliases loads unchanged"
+    (let [root (tmp-dir)]
+      (spit (io/file root ".escapement.edn")
+        (pr-str {:source-paths ["src"]}))
+      (let [cfg (:config (config/load-project-config root))]
+        (assertions
+          "no :llm/aliases key present"
+          (contains? cfg :llm/aliases) => false
+          "other keys intact"
+          (:source-paths cfg) => ["src"]))))
+
+  (component ":llm/aliases — deep-merge: project overrides global per alias key"
+    (let [global {:llm/aliases {:kimi2.6 [{:provider :baseten :model "moonshotai/Kimi-K2.6"}]
+                                :fast    [{:provider :ollama :model "glm-5.1"}]}}
+          proj   {:llm/aliases {:kimi2.6 [{:provider :fireworks-ai :model "accounts/fireworks/models/kimi-k2p6"}]}}
+          merged (config/deep-merge global proj)]
+      (assertions
+        "project alias replaces global same-key (vectors are opaque)"
+        (get-in merged [:llm/aliases :kimi2.6])
+        => [{:provider :fireworks-ai :model "accounts/fireworks/models/kimi-k2p6"}]
+        "global-only alias preserved"
+        (get-in merged [:llm/aliases :fast])
+        => [{:provider :ollama :model "glm-5.1"}])))
+
+  (component "documented :llm overlays survive validation (nested map form, alias-keyed)"
+    (let [root (tmp-dir)
+          rate {:gpt {:intelligence 9}}]
+      (spit (io/file root ".escapement.edn")
+        (pr-str {:llm {:aliases {:gpt [{:provider :openai :model "gpt-5"}]}
+                       :ratings rate}}))
+      (let [cfg (:config (config/load-project-config root))]
+        (assertions
+          "nested [:llm :ratings] passes the closed schema (alias-keyed)"
           (get-in cfg [:llm :ratings]) => rate)))))
 
 (specification "resolve-path"

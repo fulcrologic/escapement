@@ -230,6 +230,28 @@
            (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (<= x n)))) max))
          false)))))
 
+(defn target-satisfies-policy?
+  "True when a single TARGET satisfies `policy`, where objective facts are
+   resolved from the catalog by the target's `model` STRING and the subjective
+   overlay is the alias's rating map `overlay` supplied DIRECTLY (already looked
+   up by alias keyword — no model-string prefix resolution).
+
+   This is the mandatory-aliases target-granularity gate: objective catalog
+   facts stay per provider+model (`model` string), while the subjective rating
+   is read by the originating ALIAS keyword upstream and handed in here as a
+   plain opinion map. An empty/nil `policy` admits everything; a non-empty
+   policy over an unknown model id (no objective facts) is rejected unless the
+   overlay alone satisfies every clause."
+  [model policy overlay]
+  (let [{:keys [require min max]} policy]
+    (if (and (empty? require) (empty? min) (empty? max))
+      true
+      (let [i (merge (or (info model) {}) (or overlay {}))]
+        (and (seq i)
+          (every? (fn [[k v]] (= (get i k) v)) require)
+          (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (>= x n)))) min)
+          (every? (fn [[k n]] (let [x (get i k)] (and (number? x) (<= x n)))) max))))))
+
 ;; =============================================================================
 ;; Provider accessors
 ;; =============================================================================
