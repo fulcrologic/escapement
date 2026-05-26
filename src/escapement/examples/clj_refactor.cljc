@@ -4,10 +4,12 @@
 
    The `:needs` below is the ergonomic eligibility-gate surface: a flat
    `fact → constraint` map (translated at the invocation boundary into
-   the canonical `catalog/satisfies-policy?` policy). It is applied only
-   to the processor's auto-detected `default-models` fallback list — if a
-   chart pins `:model`/`:models` that is honored verbatim. Here we demand
-   a model that scores well on Clojure *and* has usable tool-calling:
+   the canonical `catalog/satisfies-policy?` policy). It filters the
+   candidate list at target granularity — the candidates being the alias
+   keywords this node names (`:model`/`:models`) or, when it names none,
+   `:llm/preferences`. Here we name no model, so the gate filters the
+   preference aliases; we demand a model that scores well on Clojure
+   *and* has usable tool-calling:
 
      {:clojure [:>= 8] :tool-calling [:>= 6]}
 
