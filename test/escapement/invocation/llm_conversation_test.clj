@@ -798,6 +798,11 @@
                                        (end-turn-response "second")])
         ;; Selector backend routes per-conversation via the :model field —
         ;; charts use it as a per-invocation tag so we don't need two processors.
+        ;; Mandatory-aliases model: chart nodes name models by alias keyword.
+        ;; The alias targets carry distinct model ids ("main"/"advisor") that
+        ;; the selector backend uses as per-invocation routing tags.
+        aliases         {:main    [{:provider :openai :model "main"}]
+                         :advisor [{:provider :openai :model "advisor"}]}
         selector        (reify llm/LLMBackend
                           (send-turn [_ request]
                             (p/do!
@@ -810,12 +815,13 @@
                             (h/llm-conversation
                               {:id        "main"
                                :params-fn (fn [_ _]
-                                            {:model "main" :initial-user-message "hello-main"})})
+                                            {:model :main :initial-user-message "hello-main"})})
                             (h/llm-conversation
                               {:id        "advisor"
                                :params-fn (fn [_ _]
-                                            {:model "advisor" :initial-user-message "hello-advisor"})})))
+                                            {:model :advisor :initial-user-message "hello-advisor"})})))
         proc            (llmc/new-processor {:backend       selector
+                                             :aliases       aliases
                                              :tool-registry (tp/new-registry)})
         t               (-> (dct/new-testing-env {:statechart chart} proc)
                           (dct/start!))]
@@ -1058,54 +1064,40 @@
     (#'llmc/params->policy {:needs {:max-output-tokens [:<= 64000]}})
     => {:require {} :min {} :max {:max-output-tokens 64000}}))
 
-(specification "candidate-models applies the eligibility gate to the fallback list"
-  (let [defaults ["gpt-4o-mini" "claude-sonnet-4-5" "claude-opus-4-1"]]
-    (component "auto-fallback list is filtered by :needs (objective fact)"
-      (assertions
-        ":context-tokens [:>= 200000] drops gpt-4o-mini (128k window)"
-        (#'llmc/candidate-models {:needs {:context-tokens [:>= 200000]}}
-          defaults (atom {}) {})
-        => ["claude-sonnet-4-5" "claude-opus-4-1"]))
-    (component "an explicit :model pick is never silently switched"
-      (assertions
-        "policy is ignored when the user names a model"
-        (#'llmc/candidate-models {:model "gpt-4o-mini"
-                                  :needs {:context-tokens [:>= 200000]}}
-          defaults (atom {}) {})
-        => ["gpt-4o-mini"]))
-    (component "an unsatisfiable gate falls back to the unfiltered list"
-      (assertions
-        "so the conversation still runs (fail-open)"
-        (#'llmc/candidate-models {:needs {:context-tokens [:>= 999999999]}}
-          defaults (atom {}) {})
-        => defaults))
-    (component ":down models are removed after gate filtering"
-      (assertions
-        "claude-sonnet-4-5 marked :down → only claude-opus-4-1 survives"
-        (#'llmc/candidate-models {:needs {:context-tokens [:>= 200000]}}
-          defaults
-          (atom {"claude-sonnet-4-5" :down})
-          {})
-        => ["claude-opus-4-1"]))
-    (component "subjective ratings come from the injected catalog-ratings arg"
-      (assertions
-        "with ratings keeping only claude-sonnet-4-5, gpt-4o-mini/opus drop"
-        (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
-          defaults (atom {})
-          {"claude-sonnet-4-5" {:clojure 9}})
-        => ["claude-sonnet-4-5"]
-        "a DIFFERENT injected ratings table → different survivors (same process)"
-        (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
-          defaults (atom {})
-          {"claude-opus-4-1" {:clojure 10}})
-        => ["claude-opus-4-1"]
-        "empty injected ratings → subjective clause matches nothing → unfiltered (fail-open)"
-        (#'llmc/candidate-models {:needs {:clojure [:>= 8]}}
-          defaults (atom {}) {})
-        => defaults))
-    (component "no gate → default-models verbatim"
-      (assertions
-        (#'llmc/candidate-models {} defaults (atom {}) {}) => defaults))))
+;; R6 (mandatory-aliases): the eligibility gate now applies at TARGET
+;; granularity inside `resolve-candidates` over alias-flattened candidates —
+;; objective facts per provider+model, subjective scores by ALIAS keyword.
+;; (Replaces the removed string-list `candidate-models` gate.)
+(specification "resolve-candidates filters candidate TARGETS by :needs at target granularity (R6)"
+  (let [aliases {:big   [{:provider :openai :model "gpt-5"}]              ; 400k window
+                 :small [{:provider :openai :model "gpt-4o-mini"}]        ; 128k window
+                 :mix   [{:provider :openai :model "gpt-4o-mini"}         ; ineligible
+                         {:provider :anthropic :model "claude-opus-4-7"}]} ; 1M, eligible
+        policy  {:require {} :min {:context-tokens 200000} :max {}}
+        resolve (fn [prefs strict?]
+                  (#'llmc/resolve-candidates {} (atom {}) prefs aliases policy {} strict?))]
+    (assertions
+      "an eligible alias keeps its target"
+      (mapv :model (:candidates (resolve [:big] false))) => ["gpt-5"]
+      "a mixed alias drops the ineligible target, keeps the eligible one (author order)"
+      (mapv :model (:candidates (resolve [:mix] false))) => ["claude-opus-4-7"]
+      "the surviving target carries its source :alias"
+      (mapv :alias (:candidates (resolve [:mix] false))) => [:mix]
+      "an all-ineligible alias: fail-open yields the UNFILTERED candidate"
+      (mapv :model (:candidates (resolve [:small] false))) => ["gpt-4o-mini"]
+      "an all-ineligible alias under strict → :eligibility-empty (no candidates)"
+      (some? (:eligibility-empty (resolve [:small] true))) => true)))
+
+(specification "resolve-candidates reads subjective scores by ALIAS keyword (R6)"
+  (let [aliases {:gpt [{:provider :openai :model "gpt-5"}]}
+        policy  {:require {} :min {:clojure 8} :max {}}
+        resolve (fn [ratings]
+                  (#'llmc/resolve-candidates {} (atom {}) [:gpt] aliases policy ratings false))]
+    (assertions
+      "alias-keyed rating satisfying the policy keeps the target"
+      (mapv :model (:candidates (resolve {:gpt {:clojure 9}}))) => ["gpt-5"]
+      "alias-keyed rating below the floor → fail-open keeps unfiltered candidate but flags the gap"
+      (mapv :model (:candidates (resolve {:gpt {:clojure 3}}))) => ["gpt-5"])))
 
 ;; ---------------------------------------------------------------------------
 ;; Categorized backend errors → finer :error.llm.<category> chart events,
@@ -1184,7 +1176,7 @@
       (->> transcript (filter #(= :llm/error (:event %))) first :data :reason)
       => :backend)))
 
-(specification "try-models! surfaces :llm/model-policy-empty when the gate excludes every fallback model (fail-open)"
+(specification "try-models! surfaces :llm/model-policy-empty when the gate excludes every candidate (fail-open)"
   (let [captured (atom [])
         backend  (mock-backend [(end-turn-response "ok")])
         result   (#'llmc/try-models!
@@ -1192,7 +1184,8 @@
                     :transcript-fn   (fn [ev] (swap! captured conj ev))
                     :worker-state    (atom :running)
                     :model-status    (atom {})
-                    :default-models  ["gpt-4o-mini"]
+                    :aliases         {:small [{:provider :openai :model "gpt-4o-mini"}]}
+                    :preferences     [:small]
                     :catalog-ratings {}
                     :parent-ctx      {:invokeid "iv"}}
                    {:needs {:context-tokens [:>= 999999999]}}
@@ -1204,11 +1197,9 @@
       (some? ev) => true
       "it carries the resolved (canonical) policy"
       (get-in ev [:data :policy]) => {:require {} :min {:context-tokens 999999999} :max {}}
-      "it carries the default-models that all failed the gate"
-      (get-in ev [:data :default-models]) => ["gpt-4o-mini"]
       "strict? is false by default"
       (get-in ev [:data :strict?]) => false
-      "the turn still completes via the unfiltered fallback model (fail-open)"
+      "the turn still completes via the unfiltered candidate (fail-open)"
       (some? (:ok result)) => true
       (:model-used result) => "gpt-4o-mini")))
 
@@ -1220,7 +1211,8 @@
                     :transcript-fn       (fn [ev] (swap! captured conj ev))
                     :worker-state        (atom :running)
                     :model-status        (atom {})
-                    :default-models      ["gpt-4o-mini"]
+                    :aliases             {:small [{:provider :openai :model "gpt-4o-mini"}]}
+                    :preferences         [:small]
                     :catalog-ratings     {}
                     :eligibility-strict? true
                     :parent-ctx          {:invokeid "iv"}}
@@ -1235,27 +1227,31 @@
       (:ok result) => nil
       "the :eligibility-empty shape is returned for the caller to fail the node"
       (some? (:eligibility-empty result)) => true
-      (get-in result [:eligibility-empty :default-models]) => ["gpt-4o-mini"])))
+      "the payload key is now :candidates (the excluded tagged targets), not :default-models"
+      (mapv :model (get-in result [:eligibility-empty :candidates])) => ["gpt-4o-mini"])))
 
-(specification "try-models! ratings come from the injected context value (two tables, one process)"
-  (let [run (fn [ratings]
+(specification "try-models! ratings come from the injected context value, keyed by ALIAS (two tables, one process)"
+  (let [aliases {:mini [{:provider :openai :model "gpt-4o-mini"}]
+                 :opus [{:provider :anthropic :model "claude-opus-4-1"}]}
+        run (fn [ratings]
               (let [backend (mock-backend [(end-turn-response "ok")])]
                 (#'llmc/try-models!
                   {:backend         backend
                    :transcript-fn   (fn [_] nil)
                    :worker-state    (atom :running)
                    :model-status    (atom {})
-                   :default-models  ["gpt-4o-mini" "claude-opus-4-1"]
+                   :aliases         aliases
+                   :preferences     [:mini :opus]
                    :catalog-ratings ratings
                    :parent-ctx      {:invokeid "iv"}}
                   {:needs {:clojure [:>= 8]}}
                   [{:role :user :content [{:type :text :text "hi"}]}]
                   [])))]
     (assertions
-      "ratings favoring gpt-4o-mini → it is the model used"
-      (:model-used (run {"gpt-4o-mini" {:clojure 9}})) => "gpt-4o-mini"
+      "alias-keyed ratings favoring :mini → gpt-4o-mini is the model used"
+      (:model-used (run {:mini {:clojure 9}})) => "gpt-4o-mini"
       "a DIFFERENT injected ratings table in the same process → different pick"
-      (:model-used (run {"claude-opus-4-1" {:clojure 9}})) => "claude-opus-4-1")))
+      (:model-used (run {:opus {:clojure 9}})) => "claude-opus-4-1")))
 
 ;; ---------------------------------------------------------------------------
 ;; Resilience: unbounded :max_tokens continuation + transient-error retry

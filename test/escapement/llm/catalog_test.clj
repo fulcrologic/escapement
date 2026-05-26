@@ -126,8 +126,14 @@
     "each key carries a one-line meaning string"
     (every? string? (vals catalog/eligibility-facts)) => true))
 
-(specification "catalog — default preferences stay reachable"
+(specification "catalog — default preferences reference built-in default aliases"
+  ;; Updated for the mandatory-aliases model: `default-preferences` is now a
+  ;; vector of alias keywords (not {:provider :model} pairs), each of which
+  ;; must be a key in the built-in `default-aliases` set. (Was: every pair
+  ;; validates against the catalog via the removed `valid-entry?`.)
   (assertions
-    "every built-in default preference validates against the catalog"
-    (mapv prefs/valid-entry? prefs/default-preferences)
-    => (mapv (constantly true) prefs/default-preferences)))
+    "every built-in default preference keyword is a built-in default alias key"
+    (every? (set (keys prefs/default-aliases)) prefs/default-preferences) => true
+    "the default alias targets are reachable {:provider :model} maps"
+    (every? (fn [t] (and (keyword? (:provider t)) (string? (:model t))))
+      (mapcat identity (vals prefs/default-aliases))) => true))

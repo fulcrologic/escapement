@@ -28,6 +28,7 @@
     [escapement.chart.service :as service]
     [escapement.llm.catalog :as catalog]
     [escapement.llm.needs :as needs]
+    [escapement.llm.preferences :as preferences]
     [escapement.llm.protocol :as llm]
     [escapement.llm.types :as llm-types]
     [escapement.tools.protocol :as tp]
@@ -759,45 +760,150 @@
     (when (policy-nonempty? pol)
       pol)))
 
-(defn- candidate-models
-  "Decide the ordered list of models to try for the next turn.
+(defn- alias-target->candidate
+  "Normalize a validated `:llm/aliases` target map into the uniform candidate
+   shape consumed by `try-models!`. `:provider`/`:model` route+identify the
+   target; `:params` carries this target's optional generation overrides
+   (`:temperature`/`:top-p`/`:top-k`/`:thinking`/`:max-tokens`) that are merged
+   UNDER the node's explicit params (node wins) on its attempt."
+  ([target] (alias-target->candidate target nil))
+  ([{:keys [provider model] :as target} alias]
+   {:provider provider
+    :model    model
+    :alias    alias
+    :params   (select-keys target [:temperature :top-p :top-k :thinking :max-tokens])}))
 
-   Resolution order:
-     1. `params :models`    — explicit ordered preference (no auto-substitution)
-     2. `params :model`     — explicit single pick (no fallback)
-     3. `default-models`    — processor-level auto-detected fallback list. When
-                              an eligibility gate is expressed (`params
-                              :needs`) the list is filtered to entries
-                              satisfying it via
-                              `escapement.llm.catalog/satisfies-policy?`,
-                              with subjective ratings resolved from the
-                              injected `catalog-ratings` value.
-                              If the filter empties the list, the
-                              unfiltered default-models is used so the
-                              conversation still runs (the gap is surfaced
-                              as an `:llm/model-policy-empty` transcript
-                              event by the caller).
-     4. `[nil]`             — let the backend pick its own default.
+(defn- node-alias-vector
+  "Normalize a node's model selection into a vector of alias keywords.
 
-   Cases 1 and 2 are honored verbatim: when the user names a model, we never
-   silently switch.
+   A KEYWORD is the ONLY legal model form. Resolution:
+     * `params :models` (a vector of alias keywords) — explicit ordered set
+     * `params :model`  (a single alias keyword)     — explicit single pick
+     * neither                                        — nil (caller falls back
+                                                         to `:llm/preferences`)
 
-   Always filters out anything marked `:down` in `model-status` AFTER the
-   resolution above; `nil` (case 4) is preserved unconditionally."
-  [params default-models model-status catalog-ratings]
-  (let [policy    (params->policy params)
-        defaults  (if (and policy (seq default-models))
-                    (let [filtered (filterv #(catalog/satisfies-policy? % policy catalog-ratings) default-models)]
-                      (if (seq filtered) filtered default-models))
-                    default-models)
-        requested (cond
-                    (seq (:models params)) (vec (:models params))
-                    (:model params) [(:model params)]
-                    (seq defaults) (vec defaults)
-                    :else [nil])
-        status    @model-status
-        live      (filterv (fn [m] (or (nil? m) (not= :down (get status m)))) requested)]
-    (if (seq live) live requested)))
+   Any STRING — a bare string `:model` or a string element inside `:models` —
+   is a categorized configuration/chart error, NEVER a passthrough to a
+   backend (R4). Returns one of:
+     {:aliases [kw …]}            — normalized alias-keyword vector (or nil)
+     {:string-model s}            — string `:model` (categorized error)
+     {:string-models [el …] :bad} — `:models` contained non-keyword element(s)"
+  [params]
+  (let [m  (:model params)
+        ms (:models params)]
+    (cond
+      (seq ms)
+      (if (every? keyword? ms)
+        {:aliases (vec ms)}
+        {:string-models (vec ms)
+         :bad           (vec (remove keyword? ms))})
+
+      (some? m)
+      (if (keyword? m)
+        {:aliases [m]}
+        {:string-model m})
+
+      :else {:aliases nil})))
+
+(defn- resolve-candidates
+  "Produce the ordered candidate list for the next turn as a vector of uniform
+   maps `{:provider :model :params}` consumed by `try-models!`.
+
+   KEYWORD-ONLY model form (R4/R5). A node selects models exclusively by alias
+   keyword: a single `:model` keyword, or a `:models` vector of alias keywords.
+   When the node names NO model, the alias vector is `:llm/preferences` (an
+   ordered vector of alias keywords; falls back to the built-in
+   `default-preferences`). Both paths normalize to \"a vector of alias
+   keywords\", which is then flattened — each alias's ordered target list
+   (author order) concatenated via `preferences/flatten-targets` — into the
+   ordered candidate sequence. Every target carries its own provider,
+   provider-specific model id, and optional generation params.
+
+   A STRING anywhere (a bare string `:model`, or a string element inside
+   `:models`) is a categorized configuration/chart error — NEVER shipped to a
+   backend.
+
+   `:needs` TARGET-GRANULARITY filtering (R6). When `policy` is non-empty,
+   each flattened candidate TARGET is evaluated against the policy: objective
+   facts are looked up per `:provider`+`:model` from the catalog, while the
+   subjective overlay is the candidate's source ALIAS's rating (looked up by
+   ALIAS keyword in `catalog-ratings`). Ineligible targets are dropped; an
+   alias survives if ≥1 of its targets is eligible; an alias whose targets all
+   fail drops out entirely; surviving targets keep author order. The fail-open
+   vs `eligibility-strict?` decision is applied to the resulting flattened list
+   (matching today's semantics): when the filter empties the list, the
+   UNFILTERED candidates are used unless `eligibility-strict?` — in which case
+   `:eligibility-empty` is returned.
+
+   Returns one of:
+     {:candidates [cand …]}              — flattened candidate vector
+     {:eligibility-empty {…}}            — strict + `:needs` excluded every target
+     {:unknown-alias kw :known […]}      — alias keyword absent from `aliases`
+     {:string-model s}                   — illegal string `:model`
+     {:string-models [el …] :bad […]}    — illegal string element(s) in `:models`
+
+   The 4-arg arity is a no-`:needs` convenience (no policy, no ratings, not
+   strict) for callers/tests that only exercise alias expansion + dispatch."
+  ([params model-status preferences aliases]
+   (resolve-candidates params model-status preferences aliases nil {} false))
+  ([params model-status preferences aliases policy catalog-ratings eligibility-strict?]
+  (let [norm (node-alias-vector params)]
+    (cond
+      (contains? norm :string-model)  norm
+      (contains? norm :string-models) norm
+
+      :else
+      (let [explicit? (boolean (seq (:aliases norm)))
+            alias-kws (if explicit? (:aliases norm) (vec preferences))
+            ;; An EXPLICITLY named alias keyword (node `:model`/`:models`) absent
+            ;; from `:llm/aliases` is a categorized error (R5) — never silently
+            ;; degraded. The preference fallback path does NOT hard-error on a
+            ;; dangling keyword (referential integrity is enforced at config
+            ;; load time; the empty-config/test path simply has no targets and
+            ;; falls through to the backend-default candidate below).
+            unknown   (when explicit?
+                        (first (remove (set (keys aliases)) alias-kws)))]
+        (if unknown
+          {:unknown-alias unknown :known (vec (keys aliases))}
+          ;; Flatten alias keywords → candidates, TAGGING each with its source
+          ;; alias so the subjective rating can be read by alias keyword (R6).
+          (let [tagged  (->> alias-kws
+                          (mapcat (fn [k] (map #(alias-target->candidate % k)
+                                            (get aliases k))))
+                          (filter :model)   ;; drop nil-target slots (none today)
+                          distinct
+                          vec)
+                ;; R6 target-granularity `:needs` gate: keep targets whose
+                ;; provider+model (objective) + their alias's rating (subjective,
+                ;; by alias keyword) satisfy the policy. An alias survives iff
+                ;; ≥1 of its targets survives (implicit: surviving targets carry
+                ;; the alias). Author order preserved.
+                eligible (if policy
+                           (filterv
+                             (fn [c]
+                               (catalog/target-satisfies-policy?
+                                 (:model c) policy (get catalog-ratings (:alias c))))
+                             tagged)
+                           tagged)
+                ;; Fail-open vs strict on the RESULTING flattened list (matches
+                ;; today's semantics): empty-after-filter → unfiltered list,
+                ;; unless strict (caller surfaces a categorized error).
+                gated-empty? (and policy (seq tagged) (empty? eligible))
+                cands    (if gated-empty? tagged eligible)
+                status   @model-status
+                live     (filterv #(not= :down (get status (:model %))) cands)]
+            (if (and gated-empty? eligibility-strict?)
+              {:eligibility-empty {:policy policy
+                                   :candidates (mapv #(select-keys % [:provider :model :alias]) tagged)}}
+            ;; No resolvable targets (no model named AND preferences don't
+            ;; flatten — e.g. empty-config / no `:llm/aliases`): hand the
+            ;; backend a single nil-model candidate so it picks its own default.
+            {:gated-empty? (boolean gated-empty?)
+             :policy       policy
+             :candidates   (cond
+                             (seq live)  live
+                             (seq cands) cands
+                             :else       [{:provider nil :model nil :params nil}])}))))))))
 
 (defn- throwable->details [^Throwable t]
   (let [message (or (.getMessage t)
@@ -839,48 +945,89 @@
    arity is intentionally not relied on here. `eligibility-strict?` is
    the injected fail-closed flag."
   [{:keys [backend transcript-fn worker-state model-status default-models
-           parent-ctx catalog-ratings eligibility-strict?]}
+           parent-ctx catalog-ratings eligibility-strict? aliases preferences]}
    params messages tools]
   (let [{:keys [max-retries backoff-ms]} (params->resilience params)
         policy         (params->policy params)
-        auto-fallback? (and (not (seq (:models params)))
-                         (nil? (:model params)))
-        gate-empties?  (and auto-fallback? policy (seq default-models)
-                         (not-any? #(catalog/satisfies-policy? % policy catalog-ratings)
-                           default-models))
-        _              (when gate-empties?
+        ;; R6: `:needs` filtering now happens at TARGET granularity inside the
+        ;; resolver over the flattened aliased candidates (objective catalog
+        ;; facts per provider+model + the subjective rating by the candidate's
+        ;; source ALIAS). `default-models` (the legacy flattened string list) is
+        ;; no longer the gate's input.
+        resolution     (resolve-candidates params model-status
+                         (if (seq preferences) preferences preferences/default-preferences)
+                         (or aliases {})
+                         policy catalog-ratings (boolean eligibility-strict?))
+        ;; When the target-granularity gate emptied the eligible list (fail-open
+        ;; fallback to the unfiltered candidates), surface the same gap event the
+        ;; old default-models gate did, so observers still see the policy-empty
+        ;; signal before an ineligible model runs.
+        _              (when (or (:gated-empty? resolution)
+                                (:eligibility-empty resolution))
                          (transcript! transcript-fn
                            {:event :llm/model-policy-empty
                             :ts    (now-ms)
-                            :data  {:policy         policy
-                                    :default-models (vec default-models)
-                                    :strict?        (boolean eligibility-strict?)}}))]
-    (if (and gate-empties? eligibility-strict?)
+                            :data  {:policy  policy
+                                    :strict? (boolean eligibility-strict?)}}))]
+    (cond
+      (:eligibility-empty resolution)
       ;; Fail-closed: a webapp/lib host opted into never running an
       ;; ineligible model. Surface a categorized error so the node fails
       ;; instead of proceeding on the unfiltered fallback list.
-      {:eligibility-empty {:policy         policy
-                           :default-models (vec default-models)}}
-      (let [candidates (candidate-models params default-models model-status catalog-ratings)]
-        (loop [[m & more] candidates
+      {:eligibility-empty (:eligibility-empty resolution)}
+
+      ;; R4: a STRING model reference (bare string `:model`, or a string
+      ;; element inside `:models`) is a categorized chart error — keyword is
+      ;; the only legal model form. Never shipped to a backend.
+      (contains? resolution :string-model)
+      {:string-model (:string-model resolution)}
+
+      (contains? resolution :string-models)
+      {:string-models (:string-models resolution)
+       :bad           (:bad resolution)}
+
+      ;; R5: a keyword :model with no matching alias must never be shipped to a
+      ;; backend as a model string. Surface a categorized error so the node fails.
+      (:unknown-alias resolution)
+      {:unknown-alias (:unknown-alias resolution)
+       :known         (:known resolution)}
+
+      :else
+      (let [candidates (:candidates resolution)]
+        (loop [[cand & more] candidates
                attempts []]
-          (let [request  (build-request
-                           {:system               (:system params)
-                            :messages             messages
-                            :tools                tools
-                            :model                m
-                            :max-tokens           (effective-max-tokens m)
-                            :temperature          (:temperature params)
-                            :top-p                (:top-p params)
-                            :top-k                (:top-k params)
-                            :stop-sequences       (:stop-sequences params)
-                            :thinking             (:thinking params)
-                            :tool-choice          (:tool-choice params)
-                            :metadata             (:metadata params)
-                            :system-cache-control (:system-cache-control params)
-                            :tools-cache-control  (:tools-cache-control params)
-                            :auto-cache?          (get params :auto-cache? true)
-                            :conv-id              (:conversation/id params)})
+          (let [m         (:model cand)
+                ;; Per-target params merged UNDER node params so an explicit
+                ;; node value always wins (alias = defaults). Legacy candidates
+                ;; carry nil :params, so this is just `params` for them.
+                eff       (merge (:params cand) params)
+                ;; effective max-tokens: catalog cap for the resolved model,
+                ;; but an alias target may carry a :max-tokens hint (e.g. to
+                ;; satisfy `max-tokens > thinking budget` when the catalog cap
+                ;; is unknown or too low — :max-tokens is not a chart param).
+                max-tok   (or (:max-tokens (:params cand)) (effective-max-tokens m))
+                request   (cond-> (build-request
+                                    {:system               (:system params)
+                                     :messages             messages
+                                     :tools                tools
+                                     :model                m
+                                     :max-tokens           max-tok
+                                     :temperature          (:temperature eff)
+                                     :top-p                (:top-p eff)
+                                     :top-k                (:top-k eff)
+                                     :stop-sequences       (:stop-sequences params)
+                                     :thinking             (:thinking eff)
+                                     :tool-choice          (:tool-choice params)
+                                     :metadata             (:metadata params)
+                                     :system-cache-control (:system-cache-control params)
+                                     :tools-cache-control  (:tools-cache-control params)
+                                     :auto-cache?          (get params :auto-cache? true)
+                                     :conv-id              (:conversation/id params)})
+                            ;; R3 dispatch: an alias candidate carries a provider
+                            ;; keyword; tagging the request routes MultiBackend by
+                            ;; provider (regex bypassed). Legacy candidates have nil
+                            ;; :provider — request left untouched, regex routing as today.
+                            (:provider cand) (assoc :provider (:provider cand)))
                 _        (transcript! transcript-fn
                            {:event :llm/request :ts (now-ms)
                             :data  (cond-> {:n-messages     (count (:messages request))
@@ -1147,21 +1294,68 @@
   (let [outcome (drive-turn! ctx params @messages-atom tool-defs)]
     (cond
       (:eligibility-empty outcome)
-      (let [{:keys [policy default-models]} (:eligibility-empty outcome)]
+      (let [{:keys [policy candidates]} (:eligibility-empty outcome)]
         (transcript! transcript-fn
           {:event :llm/error :ts (now-ms)
-           :data  {:reason         :invalid-request
-                   :detail         :eligibility-empty-strict
-                   :policy         policy
-                   :default-models default-models}})
-        ;; Fail-closed: the eligibility gate excluded every fallback
-        ;; model and `:llm/eligibility-strict?` is set. Categorize as
+           :data  {:reason     :invalid-request
+                   :detail     :eligibility-empty-strict
+                   :policy     policy
+                   :candidates candidates}})
+        ;; Fail-closed: the eligibility gate excluded every candidate target
+        ;; and `:llm/eligibility-strict?` is set. Categorize as
         ;; :invalid-request so the chart's :error.llm.* / .invalid-request
         ;; transitions fire — the node fails rather than run a model the
         ;; host declared ineligible.
-        (post-error! :invalid-request {:detail         :eligibility-empty-strict
-                                       :policy         policy
-                                       :default-models default-models})
+        (post-error! :invalid-request {:detail     :eligibility-empty-strict
+                                       :policy     policy
+                                       :candidates candidates})
+        (reset! worker-state :dying)
+        :error-and-die)
+
+      ;; R7: keyword :model named an alias not present in :llm/aliases. Fail the
+      ;; node with a categorized :invalid-request (never ships the keyword as a
+      ;; model id to a backend).
+      (:unknown-alias outcome)
+      (let [alias (:unknown-alias outcome)
+            known (:known outcome)]
+        (transcript! transcript-fn
+          {:event :llm/error :ts (now-ms)
+           :data  {:reason  :invalid-request
+                   :detail  :unknown-alias
+                   :alias   alias
+                   :known   known}})
+        (post-error! :invalid-request {:detail :unknown-alias
+                                       :alias  alias
+                                       :known  known})
+        (reset! worker-state :dying)
+        :error-and-die)
+
+      ;; R4: a STRING model reference is a categorized chart error — keyword
+      ;; is the only legal model form. Never ships a string to a backend.
+      (contains? outcome :string-model)
+      (let [s (:string-model outcome)]
+        (transcript! transcript-fn
+          {:event :llm/error :ts (now-ms)
+           :data  {:reason :invalid-request
+                   :detail :string-model
+                   :model  s}})
+        (post-error! :invalid-request {:detail :string-model
+                                       :model  s})
+        (reset! worker-state :dying)
+        :error-and-die)
+
+      (contains? outcome :string-models)
+      (let [ms  (:string-models outcome)
+            bad (:bad outcome)]
+        (transcript! transcript-fn
+          {:event :llm/error :ts (now-ms)
+           :data  {:reason :invalid-request
+                   :detail :string-models
+                   :models ms
+                   :bad    bad}})
+        (post-error! :invalid-request {:detail :string-models
+                                       :models ms
+                                       :bad    bad})
         (reset! worker-state :dying)
         :error-and-die)
 
@@ -1483,7 +1677,7 @@
       (catch Throwable _ nil))))
 
 (defrecord LlmConversationProcessor [backend tool-registry transcript-fn workers model-status default-models
-                                     catalog-ratings eligibility-strict?]
+                                     catalog-ratings eligibility-strict? aliases preferences]
   sp/InvocationProcessor
   (supports-invocation-type? [_ typ]
     (= typ :llm-conversation))
@@ -1542,6 +1736,10 @@
                              :default-models      default-models
                              :catalog-ratings     (or catalog-ratings {})
                              :eligibility-strict? (boolean eligibility-strict?)
+                             :aliases             (or aliases {})
+                             :preferences         (if (seq preferences)
+                                                    (vec preferences)
+                                                    preferences/default-preferences)
                              :params              params
                              :parent-ctx          parent-ctx}
           runnable          (fn [] (run-worker! ctx))
@@ -1640,14 +1838,30 @@
      flag. When true, an eligibility gate (`:needs`)
      that excludes every auto-fallback model fails the node with a
      categorized `:error.llm.invalid-request` instead of silently
-     proceeding on the unfiltered list (fail-open, the default)."
+     proceeding on the unfiltered list (fail-open, the default).
+   * `:aliases` (optional) — the validated `:llm/aliases` map
+     (`{alias-kw [target-map …]}`, see `escapement.config`). The SINGLE source
+     of truth for any concrete target. A node selects models EXCLUSIVELY by
+     alias keyword: a keyword `:model`, or a `:models` vector of alias keywords.
+     KEYWORD IS THE ONLY LEGAL MODEL FORM — a bare string `:model` or a string
+     element inside `:models` is a categorized configuration/chart error, never
+     a passthrough to a backend (R4). Each alias keyword expands to its ordered
+     vector of cross-provider targets (failover order). Defaults to `{}` (so a
+     keyword `:model` with no aliases configured is an unknown-alias error).
+   * `:preferences` (optional) — the `:llm/preferences` vector of ALIAS
+     KEYWORDS forming the default candidate set when a node names NO model.
+     Resolution is uniform: the node's `:model`/`:models` (a vector of alias
+     keywords) OR `:preferences` (when the node names nothing) are flattened
+     over `:aliases` into the same ordered `{:provider :model :params}`
+     candidate list. Defaults to the built-in `preferences/default-preferences`."
   [{:keys [backend tool-registry transcript-fn default-models
-           catalog-ratings eligibility-strict?]}]
+           catalog-ratings eligibility-strict? aliases preferences]}]
   (assert backend "backend is required")
   (assert tool-registry "tool-registry is required")
   (->LlmConversationProcessor backend tool-registry (or transcript-fn (fn [_] nil))
     (atom {}) (atom {}) (vec default-models)
-    (or catalog-ratings {}) (boolean eligibility-strict?)))
+    (or catalog-ratings {}) (boolean eligibility-strict?) (or aliases {})
+    (if (seq preferences) (vec preferences) preferences/default-preferences)))
 
 (>defn active-worker-count
   "Returns the number of workers whose state is not `:dying`. Used by the runner

@@ -212,12 +212,17 @@
       (merge tmpl (into {} (remove (comp nil? val)) overrides)))))
 
 (defn- preference-rank
-  "Map of provider-keyword → its first index in `preferences` (lower = higher
-   priority). Providers absent from `preferences` sort last (stable)."
-  [preferences]
-  (->> preferences
-    (map :provider)
-    (reduce (fn [m p] (if (contains? m p) m (assoc m p (count m)))) {})))
+  "Map of provider-keyword → its rank (lower = higher priority), derived from
+   the DISTINCT, first-seen order of providers across the flattened preference
+   aliases' targets (R8). `pref-targets` is the alias-flattened
+   `{:provider :model …}` sequence (`preferences/flatten-targets`); the route
+   ordering follows the providers as they first appear there. Providers absent
+   from the flattened targets sort last (stable, handled by the caller)."
+  [pref-targets]
+  (->> (map :provider pref-targets)
+    distinct
+    (map-indexed (fn [i p] [p i]))
+    (into {})))
 
 (defn build-injected-credentials-backend
   "Assemble a `multi` routing backend purely from explicitly injected
@@ -235,33 +240,41 @@
      Each is resolved to a concrete sub-backend via
      `build-credential-backend`. Descriptors with an unknown `:provider`
      are dropped.
-   - `preferences` — the injected `:llm/preferences` (sorted
-     `[{:provider :model} …]`, highest priority first). Used ONLY to ORDER
-     the routing table: routes for providers appearing earlier in
-     `preferences` are tried first; providers absent from `preferences` keep
-     their descriptor order, after the ranked ones. No new selection
-     behavior — pure assembly over `multi/new-backend`.
+   - `pref-targets` — the flattened preference-alias targets
+     (`preferences/flatten-targets` of `:llm/preferences` over `:llm/aliases`,
+     highest priority first; each a `{:provider :model …}` map). Used ONLY to
+     ORDER the routing table: the route order derives from the DISTINCT,
+     first-seen order of the targets' providers (R8) — routes for providers
+     appearing earlier are tried first; providers absent from the preference
+     targets keep their descriptor order, after the ranked ones. No new
+     selection behavior — pure assembly over `multi/new-backend`.
 
    The first resolvable descriptor's backend becomes the `:default-backend`
    so a model that matches no route still runs (consistent with
    `escapement.llm.multi` semantics). Returns nil when no descriptor
    resolves."
-  [descriptors preferences]
+  [descriptors pref-targets]
   (let [creds (->> descriptors
                 (keep (fn [d] (some-> (descriptor->credential d)
                                 (assoc ::provider (:provider d)))))
                 vec)]
     (when (seq creds)
-      (let [rank    (preference-rank preferences)
+      (let [rank    (preference-rank pref-targets)
             n       (count creds)
             ;; stable sort by preference rank; unranked keep descriptor order
             sorted  (->> (map-indexed vector creds)
                       (sort-by (fn [[i c]]
                                  [(get rank (::provider c) (+ n i)) i]))
                       (mapv second))
+            ;; Tag each route with its provider keyword (3-tuple) so the
+            ;; multi-backend can dispatch by an explicit request `:provider`
+            ;; (R3) instead of re-matching the model-string regex. Inert when
+            ;; no request carries `:provider` — the regex `:route` is still the
+            ;; first element and the legacy matcher path is untouched.
             routes  (mapv (fn [c]
                             [(:route c)
-                             (build-credential-backend (dissoc c ::provider :route))])
+                             (build-credential-backend (dissoc c ::provider :route))
+                             (::provider c)])
                       sorted)
             default (build-credential-backend
                       (dissoc (first creds) ::provider :route))]
