@@ -5,7 +5,7 @@
     <groupId>com.fulcrologic</groupId>
     <artifactId>escapement</artifactId>
     <packaging>jar</packaging>
-    <version>0.0.1</version>
+    <version>0.0.1-SNAPSHOT</version>
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>1.8</maven.compiler.source>
@@ -35,6 +35,14 @@
     </distributionManagement>
     <build>
         <sourceDirectory>src</sourceDirectory>
+        <resources>
+            <resource>
+                <directory>src</directory>
+                <excludes>
+                    <exclude>**/.escapement/**</exclude>
+                </excludes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -97,7 +105,7 @@
         <dependency>
             <groupId>com.fulcrologic</groupId>
             <artifactId>statecharts</artifactId>
-            <version>1.4.0-RC15</version>
+            <version>1.4.0-RC16</version>
         </dependency>
     </dependencies>
 </project>
