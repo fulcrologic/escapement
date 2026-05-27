@@ -1,5 +1,88 @@
 # Changelog
 
+## [unreleased] — io-refactor-capture-replay — 2026-05-27
+
+First slice of the IO refactor: heavy LLM I/O is no longer the body of the
+transcript. Full request/response/tool-result payloads (and a replayable
+seed) are externalized to a protocol-backed, navigable artifact store; each
+transcript event keeps only an ≤80-char snippet plus an `:io/ref` locator
+that round-trips to the on-disk blob. A single-turn replay primitive lets
+you re-issue one captured turn with overrides without re-running the chart.
+
+### Added
+
+- **IO protocols (`escapement.protocols`).** Three host-agnostic,
+  session-scoped protocols — `TranscriptStore` (append/read ordered events;
+  owns `:transcript/seq`), `ArtifactStore` (write/read/list both author
+  files and captured-I/O blobs, addressed solely by `path`), and the
+  cross-session `SessionIndex` (`list-sessions`). Checkpoints stay on the
+  library's `WorkingMemoryStore`, unchanged. A single backend record may
+  implement all of them at once.
+- **Capture layer (`escapement.capture`).** Externalizes full LLM I/O to an
+  `ArtifactStore` and hands back `{:io/ref :io/snippet}` for the transcript
+  event. Blobs are EDN (lossless round-trip) at node-relative locators that
+  *are* the opaque id:
+  `nodes/<node-id>/<visit>/seed.edn`,
+  `nodes/<node-id>/<visit>/turns/<n>/request.edn`,
+  `…/response.edn`, `…/tool-results/<tool_use_id>.edn`.
+  `capture-request!` is first-write-wins (a fallback / `:max_tokens`
+  continuation within a turn keeps the base turn request, so replay tunes
+  the real prompt). Pure string work + protocol calls only — no filesystem,
+  so it runs under bb/CLJ/CLJS.
+- **Replay primitive (`escapement.replay/refine-turn`).** Re-issue ONE
+  captured turn at `(node-id, visit, turn)` against an injected
+  `LLMBackend`, deep-merging `:overrides` (e.g. `{:system "tuned prompt"
+  :model "claude-opus-4-7" :temperature 0.2}`) onto the captured request,
+  with no statechart engine involved. Returns
+  `{:request :response :original-request}` for diffing. The tight
+  prompt-tuning inner loop; node-invocation (#2, from `seed.edn`) and
+  sub-chart (#3) refine are designed-for but not yet implemented.
+- **Storage backends.** `escapement.storage.memory/new-store` — a single
+  in-memory store implementing all three IO protocols plus
+  `WorkingMemoryStore` (the test stub and a legitimate ephemeral backend;
+  assigns `:transcript/seq` and nothing else). `escapement.storage.disk/new-artifact-store`
+  — a bb/CLJ `ArtifactStore` bound to one session dir, writing every blob at
+  `<session-dir>/<path>` atomically (temp + rename) so the captured-I/O tree
+  is literally walkable; `:io/ref` is a relative path with no translation
+  table.
+- **`:escapement/artifact-store` env key + per-run `:escapement/visit-counts`.**
+  `engine.env/new-env` and the `engine.testing` harness now accept an
+  `:artifact-store`; the runner builds a `DiskArtifactStore` from
+  `:session-dir` and injects it. Absent store ⇒ capture is a no-op (the
+  default in tests). `:escapement/visit-counts` is a per-run atom the
+  capture layer reads to stamp `:transcript/visit` (the library does not
+  track node re-entry).
+
+### Changed
+
+- **Transcript LLM events now reference, not inline, heavy payloads.**
+  `:llm/request`, `:llm/response`, and `:llm/tool-result` carry an `:io/ref`
+  to the captured blob and an ≤80-char `:io/snippet` for human correlation.
+  The former inline preview fields (`:content`, `:user-blocks`,
+  `:system-preview`, `:content-preview`, per-block `:text`/`:thinking`) are
+  now those same short snippets — not 8192-char truncated full text. The
+  full value is available in the referenced blob (and to the live
+  conversation buffer, unchanged).
+
+### Removed
+
+- The 8192-byte per-content-block transcript truncation
+  (`transcript-block-cap`, `transcript-truncate-marker`,
+  `truncate-for-transcript`) in `llm-conversation`. Full content is now
+  captured to a blob instead of truncated inline; the inline event carries
+  only the ≤80-char snippet.
+
+### Notes
+
+- Capture is a no-op when no `:artifact-store` is wired, so existing
+  charts/tests that don't inject one are unaffected.
+- Gate 1: the runner's CLI artifact-store wiring (build a `DiskArtifactStore`
+  from `:session-dir` and inject it) is config-glue — marked untestable, but
+  both operands (the disk store and the env key) are covered.
+- All capture writes (request / response / tool-result / seed) are
+  best-effort: each is wrapped so a storage/IO hiccup yields an absent
+  `:io/ref` rather than aborting a live turn — parity with `transcript!`.
+
 ## [unreleased] — flat-authoring-api — 2026-05-26
 
 ### Changed

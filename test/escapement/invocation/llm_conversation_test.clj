@@ -1,5 +1,6 @@
 (ns escapement.invocation.llm-conversation-test
   (:require
+    [clojure.edn :as edn]
     [clojure.string :as str]
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.chart :as chart]
@@ -9,6 +10,8 @@
     [escapement.engine.testing :as dct]
     [escapement.invocation.llm-conversation :as llmc]
     [escapement.llm.protocol :as llm]
+    [escapement.protocols :as proto]
+    [escapement.storage.disk :as disk]
     [escapement.llm.types :as llm-types]
     [escapement.test-support :as ts]
     [escapement.tools.builtin :as builtin]
@@ -65,11 +68,15 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- new-llm-test-env
-  [{:keys [statechart backend tool-registry transcript-fn]}]
+  [{:keys [statechart backend tool-registry transcript-fn session-dir artifact-store]}]
   (let [processor (llmc/new-processor {:backend       backend
                                        :tool-registry (or tool-registry (tp/new-registry))
                                        :transcript-fn (or transcript-fn (fn [_] nil))})]
-    (-> (dct/new-testing-env {:statechart statechart} processor)
+    (-> (dct/new-testing-env
+          (cond-> {:statechart statechart}
+            session-dir    (assoc :session-dir session-dir)
+            artifact-store (assoc :artifact-store artifact-store))
+          processor)
       (dct/start!))))
 
 (defn- wait-quiescent!
@@ -979,9 +986,62 @@
       "and not under the process cwd"
       (.exists (java.io.File. "out/r3.txt")) => false)))
 
-(specification "transcript truncation caps oversized text/thinking blocks"
-  (let [big      (apply str (repeat (+ 100 escapement.invocation.llm-conversation/transcript-block-cap)
-                              "x"))
+(specification "captured I/O: a worker run writes full request/response/tool-result blobs + seed and stamps :io/ref"
+  (let [session-dir (str (java.nio.file.Files/createTempDirectory "cap-sess"
+                           (into-array java.nio.file.attribute.FileAttribute [])))
+        store       (disk/new-artifact-store session-dir)
+        captured    (atom [])
+        backend     (mock-backend
+                      [(tool-use-response [{:id "u1" :name "event__ok" :input {:msg "hello"}}])
+                       (end-turn-response "bye")])
+        chart       (chart/statechart
+                      {:initial :work}
+                      (state {:id :work :initial :running}
+                        (state {:id :running}
+                          (h/llm-conversation
+                            {:id             "main"
+                             :system         "do it"
+                             :real-tools     []
+                             :allowed-events [{:event :ok :data-schema [:map [:msg :string]]}]
+                             :message        "go"})
+                          (transition {:event :ok :target :done}))
+                        (final {:id :done})))
+        t           (new-llm-test-env {:statechart     chart
+                                       :backend        backend
+                                       :session-dir    session-dir
+                                       :artifact-store store
+                                       :transcript-fn  (fn [ev] (swap! captured conj ev))})
+        _           (await-config! t :done 3000)
+        paths       (set (map :artifact/path (proto/list-artifacts store :dcch.test/session)))
+        req-ev      (first (filter #(= :llm/request (:event %)) @captured))
+        resp-ev     (first (filter #(= :llm/response (:event %)) @captured))
+        tr-ev       (first (filter #(= :llm/tool-result (:event %)) @captured))
+        req-ref     (get-in req-ev [:data :io/ref])]
+    (assertions
+      "a replayable seed.edn was captured for the invocation"
+      (boolean (some #(str/ends-with? % "/seed.edn") paths)) => true
+      "the turn's full request blob was captured"
+      (boolean (some #(str/ends-with? % "/turns/0/request.edn") paths)) => true
+      "the turn's full response blob was captured"
+      (boolean (some #(str/ends-with? % "/turns/0/response.edn") paths)) => true
+      "the tool-result was captured under tool-results/<tool_use_id>"
+      (boolean (some #(str/includes? % "/turns/0/tool-results/u1") paths)) => true
+      ":llm/request carries an :io/ref to its blob"
+      (string? req-ref) => true
+      ":llm/response carries an :io/ref"
+      (string? (get-in resp-ev [:data :io/ref])) => true
+      ":llm/tool-result carries an :io/ref"
+      (string? (get-in tr-ev [:data :io/ref])) => true
+      "the referenced request blob round-trips to the full request map (messages intact)"
+      (vector? (:messages (edn/read-string (proto/read-artifact store :dcch.test/session req-ref))))
+      => true)))
+
+(specification "oversized text/thinking blocks are reduced to an inline snippet"
+  ;; New contract (io-refactor-plan.md §0): the JSONL no longer carries full (or 8192-truncated)
+  ;; payloads — only an ≤80-char human-correlation snippet. The full value is externalized to the
+  ;; artifact store (proven separately in escapement.capture-test). With no artifact-store injected
+  ;; here, capture is a no-op and we assert only the inline snippet behavior.
+  (let [big      (apply str (repeat 5000 "x"))
         captured (atom [])
         backend  (mock-backend
                    [{:stop-reason :tool_use
@@ -1008,12 +1068,12 @@
         text     (->> (get-in resp [:data :content])
                    (some (fn [b] (when (= :text (:type b)) (:text b)))))]
     (assertions
-      "transcript text was truncated to the cap + marker"
-      (clojure.string/ends-with? text
-        escapement.invocation.llm-conversation/transcript-truncate-marker)
-      => true
-      (count text) => (+ escapement.invocation.llm-conversation/transcript-block-cap
-                        (count escapement.invocation.llm-conversation/transcript-truncate-marker)))))
+      "the inline text is capped at the 80-char snippet length, not the full payload"
+      (<= (count text) 80) => true
+      "the snippet ends with the overflow ellipsis"
+      (clojure.string/ends-with? text "…") => true
+      "the full payload is far larger than the inline snippet"
+      (< (count text) (count big)) => true)))
 
 ;; ---------------------------------------------------------------------------
 ;; Declarative :needs wiring (params->policy / candidate-models /

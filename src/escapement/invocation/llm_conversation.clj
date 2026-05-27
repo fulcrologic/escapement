@@ -25,6 +25,7 @@
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.environment :as env-ns]
     [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.capture :as capture]
     [escapement.chart.service :as service]
     [escapement.llm.catalog :as catalog]
     [escapement.llm.needs :as needs]
@@ -260,50 +261,50 @@
 (defn- transcript! [transcript-fn ev]
   (try (transcript-fn ev) (catch Throwable _ nil)))
 
-(def ^:const transcript-block-cap
-  "Per-content-block byte cap for transcript events (text/thinking/tool-result
-   strings). Larger payloads are truncated with a marker so JSONL stays sane;
-   full content remains available to the LLM in the live conversation buffer."
-  8192)
-
-(def ^:const transcript-truncate-marker "…(truncated)")
-
-(defn- truncate-for-transcript
-  "Truncate `s` at `transcript-block-cap` bytes (utf-8 approximated as char
-   count), appending a marker on overflow. Returns nil/short strings unchanged."
-  [s]
-  (let [s (when (some? s) (str s))]
-    (cond
-      (nil? s) nil
-      (<= (count s) transcript-block-cap) s
-      :else (str (subs s 0 transcript-block-cap) transcript-truncate-marker))))
+;; Heavy LLM I/O (full request/response/tool-result) is no longer stored inline: it is captured to
+;; the ArtifactStore as a blob and referenced by `:io/ref`, with only an ≤80-char `:io/snippet` kept
+;; in the event for human correlation (see `escapement.capture` and `io-refactor-plan.md` §0). The
+;; inline preview fields below (`:content`, `:user-blocks`, `:system-preview`, `:content-preview`)
+;; are now those same short snippets, not truncated full text.
 
 (defn- ->transcript-content-block
   "Coerce one assistant content block into a transcript-safe map. Text and
-   thinking strings are capped; tool_use carries `:id :name :input`."
+   thinking strings are reduced to a short snippet; tool_use carries `:id :name :input`."
   [b]
   (case (:type b)
-    :text {:type :text :text (truncate-for-transcript (:text b))}
-    :thinking {:type :thinking :thinking (truncate-for-transcript (:thinking b))}
+    :text {:type :text :text (capture/snippet (:text b))}
+    :thinking {:type :thinking :thinking (capture/snippet (:thinking b))}
     :tool_use {:type :tool_use :id (:id b) :name (:name b) :input (:input b)}
     {:type (:type b)}))
 
 (defn- trailing-user-blocks
   "Return the content blocks of the trailing user message in `messages`, or
    `[]` if the last message isn't a user turn. Each block's content text is
-   truncated for transcript-safety."
+   reduced to a short snippet for the inline transcript."
   [messages]
   (let [last-msg (peek (vec messages))]
     (if (= :user (:role last-msg))
       (mapv (fn [b]
               (case (:type b)
-                :text {:type :text :text (truncate-for-transcript (:text b))}
+                :text {:type :text :text (capture/snippet (:text b))}
                 :tool_result {:type     :tool_result :tool_use_id (:tool_use_id b)
                               :is-error (boolean (:is-error b))
-                              :content  (truncate-for-transcript (:content b))}
+                              :content  (capture/snippet (:content b))}
                 {:type (:type b)}))
         (or (:content last-msg) []))
       [])))
+
+(defn- trailing-user-text
+  "Concatenated raw text of the trailing user message in `messages` (empty string if the last
+   message is not a user turn). Used as the human-correlation snippet source for a captured request."
+  [messages]
+  (let [last-msg (peek (vec messages))]
+    (if (= :user (:role last-msg))
+      (->> (:content last-msg)
+        (filter #(= :text (:type %)))
+        (map :text)
+        (apply str))
+      "")))
 
 (defn- post-event-to-parent!
   "Send a chart event back to the parent session."
@@ -578,7 +579,7 @@
    `parent-ctx` is the worker's context (env/queue/parent-session-id/invokeid).
    `state*` holds the per-tool_use_id retry counters."
   [{:keys [tool-registry name->tool-kw name->event-entry name->region-tool
-           tool-reply-queue worker-state retry-counts transcript-fn]
+           tool-reply-queue worker-state retry-counts transcript-fn capture turn]
     :as   ctx} parent-ctx block]
   (let [{:keys [id name input]} block
         retries (get @retry-counts id 0)
@@ -588,15 +589,25 @@
                    (post-tool-result! tool-label is-error result-content nil))
                   ([tool-label is-error result-content resolved-path]
                    (when transcript-fn
-                     (transcript! transcript-fn
-                       {:event :llm/tool-result :ts (now-ms)
-                        :data  (cond-> {:tool_use_id     id
-                                        :tool            tool-label
-                                        :input           input
-                                        :is-error        (boolean is-error)
-                                        :content-preview (truncate-for-transcript result-content)
-                                        :invokeid        (:invokeid parent-ctx)}
-                                 resolved-path (assoc :resolved-path resolved-path))}))))]
+                     ;; Externalize the FULL tool result to a blob (it can be large — file reads,
+                     ;; REPL output, and it is a replay input for node-refine); keep only an
+                     ;; ≤80-char snippet + :io/ref inline.
+                     (let [io-ref (when capture
+                                    ;; Best-effort: a storage hiccup must never abort a live turn
+                                    ;; (parity with `transcript!` / seed capture).
+                                    (try (capture/capture-blob! capture turn
+                                           (str "tool-results/" id) result-content result-content)
+                                         (catch Throwable _ nil)))]
+                       (transcript! transcript-fn
+                         {:event :llm/tool-result :ts (now-ms)
+                          :data  (cond-> {:tool_use_id     id
+                                          :tool            tool-label
+                                          :input           input
+                                          :is-error        (boolean is-error)
+                                          :content-preview (capture/snippet result-content)
+                                          :invokeid        (:invokeid parent-ctx)}
+                                   resolved-path (assoc :resolved-path resolved-path)
+                                   io-ref (assoc :io/ref (:io/ref io-ref)))})))))]
     (cond
       ;; Real tool
       (contains? name->tool-kw name)
@@ -839,9 +850,10 @@
    arity is intentionally not relied on here. `eligibility-strict?` is
    the injected fail-closed flag."
   [{:keys [backend transcript-fn worker-state model-status default-models
-           parent-ctx catalog-ratings eligibility-strict?]}
+           parent-ctx catalog-ratings eligibility-strict? capture turn-count]}
    params messages tools]
-  (let [{:keys [max-retries backoff-ms]} (params->resilience params)
+  (let [turn (when turn-count (dec (long @turn-count)))
+        {:keys [max-retries backoff-ms]} (params->resilience params)
         policy         (params->policy params)
         auto-fallback? (and (not (seq (:models params)))
                          (nil? (:model params)))
@@ -881,13 +893,22 @@
                             :tools-cache-control  (:tools-cache-control params)
                             :auto-cache?          (get params :auto-cache? true)
                             :conv-id              (:conversation/id params)})
+                ;; Externalize the FULL request (system+messages+tools+model+knobs) to a blob — the
+                ;; exact value `escapement.replay/refine-turn` re-feeds. First-write-wins so a
+                ;; fallback/continuation re-issue within the turn keeps the base request.
+                io-ref   (when (and capture turn)
+                           ;; Best-effort: never let a storage failure abort the turn.
+                           (try (capture/capture-request! capture turn request
+                                  (trailing-user-text messages))
+                                (catch Throwable _ nil)))
                 _        (transcript! transcript-fn
                            {:event :llm/request :ts (now-ms)
                             :data  (cond-> {:n-messages     (count (:messages request))
                                             :user-blocks    (trailing-user-blocks messages)
-                                            :system-preview (truncate-for-transcript (:system params))
+                                            :system-preview (capture/snippet (:system params))
                                             :invokeid       (:invokeid parent-ctx)}
-                                     m (assoc :model m))})
+                                     m (assoc :model m)
+                                     io-ref (assoc :io/ref (:io/ref io-ref)))})
                 on-delta (when (:stream? params)
                            (fn [d]
                              (transcript! transcript-fn
@@ -1142,9 +1163,10 @@
   [{:keys [tool-registry transcript-fn
            name->tool-kw name->event-entry tool-defs
            worker-state messages-atom retry-counts
-           params parent-ctx] :as ctx}
+           params parent-ctx capture turn-count] :as ctx}
    post-error! on-end-turn-event]
-  (let [outcome (drive-turn! ctx params @messages-atom tool-defs)]
+  (let [turn    (when turn-count (dec (long @turn-count)))
+        outcome (drive-turn! ctx params @messages-atom tool-defs)]
     (cond
       (:eligibility-empty outcome)
       (let [{:keys [policy default-models]} (:eligibility-empty outcome)]
@@ -1217,7 +1239,14 @@
                             (Double/parseDouble
                               (format "%.2f" (/ (double output-tokens) (/ (double elapsed-ms) 1000.0)))))
             ctx-used-frac (when (and ctx-window input-tokens (pos? ctx-window))
-                            (/ (double input-tokens) (double ctx-window)))]
+                            (/ (double input-tokens) (double ctx-window)))
+            ;; Externalize the FULL assistant response (all content blocks) to a blob — the "output"
+            ;; half of this turn's I/O; inline keeps only block snippets + :io/ref.
+            first-text    (->> content (filter #(= :text (:type %))) (map :text) (apply str))
+            io-ref        (when (and capture turn)
+                            ;; Best-effort: never let a storage failure abort the turn.
+                            (try (capture/capture-blob! capture turn "response" content first-text)
+                                 (catch Throwable _ nil)))]
         (transcript! transcript-fn
           {:event :llm/response
            :ts    (now-ms)
@@ -1230,6 +1259,7 @@
                     elapsed-ms (assoc :elapsed-ms elapsed-ms)
                     output-tps (assoc :output-tps output-tps)
                     ctx-window (assoc :context-window ctx-window)
+                    io-ref (assoc :io/ref (:io/ref io-ref))
                     ctx-used-frac (assoc :context-used-frac
                                          (Double/parseDouble (format "%.3f" ctx-used-frac))))})
         (when (and ctx-used-frac (>= ctx-used-frac 0.8))
@@ -1282,7 +1312,9 @@
                        :tool-reply-queue  (:tool-reply-queue ctx)
                        :worker-state      worker-state
                        :retry-counts      retry-counts
-                       :transcript-fn     transcript-fn}
+                       :transcript-fn     transcript-fn
+                       :capture           capture
+                       :turn              turn}
                       parent-ctx b)]
                 (swap! results conj result-block)
                 (when (:posted-event? block-res) (reset! posted-event? true))
@@ -1391,11 +1423,10 @@
   [{:keys [backend tool-registry transcript-fn
            name->tool-kw name->event-entry tool-defs
            worker-state messages-atom user-msg-queue retry-counts
-           params parent-ctx] :as ctx}]
+           params parent-ctx turn-count] :as ctx}]
   (let [{:keys [on-end-turn-event max-turns max-conversation-duration-ms]
          :or   {on-end-turn-event :llm.idle}} params
         started-at  (now-ms)
-        turn-count  (atom 0)
         post-error! (fn [reason data]
                       (post-event-to-parent! parent-ctx (error-event reason)
                         (assoc data :reason reason)))]
@@ -1523,6 +1554,25 @@
           user-msg-queue    (ArrayBlockingQueue. 256)
           tool-reply-queue  (ArrayBlockingQueue. 64)
           retry-counts      (atom {})
+          ;; Capture coordinates for this node invocation (io-refactor-plan.md §0/§3). node-id is the
+          ;; chart element that holds the <invoke>; visit is its 0-based entry count this run; turn is
+          ;; owned per-turn by the worker. Absent artifact-store => capture is a no-op (e.g. tests).
+          node-id           (env-ns/context-element-id env)
+          artifact-store    (:escapement/artifact-store env)
+          visit-counts      (:escapement/visit-counts env)
+          visit             (when (and artifact-store visit-counts)
+                              (get (swap! visit-counts update node-id (fnil inc -1)) node-id))
+          capture           (when artifact-store
+                              {:store      artifact-store
+                               :session-id parent-session-id
+                               :node-id    node-id
+                               :visit      (or visit 0)})
+          turn-count        (atom 0)
+          ;; Seed = the replayable input for this invocation (resolved params + initial messages).
+          _                 (when capture
+                              (try (capture/capture-seed! capture
+                                     {:params params :initial-messages initial-msgs})
+                                   (catch Throwable _ nil)))
           parent-ctx        {:env               env :queue queue
                              :parent-session-id parent-session-id
                              :invokeid          invokeid}
@@ -1542,6 +1592,8 @@
                              :default-models      default-models
                              :catalog-ratings     (or catalog-ratings {})
                              :eligibility-strict? (boolean eligibility-strict?)
+                             :capture             capture
+                             :turn-count          turn-count
                              :params              params
                              :parent-ctx          parent-ctx}
           runnable          (fn [] (run-worker! ctx))

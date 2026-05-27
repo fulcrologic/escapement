@@ -36,7 +36,7 @@
   [{:keys [checkpoint-dir invocation-processors registry queue store
            llm-backend llm-default-models llm-catalog-ratings llm-eligibility-strict?
            tool-registry transcript-fn human-renderer
-           session-dir]
+           session-dir artifact-store]
     :or   {invocation-processors []}}]
   (let [registry  (or registry (lmr/new-registry))
         queue     (or queue (queue/new-queue))
@@ -72,9 +72,17 @@
              ;; Per-chart-run registry for service-region tool declarations.
              ;; See `escapement.chart.service`. Empty at start; populated by
              ;; on-entry actions calling `service/register-tool!`.
-             ::service/registry         (atom {})}
+             ::service/registry         (atom {})
+             ;; Per-(session,node) entry counter the emit/capture layer reads to
+             ;; stamp `:transcript/visit`. The library does not track re-entry,
+             ;; so we own it (one atom per run; see `io-refactor-plan.md` §3).
+             :escapement/visit-counts   (atom {})}
       tool-registry (assoc :escapement/tool-registry tool-registry)
       session-dir (assoc :escapement/session-dir session-dir)
+      ;; Injected by the host (the bb runner builds a disk store from session-dir;
+      ;; a browser host would inject an IndexedDB store). The capture layer writes
+      ;; full LLM request/response/tool-result blobs here; absent => capture is a no-op.
+      artifact-store (assoc :escapement/artifact-store artifact-store)
       ;; Surface the transcript fn on the env so chart actions (e.g.
       ;; `helpers/capture-llm-output`) can emit `:artifact/captured`.
       transcript-fn (assoc :escapement/transcript-fn transcript-fn))))

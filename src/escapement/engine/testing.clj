@@ -22,7 +22,7 @@
     * `invocation-processors` (varargs) — instances of `InvocationProcessor` to install.
 
   Returns a map `{:env, :session-id, :chart-id}` for use with the rest of this harness."
-  [{:keys [statechart session-id checkpoint-dir tool-registry session-dir]}
+  [{:keys [statechart session-id checkpoint-dir tool-registry session-dir artifact-store]}
    & invocation-processors]
   (let [sid      (or session-id :dcch.test/session)
         chart-id ::chart
@@ -33,7 +33,10 @@
         env      (env/new-env (cond-> {:checkpoint-dir        ckpt-dir
                                        :session-dir           sess-dir
                                        :invocation-processors (vec invocation-processors)}
-                                tool-registry (assoc :tool-registry tool-registry)))]
+                                tool-registry  (assoc :tool-registry tool-registry)
+                                ;; Capture is off by default in tests; pass an ArtifactStore to
+                                ;; exercise the full request/response/tool-result blob path.
+                                artifact-store (assoc :artifact-store artifact-store)))]
     (sp/register-statechart! (::sc/statechart-registry env) chart-id statechart)
     {:env env :session-id sid :chart-id chart-id}))
 
