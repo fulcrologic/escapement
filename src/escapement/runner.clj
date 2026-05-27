@@ -14,6 +14,7 @@
     [escapement.engine.queue :as engine-queue]
     [escapement.invocation.human-input :as human-input]
     [escapement.invocation.llm-conversation :as llm-conv]
+    [escapement.storage.disk :as disk]
     [escapement.transcript :as transcript]))
 
 (defn- now-ms [] (System/currentTimeMillis))
@@ -324,6 +325,8 @@
                         jsonl-fn)
         env           (engine-env/new-env {:checkpoint-dir          checkpoint-dir
                                            :session-dir             session-dir
+                                           :artifact-store          (when session-dir
+                                                                      (disk/new-artifact-store session-dir))
                                            :store                   store
                                            :llm-backend             backend
                                            :llm-default-models      backend-default-models

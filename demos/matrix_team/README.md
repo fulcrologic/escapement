@@ -67,7 +67,7 @@ One of:
 * `OPENAI_API_KEY` — OpenAI
 
 The chart picks the default model from the project's model catalog; override
-with `:model` in each region's params-fn if needed.
+with the `:model` key in each region's `llm-conversation` if needed.
 
 ## Cost note
 

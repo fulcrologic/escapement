@@ -1004,6 +1004,27 @@ Additionally, whenever `:context-used-frac` ≥ 0.8 a separate
 `:llm/context-warning` event is emitted into the transcript with the same data.
 Charts can ignore it (the worker keeps running) or chain a transition on it via the parent session's autoforward path if they want to do something proactive (compact history, swap to a smaller model for the next state, etc.).
 
+[[captured-io]]
+==== Captured I/O: `:io/ref` and snippets
+
+Heavy LLM payloads are **not** stored in the transcript.
+A `:llm/request`, `:llm/response`, or `:llm/tool-result` row keeps only a short ≤80-char `:io/snippet` (plus the inline preview fields, which are now that same short snippet — not 8192-char truncated full text) for human correlation, and an `:io/ref` locator pointing at the full payload.
+The full request (system + messages + tools + model + knobs — the exact value `refine-turn` re-feeds), the full assistant response (all content blocks), and each full tool result are written as EDN blobs under the session directory:
+
+[source,text]
+----
+<session-dir>/nodes/<node-id>/<visit>/seed.edn                       ; replayable seed (params + initial messages)
+<session-dir>/nodes/<node-id>/<visit>/turns/<n>/request.edn          ; the :io/ref of :llm/request
+<session-dir>/nodes/<node-id>/<visit>/turns/<n>/response.edn         ; the :io/ref of :llm/response
+<session-dir>/nodes/<node-id>/<visit>/turns/<n>/tool-results/<id>.edn ; the :io/ref of :llm/tool-result
+----
+
+`<node-id>` is the chart element holding the `:llm-conversation`; `<visit>` is its 0-based entry count this run; `<n>` is the turn index.
+The `:io/ref` value is exactly that relative path — the locator *is* the id, so the tree is walkable with no tooling and no translation table.
+Capture is active only when an artifact store is wired (the CLI runner builds one from `--session-dir`); with no store, these rows simply omit `:io/ref` and capture is a no-op.
+
+These captured blobs are also the input to the replay primitive — see <<refine-turn>>.
+
 ==== Plotting usage from a transcript
 
 [source,bash]
@@ -1560,6 +1581,35 @@ targeted at `:to`.
 
 Latest write wins.
 Keep history by picking versioned filenames (`(str "draft-" iteration ".md")`).
+
+NOTE: These author files live under `<session-dir>/artifacts/`. The same session directory also grows a sibling `<session-dir>/nodes/` tree holding the runtime's captured LLM I/O (full request/response/tool-result + seed). That tree is written automatically by the capture layer, not by these helpers — see <<captured-io>>.
+
+[[refine-turn]]
+=== Replaying a captured turn: `refine-turn`
+
+Once a run has captured its LLM I/O (see <<captured-io>>), you can re-issue a *single* turn with a tuned prompt, model, or knobs — without re-running the chart.
+This is the tight prompt-tuning inner loop: load the captured request, deep-merge your overrides, send it to a live backend, and diff the new response against the original.
+
+[source,clojure]
+----
+(require '[escapement.replay :as replay]
+         '[escapement.storage.disk :as disk])
+
+(let [store (disk/new-artifact-store "/path/to/session-dir")]
+  (replay/refine-turn store session-id :writer 0 0
+    {:backend   my-backend
+     :overrides {:system "A tighter system prompt."
+                 :model  "claude-opus-4-7"
+                 :temperature 0.2}}))
+;; => {:request <effective> :response <new Response> :original-request <captured>}
+----
+
+`(node-id, visit, turn)` address the captured turn (here the first turn of the first visit of node `:writer`).
+`:overrides` is deep-merged onto the captured request — matching map keys merge; non-map collections such as `:messages` are replaced wholesale.
+The captured request round-trips losslessly (EDN), so keywords, enums, and nested schemas survive.
+It throws if nothing was captured at those coordinates.
+
+Node-invocation refine (re-enter a whole node from its `seed.edn`) and sub-chart refine (from a checkpoint) are designed for but not yet implemented.
 
 === Dynamic child sessions: multiplex + `:multi-session?`
 
