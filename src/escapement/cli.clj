@@ -41,6 +41,10 @@
                                 wins.
         --no-tui                Force-disable the TUI (overrides
                                 ^{:interactive? true} chart metadata).
+        --dump-d2               Print the chart's d2 diagram source to stdout
+                                and exit without running it. Requires no LLM
+                                backend and creates no session dir. Pipe to the
+                                `d2` binary to render (e.g. ... --dump-d2 | d2 -).
         --debug                 Enable debug mode: forces the TUI on (even
                                 for non-interactive charts), enables the
                                 inspector overlay (`?` to open), and — when
@@ -58,6 +62,7 @@
     [com.fulcrologic.statecharts :as sc]
     [escapement.config :as config]
     [escapement.debug.controller :as dbg]
+    [escapement.debug.d2 :as d2]
     [escapement.invocation.human-input :as human-input]
     [escapement.llm.providers :as providers]
     [escapement.llm.ratings :as ratings]
@@ -520,7 +525,7 @@
 
 (defn- cmd-run [args]
   (let [{:keys [positional opts]}
-        (parse-args args #{:resume :trace :no-tui :debug} #{:param :tools-ns})
+        (parse-args args #{:resume :trace :no-tui :debug :dump-d2} #{:param :tools-ns})
         _                      (let [[tag v] (resolve-log-level opts)]
                                  (if (= tag :error)
                                    (die! v 2)
@@ -558,6 +563,14 @@
                                                           merged-deps)}}))
         _                      (apply-deps! merged-deps)
         _                      (apply-classpath! all-source-paths)
+        ;; --dump-d2: print the chart's d2 source and exit, before any
+        ;; execution machinery (LLM backend, session dirs, TUI). Loads the
+        ;; chart only — no API key required, no session dir created.
+        _                      (when (:dump-d2 opts)
+                                 (let [[chart _] (runner/load-chart-with-meta chart-sym)]
+                                   (print (d2/chart->d2 chart nil))
+                                   (flush)
+                                   (System/exit 0)))
         session                (or (:session opts) (str (java.util.UUID/randomUUID)))
         session-dir            (str work-dir "/" session)
         transcript             (or (:transcript opts) (str session-dir "/transcript.jsonl"))
@@ -746,6 +759,8 @@ Common `run` flags:
                                 50ms). Increases per-cycle wall-clock so
                                 --max-frozen-cycles N covers more time.
   --no-tui                      Force-disable the TUI (overrides ^:interactive?).
+  --dump-d2                     Print the chart's d2 diagram source and exit
+                                (no run, no backend). Pipe to `d2 -` to render.
   --debug                       Force the TUI on, enable inspector (`?`), and
                                 pause before the first event so you can step.
                                 Press `c` to continue. Recommended for watching
