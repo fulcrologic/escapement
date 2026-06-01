@@ -148,6 +148,31 @@
         [:level :info]
         [:level nil]))))
 
+(defn route-logs-to-file!
+  "Redirect timbre output to `path` (append) and silence the console appender.
+
+   The TUI owns the terminal (it renders an alt-screen via ANSI on `*err*`),
+   so any library logging that also reaches the terminal scribbles over the
+   modal/scrollback — the classic \"flickers and prints messages\" corruption.
+   When the TUI is active we therefore keep verbose logs (the interactive
+   default is DEBUG) but send them to `<session-dir>/escapement.log` instead
+   of the screen. Returns `path` so callers can surface it in the run summary.
+
+   Idempotent enough for one call per run; uses a plain `:fn` appender so it
+   works under bb/SCI (no dependency on timbre's appender namespaces)."
+  [path]
+  (io/make-parents (io/file path))
+  (timbre/merge-config!
+    {:appenders {:println {:enabled? false}
+                 :file    {:enabled?  true
+                           :async?    false
+                           :min-level nil
+                           :fn        (fn [data]
+                                        (try
+                                          (spit path (str (force (:output_ data)) "\n") :append true)
+                                          (catch Throwable _ nil)))}}})
+  path)
+
 (defn- read-edn-file [path]
   (with-open [r (java.io.PushbackReader. (io/reader path))]
     (edn/read r)))
@@ -614,6 +639,13 @@
         ;; visible to `runner/run!` below.
         [chart chart-meta] (runner/load-chart-with-meta chart-sym)
         use-tui?               (decide-tui opts chart-meta)
+        ;; When the TUI is active it owns the terminal (alt-screen ANSI on
+        ;; *err*). The interactive logging default is DEBUG, which would
+        ;; otherwise scribble over the modal/scrollback ("flicker + messages").
+        ;; Redirect those logs to a file so the screen stays clean but the
+        ;; verbose trail is still captured for debugging.
+        log-file               (when use-tui?
+                                 (route-logs-to-file! (str session-dir "/escapement.log")))
         debug?                 (boolean (:debug opts))
         debug-cfg              (when debug? (config/load-config))
         debug-controller       (when debug?
@@ -736,6 +768,7 @@
             (println "session         " session)
             (println "transcript      " transcript)
             (println "checkpoint-dir  " checkpoint-dir)
+            (when log-file (println "log             " log-file))
             (println "final-config    " (:final-config summary))
             0)
           (catch Throwable t

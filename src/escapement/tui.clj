@@ -28,7 +28,8 @@
     [com.fulcrologic.statecharts.promise :as p])
   (:import
     (java.io Reader)
-    (org.jline.terminal Terminal TerminalBuilder)))
+    (org.jline.terminal Terminal TerminalBuilder)
+    (org.jline.utils NonBlockingReader)))
 
 ;; ---------------------------------------------------------------------------
 ;; TTY detection
@@ -744,13 +745,45 @@
                         :event             event-kw})
         (catch Throwable _ nil)))))
 
-(defn- read-key
-  "Block reading a single logical key from `rdr`. Returns:
-     :up :down :left :right :pgup :pgdn :home :end
-     :esc :enter :ctrl-c :backspace :tab :space :eof
-     [:char ch]  for any other printable character."
-  [^Reader rdr]
-  (let [c (.read rdr)]
+(def ^:private esc-seq-timeout-ms
+  "How long to wait for the byte after an ESC before concluding the user
+   pressed a bare Escape. An escape *sequence* (arrow keys, terminal
+   device-report replies like the Mode-2026 DECRPM `\\e[?2026;2$y`) delivers
+   its bytes within a few ms; a real Escape is followed by nothing. 50ms is
+   imperceptible to a human yet comfortably covers inter-byte latency over
+   tmux/ssh. This MUST be > 0: with a `.ready`-only check, a sequence whose
+   tail hadn't yet buffered was misread as a bare ESC and (with a modal up)
+   cancelled the prompt — the TUI would flash open and immediately exit."
+  50)
+
+(defn- drain-csi-tail!
+  "Consume the remainder of a CSI escape sequence whose final byte we did not
+   already read. `b` is the byte after `ESC [` that was not a recognized final.
+   Pulls bytes via `read!` (see `key-from-bytes`) up to and including the
+   sequence's final byte (0x40–0x7E) so no trailing bytes (e.g. the `;2$y` of a
+   DECRPM reply) leak back into the stream as spurious keystrokes."
+  [read! b]
+  (when-not (<= 0x40 b 0x7e)
+    (loop [n 0]
+      (when (< n 64)
+        (let [x (read! esc-seq-timeout-ms)]
+          (when (and (>= x 0) (not (<= 0x40 x 0x7e)))
+            (recur (inc n))))))))
+
+(defn- key-from-bytes
+  "Decode one logical key from a byte source. `read!` is `(fn [timeout-ms] ->
+   int)` returning the next byte: a non-positive `timeout-ms` blocks for the
+   byte, a positive one waits up to that many ms and returns a negative value
+   (EOF -1 / timeout -2) if none arrives. Factored out of the JLine Reader so
+   the escape-sequence parsing is pure and unit-testable under bb without a
+   live terminal. Return contract matches `read-key`.
+
+   ESC disambiguation uses a bounded inter-byte wait (`esc-seq-timeout-ms`)
+   rather than `.ready`: an escape *sequence* whose tail has not yet buffered
+   must not be misclassified as a bare Escape — that misread, with a modal up,
+   cancelled the prompt and made the TUI flash open then immediately exit."
+  [read!]
+  (let [c (read! 0)]
     (cond
       (= c -1) :eof
       (= c 3) :ctrl-c
@@ -759,25 +792,52 @@
       (or (= c 10) (= c 13)) :enter
       (= c 32) :space
       (= c 27)
-      (if (.ready rdr)
-        (let [b1 (.read rdr)]
-          (if (and (= b1 91) (.ready rdr))
-            (let [b2 (.read rdr)]
-              (case (int b2)
-                65 :up
-                66 :down
-                67 :right
-                68 :left
-                ;; PgUp/PgDn arrive as ESC[5~ / ESC[6~ — consume the trailing ~
-                53 (do (when (.ready rdr) (.read rdr)) :pgup)
-                54 (do (when (.ready rdr) (.read rdr)) :pgdn)
-                72 :home
-                70 :end
-                :other))
-            :esc))
-        :esc)
+      ;; ESC: bare Escape, or the introducer of a CSI (`ESC [`) / SS3
+      ;; (`ESC O`) sequence. Wait briefly for the next byte; a negative
+      ;; result (-1 EOF or -2 READ_EXPIRED timeout) means a real Escape.
+      (let [b1 (read! esc-seq-timeout-ms)]
+        (cond
+          (neg? b1) :esc
+
+          (= b1 91)                                         ;; CSI: ESC [
+          (let [b2 (read! esc-seq-timeout-ms)]
+            (case (int b2)
+              65 :up
+              66 :down
+              67 :right
+              68 :left
+              72 :home
+              70 :end
+              ;; PgUp/PgDn arrive as ESC[5~ / ESC[6~; any other
+              ;; parameterized/private CSI (incl. device-report replies)
+              ;; is consumed through its final byte and ignored.
+              (let [k (case (int b2) 53 :pgup 54 :pgdn :other)]
+                (drain-csi-tail! read! b2)
+                k)))
+
+          (= b1 79)                                         ;; SS3: ESC O (application cursor keys)
+          (let [b2 (read! esc-seq-timeout-ms)]
+            (case (int b2) 65 :up 66 :down 67 :right 68 :left :other))
+
+          :else :esc))
       (and (>= c 32) (< c 127)) [:char (char c)]
       :else :other)))
+
+(defn- read-key
+  "Block reading a single logical key from JLine `rdr`. Returns:
+     :up :down :left :right :pgup :pgdn :home :end
+     :esc :enter :ctrl-c :backspace :tab :space :eof
+     [:char ch]  for any other printable character.
+
+   Thin adapter: delegates the actual decode to `key-from-bytes`, supplying a
+   `read!` backed by the reader (blocking for the first byte, timed for the
+   inter-byte ESC disambiguation)."
+  [^NonBlockingReader rdr]
+  (key-from-bytes
+    (fn [timeout-ms]
+      (if (pos? timeout-ms)
+        (.read rdr (long timeout-ms))
+        (.read rdr)))))
 
 (defn- complete-modal!
   "Deliver the modal's promise with `value` and clear the modal."
@@ -861,23 +921,25 @@
    true if the terminal indicates support (response values 1-4), false on
    timeout or an indication of no support. Must run AFTER raw mode is entered
    AND BEFORE the main input loop starts consuming bytes from the reader."
-  [^Reader rdr]
+  [^NonBlockingReader rdr]
   (try
     (emit! sync-output-query-s)
     ;; Drain up to ~120 ms looking for `\e[?2026;<n>$y`. Some terminals never
     ;; reply at all — that's the timeout path, return false.
-    (let [deadline (+ (System/currentTimeMillis) 120)
+    (let [deadline (+ (System/currentTimeMillis) 150)
           sb       (StringBuilder.)]
       (loop []
-        (cond
-          (or (>= (System/currentTimeMillis) deadline) (>= (.length sb) 32))
-          nil
-
-          (.ready rdr)
-          (do (.append sb (char (.read rdr))) (recur))
-
-          :else
-          (do (Thread/sleep 5) (recur))))
+        ;; Read with a short per-byte timeout (block on bytes rather than
+        ;; busy-polling `.ready`) until the `$y` terminator arrives, 32 chars
+        ;; accumulate, or the deadline passes. Consuming the reply to
+        ;; completion HERE is what keeps its leading ESC out of the main input
+        ;; loop, where it would be misread as the user pressing Escape.
+        (when-not (or (>= (System/currentTimeMillis) deadline)
+                    (>= (.length sb) 32)
+                    (str/includes? (.toString sb) "$y"))
+          (let [c (.read rdr (long 20))]
+            (when (>= c 0) (.append sb (char c)))
+            (recur))))
       (let [s (.toString sb)]
         (if-let [[_ n] (re-find #"\[\?2026;(\d+)\$y" s)]
           (boolean (#{"1" "2" "3" "4"} n))
@@ -1139,7 +1201,7 @@
   (try
     (.enterRawMode ^Terminal terminal)
     (reset! raw-mode? true)
-    (let [rdr ^Reader (.reader ^Terminal terminal)]
+    (let [rdr ^NonBlockingReader (.reader ^Terminal terminal)]
       (reset! sync-output? (detect-sync-output! rdr))
       ;; A render after detection so the first 2026-wrapped frame appears.
       (render-frame! h)
