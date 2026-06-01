@@ -696,7 +696,15 @@
         ;; PLUS a live control plane (pause/step/continue) when a debug
         ;; controller is active. Lazy-required so a normal run never loads Pathom.
         api-handle             (when api-server-port
-                                 (let [start! (requiring-resolve 'escapement.ui.server/start!)]
+                                 (let [start! (try
+                                                (requiring-resolve 'escapement.ui.server/start!)
+                                                (catch Throwable t
+                                                  (die! (str "--api-server requires the optional web UI add-on "
+                                                          "(Pathom/EQL/transit + escapement.ui.server), which is "
+                                                          "not on this classpath. It ships with the bbin/JVM build; "
+                                                          "library consumers must add those deps. Cause: "
+                                                          (.getMessage t))
+                                                    2)))]
                                    (binding [*out* *err*]
                                      (println (str "[cli] EQL API on http://localhost:" api-server-port "/api"))
                                      (println (str "[cli] UI     on http://localhost:" api-server-port "/")))

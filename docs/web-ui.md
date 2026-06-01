@@ -122,7 +122,7 @@ escapement run escapement.examples.hello/agent --api-server 8920 --debug
 proved deterministically (no socket, no engine thread) by
 `test/escapement/ui/live_control_http_test.clj`, which runs under `bb test`.
 
-## Two test paths: `bb test` vs `clojure -M:ui-test`
+## Two test paths: `bb test` vs `clojure -M:api:ui-test`
 
 The UI work spans two classpaths that **cannot coexist**, because of a guardrails version conflict:
 
@@ -130,7 +130,7 @@ The UI work spans two classpaths that **cannot coexist**, because of a guardrail
   `live_control_http_test` integration proof. These run under babashka, where Pathom 2.4.0 only loads
   with **guardrails pinned to 1.2.16** (Pathom's transitive guardrails uses a timbre macro newer SCI
   builds reject). These test namespaces stay bb-compatible (no Fulcro RAD).
-- **`clojure -M:ui-test`** — the RAD/TUI UI tests (e.g. `escapement.ui.{screens-load,tui-render}-test`).
+- **`clojure -M:api:ui-test`** — the RAD/TUI UI tests (e.g. `escapement.ui.{screens-load,tui-render}-test`).
   These load the Fulcro RAD stack, which wants **guardrails 1.3.2**, and run under the JVM (where
   Pathom has no SCI constraint, so 1.3.2 and Pathom coexist). The `:ui-test` alias overrides the
   guardrails pin for that classpath only.
@@ -140,7 +140,7 @@ So the RAD/TUI namespaces are **excluded from `bb test`** via the `jvm-only-name
 
 ```bash
 bb test                 # engine + queue + control plane + live-control HTTP proof (bb, guardrails 1.2.16)
-clojure -M:ui-test      # RAD/TUI explorer screens (JVM, guardrails 1.3.2)
+clojure -M:api:ui-test      # RAD/TUI explorer screens (JVM, guardrails 1.3.2)
 ```
 
 > **CLJC gotcha:** `::fully.qualified.ns/kw` (double-colon + full ns) *resolves* in CLJS when that ns
@@ -244,6 +244,6 @@ check still prevents any mismatch between the manifest and the published asset.
 - `escapement run … --api-server <port>` — serve `/api` + the SPA on `<port>`.
 - `escapement run … --api-server <port> --debug` — same, but headless + auto-paused for live stepping.
 - `bb test` — engine + queue + control plane + the `live_control_http_test` HTTP proof (bb).
-- `clojure -M:ui-test` — the RAD/TUI explorer screen tests (JVM, guardrails 1.3.2).
+- `clojure -M:api:ui-test` — the RAD/TUI explorer screen tests (JVM, guardrails 1.3.2).
 - Committed: `resources/public/index.html`, `resources/escapement-ui.edn`, all `src/escapement/ui/*`.
 - Gitignored (build artifacts): everything under `resources/public/js/`.

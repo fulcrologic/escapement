@@ -41,6 +41,39 @@ No JVM is required.
 - An optional `:test` alias exists in `deps.edn` for IDE/JVM REPL workflows,
   but the project does **not** depend on it.
 
+## Layering: engine core vs. presentation add-ons
+
+Escapement is a runtime/library **core** plus optional presentation add-ons.
+The dependency direction is strictly one-way (`add-on → core`, never the
+reverse), and that boundary is **enforced by a test**:
+
+- **Engine/library core** — `engine.*`, `runner`, `lib`, `protocols`,
+  `invocation.*` (incl. the `HumanRenderer` protocol + dependency-free
+  `StdinRenderer`, so charts are interactive headlessly), `llm.*`, `tools.*`,
+  `storage.*`, `transcript`, `debug.{controller,control-handle,d2}`, `config`,
+  and the CLI (`cli.clj`). The embeddable entry point is `escapement.lib`. Core
+  must NOT statically require the web/Pathom/RAD UI or the terminal UI.
+- **Web/API add-on** — `escapement.ui.*` + Pathom/EQL/transit + the RAD/CLJS
+  bundle. Loaded **lazily** by `--api-server` via `requiring-resolve`; if its
+  deps are absent the flag fails with a clear message.
+
+  These deps are kept OUT of every downstream-facing dependency manifest so a
+  consumer using only the core lib/CLI is not infected by the Pathom/Fulcro/RAD
+  tree: `pom.xml` (Clojars) omits them, and `deps.edn` base `:deps` omits them —
+  they live in the **`:api` alias** instead (compose as `-M:api:ui-test`, etc.).
+  Only `bb.edn`'s own `:deps` carries them, because the bb runtime/bbin product
+  *is* the full tool (its `--api-server` runs the Pathom surface under bb). The
+  only namespace that requires Pathom is `escapement.ui.resolvers` (via
+  `server.clj`); it is server-side only and is NOT in the browser build graph.
+- **Terminal-UI add-on** — `escapement.tui` (+ JLine). Used by the CLI
+  front-end only; the embeddable library (`escapement.lib`) never pulls it.
+
+`test/escapement/architecture_boundary_test.clj` scans every `ns` form under
+`src/escapement` and fails if a core namespace statically requires the
+forbidden layers (web/Pathom/RAD everywhere; the TUI everywhere except
+`cli.clj`). Lazy `requiring-resolve` bridges are intentionally invisible to it.
+When adding code, keep heavy presentation deps behind that seam.
+
 ## Statecharts caveats
 
 This project uses `com.fulcrologic/statecharts`. The library's
@@ -132,7 +165,7 @@ engine + api-server stay bb (1.2.16); only the RAD/TUI render code is 1.3.2.
 > `fr/render-field` / `render-element` multimethods, so only one render target can load per JVM (last
 > `defmethod` wins). `bb ui-test` therefore runs three subprocess groups — `tui` (tui-render + tui-form),
 > `web-sui` (web-render), and `headless+core` (screens-load + control + instrumented-queue +
-> control-resolvers) — each in its own JVM. Running all UI test namespaces in one `clojure -M:ui-test`
+> control-resolvers) — each in its own JVM. Running all UI test namespaces in one `clojure -M:api:ui-test`
 > process will show spurious failures (plugins clobber each other); always use `bb ui-test`.
 
 > CLJC gotcha: `::fully.qualified.ns/kw` (double-colon + full ns) resolves in CLJS but is an INVALID

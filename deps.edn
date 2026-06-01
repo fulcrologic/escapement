@@ -6,18 +6,24 @@
          cheshire/cheshire           {:mvn/version "5.13.0"}
          babashka/process            {:mvn/version "0.5.22"}
          org.babashka/http-client    {:mvn/version "0.4.22"}
-         ;; EQL/Pathom read surface for the --api-server. Pathom 2.4.0 runs under
-         ;; bb ONLY because guardrails is pinned 1.2.16 above (Pathom's transitive
-         ;; guardrails 0.0.12 uses a timbre macro SCI can't analyze); the explicit
-         ;; pin shadows it. pathom_smoke_test guards against drift.
-         com.wsscode/pathom          {:mvn/version "2.4.0"}
-         edn-query-language/eql      {:mvn/version "1.0.2"}
-         com.cognitect/transit-clj   {:mvn/version "1.0.333"}
          ;; Bundled with babashka; declared explicitly so the TUI namespace
          ;; also loads under plain JVM Clojure for IDE/REPL workflows.
          org.jline/jline-terminal    {:mvn/version "3.27.1"}}
  :aliases
- {:demos {:extra-paths ["demos"]}
+ {;; The OPTIONAL web/API add-on deps (Pathom EQL read surface + transit wire
+  ;; format), kept OUT of the base :deps so downstream consumers that depend on
+  ;; escapement as a library/CLI (git or :local/root → this deps.edn; Clojars →
+  ;; pom.xml, which already omits them) are not infected by the Pathom tree. The
+  ;; --api-server / RAD UI is the only thing that needs these. Pathom 2.4.0 loads
+  ;; under bb ONLY because guardrails is pinned 1.2.16 in :deps (Pathom's transitive
+  ;; guardrails 0.0.12 uses a timbre macro SCI can't analyze); the pin shadows it.
+  ;; pathom_smoke_test guards against drift. Compose it where needed, e.g.
+  ;; `clojure -M:api:ui-test`, or for a JVM api-server REPL `clojure -M:api`.
+  ;; (The bb runtime gets these from bb.edn's own :deps, not from here.)
+  :api   {:extra-deps {com.wsscode/pathom        {:mvn/version "2.4.0"}
+                       edn-query-language/eql    {:mvn/version "1.0.2"}
+                       com.cognitect/transit-clj {:mvn/version "1.0.333"}}}
+  :demos {:extra-paths ["demos"]}
   :dev   {:extra-paths ["dev" "spike" "demos"]
           :jvm-opts    ["-Dguardrails.enabled=true"]}
   ;; Tests run under bb (`bb test`). This alias is retained only for an
@@ -67,7 +73,9 @@
   ;; SCI constraint, so guardrails 1.3.2 (wanted by fulcro-rad) coexists with Pathom
   ;; cleanly — sidestepping the bb-only guardrails-1.2.16 pin. The alias' guardrails
   ;; entry overrides the base :deps pin for this classpath only. Pathom/eql/transit
-  ;; come from the base :deps. fulcro-tui is :local/root (unreleased plugin source).
+  ;; now live in the :api alias (out of base :deps), so run this as
+  ;; `clojure -M:api:ui-test` (see bb's `ui-test` task). fulcro-tui is :local/root
+  ;; (unreleased plugin source).
   :ui-test
   {:extra-paths ["src" "test" "demos"]
    :extra-deps  {com.fulcrologic/fulcro                 {:mvn/version "3.10.0-RC2"}

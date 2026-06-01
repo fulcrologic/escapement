@@ -33,7 +33,7 @@
                        (let [form (str "(require " (q nss) ")"
                                        "(let [r (clojure.test/run-tests " (q nss) ")]"
                                        " (when (or (pos? (:fail r)) (pos? (:error r))) (System/exit 1)))")
-                             res  (shell {:continue true} "clojure" "-M:ui-test" "-e" form)]
+                             res  (shell {:continue true} "clojure" "-M:api:ui-test" "-e" form)]
                          (println (str "[ui-test] group " label " -> exit " (:exit res)))
                          (when-not (zero? (:exit res)) (swap! fails inc))))
                      (if (zero? (deref fails))
