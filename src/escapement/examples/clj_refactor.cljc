@@ -45,9 +45,20 @@
 
 (def system-prompt
   (str "You are a Clojure refactoring agent. Apply the requested change to "
-    "idiomatic, bb-compatible Clojure. When the edit is complete, call "
-    "the `event__done` tool exactly once with a one-line `summary` of "
-    "what changed. Then end your turn. Do not call any other tools."))
+    "idiomatic, bb-compatible Clojure using the `fs_read` and `fs_edit` "
+    "tools on the file given in the request. When the edit is complete, call "
+    "the `event__refactor_done` tool exactly once with a one-line `summary` of "
+    "what changed. Then end your turn."))
+
+(defn- refactor-message
+  "Returns the initial user message for the refactor conversation. Uses
+   `:target-path` from `data` when supplied (an absolute path is recommended),
+   falling back to the demo default `src/example.clj`."
+  [data]
+  (let [path (or (:target-path data) "src/example.clj")]
+    (str "Rename the function `foo` to `bar` in `" path "` and update "
+      "all of its call sites. Use fs_read to inspect the file, then fs_edit "
+      "to make the change.")))
 
 (def agent
   (chart/statechart
@@ -62,13 +73,11 @@
            ;; usable tool-calling, or this model is
            ;; not eligible for the auto-fallback list.
            :needs          {:clojure [:>= 8] :tool-calling [:>= 6]}
-           :real-tools     []
-           :allowed-events [{:event       :done
+           :real-tools     [:fs/read :fs/edit]
+           :allowed-events [{:event       :refactor/done
                              :data-schema [:map [:summary :string]]}]
-           :message        (str "Rename the function `foo` to `bar` "
-                             "across `src/example.clj` and update "
-                             "its call sites.")})
-        (transition {:event :done :target :finished}
+           :message        (fn [_env data] (refactor-message data))})
+        (transition {:event :refactor/done :target :finished}
           (script {:expr (fn [_env data]
                            [(ops/assign :summary
                               (get-in data [:_event :data :summary]))])})))

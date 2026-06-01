@@ -66,6 +66,14 @@
 (defn- relative-path [^Path root ^Path file]
   (str (.relativize root file)))
 
+(defn- artifact-path?
+  "True when relative `path` names an artifact this store owns — an author file under `artifacts/` or
+   a captured-I/O blob under `nodes/`. Excludes sibling session files (the transcript, checkpoints,
+   rendered diagrams) that share the session dir but are not artifacts."
+  [path]
+  (or (str/starts-with? path "artifacts/")
+    (str/starts-with? path "nodes/")))
+
 (defrecord DiskArtifactStore [session-dir]
   proto/ArtifactStore
   (write-artifact! [_ _session-id path content meta]
@@ -81,12 +89,13 @@
     (let [root (as-path session-dir)]
       (->> (file-seq (io/file session-dir))
         (filter #(.isFile ^java.io.File %))
-        (mapv (fn [^java.io.File f]
+        (keep (fn [^java.io.File f]
                 (let [rel (relative-path root (.toPath f))]
-                  (merge (path->coords rel)
-                    {:artifact/path         rel
-                     :artifact/size         (.length f)
-                     :artifact/content-type (path->content-type rel)}))))
+                  (when (artifact-path? rel)
+                    (merge (path->coords rel)
+                      {:artifact/path         rel
+                       :artifact/size         (.length f)
+                       :artifact/content-type (path->content-type rel)})))))
         (sort-by :artifact/path)
         vec))))
 

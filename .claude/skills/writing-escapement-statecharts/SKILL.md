@@ -9,7 +9,7 @@ Traps the engine won't warn about. Sources: `Guide.adoc` (Idioms/gotchas, params
 
 ## Events
 
-- **Never use `:done`** (or any prefix of an auto-raised framework event). SCXML descriptors are prefix-matched, so `:done` also matches synthesized `:done.state.X` from finalising compound/parallel states → re-entry loop, pegs CPU. Use `:finish`/`:exit`/namespaced kw. Same trap for prefixes of `error.*`. Canonical write-up: `examples/fired.clj`.
+- **Namespace EVERY application event** (e.g. `:count/done`, `:count/tick`, `:iterate/retry`). SCXML descriptors are prefix-matched, so a *bare* `:done` also matches synthesized `:done.state.X`/`:done.invoke.Y` from finalising compound/parallel states (and bare `:error*` matches the `error.*` family) → in a `parallel` chart the join re-fires your transition → eventless re-entry loop ("Eventless transition loop exceeded 1000 iterations"), pegs CPU. A namespaced kw has no dot in its first token so it can never collide — and you keep the natural name (`:count/done` is fine; bare `:done` is the hazard). Every chart under `src/escapement/examples/` follows this. Leave framework events bare: `:llm.idle`, `:llm.user-message`, `error.*`, `done.state.*`, `done.invoke.*`. Canonical write-up: `examples/fired.clj`; full rationale: `Guide.adoc` "Event naming".
 - **Event-tool encoding**: `:foo-bar` → `event__foo_bar`; `:my.ns/foo-bar` → `event__my_ns_foo_bar`; non-alphanum → `_`.
 - **`submit_verdict` is reserved** when using `:verdict-schema` — don't collide via `:allowed-events`/`:real-tools`.
 
@@ -25,7 +25,9 @@ Traps the engine won't warn about. Sources: `Guide.adoc` (Idioms/gotchas, params
 
 - **Top-level `final` empties the configuration** — always wrap in a compound parent.
 - **Read trigger payload via `:_event`**: `(get-in data [:_event :data ...])` inside script `:expr`.
-- **`:chart-tools` palette is snapshotted at conversation start** — late-registered service-region tools won't be callable in that conversation.
+- **`:chart-tools` palette is snapshotted at conversation start** — late-registered service-region tools won't be callable in that conversation. Region-tools are NOT auto-discovered: you MUST declare `:chart-tools [{:owner <registering-state-id>}]` or the model never sees them.
+- **Region-final transition on a region ROOT must be `:type :internal`.** A transition whose source is a `parallel` region's root state and whose target is that region's `<final>` is, as an *external* transition, given the whole `parallel` as its SCXML domain (LCCA of root + its final child). Its exit set then spans every sibling region, so `remove-conflicting-transitions` drops it and the region never finalises → the join never completes. `:type :internal` keeps the domain in-region. (A transition sourced on a *deeper* substate is fine — its domain is the region.)
+- **Use `send-after` for safety timers, not a raw `(send {:delay …})`.** A raw delayed send is NOT cancelled when the chart finishes early, so the runner idles for the full delay waiting on the orphaned timer after the chart already reached its final. `(send-after {:id … :event … :delay …})` (from `com.fulcrologic.statecharts.convenience`) pairs an on-entry send with an on-exit cancel. Also: a region-root `:safety/stop` transition has the same external-domain trap as above — terminate via a *top-level* `:safety/stop -> :finished` instead, and handle `:error.llm.max-turns` at top level so a chatty model that burns `:max-turns` ends promptly.
 
 ## `params-fn`
 

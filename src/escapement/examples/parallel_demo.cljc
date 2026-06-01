@@ -16,11 +16,11 @@
     [escapement.chart.helpers :as h]))
 
 (def translator-system
-  (str "Reply by calling the `event__translated` tool exactly once with "
+  (str "Reply by calling the `event__parallel_translated` tool exactly once with "
     "`{\"text\":\"<the French translation>\"}`. Keep it short. Then end your turn."))
 
 (def summarizer-system
-  (str "Reply by calling the `event__summarized` tool exactly once with "
+  (str "Reply by calling the `event__parallel_summarized` tool exactly once with "
     "`{\"text\":\"<a one-sentence summary>\"}`. Keep it under 20 words. Then end your turn."))
 
 (def agent
@@ -34,12 +34,12 @@
             (h/llm-conversation
               {:id             "translator"
                :system         translator-system
-               :allowed-events [{:event       :translated
+               :allowed-events [{:event       :parallel/translated
                                  :data-schema [:map [:text :string]]}]
                :message        (fn [_env data]
                                  (str "Translate to French: "
                                    (pr-str (:phrase data "Hello, world."))))})
-            (transition {:event :translated :target :t-done}
+            (transition {:event :parallel/translated :target :t-done}
               (script {:expr (fn [_env data]
                                [(ops/assign :translation
                                   (get-in data [:_event :data :text]))])})))
@@ -50,12 +50,12 @@
             (h/llm-conversation
               {:id             "summarizer"
                :system         summarizer-system
-               :allowed-events [{:event       :summarized
+               :allowed-events [{:event       :parallel/summarized
                                  :data-schema [:map [:text :string]]}]
                :message        (fn [_env data]
                                  (str "Summarize this passage: "
                                    (pr-str (:passage data "Once upon a time there was a cat."))))})
-            (transition {:event :summarized :target :s-done}
+            (transition {:event :parallel/summarized :target :s-done}
               (script {:expr (fn [_env data]
                                [(ops/assign :summary
                                   (get-in data [:_event :data :text]))])})))

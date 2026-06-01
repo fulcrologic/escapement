@@ -41,6 +41,14 @@
                     <exclude>**/.escapement/**</exclude>
                 </excludes>
             </resource>
+            <!-- index.html + the fetch manifest (escapement-ui.edn) ship in the jar. The compiled
+                 SPA bundle is NOT in git (avoids bloat); run `bb build-ui` before packaging so
+                 resources/public/js/main/main.js exists in the working tree and gets bundled into
+                 the jar too. bbin installs (git tree, no bundle) instead fetch it from the GitHub
+                 release on demand. Served by escapement.ui.server from the classpath. -->
+            <resource>
+                <directory>resources</directory>
+            </resource>
         </resources>
         <plugins>
             <plugin>

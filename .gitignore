@@ -28,3 +28,10 @@ node_modules/
 out/
 .shadow-cljs/
 package-lock.json
+
+# Compiled browser SPA — NOT committed (avoids git bloat from the ~1.2MB bundle
+# changing every build). The escapement server resolves the bundle on demand:
+# classpath (release jar / local `bb build-ui`) → ~/.cache → GitHub release asset
+# (verified against the SHA-256 in the committed resources/escapement-ui.edn).
+# Only resources/public/index.html and resources/escapement-ui.edn are committed.
+resources/public/js/

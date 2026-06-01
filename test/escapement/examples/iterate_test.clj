@@ -86,9 +86,9 @@
 
 (specification "iterate chart: happy path — patch passes on first try"
   (let [be (mock-backend
-             [(tool-use [{:id    "s" :name "event__spec_ready"
+             [(tool-use [{:id    "s" :name "event__iterate_spec_ready"
                           :input {:summary "make square"}}])
-              (tool-use [{:id    "p" :name "event__patch_applied"
+              (tool-use [{:id    "p" :name "event__iterate_patch_applied"
                           :input {:rationale "wrote square"}}])])
         {:keys [t shell-calls]}
         (run-chart! {:backend         be
@@ -108,13 +108,13 @@
 
 (specification "iterate chart: retry then pass"
   (let [be (mock-backend
-             [(tool-use [{:id    "s" :name "event__spec_ready"
+             [(tool-use [{:id    "s" :name "event__iterate_spec_ready"
                           :input {:summary "make square"}}])
-              (tool-use [{:id    "p1" :name "event__patch_applied"
+              (tool-use [{:id    "p1" :name "event__iterate_patch_applied"
                           :input {:rationale "first attempt"}}])
-              (tool-use [{:id    "r" :name "event__retry"
+              (tool-use [{:id    "r" :name "event__iterate_retry"
                           :input {:reasoning "try again"}}])
-              (tool-use [{:id    "p2" :name "event__patch_applied"
+              (tool-use [{:id    "p2" :name "event__iterate_patch_applied"
                           :input {:rationale "second attempt"}}])])
         {:keys [t shell-calls]}
         (run-chart! {:backend         be
@@ -135,15 +135,15 @@
 
 (specification "iterate chart: exhaust iterations"
   (let [be (mock-backend
-             [(tool-use [{:id    "s" :name "event__spec_ready"
+             [(tool-use [{:id    "s" :name "event__iterate_spec_ready"
                           :input {:summary "make square"}}])
-              (tool-use [{:id    "p1" :name "event__patch_applied"
+              (tool-use [{:id    "p1" :name "event__iterate_patch_applied"
                           :input {:rationale "first"}}])
-              (tool-use [{:id    "r1" :name "event__retry"
+              (tool-use [{:id    "r1" :name "event__iterate_retry"
                           :input {:reasoning "again"}}])
-              (tool-use [{:id    "p2" :name "event__patch_applied"
+              (tool-use [{:id    "p2" :name "event__iterate_patch_applied"
                           :input {:rationale "second"}}])
-              (tool-use [{:id    "r2" :name "event__retry"
+              (tool-use [{:id    "r2" :name "event__iterate_retry"
                           :input {:reasoning "yet again"}}])])
         {:keys [t shell-calls]}
         (run-chart! {:backend         be
@@ -164,11 +164,11 @@
 
 (specification "iterate chart: give-up"
   (let [be (mock-backend
-             [(tool-use [{:id    "s" :name "event__spec_ready"
+             [(tool-use [{:id    "s" :name "event__iterate_spec_ready"
                           :input {:summary "make square"}}])
-              (tool-use [{:id    "p1" :name "event__patch_applied"
+              (tool-use [{:id    "p1" :name "event__iterate_patch_applied"
                           :input {:rationale "first"}}])
-              (tool-use [{:id    "g" :name "event__give_up"
+              (tool-use [{:id    "g" :name "event__iterate_give_up"
                           :input {:reason "stuck"}}])])
         {:keys [t shell-calls]}
         (run-chart! {:backend         be

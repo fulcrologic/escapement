@@ -1,5 +1,187 @@
 # Changelog
 
+## [unreleased] — tui-improvements — 2026-06-01
+
+This branch adds a complete read-only inspection + live-control surface over a
+running agent — a Pathom EQL API, a statechart-driven RAD explorer that renders
+both in the browser (Semantic-UI) and in the terminal (fulcro-tui), and a live
+single-stepping debugger — and hardens every bundled example chart so it runs
+cleanly end-to-end. The earlier `2026-05-29` and `2026-05-30` entries below are
+the incremental ledger for the API/SPA/RAD/debugger work; this entry is the
+consolidated, user-facing view of the whole branch delta vs `main`, including
+the example-chart and runner changes not previously recorded.
+
+### Added
+
+- **Read-only EQL/Pathom API on `run` (`--api-server <port>`).** Publishes a
+  transit+json EQL endpoint at `POST /api` over the `--work-dir` disk store:
+  the active session, past sessions, paged transcript, artifacts, and the
+  per-node invocation drill-in. No mutations on a plain `--api-server` run.
+- **Statechart-driven RAD explorer (browser + terminal).** A shared CLJC RAD
+  model and screens (Sessions → Events → Artifacts, plus session detail) render
+  two ways from one definition: a **Semantic-UI** browser SPA and a
+  **fulcro-tui** terminal target. The browser bundle is lazy-loaded and
+  content-addressed (SHA-256-verified against the committed manifest; jar
+  installs serve it from the classpath, `bbin` installs fetch it from the
+  GitHub release). A normal `run` without `--api-server` loads no UI code.
+- **Live single-stepping debugger (`--api-server --debug`).** A `--debug` run is
+  headless-friendly, auto-paused, and now exposes its pause/step controller over
+  the api-server. The browser Debugger drives the *same* live run as the TUI:
+  **Pause / Step / Continue / Arm-pause-on-next-external**, the live state
+  configuration, and the events still queued but undelivered, plus an embedded
+  ELK chart visualizer that highlights the active states as you step. Control
+  mutations `escapement.control/{pause,step,continue,arm-pause-on-next-external}`
+  and live resolvers `:session/{paused?,step-budget,live-configuration,pending-events}`
+  back it. The control plane exists only under `--debug`.
+- **Instrumented, pausable event queue.** The debug pause/step gate moved out of
+  the runner loop into `escapement.engine.instrumented-queue`; it engages only
+  when a `:debug-controller` is present (zero overhead otherwise), so the TUI
+  keys (`s`/`c`/`p`/`P`), the web Debugger, and the runner loop all single-step
+  through one primitive with no double-gating. `send!`/`cancel!` stay
+  non-blocking so worker threads never deadlock while the drainer is parked.
+- **`--dump-d2`** on `run` prints the chart's `d2` diagram source to stdout and
+  exits before any execution machinery (no LLM backend, no session dir, no API
+  key) — pipe it to `d2` to render: `… run my.ns/agent --dump-d2 | d2 -`.
+
+### Changed
+
+- **Every bundled example chart now namespaces its application events**
+  (`:done`→`:hello/done`, `:tick`→`:count/tick`, `:found-bug`→`:scan/found-bug`,
+  `:spec-ready`→`:iterate/spec-ready`, `:translated`→`:parallel/translated`,
+  `:step`/`:done`→`:inspect/step`/`:inspect/done`, `:done`→`:refactor/done`/
+  `:turn/done`, and the haiku `mux/reply` events to `:haiku/*`). A *bare* event
+  whose first dotted token collides with SCXML's reserved `done.*`/`error.*`
+  families (e.g. a plain `:done`) re-fires on the engine's auto-raised
+  `done.state.*`, which in a `parallel` chart wedges the macrostep in an
+  eventless loop. Namespaced names cannot prefix-match a reserved family.
+  System-prompt text and the synthesized event-tool names update in lockstep
+  (`:scan/found-bug` → `event__scan_found_bug`, etc.).
+- **Parallel example charts: region-root → region-`<final>` transitions are now
+  `:type :internal`.** As external transitions their SCXML domain is the whole
+  `parallel`, so `remove-conflicting-transitions` dropped them and the region
+  never finalised (the join never completed). Internal keeps the domain
+  in-region. Applied across `steered_convo`, `steer_midturn`, and `supervisor`.
+- **Runner frozen-config guard default raised 200 → 4000 cycles** (~10s → ~200s
+  at the default 50ms quiescent sleep). A single slow LLM turn no longer trips
+  the `:frozen-config` abort during legitimate idle while the model is thinking.
+- **Example charts gained `send-after` safety-stop timers** (on-entry send +
+  on-exit cancel, so no orphaned timer survives reaching `:finished`) and a fast
+  exit on `:error.llm.max-turns`, so a live run terminates promptly instead of
+  hanging or idling into the safety stop.
+- **`scan` and `clj-refactor` input hardening.** `scan` now names a concrete
+  absolute repo root, instructs the model to read at most two real files (no path
+  guessing/retries), and bounds the conversation with `:max-turns 8` /
+  `:budget-ms 120000`. `clj-refactor` now gives the model real `:fs/read`/
+  `:fs/edit` tools, takes an optional `:target-path`, and uses the namespaced
+  `:refactor/done` completion event.
+
+### Notes
+
+- The browser RAD explorer's visual rendering (Semantic-UI report/form layout,
+  the ELK live-chart highlight, the Pause/Step/Continue button wiring) is **not**
+  unit-tested — the RAD model, resolvers, screen queries, control wire-path, and
+  the TUI render target are covered, but the in-browser appearance and
+  click-through must be eyeballed against a live `--api-server --debug` run.
+- The example charts and the namespaced-event/turn-end behaviour exercise live
+  LLM backends; their end-to-end behaviour (and the no-hang safety timers) is
+  credential-gated and best confirmed against a live provider.
+- UI tests run on a separate path: engine/queue/control/HTTP-proof under
+  `bb test` (guardrails 1.2.16); the RAD/TUI render code is JVM-only and runs via
+  `bb ui-test` (guardrails 1.3.2) in render-target-isolated subprocess JVMs,
+  because the TUI/Semantic-UI/headless plugins register the same global
+  `render-field`/`render-element` multimethods (last `defmethod` wins).
+
+## [unreleased] — RAD explorer + live single-stepping — 2026-05-30
+
+### Added
+
+- **Statechart-driven RAD explorer (web + TUI).** A shared CLJC RAD model
+  (`escapement.ui.model.*`) and reports/screens (`escapement.ui.screens.*`:
+  Sessions → Events → Artifacts, plus session detail) over the existing
+  read-only Pathom surface. The *same* reports render two ways: in the browser
+  with a **Semantic-UI** render adapter (`escapement.ui.rendering.semantic-ui.*`)
+  and in a terminal with a **fulcro-tui** target (`escapement.ui.rendering.tui.*`).
+- **Instrumented, pausable event queue** (`escapement.engine.instrumented-queue`).
+  Relocates the debug pause gate out of the runner loop and into the event
+  queue; it engages only when a `:debug-controller` is present (zero overhead
+  otherwise). `send!`/`cancel!` stay non-blocking so worker threads never
+  deadlock while the draining thread is parked. bb + JVM safe (atoms + promises).
+- **Live single-step control API on `--api-server`.** Control mutations
+  `escapement.control/{pause,step,continue,arm-pause-on-next-external}` and live
+  resolvers `:session/{paused?,step-budget,live-configuration,pending-events}`
+  (`escapement.ui.resolvers`, with `::p/mutate pc/mutate` now wired into the
+  parser). A shared `escapement.debug.control-handle` atom bridges the running
+  engine's live env to the server, filled in `run!`'s `on-env-ready`.
+- **The debug controller is now shared with `--api-server`.** A `--debug` run
+  (which still forces the TUI on and auto-pauses when `:debug :auto-pause?` is
+  true, default) now also exposes its pause/step controller over the api-server,
+  so the browser Debugger can Pause/Step/Continue the *same* live run
+  concurrently with the TUI keys (`s`/`c`/`p`/`P`). The control plane is present
+  only under `--debug`; a plain `--api-server` run stays read-only.
+- **Browser Debugger + embedded statechart visualizer**
+  (`escapement.ui.screens.{debugger,chart-view}`): Pause/Step/Continue/Arm,
+  live configuration + pending-events, and an ELK-rendered chart that highlights
+  the live active states as you step.
+- **Dual test path.** Engine/queue/control tests run under `bb test`
+  (guardrails 1.2.16). The RAD/TUI UI tests load the Fulcro RAD stack and run
+  under the JVM via `clojure -M:ui-test` (guardrails 1.3.2); those namespaces are
+  excluded from `bb test`. A deterministic `escapement.ui.live-control-http-test`
+  proves the full `POST /api` transit → handler → parser → control path under bb.
+
+### Changed
+
+- **The debug pause/step gate moved from the runner loop into the event
+  queue.** When `--debug` (or any `:debug-controller`) is active the runner now
+  uses `escapement.engine.instrumented-queue`, which applies the pause/step gate
+  once per event as it drains — so the TUI keys, the api-server control plane,
+  and the runner loop all single-step through one primitive with no
+  double-gating. A normal run (no controller) uses the plain in-process queue and
+  carries zero stepping overhead.
+
+### Notes
+
+- The browser RAD explorer's visual rendering (Semantic-UI report/form layout,
+  the ELK live-chart highlight, Pause/Step/Continue button wiring) is **not**
+  unit-tested — the RAD model, resolvers, screen queries, control wire-path, and
+  the TUI render target are covered, but the actual in-browser appearance and
+  click-through must be eyeballed against a live `--api-server --debug` run.
+- The instrumented queue's non-blocking `send!`/`cancel!` while the draining
+  thread is parked on the gate is a concurrency property; it is exercised by the
+  queue tests but its deadlock-freedom under real concurrent worker load is best
+  confirmed live.
+
+## [unreleased] — read-only EQL API + browser inspector — 2026-05-29
+
+### Added
+
+- **`--api-server <port>` on `run`.** Publishes a read-only EQL/Pathom API
+  (`escapement.ui.server` + `escapement.ui.resolvers`, over a multi-session
+  disk read store rooted at `--work-dir`) for the active session, past
+  sessions, transcript paging, artifacts, and the invocation drill-in.
+  `POST /api` with a transit+json EQL query. No mutations.
+- **Browser inspector SPA (`escapement.ui.client`).** A minimal Fulcro app
+  (a `Root` that loads the active session id) whose `:remote` posts transit
+  EQL to `/api`, with Fulcro Inspect wired in. Served by the same
+  `--api-server` on the same origin. CLJS deps live only in the `:cljs`
+  alias — a normal `run` never loads any UI code. Build with `bb build-ui`
+  (release) / `bb watch-ui` (dev). See [`docs/web-ui.md`](docs/web-ui.md).
+- **Lazy, content-addressed UI delivery.** The ~1.2 MB compiled bundle is
+  not committed to git. Jar installs serve it from the classpath; `bbin`
+  installs fetch it once from the GitHub release asset
+  (`escapement-<version>/main.js`), verify it against the SHA-256 in the
+  committed `resources/escapement-ui.edn`, and cache it under
+  `~/.cache/escapement/ui/`. Served at `/js/main/<sha>.js` with an immutable
+  cache header; `index.html` gets the SHA path injected at serve time, so a
+  rebuilt bundle never reads stale from cache.
+- **UI build/release tasks.** `bb build-ui` (release-compile + refresh the
+  `escapement-ui.edn` manifest), `bb watch-ui` (dev compile + hot reload), and
+  `bb release-ui` (verify-not-rebuild: publishes the already-built `main.js` to
+  the GitHub release `escapement-<version>` via `gh` — creating the release for
+  the pushed tag if needed — only after asserting its SHA-256 matches the
+  committed manifest, so the published asset equals what bbin installs verify
+  against). Documented in [`docs/web-ui.md`](docs/web-ui.md), including the
+  bbin install timeline and stability guarantees.
+
 ## [unreleased] — io-refactor-capture-replay — 2026-05-27
 
 First slice of the IO refactor: heavy LLM I/O is no longer the body of the

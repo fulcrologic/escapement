@@ -132,7 +132,7 @@
     "{\"path\":\"scratch/note.txt\",\"content\":\"sky is blue\"} to record the fact.\n"
     "2. After the tool result, write a ONE-sentence final answer stating the "
     "fact you recorded, then end your turn.\n"
-    "3. Then call the event tool `event__done` exactly once with "
+    "3. Then call the event tool `event__inspect_done` exactly once with "
     "{\"summary\":\"<your one-sentence answer>\"} to finish.\n"
     "Do not call any other tools. Do not loop."))
 
@@ -152,7 +152,7 @@
            ;; so the model can ONLY write, nothing else.
            :real-tools     [:fs/write]
            ;; Event-tool that advances the chart to :finished.
-           :allowed-events [{:event       :done
+           :allowed-events [{:event       :inspect/done
                              :data-schema [:map [:summary :string]]}]
            ;; Conservative budgets so a live run can never hang
            ;; (cheat-sheet §1: ALWAYS bound the loop).
@@ -164,7 +164,7 @@
         ;; :llm.idle for the same turn). It is `:type :internal` so
         ;; it records the summary WITHOUT exiting :converse — the
         ;; :llm.idle transition below stays active for step 2.
-        (transition {:event :done :type :internal}
+        (transition {:event :inspect/done :type :internal}
           (script
             {:expr (fn [_env data]
                      [(ops/assign

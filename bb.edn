@@ -1,8 +1,14 @@
-{:paths    ["src" "bb_test" "demos"]
- :deps     {com.fulcrologic/statecharts {:mvn/version "1.4.0-RC16"}
+{:paths    ["src" "bb_test" "demos" "resources"]
+ :deps     {com.fulcrologic/statecharts {:mvn/version "1.4.0-RC18"}
             com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
             metosin/malli               {:mvn/version "0.16.4"}
-            cheshire/cheshire           {:mvn/version "5.13.0"}}
+            cheshire/cheshire           {:mvn/version "5.13.0"}
+            ;; EQL/Pathom read surface (--api-server). guardrails MUST stay pinned
+            ;; 1.2.16 above or Pathom's transitive 0.0.12 breaks bb. transit-clj is
+            ;; the /api wire format; org.httpkit.server is bundled with bb.
+            com.wsscode/pathom          {:mvn/version "2.4.0"}
+            edn-query-language/eql      {:mvn/version "1.0.2"}
+            com.cognitect/transit-clj   {:mvn/version "1.0.333"}}
  :bbin/bin {escapement {:main-opts ["-m" "escapement.cli"]}}
  :tasks    {repl   {:override-builtin true
                     :doc              "Start a babashka nrepl on port 1667"
@@ -12,6 +18,27 @@
                                           (deref (promise)))}
             sanity {:doc  "Run the bb sanity script for the engine."
                     :task (shell "bb bb_test/sanity.clj")}
+            ui-test
+            {:doc  "Run the JVM RAD/TUI UI tests (clojure -M:ui-test), grouped by render target into ISOLATED JVMs. The TUI, Semantic-UI, and headless RAD render plugins each register the SAME global fr/render-field / render-element multimethods, so only one render target may load per JVM (last defmethod wins). In production each target is its own process; here we run one subprocess per group so the whole UI suite is green together."
+             :task (let [groups [["tui"           ["escapement.ui.tui-render-test"
+                                                    "escapement.ui.tui-form-test"]]
+                                  ["web-sui"       ["escapement.ui.web-render-test"]]
+                                  ["headless+core" ["escapement.ui.screens-load-test"
+                                                    "escapement.ui.control-test"
+                                                    "escapement.engine.instrumented-queue-test"
+                                                    "escapement.ui.control-resolvers-test"]]]
+                         q     (fn [nss] (clojure.string/join " " (map (fn [n] (str "'" n)) nss)))
+                         fails (atom 0)]
+                     (doseq [[label nss] groups]
+                       (let [form (str "(require " (q nss) ")"
+                                       "(let [r (clojure.test/run-tests " (q nss) ")]"
+                                       " (when (or (pos? (:fail r)) (pos? (:error r))) (System/exit 1)))")
+                             res  (shell {:continue true} "clojure" "-M:ui-test" "-e" form)]
+                         (println (str "[ui-test] group " label " -> exit " (:exit res)))
+                         (when-not (zero? (:exit res)) (swap! fails inc))))
+                     (if (zero? (deref fails))
+                       (println "[ui-test] all UI render-target groups GREEN")
+                       (do (println (str "[ui-test] " (deref fails) " group(s) FAILED")) (System/exit 1))))}
             test   {:doc         "Run all tests under bb (test/**/*_test.{clj,cljc})."
                     :extra-paths ["test"]
                     :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.9"}}
@@ -24,6 +51,76 @@
                        (shell "npm install --no-fund --no-audit"))
                      (shell "npx shadow-cljs compile node-test")
                      (shell "node out/node-tests.js"))}
+            build-ui
+            {:doc      "Release-compile the browser SPA and refresh the fetch manifest (resources/escapement-ui.edn). After this, commit the manifest and upload resources/public/js/main/main.js to the matching GitHub release (escapement-<version>)."
+             :requires ([clojure.java.io :as io] [clojure.string :as str])
+             :task     (do
+                         (when-not (.exists (io/file "node_modules"))
+                           (println "[build-ui] installing npm deps...")
+                           (shell "npm install --no-fund --no-audit"))
+                         (shell "npx shadow-cljs release main")
+                         (let [bytes   (java.nio.file.Files/readAllBytes
+                                         (.toPath (io/file "resources/public/js/main/main.js")))
+                               digest  (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes)
+                               sha     (apply str (map (fn [b] (format "%02x" (bit-and b 0xff))) digest))
+                               version (-> (re-find (re-pattern "<version>([^<]+)</version>") (slurp "pom.xml"))
+                                         second (str/replace (re-pattern "-SNAPSHOT$") ""))]
+                           (spit "resources/escapement-ui.edn"
+                             (str (pr-str {:version version :sha256 sha :asset "main.js"}) "\n"))
+                           (println (format "[build-ui] %s  sha256=%s  (%d bytes)" version sha (count bytes)))
+                           (println (str "[build-ui] wrote resources/escapement-ui.edn — commit it; "
+                                      "`bb release-ui` publishes main.js to GitHub release escapement-" version))))}
+            watch-ui
+            {:doc  "Dev-compile + hot-reload the browser SPA (shadow watch). Pair with `run --api-server <port>` to serve it."
+             :task (do
+                     (when-not (.exists (clojure.java.io/file "node_modules"))
+                       (println "[watch-ui] installing npm deps...")
+                       (shell "npm install --no-fund --no-audit"))
+                     (shell "npx shadow-cljs watch main"))}
+            release-ui
+            {:doc      "Publish the ALREADY-BUILT resources/public/js/main/main.js as an asset on the GitHub release escapement-<version>. Verify-not-rebuild: never recompiles — it asserts the on-disk bundle's SHA-256 matches the committed escapement-ui.edn (so the published asset == what bbin installs verify against), that the manifest is committed, and that the tag is on origin. Run order: `bb build-ui` -> commit escapement-ui.edn -> maven release (tags+pushes) -> `bb release-ui`."
+             :requires ([clojure.edn :as edn] [clojure.string :as str])
+             :task     (let [ok?    (fn [m] (zero? (:exit m)))
+                             sh     (fn [& args] (apply shell {:continue true :out :string :err :string} args))
+                             die    (fn [msg] (println (str "[release-ui] " msg)) (System/exit 1))
+                             sha-of (fn [path]
+                                      (let [bytes (java.nio.file.Files/readAllBytes
+                                                    (.toPath (clojure.java.io/file path)))]
+                                        (apply str (map (fn [b] (format "%02x" (bit-and b 0xff)))
+                                                     (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                                                       bytes)))))
+                             bundle   "resources/public/js/main/main.js"
+                             manifest "resources/escapement-ui.edn"]
+                         (when-not (ok? (sh "gh" "--version"))
+                           (die "GitHub CLI `gh` not found — install it (brew install gh)."))
+                         (when-not (ok? (sh "gh" "auth" "status"))
+                           (die "`gh` is not authenticated — run `gh auth login`."))
+                         (when-not (.exists (clojure.java.io/file bundle))
+                           (die "no bundle on disk — run `bb build-ui` first (release-ui never compiles)."))
+                         (let [{:keys [version sha256]} (edn/read-string (slurp manifest))
+                               tag      (str "escapement-" version)
+                               disk-sha (sha-of bundle)]
+                           ;; The published asset MUST be byte-identical to what every bbin install
+                           ;; verifies against — so refuse to publish a bundle that doesn't match the
+                           ;; committed manifest, and refuse if the manifest itself is uncommitted.
+                           (when-not (= disk-sha sha256)
+                             (die (str "on-disk bundle sha " disk-sha " != committed " manifest " sha " sha256
+                                    ". Run `bb build-ui`, commit the refreshed manifest, and don't run `watch-ui` after.")))
+                           (when-not (ok? (sh "git" "diff" "--quiet" "--" manifest))
+                             (die (str manifest " has uncommitted changes — commit it so the tag matches the published asset.")))
+                           (when (str/blank? (:out (sh "git" "ls-remote" "--tags" "origin" (str "refs/tags/" tag))))
+                             (die (str "tag " tag " is not on origin. Run the maven release (it tags + pushes) first.")))
+                           (if (ok? (sh "gh" "release" "view" tag))
+                             (do (println (str "[release-ui] release " tag " exists — uploading asset (clobber)…"))
+                                 (shell "gh" "release" "upload" tag bundle "--clobber"))
+                             (do (println (str "[release-ui] creating release " tag " with asset…"))
+                                 (shell "gh" "release" "create" tag bundle
+                                   "--title" tag
+                                   "--notes" (str "Escapement " version " web UI bundle (`main.js`).\n\n"
+                                               "SHA-256: `" sha256 "`\n\n"
+                                               "Fetched and verified on demand by `escapement run --api-server` "
+                                               "for `bbin` installs (see docs/web-ui.md)."))))
+                           (println (str "[release-ui] published main.js to release " tag " (sha256 " sha256 ")"))))}
             test-demo-unit-test
             {:doc         "Run the unit_test demo's own tests (segment-composition pattern)."
              :extra-paths ["demos/unit_test/test"]

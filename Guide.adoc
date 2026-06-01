@@ -211,7 +211,8 @@ Read them in order — together they cover every substantive pattern this librar
 Full source: `src/escapement/examples/hello.clj`.
 
 The chart binds an LLM conversation to a state, asks for a single
-`event__done` call, and transitions to a final state that assigns the greeting to the data model.
+`event__hello_done` call (the event-tool for the namespaced event
+`:hello/done`), and transitions to a final state that assigns the greeting to the data model.
 
 The namespace pulls in `chart`, `data-model.operations` (for `ops/assign`), the standard element wrappers, and this project's authoring helpers:
 
@@ -225,13 +226,13 @@ The namespace pulls in `chart`, `data-model.operations` (for `ops/assign`), the 
 ----
 
 The system prompt is just a string.
-The LLM is told to call `event__done`
+The LLM is told to call `event__hello_done`
 once with a `{"greeting": "..."}` payload:
 
 [source,clojure]
 ----
 (def system-prompt
-  (str "When asked, call the `event__done` tool exactly once with `{\"greeting\":\"<a short hello "
+  (str "When asked, call the `event__hello_done` tool exactly once with `{\"greeting\":\"<a short hello "
        "in any language>\"}`. Keep the greeting under 30 characters. After the tool call, end your turn. "
        "Do not call any other tools."))
 ----
@@ -249,10 +250,10 @@ The chart itself:
                   {:id             "hello"
                    :system         system-prompt
                    :real-tools     []
-                   :allowed-events [{:event       :done
+                   :allowed-events [{:event       :hello/done
                                      :data-schema [:map [:greeting :string]]}]
                    :message        "Say hello."})
-                 (transition {:event :done :target :finished}
+                 (transition {:event :hello/done :target :finished}
                              (script {:expr (fn [_env data]
                                               [(ops/assign :greeting
                                                            (get-in data [:_event :data :greeting]))])})))
@@ -274,8 +275,8 @@ literals.
 * `:allowed-events` declares the event vocabulary.
 Each entry is a map with
 `:event` (chart event keyword) and `:data-schema` (Malli).
-The runtime synthesizes the Anthropic tool definition (`event__done` here) and validates the LLM's tool input against the schema before posting the event.
-* The `:done` transition is **structural** (it leaves the bound state), killing the conversation.
+The runtime synthesizes the Anthropic tool definition (`event__hello_done` here) and validates the LLM's tool input against the schema before posting the event.
+* The `:hello/done` transition is **structural** (it leaves the bound state), killing the conversation.
 The `script` action copies the event data into the data model. `get-in data [:_event :data ...]` is the standard pattern for reading the current event's payload inside a transition action — the library exposes the triggering event under the `:_event` key of the data-model snapshot passed to script `:expr`.
 
 === Three shapes of `:llm-conversation`
@@ -312,30 +313,30 @@ See
 Full source: `src/escapement/examples/scan.clj`.
 
 This chart adds one real tool (`:fs/read`) and demonstrates **fan-out**:
-the LLM is expected to fire multiple `:found-bug` events and one
-`:scan-complete`.
+the LLM is expected to fire multiple `:scan/found-bug` events and one
+`:scan/complete` (both namespaced — see <<event-naming>>).
 Two ideas worth highlighting:
 
 [source,clojure]
 ----
 :real-tools     [:fs/read]
-:allowed-events [{:event       :found-bug
+:allowed-events [{:event       :scan/found-bug
                   :data-schema [:map
                                 [:file :string]
                                 [:line :int]
                                 [:summary :string]]}
-                 {:event       :scan-complete
+                 {:event       :scan/complete
                   :data-schema [:map [:total_findings :int]]}]
 ----
 
 The chart never sees `:fs/read`.
-The LLM reads files, decides on findings, calls `event__found_bug` once per finding, then `event__scan_complete`.
+The LLM reads files, decides on findings, calls `event__scan_found_bug` once per finding, then `event__scan_complete`.
 
 The trick is the internal transition for accumulating findings:
 
 [source,clojure]
 ----
-(transition {:event :found-bug :type :internal}
+(transition {:event :scan/found-bug :type :internal}
             (script {:expr (fn [_env data]
                              [(ops/assign :findings
                                           (conj (vec (:findings data))
@@ -344,8 +345,8 @@ The trick is the internal transition for accumulating findings:
 
 `:type :internal` tells the algorithm to **not leave** the source state.
 That matters here because leaving and re-entering `:scanning` would kill the LLM worker.
-With an internal transition, the binding stays alive across arbitrarily many `:found-bug` events.
-Only the terminal `:scan-complete`
+With an internal transition, the binding stays alive across arbitrarily many `:scan/found-bug` events.
+Only the terminal `:scan/complete`
 uses a normal (external) transition to `:finished`.
 
 === Worked example: `parallel_demo.clj` — two LLMs at once
@@ -354,7 +355,7 @@ Full source: `src/escapement/examples/parallel_demo.clj`.
 
 Two parallel regions, each with its own `:llm-conversation`.
 Region A is a translator; region B is a summarizer.
-The two workers run concurrently on different threads; tool-name collisions are impossible because event tool names encode the event keyword (`event__translated` vs `event__summarized`).
+The two workers run concurrently on different threads; tool-name collisions are impossible because event tool names encode the event keyword (`event__parallel_translated` vs `event__parallel_summarized`, from the namespaced events `:parallel/translated` and `:parallel/summarized`).
 
 [source,clojure]
 ----
@@ -381,11 +382,14 @@ One long conversation is bound at the top of
 [source,clojure]
 ----
 :real-tools      [:fs/read :fs/edit :fs/write]
-:allowed-events  [{:event :spec-ready    :data-schema [:map [:summary :string]]}
-                  {:event :patch-applied :data-schema [:map [:rationale :string]]}
-                  {:event :retry         :data-schema [:map [:reasoning :string]]}
-                  {:event :give-up       :data-schema [:map [:reason :string]]}]
+:allowed-events  [{:event :iterate/spec-ready    :data-schema [:map [:summary :string]]}
+                  {:event :iterate/patch-applied :data-schema [:map [:rationale :string]]}
+                  {:event :iterate/retry         :data-schema [:map [:reasoning :string]]}
+                  {:event :iterate/give-up       :data-schema [:map [:reason :string]]}]
 ----
+
+(All four are namespaced — see <<event-naming>>; the synthesized tool names are
+`event__iterate_spec_ready`, `event__iterate_patch_applied`, etc.)
 
 The chart progresses `:read-spec → :propose-patch → :run-tests → :reflect`
 with **all internal transitions** so the LLM's accumulated context survives the whole loop:
@@ -393,12 +397,12 @@ with **all internal transitions** so the LLM's accumulated context survives the 
 [source,clojure]
 ----
 (state {:id :read-spec}
-       (transition {:event :spec-ready :target :propose-patch :type :internal}))
+       (transition {:event :iterate/spec-ready :target :propose-patch :type :internal}))
 
 (state {:id :propose-patch}
        (on-entry {}
          (h/tell-llm {:expr (fn [_env data] (user-message-for-propose data))}))
-       (transition {:event :patch-applied :target :run-tests :type :internal}
+       (transition {:event :iterate/patch-applied :target :run-tests :type :internal}
                    (script {:expr (fn [_env data]
                                     [(ops/assign :iterations
                                                  (inc (or (:iterations data) 0)))])})))
@@ -407,7 +411,7 @@ with **all internal transitions** so the LLM's accumulated context survives the 
 Two new ideas appear here:
 
 * **Test execution is NOT an LLM tool.** It is a chart-controlled `script`
-action on `:run-tests` entry that dispatches `:shell/run` via the tool registry directly and posts `:tests-pass` or `:tests-fail` back to itself.
+action on `:run-tests` entry that dispatches `:shell/run` via the tool registry directly and posts `:iterate/tests-pass` or `:iterate/tests-fail` back to itself.
 This keeps test results out of the LLM's tool-loop and out of the conversation context unless the chart decides to surface them.
 * **`h/tell-llm`** pushes a fresh user message into the live binding from inside the chart (see <<tell-llm-helper>>).
 Used here on
@@ -829,6 +833,55 @@ Qualified keywords are flattened: `:my.ns/foo-bar` becomes `event__my_ns_foo_bar
 Anthropic enforces alphanum/underscore in tool names, so any other character in the keyword is replaced by `_`.
 See `kw->anthropic-name` in
 `src/escapement/invocation/llm_conversation.clj:41`.
+
+[[event-naming]]
+=== Event naming: namespace your application events
+
+SCXML matches event descriptors by dot-separated *prefix*: a transition on
+`:done` matches `:done`, `:done.state.x`, `:done.invoke.y`, … . The engine
+auto-raises `done.state.<id>` whenever a `<final>` is entered (and
+`done.invoke.<id>` when an invocation ends), and the framework emits the
+`error.*` family on failures. So a *bare* application event named `:done` or
+`:error` — or anything sharing their first token — will ALSO fire on those
+reserved events. In a `parallel` chart this is pernicious: as the regions
+finalise, the auto-raised `done.state.*` re-fires your `:done` transitions,
+which re-enter/re-finalise the regions, raising more `done.state.*` forever —
+the macrostep wedges in an eventless loop ("Eventless transition loop
+exceeded 1000 iterations").
+
+*Rule: give every application-domain event a namespace.* A namespaced keyword
+has no dot in its first token, so it can never prefix-match a reserved family:
+
+[source,clojure]
+----
+;; WRONG — bare names collide with the reserved done.* / error.* families
+(transition {:event :done :target :finished})
+{:event :tick :data-schema [:map [:n :int]]}
+
+;; RIGHT — namespaced; safe AND self-documenting
+(transition {:event :count/done :target :finished})
+{:event :count/tick :data-schema [:map [:n :int]]}
+----
+
+You may keep the natural name — `:count/done` is fine; it is the *bare* `:done`
+that is the hazard. Leave the framework/reserved events alone: `:llm.idle`,
+`:llm.user-message`, the `error.*` family (e.g. `:error.llm.max-turns`), and the
+engine's `done.state.*` / `done.invoke.*`. Because event-tool names follow
+`kw->anthropic-name` (previous section), a namespaced event-tool is exposed to
+the model with the namespace folded in: `:count/done` becomes
+`event__count_done` — update your system-prompt text to match. (Region-tool
+names work the same way: `:steer/probe` is still `region__steer_probe`.) Every
+bundled example under `src/escapement/examples/` follows this convention.
+
+[NOTE]
+====
+A closely-related `parallel` footgun: a transition declared on a *region root*
+that targets a region-`<final>` must be `:type :internal`. As an *external*
+transition its SCXML domain is the whole `parallel` (the LCCA of the region root
+and its `<final>` child), so its exit set spans every sibling region and
+`remove-conflicting-transitions` drops it — the region never finalises and the
+join never completes. `:type :internal` keeps the domain in-region.
+====
 
 === JSON-string coercion for nested collections
 
@@ -1389,6 +1442,8 @@ The page targets them via
 Subsequent `v` presses just re-log the URL.
 * In `--debug` mode the active state lights up exactly when you step (`s`) or continue (`c`); the just-fired transition flashes red on every step.
 No special config is needed — debug-paced transitions flow through the same path normal-mode transitions do.
++
+`--debug --api-server <port>` also exposes the same pause/step controller and a live chart highlight in the browser RAD explorer, so you can step the run from the web UI as well as the TUI (see <<api-server>>).
 * The page header has zoom controls (`−` / `100%` / `+` / `Fit`),
   responds to `⌘+` / `⌘−` / `⌘0` (or `Ctrl` on non-Mac), and `⌘-scroll`
 zooms around the cursor.
@@ -2647,6 +2702,9 @@ If it is requesting abort, emit `:runner/aborted`
 (The pre-existing max-iterations bound emits the same `:runner/aborted`
 event with `{:reason :max-iterations}`.)
 2. Drain currently-deliverable events through the processor.
+When a debug controller is supplied (`--debug`), the event queue is an
+`escapement.engine.instrumented-queue` that applies the pause/step gate per event as it drains — so the runner loop, the TUI keys, and the api-server control plane all single-step through one primitive.
+With no controller the plain in-process queue is used and there is zero stepping overhead.
 3. After each event, save working memory to the checkpoint store.
 4. When the queue is empty, ask each `InvocationProcessor` how many live workers it has.
 If zero, terminate with `:status :done`.
@@ -2718,6 +2776,8 @@ Display:
 
 * `--debug` forces the TUI on (requires a TTY) and starts paused so you can step or press `c` to continue.
 This is the canonical way to watch a non-interactive chart's conversation traffic.
+Pause-on-start is gated by `:debug {:auto-pause? true}` in `.escapement.edn` (default true).
+When combined with `--api-server`, the same pause/step controller is also reachable from the browser Debugger (see <<api-server>>), so you can drive the run from either the TUI keys or the web UI.
 * `--no-tui` forces the TUI off (useful in CI, or to fall back to stdin prompts for `:human-input` invocations).
 * Charts marked `^{:interactive? true}` auto-open the TUI when a TTY is available.
 Other charts stay headless unless `--debug` is passed.
@@ -2781,10 +2841,34 @@ Accepts a comma-separated list and can be passed multiple times; entries accumul
 * `--source-paths a:b:c` prepends classpath roots before chart load.
 * `--deps '{lib/x {:mvn/version "1.0.0"}}'` resolves additional runtime Maven/git coordinates via `babashka.deps/add-deps` before chart load.
 * `--trace` emits per-tick transcript events.
+* `--dump-d2` prints the chart's `d2` diagram source to stdout and exits, before any execution machinery (no LLM backend, no session dir, no API key needed).
+Pipe it to the `d2` binary to render — e.g. `escapement run my.ns/agent --dump-d2 | d2 - chart.svg`.
 * `--log-level debug|info|warn|error` sets logging verbosity (case-insensitive).
 An explicit value always wins.
 With no explicit value, headless (`--no-tui`) runs default to `info` so live archiving stays cheap, while interactive runs keep the library default (`debug`).
 An unrecognized value exits with usage error 2.
+
+[[api-server]]
+==== `--api-server <port>` — web RAD explorer + live control
+
+* `--api-server <port>` publishes a small HTTP server (on the same origin) that serves two things:
++
+1. A **read-only EQL/Pathom API** at `POST /api` (transit+json EQL) over the
+work directory — the active session, past sessions, paged transcript, artifacts, and the per-node invocation drill-in.
+2. An optional **browser RAD explorer** (a Fulcro SPA): Sessions → Events →
+Artifacts reports plus a session-detail screen, all reading that API.
+The SPA bundle is lazy-loaded and content-addressed (see `docs/web-ui.md`); a normal `run` without `--api-server` never loads any UI code.
++
+The explorer is independent of the JLine TUI — point a browser at the printed
+`http://127.0.0.1:<port>/` URL to inspect a run.
+
+* The *same* RAD reports also render to a terminal via a fulcro-tui target, so
+the explorer is a single screen definition with two render adapters (browser Semantic-UI and TUI).
+
+* **Live single-stepping from the browser.** Combine `--api-server` with
+`--debug` and the web Debugger gains a control plane over the *same* live run the TUI drives: **Pause / Step / Continue / Arm-pause-on-next-external**, the live state configuration, and the events still queued but not yet delivered, plus an embedded chart visualizer that highlights the live active states as you step.
+It shares the one pause gate with the TUI's `s`/`c`/`p`/`P` keys and the `v` live chart view, driven over HTTP instead of the keyboard (`--debug` still forces the TUI on, so both surfaces are live together).
+The control plane is active only while a debug controller is present (i.e. under `--debug`); a plain `--api-server` run exposes the read-only API only.
 
 [[project-config]]
 === Project configuration (`.escapement.edn`)

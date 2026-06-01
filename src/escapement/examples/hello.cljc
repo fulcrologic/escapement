@@ -1,6 +1,6 @@
 (ns escapement.examples.hello
   "M6 demo: minimal single-region chart that drives one LLM conversation. The
-  LLM is asked to call a single event-tool `event__done` with a short greeting
+  LLM is asked to call a single event-tool `event__hello_done` with a short greeting
   string; the chart then transitions to a wrapped final state.
 
   A top-level `final` would empty the configuration set on entry, so the final
@@ -12,7 +12,7 @@
     [escapement.chart.helpers :as h]))
 
 (def system-prompt
-  (str "When asked, call the `event__done` tool exactly once with `{\"greeting\":\"<a short hello "
+  (str "When asked, call the `event__hello_done` tool exactly once with `{\"greeting\":\"<a short hello "
     "in any language>\"}`. Keep the greeting under 30 characters. After the tool call, end your turn. "
     "Do not call any other tools."))
 
@@ -25,10 +25,10 @@
           {:id             "hello"
            :system         system-prompt
            :real-tools     []
-           :allowed-events [{:event       :done
+           :allowed-events [{:event       :hello/done
                              :data-schema [:map [:greeting :string]]}]
            :message        "Say hello."})
-        (transition {:event :done :target :finished}
+        (transition {:event :hello/done :target :finished}
           (script {:expr (fn [_env data]
                            [(ops/assign :greeting
                               (get-in data [:_event :data :greeting]))])})))

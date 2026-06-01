@@ -45,6 +45,10 @@
                                 and exit without running it. Requires no LLM
                                 backend and creates no session dir. Pipe to the
                                 `d2` binary to render (e.g. ... --dump-d2 | d2 -).
+        --api-server <port>     Also start a read-only EQL HTTP API on <port>
+                                for the duration of the run. POST a transit
+                                EQL query to /api to inspect the active session
+                                (and browse past sessions under --work-dir).
         --debug                 Enable debug mode: forces the TUI on (even
                                 for non-interactive charts), enables the
                                 inspector overlay (`?` to open), and — when
@@ -61,6 +65,7 @@
     [clojure.string :as str]
     [com.fulcrologic.statecharts :as sc]
     [escapement.config :as config]
+    [escapement.debug.control-handle :as ctrl-handle]
     [escapement.debug.controller :as dbg]
     [escapement.debug.d2 :as d2]
     [escapement.invocation.human-input :as human-input]
@@ -644,65 +649,105 @@
                                    ;; when no explicit base-dir arg is given.
                                    (when session-dir
                                      (alter-meta! reg assoc :escapement/base-dir session-dir))
-                                   reg))]
-    (try
-      (let [session-kw         (keyword "session" session)
-            parse-pos-int      (fn [k]
-                                 (when-let [s (get opts k)]
-                                   (let [n (try (Long/parseLong s) (catch Throwable _ nil))]
-                                     (when (or (nil? n) (not (pos? n)))
-                                       (die! (str "--" (name k) " must be a positive integer (got: " s ")")
-                                         2))
-                                     n)))
-            max-frozen-cycles  (parse-pos-int :max-frozen-cycles)
-            quiescent-sleep-ms (parse-pos-int :quiescent-sleep-ms)
-            summary            (runner/run!
-                                 (cond-> {:chart                  chart
-                                          :session-id             session-kw
-                                          :transcript-path        transcript
-                                          :checkpoint-dir         checkpoint-dir
-                                          :session-dir            session-dir
-                                          :backend                backend
-                                          :backend-default-models backend-default-models
-                                          :catalog-ratings        catalog-ratings
-                                          :eligibility-strict?    eligibility-strict?
-                                          :tool-registry          tool-registry
-                                          :human-renderer         human-renderer
-                                          :initial-data           initial-data
-                                          :resume?                (boolean (:resume opts))
-                                          :trace?                 (boolean (:trace opts))
-                                          :multi-session?         (boolean (:multi-session? chart-meta))
-                                          :prelude-events         prelude-events
-                                          :transcript-tap         (when tui-handle
-                                                                    (fn [ev] (tui/event! tui-handle ev)))
-                                          :debug-controller       debug-controller
-                                          :human-input-active?    (when tui-handle
-                                                                    (fn [] (tui/human-input-active? tui-handle)))
-                                          :on-env-ready           (when tui-handle
-                                                                    (fn [env]
-                                                                      (tui/attach-session!
-                                                                        tui-handle
-                                                                        session-kw
-                                                                        (::sc/event-queue env))
-                                                                      (tui/attach-env! tui-handle env chart)))}
-                                   max-frozen-cycles (assoc :max-frozen-cycles max-frozen-cycles)
-                                   quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)))]
-        ;; In debug mode, hold the TUI open after the chart finishes so the
-        ;; user can keep browsing the inspector (artifacts, history, viz).
-        ;; Ctrl-C from the input thread breaks await-quit!.
-        (when (and tui-handle debug?)
-          (tui/await-quit! tui-handle))
-        (when tui-handle (tui/stop! tui-handle))
-        (println "session         " session)
-        (println "transcript      " transcript)
-        (println "checkpoint-dir  " checkpoint-dir)
-        (println "final-config    " (:final-config summary))
-        (System/exit 0))
-      (catch Throwable t
-        (when tui-handle (tui/stop! tui-handle))
-        (binding [*out* *err*]
-          (println "[cli] chart run failed:" (.getMessage t)))
-        (System/exit 1)))))
+                                   reg))
+        api-server-port        (when-let [s (:api-server opts)]
+                                 (let [n (try (Long/parseLong s) (catch Throwable _ nil))]
+                                   (when-not (and n (pos? n))
+                                     (die! (str "--api-server must be a positive port (got: " s ")") 2))
+                                   n))
+        ;; Shared control handle: created here (before the env exists) and given
+        ;; to BOTH the api-server ctx and `run!`'s on-env-ready (which fills it
+        ;; with the live env/queue/controller). This is the seam by which the
+        ;; server's live resolvers/mutations reach the running chart under bb.
+        control-handle         (when api-server-port (ctrl-handle/new-handle))
+        ;; Read-only EQL API over the work-dir, scoped to this run's session,
+        ;; PLUS a live control plane (pause/step/continue) when a debug
+        ;; controller is active. Lazy-required so a normal run never loads Pathom.
+        api-handle             (when api-server-port
+                                 (let [start! (requiring-resolve 'escapement.ui.server/start!)]
+                                   (binding [*out* *err*]
+                                     (println (str "[cli] EQL API on http://localhost:" api-server-port "/api"))
+                                     (println (str "[cli] UI     on http://localhost:" api-server-port "/")))
+                                   (start! {:port              api-server-port
+                                            :work-dir          work-dir
+                                            :active-session-id session
+                                            :chart             chart
+                                            :controller        debug-controller
+                                            :live              control-handle})))
+        exit-code
+        (try
+          (let [session-kw         (keyword "session" session)
+                parse-pos-int      (fn [k]
+                                     (when-let [s (get opts k)]
+                                       (let [n (try (Long/parseLong s) (catch Throwable _ nil))]
+                                         (when (or (nil? n) (not (pos? n)))
+                                           (die! (str "--" (name k) " must be a positive integer (got: " s ")")
+                                             2))
+                                         n)))
+                max-frozen-cycles  (parse-pos-int :max-frozen-cycles)
+                quiescent-sleep-ms (parse-pos-int :quiescent-sleep-ms)
+                summary            (runner/run!
+                                     (cond-> {:chart                  chart
+                                              :session-id             session-kw
+                                              :transcript-path        transcript
+                                              :checkpoint-dir         checkpoint-dir
+                                              :session-dir            session-dir
+                                              :backend                backend
+                                              :backend-default-models backend-default-models
+                                              :catalog-ratings        catalog-ratings
+                                              :eligibility-strict?    eligibility-strict?
+                                              :tool-registry          tool-registry
+                                              :human-renderer         human-renderer
+                                              :initial-data           initial-data
+                                              :resume?                (boolean (:resume opts))
+                                              :trace?                 (boolean (:trace opts))
+                                              :multi-session?         (boolean (:multi-session? chart-meta))
+                                              :prelude-events         prelude-events
+                                              :transcript-tap         (when tui-handle
+                                                                        (fn [ev] (tui/event! tui-handle ev)))
+                                              :debug-controller       debug-controller
+                                              :human-input-active?    (when tui-handle
+                                                                        (fn [] (tui/human-input-active? tui-handle)))
+                                              :on-env-ready           (when (or tui-handle control-handle)
+                                                                        (fn [env]
+                                                                          (when tui-handle
+                                                                            (tui/attach-session!
+                                                                              tui-handle
+                                                                              session-kw
+                                                                              (::sc/event-queue env))
+                                                                            (tui/attach-env! tui-handle env chart))
+                                                                          ;; Fill the shared control handle so the
+                                                                          ;; api-server's live resolvers/mutations
+                                                                          ;; can reach the running env + queue.
+                                                                          (when control-handle
+                                                                            (ctrl-handle/fill! control-handle
+                                                                              {:env        env
+                                                                               :session-id session-kw
+                                                                               :queue      (::sc/event-queue env)
+                                                                               :controller debug-controller}))))}
+                                       max-frozen-cycles (assoc :max-frozen-cycles max-frozen-cycles)
+                                       quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)))]
+            ;; In debug mode, hold the TUI open after the chart finishes so the
+            ;; user can keep browsing the inspector (artifacts, history, viz).
+            ;; Ctrl-C from the input thread breaks await-quit!.
+            (when (and tui-handle debug?)
+              (tui/await-quit! tui-handle))
+            (when tui-handle (tui/stop! tui-handle))
+            (println "session         " session)
+            (println "transcript      " transcript)
+            (println "checkpoint-dir  " checkpoint-dir)
+            (println "final-config    " (:final-config summary))
+            0)
+          (catch Throwable t
+            (when tui-handle (tui/stop! tui-handle))
+            (binding [*out* *err*]
+              (println "[cli] chart run failed:" (.getMessage t)))
+            1)
+          (finally
+            (when api-handle
+              (try ((requiring-resolve 'escapement.ui.server/stop!) api-handle)
+                   (catch Throwable _ nil)))))]
+    (System/exit exit-code)))
 
 (defn- cmd-login [args]
   (let [[provider & _rest] args]
@@ -761,6 +806,8 @@ Common `run` flags:
   --no-tui                      Force-disable the TUI (overrides ^:interactive?).
   --dump-d2                     Print the chart's d2 diagram source and exit
                                 (no run, no backend). Pipe to `d2 -` to render.
+  --api-server <port>           Serve a read-only EQL HTTP API on <port> during
+                                the run (POST transit EQL to /api).
   --debug                       Force the TUI on, enable inspector (`?`), and
                                 pause before the first event so you can step.
                                 Press `c` to continue. Recommended for watching
