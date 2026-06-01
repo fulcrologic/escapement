@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Escapement</title>
+    <!-- Fomantic-UI (Semantic-UI fork) CSS for the RAD Semantic-UI render adapter
+         (escapement.ui.rendering.semantic-ui). CDN is fine for the read-only inspector. -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fomantic-ui@2.9.3/dist/semantic.min.css"/>
+</head>
+<body>
+<div id="app"></div>
+<!-- __MAIN_JS__ is replaced by escapement.ui.server with the content-addressed bundle URL
+     (/js/main/<sha>.js) at serve time, so a freshly built bundle never reads stale from cache. -->
+<script src="__MAIN_JS__"></script>
+</body>
+</html>

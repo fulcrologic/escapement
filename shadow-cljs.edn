@@ -1,5 +1,18 @@
-{:deps   {:aliases [:cljs-test]}
- :builds {:node-test {:target     :node-test
+{:deps   {:aliases [:cljs-test :cljs]}
+ :nrepl  {:port 9001}
+ :builds {;; Browser SPA for the read surface. Output lands under resources/public so the
+          ;; escapement server can serve it from the classpath (dev + release jar).
+          :main      {:target     :browser
+                      :output-dir "resources/public/js/main"
+                      :asset-path "/js/main"
+                      :modules    {:main {:init-fn escapement.ui.client/init}}
+                      :dev        {:compiler-options
+                                   {:external-config {:guardrails {:emit-spec? true :throw? false}
+                                                      :fulcro     {:html-source-annotations? true}}}}
+                      :devtools   {:preloads   [com.fulcrologic.devtools.chrome-preload]
+                                   :after-load escapement.ui.client/refresh}}
+
+          :node-test {:target     :node-test
                       :output-to  "out/node-tests.js"
                       :ns-regexp  "-test$"
                       :autorun    false

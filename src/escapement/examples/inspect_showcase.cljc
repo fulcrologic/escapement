@@ -167,12 +167,12 @@
     "no chit-chat.\n\n"
     "PHASE 1 (PLAN): Write a numbered 2-3 step PLAN for answering the user's "
     "question. Do NOT answer the question yet. Then call the event tool "
-    "`event__step` exactly once with {\"phase\":\"plan\"} to finish phase 1.\n\n"
+    "`event__inspect_step` exactly once with {\"phase\":\"plan\"} to finish phase 1.\n\n"
     "PHASE 2 (ANSWER): You will receive a user message telling you to execute "
     "the plan. First call the real tool `fs_write` exactly once with "
     "{\"path\":\"scratch/fact.txt\",\"content\":\"<the key fact>\"} to record "
     "the key fact. After the tool result, write your FINAL one-paragraph "
-    "answer to the original question. Then call the event tool `event__done` "
+    "answer to the original question. Then call the event tool `event__inspect_done` "
     "exactly once with {\"summary\":\"<one-sentence summary of your answer>\"} "
     "to finish.\n\n"
     "Do not call any other tools. Do not loop. One event tool per phase."))
@@ -181,7 +181,7 @@
   (str
     "Phase 1 accepted. Now execute the plan: call `fs_write` once to record "
     "the key fact at scratch/fact.txt, then write your FINAL one-paragraph "
-    "answer, then call `event__done` with a one-sentence summary."))
+    "answer, then call `event__inspect_done` with a one-sentence summary."))
 
 (def agent                                                  ; runnable: bb -m escapement.cli run escapement.examples.inspect-showcase/agent
   (chart/statechart
@@ -202,9 +202,9 @@
            :real-tools     [:fs/write]
            ;; Two event-tools: one per phase boundary.
            :allowed-events
-           [{:event       :step
+           [{:event       :inspect/step
              :data-schema [:map [:phase :string]]}
-            {:event       :done
+            {:event       :inspect/done
              :data-schema [:map [:summary :string]]}]
            ;; Conservative budgets so a live run can never hang
            ;; (cheat-sheet §1: ALWAYS bound the loop). Two phases
@@ -221,12 +221,12 @@
         ;; record data and bump the :phase counter WITHOUT exiting
         ;; :converse, so the :llm.idle capture transition below stays
         ;; active for the same turn (mirrors iterate.clj). ----------
-        (transition {:event :step :type :internal}
+        (transition {:event :inspect/step :type :internal}
           (script
             {:expr (fn [_env _data]
                      [(ops/assign :phase 1)])}))
 
-        (transition {:event :done :type :internal}
+        (transition {:event :inspect/done :type :internal}
           (script
             {:expr (fn [_env data]
                      [(ops/assign :phase 2)

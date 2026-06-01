@@ -41,9 +41,9 @@
         (>= (System/currentTimeMillis) deadline) t
         :else (do (Thread/sleep 25) (recur))))))
 
-(specification "hello chart: LLM fires :done and chart reaches :finished"
+(specification "hello chart: LLM fires :hello/done and chart reaches :finished"
   (let [backend (mock-backend
-                  [(tool-use [{:id "u1" :name "event__done" :input {:greeting "Bonjour!"}}])
+                  [(tool-use [{:id "u1" :name "event__hello_done" :input {:greeting "Bonjour!"}}])
                    (end-turn)])
         proc    (llmc/new-processor {:backend backend :tool-registry (tp/new-registry)})
         t       (-> (dct/new-testing-env {:statechart hello/agent} proc)

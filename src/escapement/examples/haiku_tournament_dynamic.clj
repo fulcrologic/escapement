@@ -262,7 +262,7 @@
 ;; Each `:haiku-N` state runs one llm-conversation with the poet system
 ;; prompt. On `:llm.idle` we capture the text, parse it down to 3 lines,
 ;; accumulate into `:haikus`, then advance. The third step calls
-;; `mux/reply` to send the per-poet `:poet-result` event back to the
+;; `mux/reply` to send the per-poet `:haiku/poet-result` event back to the
 ;; tournament parent (the grandparent).
 ;; ---------------------------------------------------------------------------
 
@@ -293,14 +293,14 @@
                          haikus (cond-> (or (:haikus data) [])
                                   haiku (conj haiku))]
                      (when (and last? (= 3 (count haikus)))
-                       (mux/reply env :poet-result
+                       (mux/reply env :haiku/poet-result
                          {:idx (:idx data) :haikus haikus}))
                      [(ops/assign :haikus haikus)]))}))
 
       (transition {:event :error.llm :target :reported}
         (script {:expr
                  (fn [env data]
-                   (mux/reply env :poet-result
+                   (mux/reply env :haiku/poet-result
                      {:idx        (:idx data)
                       :abstained? true
                       :error      (get-in data [:_event :data])})
@@ -309,7 +309,7 @@
       (transition {:event :child/safety-stop :target :reported}
         (script {:expr
                  (fn [env data]
-                   (mux/reply env :poet-result
+                   (mux/reply env :haiku/poet-result
                      {:idx (:idx data) :abstained? true :hang? true})
                    nil)})))))
 
@@ -353,12 +353,12 @@
                          parsed (parse-pick text 3)]
                      (if parsed
                        (let [[idx0 reason] parsed]
-                         (mux/reply env :judge1-result
+                         (mux/reply env :haiku/judge1-result
                            {:idx       (:idx data)
                             :poet-idx  (:poet-idx data)
                             :haiku-idx idx0
                             :reason    reason}))
-                       (mux/reply env :judge1-result
+                       (mux/reply env :haiku/judge1-result
                          {:idx (:idx data) :poet-idx (:poet-idx data)
                           :abstained? true :raw text}))
                      nil))}))
@@ -366,7 +366,7 @@
       (transition {:event :error.llm :target :reported}
         (script {:expr
                  (fn [env data]
-                   (mux/reply env :judge1-result
+                   (mux/reply env :haiku/judge1-result
                      {:idx (:idx data) :poet-idx (:poet-idx data)
                       :abstained? true
                       :error (get-in data [:_event :data])})
@@ -375,7 +375,7 @@
       (transition {:event :child/safety-stop :target :reported}
         (script {:expr
                  (fn [env data]
-                   (mux/reply env :judge1-result
+                   (mux/reply env :haiku/judge1-result
                      {:idx (:idx data) :poet-idx (:poet-idx data)
                       :abstained? true :hang? true})
                    nil)})))
@@ -417,18 +417,18 @@
                          parsed (parse-pick text n)]
                      (if parsed
                        (let [[idx0 reason] parsed]
-                         (mux/reply env :judge2-result
+                         (mux/reply env :haiku/judge2-result
                            {:idx          (:idx data)
                             :finalist_idx idx0
                             :reason       reason}))
-                       (mux/reply env :judge2-result
+                       (mux/reply env :haiku/judge2-result
                          {:idx (:idx data) :abstained? true :raw text}))
                      nil))}))
 
       (transition {:event :error.llm :target :reported}
         (script {:expr
                  (fn [env data]
-                   (mux/reply env :judge2-result
+                   (mux/reply env :haiku/judge2-result
                      {:idx (:idx data) :abstained? true
                       :error (get-in data [:_event :data])})
                    nil)}))
@@ -436,7 +436,7 @@
       (transition {:event :child/safety-stop :target :reported}
         (script {:expr
                  (fn [env data]
-                   (mux/reply env :judge2-result
+                   (mux/reply env :haiku/judge2-result
                      {:idx (:idx data) :abstained? true :hang? true})
                    nil)})))
     (final {:id :reported})))
@@ -599,7 +599,7 @@
                                        :theme (:theme data)}})})
 
         ;; Accumulate per-poet results as they reply.
-        (transition {:event :poet-result :type :internal}
+        (transition {:event :haiku/poet-result :type :internal}
           (script {:expr
                    (fn [_env data]
                      (let [{:keys [idx haikus abstained?]}
@@ -633,7 +633,7 @@
                                          :poet-idx poet-i
                                          :haikus   (get-in data [:haikus poet-i])}}))})
 
-        (transition {:event :judge1-result :type :internal}
+        (transition {:event :haiku/judge1-result :type :internal}
           (script {:expr
                    (fn [_env data]
                      (let [{:keys [idx poet-idx haiku-idx reason abstained?]}
@@ -656,9 +656,9 @@
                    (fn [env data]
                      (let [f (compute-finalists (:haikus data)
                                (:judge1-picks data))]
-                       (raise! env :tally-r1-done)
+                       (raise! env :haiku/tally-r1-done)
                        [(ops/assign :finalists f)]))}))
-        (transition {:event :tally-r1-done :target :judging-r2}))
+        (transition {:event :haiku/tally-r1-done :target :judging-r2}))
 
       ;; ---------- PHASE 5: judging round 2 — multiplex of M judges ----------
       (state {:id :judging-r2}
@@ -672,7 +672,7 @@
                                        :persona   (persona-for idx)
                                        :finalists (:finalists data)}})})
 
-        (transition {:event :judge2-result :type :internal}
+        (transition {:event :haiku/judge2-result :type :internal}
           (script {:expr
                    (fn [_env data]
                      (let [{:keys [idx finalist_idx reason abstained?]}
@@ -691,9 +691,9 @@
           (script {:expr
                    (fn [env data]
                      (let [result (compute-winner (:judge2-votes data))]
-                       (raise! env :tally-r2-done)
+                       (raise! env :haiku/tally-r2-done)
                        [(ops/assign :result result)]))}))
-        (transition {:event :tally-r2-done :target :summarizing}))
+        (transition {:event :haiku/tally-r2-done :target :summarizing}))
 
       ;; ---------- PHASE 7: host LLM writes tournament-summary.md ----------
       (state {:id :summarizing}

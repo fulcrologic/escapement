@@ -105,6 +105,7 @@
     [com.fulcrologic.statecharts.data-model.operations :as ops]
     [com.fulcrologic.statecharts.elements
      :refer [final on-entry on-exit parallel script send state transition]]
+    [com.fulcrologic.statecharts.convenience :refer [send-after]]
     [escapement.chart.helpers :as h]
     [escapement.chart.service :as service]))
 
@@ -116,24 +117,24 @@
     "3, ...). It returns a string `PROBE-ACK t=<t>`; copy that exact "
     "string as the FIRST line of your reply.\n"
     "2. THEN, on the SAME turn, write the line `COUNT <n>` (n starts at "
-    "1 and increases by 1 each turn) and call the `event__tick` tool "
+    "1 and increases by 1 each turn) and call the `event__count_tick` tool "
     "exactly once with `{\"n\":<n>}`, then END your turn.\n"
     "3. Keep doing this turn after turn until a user message tells you "
     "to STOP.\n"
     "4. If a user message says STOP: from that turn on, still call "
     "`region__steer_probe` first and echo its `PROBE-ACK t=<t>` line, "
     "but then write ONLY the line `STEERED MANGO` (no more `COUNT`) and "
-    "call `event__tick` with `{\"n\":0}`. After two `STEERED MANGO` "
-    "turns, call the `event__done` tool once with "
+    "call `event__count_tick` with `{\"n\":0}`. After two `STEERED MANGO` "
+    "turns, call the `event__count_done` tool once with "
     "`{\"reason\":\"steered\"}` and end your turn.\n"
-    "Be terse. One `event__tick` per turn; never skip the "
+    "Be terse. One `event__count_tick` per turn; never skip the "
     "`region__steer_probe` call."))
 
 (def steer-message
   (str "STOP counting now. From this turn on your entire reply is the "
     "`PROBE-ACK t=<t>` line followed by the line `STEERED MANGO` and a "
-    "call to `event__tick` with `{\"n\":0}`. After two STEERED turns "
-    "call `event__done` with `{\"reason\":\"steered\"}`."))
+    "call to `event__count_tick` with `{\"n\":0}`. After two STEERED turns "
+    "call `event__count_done` with `{\"reason\":\"steered\"}`."))
 
 (def agent
   (chart/statechart
@@ -149,16 +150,23 @@
               {:id "subject"
                ;; autoforward? defaults true -> tell-llm
                ;; (fired from the region-tool handler)
-               ;; reaches this conversation. region-tools
-               ;; are auto-discovered from the service
-               ;; registry — no :real-tools needed here.
+               ;; reaches this conversation.
                :system         system-prompt
                :real-tools     []
+               ;; Region-tools are NOT auto-discovered — the LLM palette is
+               ;; built ONLY from :chart-tools, filtered by :owner. The
+               ;; :serving state (its on-entry) registers :steer/probe, so we
+               ;; must expose owner :serving here or the model never sees
+               ;; `region__steer_probe` and the mid-turn steer never fires.
+               :chart-tools    [{:owner :serving}]
                :allowed-events
-               [{:event       :tick
+               [{:event       :count/tick
                  :description "Record one counting step."
                  :data-schema [:map [:n :int]]}
-                {:event       :done
+                ;; NAMESPACED on purpose: a bare :done would prefix-match the
+                ;; reserved `done.state.*` raised at the parallel join and wedge
+                ;; the macrostep. `:count/done` keeps the name, namespaced & safe.
+                {:event       :count/done
                  :description "End the counting task."
                  :data-schema [:map [:reason :string]]}]
                :max-turns      8
@@ -168,12 +176,12 @@
             ;; event-tool's chart event :type :internal
             ;; so it never tears down :counting before
             ;; the parent observes it / :llm.idle.
-            (transition {:event :tick :type :internal}
+            (transition {:event :count/tick :type :internal}
               (script {:expr (fn [_env data]
                                [(ops/assign
                                   :last-tick
                                   (get-in data [:_event :data :n]))])}))
-            (transition {:event :done :target :c-done}
+            (transition {:event :count/done :target :c-done}
               (script {:expr (fn [_env data]
                                [(ops/assign
                                   :done-reason
@@ -189,20 +197,20 @@
         ;; docstring).
         (state {:id :probe :initial :serving}
 
-          ;; Hard safety stop: if the model never calls
-          ;; event__done, force the whole chart down after a
-          ;; generous wall-clock budget.
-          (on-entry {}
-            (send {:id    :safety-timer
-                   :event :safety/stop
-                   :delay 150000}))
+          ;; Hard safety stop. `send-after` (on-entry send + on-exit cancel) is
+          ;; REQUIRED over a raw `send`: a raw delayed send isn't cancelled when
+          ;; the chart finishes early, so the runner would idle ~150s for the
+          ;; orphaned timer after reaching :finished. send-after cancels on exit.
+          (send-after {:id    :safety-timer
+                       :event :safety/stop
+                       :delay 150000})
 
           (state {:id :serving}
             ;; Register the region-tool on entry; remove
             ;; it on exit (service-region contract).
             (on-entry {}
               (service/register-tool!
-                {:tool         :steer-probe
+                {:tool         :steer/probe
                  :description
                  (str "Call this exactly once at the start of "
                    "every turn with the current turn number "
@@ -210,7 +218,26 @@
                    "string PROBE-ACK t=<t> which you must echo.")
                  :input-schema [:map [:t :int]]}))
             (on-exit {}
-              (service/unregister-tool! :steer-probe))
+              (service/unregister-tool! :steer/probe))
+
+            ;; Each `event__count_tick` parks the worker in :awaiting-user, so the
+            ;; chart must resume it every turn. The steer is delivered here at
+            ;; the turn-end (:llm.idle) boundary — the RELIABLE path that
+            ;; actually reaches the parked worker's user-msg-queue (the same
+            ;; mechanism steered_convo uses). The region-tool `steer-probe`
+            ;; below still fires per turn and yields the grepable `PROBE-ACK
+            ;; t=<t>` mid-turn marker (so the mid-turn boundary stays visible),
+            ;; but injecting the steer from that mid-turn handler does NOT
+            ;; reliably reach the worker, so the steer itself rides the
+            ;; turn-end nudge. FIRST idle injects the one-shot steer; later
+            ;; idles nudge "Continue." until the model fires event__count_done.
+            (transition {:event :llm.idle :type :internal
+                         :cond  (fn [_env data] (not (:steer-sent? data)))}
+              (script {:expr (fn [_env _data] [(ops/assign :steer-sent? true)])})
+              (h/tell-llm {:expr (fn [_env _data] steer-message)}))
+            (transition {:event :llm.idle :type :internal
+                         :cond  (fn [_env data] (boolean (:steer-sent? data)))}
+              (h/tell-llm {:expr (fn [_env _data] "Continue.")}))
 
             ;; Mid-turn handler. Records the probe turn
             ;; number; on the FIRST call it also fires
@@ -219,14 +246,14 @@
             ;; LLM echoes (PROBE-ACK t=<t>), making the
             ;; injection boundary grepable per-turn.
             (service/handle
-              :steer-probe
+              :steer/probe
               (fn [_env request]
                 ;; Synchronous reply the LLM echoes as
                 ;; `PROBE-ACK t=<t>` (first line of its
                 ;; turn) — makes the per-turn mid-turn
                 ;; boundary grepable. The actual steer
                 ;; injection + one-shot bookkeeping is
-                ;; done by the :steer-probe transitions
+                ;; done by the :steer/probe transitions
                 ;; below (the same request event is also
                 ;; posted to the parent chart at
                 ;; llm_conversation.clj:614).
@@ -234,30 +261,15 @@
                              (get-in request [:data :t]))
                  :is-error false})))
 
-          ;; The region-tool request event (:steer-probe) is
-          ;; ALSO posted to the parent chart
-          ;; (llm_conversation.clj:614) — observe it here to
-          ;; (a) record the injection turn and (b) fire the
-          ;; one-shot steer via h/tell-llm on the FIRST probe.
-          ;; :type :internal so :serving (which owns the tool
-          ;; registration) is never torn down mid-turn.
-          (transition {:event :steer-probe
-                       :type  :internal
-                       :cond  (fn [_env data]
-                                (not (:steer-sent? data)))}
-            (script {:expr (fn [_env data]
-                             [(ops/assign :steer-sent? true)
-                              (ops/assign
-                                :inject-turn
-                                (get-in data [:_event :data :t]))])})
-            (h/tell-llm
-              {:expr (fn [_env _data] steer-message)}))
-          ;; Subsequent probes after the steer: just record
-          ;; the latest probed turn (latency bookkeeping).
-          (transition {:event :steer-probe
-                       :type  :internal
-                       :cond  (fn [_env data]
-                                (boolean (:steer-sent? data)))}
+          ;; The region-tool request event (:steer/probe) is ALSO posted to the
+          ;; parent chart — observe it here purely to RECORD the per-turn
+          ;; mid-turn boundary (latency bookkeeping). The steer itself is NOT
+          ;; injected from here: injecting via this mid-turn handler does not
+          ;; reliably reach the parked worker, so the steer rides the turn-end
+          ;; (:llm.idle) nudge in :serving instead. :type :internal so :serving
+          ;; (which owns the tool registration) is never torn down mid-turn.
+          (transition {:event :steer/probe
+                       :type  :internal}
             (script {:expr (fn [_env data]
                              [(ops/assign
                                 :last-probe-turn
@@ -267,15 +279,26 @@
           ;; (mirrors steered_convo.clj's monitor exit, 001
           ;; §1 / 002 Notes). Reached on the conversation's
           ;; :done, the safety timer, or the turn-end hook.
-          (transition {:event :done :target :p-done})
-          (transition {:event :safety/stop :target :p-done})
+          ;; :type :internal REQUIRED — source is the region root (:probe), so an
+          ;; external transition's domain would be the whole `:work` parallel and it
+          ;; would be dropped by remove-conflicting-transitions (conflicts with the
+          ;; convo region's :count/done), leaving this region un-finalised. Internal
+          ;; keeps the domain region-local.
+          (transition {:event :count/done :target :p-done :type :internal})
+          ;; No region-level :safety/stop — a region-root external transition's
+          ;; domain is the whole `:work` parallel, so it would exit+re-enter
+          ;; `:work` (restarting the conversation) instead of terminating. The
+          ;; top-level `:safety/stop -> :finished` ends the chart cleanly.
           (final {:id :p-done})))
 
       ;; Both regions reached their region final -> parallel raises
       ;; done.state.work; the clean, non-wedging join.
       (transition {:event :done.state.work :target :finished})
       ;; Belt-and-braces terminators.
-      (transition {:event :done :target :finished})
+      (transition {:event :count/done :target :finished})
       (transition {:event :safety/stop :target :finished})
+      ;; Chatty model ignores the steer and burns :max-turns -> self-cancel
+      ;; :error.llm.max-turns. Terminate promptly rather than idle to :safety/stop.
+      (transition {:event :error.llm.max-turns :target :finished})
 
       (final {:id :finished}))))

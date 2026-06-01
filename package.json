@@ -1,8 +1,17 @@
 {
-  "name": "escapement-cljs-tests",
+  "name": "escapement-cljs",
   "version": "0.0.0",
   "private": true,
-  "description": "shadow-cljs harness used solely by `bb cljs-test` to compile and run the .cljc test files under Node. Escapement itself does not ship JS.",
+  "description": "shadow-cljs harness: the `bb cljs-test` Node test runner and the `:main` browser SPA for the read surface (served by the escapement --api-server).",
+  "dependencies": {
+    "@js-joda/core": "3.2.0",
+    "@js-joda/timezone": "2.8.0",
+    "big.js": "6.1.1",
+    "elkjs": "^0.11.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "semantic-ui-react": "2.1.5"
+  },
   "devDependencies": {
     "shadow-cljs": "^3.3.4"
   }
