@@ -35,11 +35,14 @@
         => nil))
 
     (component "list-artifacts reconstructs coordinates from the path"
+      ;; A sibling session file (transcript) shares the session dir but is NOT an artifact this
+      ;; store owns — list-artifacts must skip it (only artifacts/ and nodes/ count).
+      (spit (io/file dir "transcript.jsonl") "{\"event\":\"x\"}\n")
       (let [items (proto/list-artifacts store "s")
             blob  (first (filter #(= "nodes/writer/0/turns/0/request.edn" (:artifact/path %)) items))
             auth  (first (filter #(= "artifacts/report.md" (:artifact/path %)) items))]
         (assertions
-          "lists both artifacts, sorted by path"
+          "lists only owned artifacts, sorted by path — sibling session files are excluded"
           (mapv :artifact/path items) => ["artifacts/report.md" "nodes/writer/0/turns/0/request.edn"]
           "captured-I/O node/visit/turn are derived from the locator"
           (select-keys blob [:artifact/class :transcript/node-id :transcript/visit :transcript/turn])
