@@ -14,6 +14,7 @@
   descendant thereof); the invocation only exists while that state is active."
   (:require
     #?(:clj [clojure.java.io :as io])
+    [clojure.edn :as edn]
     [clojure.string :as str]
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.data-model.operations :as ops]
@@ -21,7 +22,8 @@
     [com.fulcrologic.statecharts.environment :as env-ns]
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.chart.service :as service]
-    [escapement.invocation.llm-conversation :as llmc])
+    [escapement.invocation.llm-conversation :as llmc]
+    [escapement.protocols :as proto])
   #?(:clj
      (:import
        (java.nio.file Files Paths StandardCopyOption)
@@ -440,10 +442,35 @@
      (throw (ex-info "read-artifact! is CLJ/bb only — no filesystem in CLJS host"
               {:reason :no-fs :name name}))))
 
+(defn deref-output
+  "Returns the LLM's final assistant text for an idle event whose `data` is the transition's data
+   map (so the originating event is at `[:_event :data]`).
+
+   The conversation delivers its output as a small HANDLE: the idle event carries `:output-ref`, a
+   locator into the `ArtifactStore`, NOT the full text — so working memory and the transcript stay
+   tiny. This dereferences that handle (reads `output.edn` from `(:escapement/artifact-store env)` and
+   returns its `:text`). When no artifact store wrote a handle (no-store runs, e.g. tests) it falls
+   back to an inline `:text`. Returns `\"\"` when neither is present.
+
+   Use this anywhere you previously read `(get-in data [:_event :data :text])`."
+  [env data]
+  (let [ed  (get-in data [:_event :data])
+        ref (:output-ref ed)]
+    (if ref
+      (let [store (:escapement/artifact-store env)
+            sid   (env-ns/session-id env)
+            blob  (when store (proto/read-artifact store sid ref))
+            m     (when blob
+                    (try (edn/read-string {:default tagged-literal} blob)
+                         (catch #?(:clj Throwable :cljs :default) _ nil)))]
+        (or (:text m) ""))
+      (or (:text ed) ""))))
+
 (defn capture-llm-output
   "Returns a `script` element. When executed inside a transition on
-   `:llm.idle` (or any event whose data carries `:text` and `:from`), writes
-   the LLM's final assistant text to `<session-dir>/artifacts/<name>`.
+   `:llm.idle` (or any event whose data carries `:output-ref`/`:text` and
+   `:from`), writes the LLM's final assistant text to
+   `<session-dir>/artifacts/<name>`.
 
    `opts` (all optional):
     * `:as`     — filename. Default `(:from data-of-event)`, i.e. the invokeid
@@ -454,7 +481,7 @@
    (elt/script
      {:expr
       (fn [env data]
-        (let [text (or (get-in data [:_event :data :text]) "")
+        (let [text (deref-output env data)
               from (llmc/->id-str (get-in data [:_event :data :from]))
               name (llmc/->id-str (or as from))]
           (when-not name
@@ -526,7 +553,7 @@
   (elt/script
     {:expr
      (fn [env data]
-       (let [text     (or (get-in data [:_event :data :text]) "")
+       (let [text     (deref-output env data)
              from     (llmc/->id-str (get-in data [:_event :data :from]))
              art-name (llmc/->id-str (or as from))
              to'      (llmc/->id-str to)

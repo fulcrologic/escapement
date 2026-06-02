@@ -81,6 +81,15 @@
          :transcript/turn turn :artifact/class :captured-io}))
     {:io/ref path :io/snippet (snippet snippet-text)}))
 
+(defn capture-output!
+  "Capture the idle/verdict OUTPUT of one logical turn — the value the conversation hands its parent
+   chart on the `on-end-turn-event` — as `nodes/<node-id>/<visit>/turns/<turn>/output.edn`, and return
+   `{:io/ref <locator> :io/snippet <≤80 chars>}`. `output` is the EDN map `{:text <full assistant
+   text> :verdict <…> :from <id>}`; the snippet slices its `:text`. Per-turn (like request/response)
+   so each `on-end-turn-event`'s ref is immutable and distinct across a multi-turn invocation."
+  [capture turn output]
+  (capture-blob! capture turn "output" output (:text output)))
+
 (defn capture-seed!
   "Write the replayable `seed` (resolved params + initiating input) for the `(node-id, visit)`
    invocation of `session-id`. Returns the stored artifact summary. The seed is what

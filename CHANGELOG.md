@@ -1,5 +1,46 @@
 # Changelog
 
+## [unreleased] — chart-owned-termination + output-handles + invocation-reconstruction — 2026-06-02
+
+Three internal improvements driven by debuggability and correctness.
+
+### Changed
+
+- **Chart-owned termination.** The runner no longer aborts a legitimately
+  infinite *event-driven* chart. The old lifetime `:max-iterations` cap counted
+  total pump iterations without resetting and so mis-aborted a chart that simply
+  loops on events; it is now a deprecated no-op. The only runner backstop is the
+  `:max-frozen-cycles` wedge guard, which resets to 0 on any progress (so an
+  event chart never trips it) and a chart waiting on its own future-dated timer
+  is now unbounded. The genuine *transitionless* (eventless) loop guard lives in
+  the statecharts library, unchanged. Region-tool default timeout raised
+  30s → 120s for slower models (still per-call overridable).
+- **Conversation output is delivered as a handle, not inline.** When an
+  `:llm-conversation` turn ends, the `on-end-turn-event` (`:llm.idle`) now
+  carries only `:output-ref` (a locator into the `ArtifactStore`) + an ≤80-char
+  `:io/snippet`, never the full assistant text — so working memory, checkpoints,
+  and the transcript stay small. The full text is captured to
+  `nodes/<node-id>/<visit>/turns/<turn>/output.edn`. Chart helpers
+  (`capture-llm-output`, `forward-llm-output`) and the new public
+  `escapement.chart.helpers/deref-output` dereference the handle on demand;
+  with no artifact store the event falls back to inline `:text`.
+
+### Added
+
+- **Invocation reconstruction (EQL).** New `escapement.ui.resolvers`
+  resolvers reconstruct one `:llm-conversation` node invocation (entry→exit) as
+  an ordered `:invocation/timeline` — turns (request/response/tool-results/output
+  refs) interleaved with the statechart events the conversation fired (`events
+  sent`, recorded as new stamped `:llm/event-posted` transcript rows). Keyed by
+  `[:llm.conversation/invocation-id [sid node-id visit]]`. The output handle is
+  exposed as `:llm.conversation/output-ref` (rides the read) + a lazy
+  `:llm.conversation/output` resolver that derefs the blob. Plus
+  `:session/invocations` to enumerate invocation idents.
+- **`escapement.examples.large-files`** — a single-conversation demo that gives
+  the LLM shell/glob tools to find the largest files under `$HOME` and writes a
+  Markdown report to `artifacts/large-files.md`. Exercises all three features
+  end-to-end.
+
 ## [unreleased] — llm-aliases-mandatory — 2026-05-27
 
 Makes named `:llm/aliases` the single, mandatory way to define an LLM

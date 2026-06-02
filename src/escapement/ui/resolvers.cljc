@@ -11,6 +11,7 @@
      * `[:transcript/id [<sid> <seq>]]`                   — one transcript event
      * `[:artifact/id [<sid> <path>]]`                    — one artifact (content lazy)"
   (:require
+    [clojure.edn :as edn]
     [clojure.string :as str]
     [clojure.walk :as walk]
     [com.fulcrologic.statecharts :as-alias sc]
@@ -30,11 +31,12 @@
 ;; ---------------------------------------------------------------------------
 
 (defn captured-kind
-  "Classify a captured-I/O artifact `path` into `:seed`, `:request`, `:response`, `:tool-result`, or
-   `:other` by its locator tail."
+  "Classify a captured-I/O artifact `path` into `:seed`, `:output`, `:request`, `:response`,
+   `:tool-result`, or `:other` by its locator tail."
   [path]
   (cond
     (str/ends-with? path "/seed.edn")     :seed
+    (str/ends-with? path "/output.edn")   :output
     (str/ends-with? path "/request.edn")  :request
     (str/ends-with? path "/response.edn") :response
     (str/includes? path "/tool-results/") :tool-result
@@ -59,19 +61,68 @@
              (mapv
                (fn [[visit vitems]]
                  (let [seed  (first (filter #(= :seed (captured-kind (:artifact/path %))) vitems))
-                       turns (group-by :transcript/turn (filter :transcript/turn vitems))]
-                   {:transcript/visit    visit
-                    :invocation/seed-ref (:artifact/path seed)
-                    :invocation/turns
-                    (->> turns
-                      (sort-by key)
-                      (mapv
-                        (fn [[turn titems]]
-                          (let [by-kind (group-by #(captured-kind (:artifact/path %)) titems)]
-                            {:transcript/turn       turn
-                             :turn/request-ref      (:artifact/path (first (:request by-kind)))
-                             :turn/response-ref     (:artifact/path (first (:response by-kind)))
-                             :turn/tool-result-refs (mapv :artifact/path (:tool-result by-kind))}))))}))))})))))
+                       turns (->> (group-by :transcript/turn (filter :transcript/turn vitems))
+                               (sort-by key)
+                               (mapv
+                                 (fn [[turn titems]]
+                                   (let [by-kind (group-by #(captured-kind (:artifact/path %)) titems)]
+                                     {:transcript/turn       turn
+                                      :turn/request-ref      (:artifact/path (first (:request by-kind)))
+                                      :turn/response-ref     (:artifact/path (first (:response by-kind)))
+                                      :turn/tool-result-refs (mapv :artifact/path (:tool-result by-kind))
+                                      :turn/output-ref       (:artifact/path (first (:output by-kind)))}))))]
+                   {:transcript/visit         visit
+                    :invocation/seed-ref      (:artifact/path seed)
+                    ;; The invocation's final output is the last turn that captured one.
+                    :invocation/output-ref    (some :turn/output-ref (rseq turns))
+                    :invocation/turns         turns}))))})))))
+
+(defn reconstruct-invocation
+  "Pure: reconstruct one llm-conversation node INVOCATION (entry→exit) at (`node-id`, `visit`) of
+   `session-id` into a UI-ready, ordered `:invocation/timeline`.
+
+   `artifacts` is the session's `list-artifacts` seq; `events` is its (normalized) `read-events` seq.
+   Joins the captured-I/O turn blobs (request/response/tool-results/output — keyed by
+   node-id/visit/turn) with the `:llm/event-posted` transcript rows (the statechart events the
+   conversation fired — also keyed by node-id/visit/turn) so the timeline reads like a transcript:
+   for each turn, a `:turn` entry (its request/response/tool-result/output refs) followed by that
+   turn's `:fired-event` entries (ordered by `:transcript/seq`). Returns `nil` when no captured
+   artifacts exist for the invocation."
+  [{:keys [session-id node-id visit artifacts events]}]
+  (let [node (first (filter #(= node-id (:transcript/node-id %))
+                      (invocations-from-artifacts artifacts)))
+        vmap (first (filter #(= visit (:transcript/visit %)) (:node/visits node)))]
+    (when vmap
+      (let [evs      (filter #(and (= node-id (:transcript/node-id %))
+                                (= visit (:transcript/visit %))) events)
+            start    (first (filter #(= :llm/start (:transcript/kind %)) evs))
+            posted   (->> evs
+                       (filter #(= :llm/event-posted (:transcript/kind %)))
+                       (group-by :transcript/turn))
+            fired-of (fn [turn]
+                       (->> (get posted turn)
+                         (sort-by :transcript/seq)
+                         (mapv (fn [e]
+                                 {:timeline/kind   :fired-event
+                                  :transcript/turn turn
+                                  :transcript/seq  (:transcript/seq e)
+                                  :transcript/ts   (:transcript/ts e)
+                                  :event/name      (get-in e [:transcript/data :event-name])
+                                  :event/data      (get-in e [:transcript/data :event-data])}))))
+            timeline (into []
+                       (mapcat (fn [t]
+                                 (cons (assoc t :timeline/kind :turn)
+                                   (fired-of (:transcript/turn t)))))
+                       (:invocation/turns vmap))]
+        {:llm.conversation/invocation-id [session-id node-id visit]
+         ::sc/session-id                 session-id
+         :transcript/node-id             node-id
+         :transcript/visit               visit
+         :invocation/seed-ref            (:invocation/seed-ref vmap)
+         :invocation/started-at          (:transcript/ts start)
+         :invocation/turn-count          (count (:invocation/turns vmap))
+         :llm.conversation/output-ref    (:invocation/output-ref vmap)
+         :invocation/timeline            timeline}))))
 
 (defn remove-functions
   "Recursively replace functions in `data` with the `:fn` placeholder so a chart definition (which
@@ -182,15 +233,67 @@
 
 (pc/defresolver node-invocations-resolver
   "The §5b invocation drill-in for a session: per-node, per-visit, per-turn request/response/
-   tool-result refs, folded from the captured-I/O artifact tree."
+   tool-result/output refs, folded from the captured-I/O artifact tree."
   [env {sid ::sc/session-id}]
   {::pc/input  #{::sc/session-id}
    ::pc/output [{:session/node-invocations
                  [:transcript/node-id
-                  {:node/visits [:transcript/visit :invocation/seed-ref
+                  {:node/visits [:transcript/visit :invocation/seed-ref :invocation/output-ref
                                  {:invocation/turns [:transcript/turn :turn/request-ref
-                                                     :turn/response-ref :turn/tool-result-refs]}]}]}]}
+                                                     :turn/response-ref :turn/tool-result-refs
+                                                     :turn/output-ref]}]}]}]}
   {:session/node-invocations (invocations-from-artifacts (proto/list-artifacts (store env) sid))})
+
+(pc/defresolver node-invocation-ids-resolver
+  "Enumerate a session's invocation idents so a UI can list them without already knowing
+   `(node-id, visit)`. Each entry carries the `[:llm.conversation/invocation-id [sid node-id visit]]`
+   ident the `invocation-transcript-resolver` reconstructs from."
+  [env {sid ::sc/session-id}]
+  {::pc/input  #{::sc/session-id}
+   ::pc/output [{:session/invocations [:llm.conversation/invocation-id ::sc/session-id
+                                       :transcript/node-id :transcript/visit]}]}
+  {:session/invocations
+   (vec (for [n (invocations-from-artifacts (proto/list-artifacts (store env) sid))
+              v (:node/visits n)]
+          {:llm.conversation/invocation-id [sid (:transcript/node-id n) (:transcript/visit v)]
+           ::sc/session-id                 sid
+           :transcript/node-id             (:transcript/node-id n)
+           :transcript/visit               (:transcript/visit v)}))})
+
+(pc/defresolver invocation-transcript-resolver
+  "Reconstruct one llm-conversation node invocation (entry→exit) — keyed by its
+   `[:llm.conversation/invocation-id [sid node-id visit]]` ident — into an ordered
+   `:invocation/timeline` of turns interleaved with the statechart events it fired. See
+   `reconstruct-invocation`."
+  [env {id :llm.conversation/invocation-id}]
+  {::pc/input  #{:llm.conversation/invocation-id}
+   ::pc/output [:llm.conversation/invocation-id ::sc/session-id :transcript/node-id :transcript/visit
+                :invocation/seed-ref :invocation/started-at :invocation/turn-count
+                :llm.conversation/output-ref
+                {:invocation/timeline [:timeline/kind :transcript/turn :transcript/seq :transcript/ts
+                                       :turn/request-ref :turn/response-ref :turn/tool-result-refs
+                                       :turn/output-ref :event/name :event/data]}]}
+  (let [[sid node-id visit] id
+        st                  (store env)]
+    (reconstruct-invocation {:session-id sid :node-id node-id :visit visit
+                             :artifacts  (proto/list-artifacts st sid)
+                             :events     (proto/read-events st sid {})})))
+
+(pc/defresolver output-resolver
+  "Lazy full value of an invocation's captured OUTPUT: derefs the `:llm.conversation/output-ref`
+   handle (an `output.edn` locator) via `read-artifact` and parses the EDN to `{:text :verdict
+   :from}`. Mirrors `artifact-content-resolver` — the handle rides the read; the value is computed
+   only when `:llm.conversation/output` is actually queried. Needs `::sc/session-id` alongside the
+   ref (both ride the invocation entity) so the store can resolve the blob."
+  [env input]
+  {::pc/input  #{:llm.conversation/output-ref ::sc/session-id}
+   ::pc/output [:llm.conversation/output]}
+  (let [ref (:llm.conversation/output-ref input)
+        sid (::sc/session-id input)]
+    (when ref
+      {:llm.conversation/output
+       (some-> (proto/read-artifact (store env) sid ref)
+         (->> (edn/read-string {:default tagged-literal})))})))
 
 (pc/defresolver artifact-content-resolver
   "Lazy full content of one artifact, keyed by its `[:artifact/id [sid path]]` ident."
@@ -303,7 +406,8 @@
 (def read-resolvers
   [active-session-resolver all-sessions-resolver session-resolver transcript-resolver
    artifacts-resolver session-events-report-resolver session-artifacts-report-resolver
-   node-invocations-resolver artifact-content-resolver chart-definition-resolver])
+   node-invocations-resolver node-invocation-ids-resolver invocation-transcript-resolver
+   output-resolver artifact-content-resolver chart-definition-resolver])
 
 (def live-resolvers
   "Server-only live resolvers + control mutations (empty under cljs)."

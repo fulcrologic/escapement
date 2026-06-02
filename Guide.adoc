@@ -1225,11 +1225,23 @@ The full request (system + messages + tools + model + knobs — the exact value 
 <session-dir>/nodes/<node-id>/<visit>/turns/<n>/request.edn          ; the :io/ref of :llm/request
 <session-dir>/nodes/<node-id>/<visit>/turns/<n>/response.edn         ; the :io/ref of :llm/response
 <session-dir>/nodes/<node-id>/<visit>/turns/<n>/tool-results/<id>.edn ; the :io/ref of :llm/tool-result
+<session-dir>/nodes/<node-id>/<visit>/turns/<n>/output.edn           ; the :output-ref of :on-end-turn-event ({:text :verdict :from})
 ----
 
 `<node-id>` is the chart element holding the `:llm-conversation`; `<visit>` is its 0-based entry count this run; `<n>` is the turn index.
 The `:io/ref` value is exactly that relative path — the locator *is* the id, so the tree is walkable with no tooling and no translation table.
 Capture is active only when an artifact store is wired (the CLI runner builds one from `--session-dir`); with no store, these rows simply omit `:io/ref` and capture is a no-op.
+
+This captured tree is fully reconstructable into an ordered transcript. The
+EQL resolvers in `escapement.ui.resolvers` rebuild a single
+`:llm-conversation` node invocation (entry→exit) as an
+`:invocation/timeline` — each turn's request/response/tool-result/output
+refs interleaved with the chart events that turn fired (the
+`:llm/event-posted` rows) — keyed by
+`[:llm.conversation/invocation-id [sid node-id visit]]`;
+`:session/invocations` enumerates the available idents. The dev script
+`dev/llm_transcript.clj` renders one such invocation as a readable
+transcript. See `docs/web-ui.md` for the resolver API in detail.
 
 These captured blobs are also the input to the replay primitive — see <<refine-turn>>.
 
@@ -1639,13 +1651,24 @@ Plain `tell-llm` continues to broadcast.
 === `:on-end-turn-event` payload
 
 Every turn end fires the configured `:on-end-turn-event` (default
-`:llm.idle`) with `{:text "<final assistant text>" :from "<invokeid>"}`
-in the data.
+`:llm.idle`). The data carries `:from "<invokeid>"` plus a *handle* to the
+final assistant text rather than the full text inline: `:output-ref` (a
+locator into the `ArtifactStore`) and `:io/snippet` (a ≤80-char preview).
+The full text is captured to
+`nodes/<node-id>/<visit>/turns/<turn>/output.edn` and dereferenced on
+demand — this keeps working memory, checkpoints, and the transcript small
+even when the turn produced a large report. Only when there is no artifact
+store (e.g. most test runs) does the event fall back to carrying the text
+inline as `:text`.
 "Turn end" means either an `:end_turn` stop reason *or* a
 `:tool_use` response in which the model batched the terminating event-tool (the glm-class case — see *Stop reasons*); both fire the hook exactly once per logical turn, so a chart can rely on it regardless of which shape the model emits.
 That's the wire for routing one LLM's output to another:
-catch the event, inspect `:from`, format `:text` into a follow-up prompt,
-`tell-other-llm` it elsewhere.
+catch the event, inspect `:from`, dereference the output (e.g. via
+`h/deref-output`, or the `capture-llm-output`/`forward-llm-output`
+helpers which deref it for you), format it into a follow-up prompt,
+and `tell-other-llm` it elsewhere. Do **not** read `:text` directly off
+the event — it is absent whenever a store is present; use `h/deref-output`,
+which transparently handles both the handle and the no-store fallback.
 
 When the invocation declares `:verdict-schema`, the event data also carries `:verdict <validated-payload>` — see <<verdicts>> below.
 
@@ -1654,7 +1677,7 @@ When the invocation declares `:verdict-schema`, the event data also carries `:ve
 
 Set `:verdict-schema <malli>` as an invocation key and the worker will run one extra inference at every turn end with
 `:tool-choice {:type "tool" :name "submit_verdict"}`.
-The model's structured input becomes `:verdict` in the `:on-end-turn-event` data — alongside the existing `:text` and `:from`.
+The model's structured input becomes `:verdict` in the `:on-end-turn-event` data — alongside the existing `:from` and the `:output-ref`/`:io/snippet` output handle (see above).
 The chart can then guard transitions on `:verdict :status` (or any other key) without parsing free text.
 
 [source,clojure]
@@ -1742,10 +1765,21 @@ For agent pipelines that produce text artifacts to be embedded in later prompts,
 `(h/capture-llm-output)` / `(h/capture-llm-output {:as "x.md"})`::
 Returns a script.
 Used in a transition reacting to `:llm.idle`.
-Writes
-`:_event :data :text` to `<session-dir>/artifacts/<name>` atomically (temp + rename).
+Dereferences the event's output handle (`:output-ref`, or the inline
+`:text` fallback when there is no artifact store — see the
+`:on-end-turn-event` payload section) and writes the resulting
+text to `<session-dir>/artifacts/<name>` atomically (temp + rename).
 Default `:as` is the producing invokeid (`:from`).
 Logs `:artifact/captured {:name N :bytes B}` to the transcript.
+
+`(h/deref-output env data)`::
+Returns the LLM's final assistant text for an idle event. The conversation
+delivers its output as a small handle (`:output-ref`) rather than inline
+text; this reads `output.edn` from the env's `ArtifactStore` and returns
+its `:text`, falling back to the event's inline `:text` when no store
+wrote a handle, and `""` when neither is present. Use this anywhere you
+would previously have read `(get-in data [:_event :data :text])`.
+`capture-llm-output` and `forward-llm-output` call it internally.
 
 `(h/render-template tmpl env)` / `(h/render-template tmpl env extras)`::
 Pure-ish substitution.
@@ -2708,6 +2742,13 @@ The events emitted across the codebase:
 * `:checkpoint/written`
 * `:llm/start`, `:llm/request`, `:llm/response`, `:llm/error`,
 `:llm/user-message`, `:llm/worker-exit`, `:llm/context-warning`
+* `:llm/event-posted` — a chart event the conversation fired at the LLM's
+request (an `:allowed-events` / event-tool call). `:data` is
+`{:invokeid … :event-name <kw> :event-data <decoded input>}`, and the row
+is stamped with the invocation coordinates `:transcript/node-id`,
+`:transcript/visit`, `:transcript/turn` so the reconstruction layer
+(`escapement.ui.resolvers`, see <<captured-io>>) can interleave the
+"events sent" by a turn with that turn's request/response/tool-results.
 * `:llm/delta` — incremental output during a `:stream?` turn. `:data` is
 `{:type :text-delta|:thinking-delta :text "…" :model … :invokeid …}`.
 Only emitted when the state set `:stream?` and the backend supports streaming; consumers MUST ignore unknown `:type` values (more may be added).
@@ -2837,7 +2878,8 @@ Required keys:
 `:chart`, `:session-id`, `:transcript-path`, `:checkpoint-dir`.
 Optional:
 `:backend`, `:tool-registry`, `:initial-data`, `:resume?`, `:trace?`,
-`:max-iterations` (default 100000), `:quiescent-sleep-ms` (default 50), plus these additive keys (all default to prior behavior when omitted):
+`:quiescent-sleep-ms` (default 50), `:max-frozen-cycles` (default 4000),
+plus these additive keys (all default to prior behavior when omitted):
 
 * `:store` — working-memory store override, threaded to
 `engine.env/new-env`; `nil` ⇒ the default file-backed store (CLI behavior unchanged).
@@ -2849,9 +2891,30 @@ Optional:
 *delivered* value is truthy, requests a prompt abort.
 An undelivered promise never blocks the pump.
 
+`:max-iterations`::
+**Deprecated / no-op.** Formerly a lifetime cap on total pump iterations.
+It counted without resetting, so it mis-aborted legitimately *infinite*
+event-driven charts (a chart that simply loops on events). It is now
+ignored — the chart owns its own termination. The only runner backstop is
+the `:max-frozen-cycles` wedge guard below. The key is still accepted for
+call-site compatibility, but has no effect.
+
+`:max-frozen-cycles` (default 4000)::
+The runner's sole backstop against a wedged *configuration* — the number
+of *consecutive* no-progress quiescent cycles tolerated while live work
+(or stranded deliverable events) exist before the run aborts with
+`:status :frozen-config` and a `:runner/error {:reason :frozen-config}`
+event. The counter **resets to 0 on any progress**, so an infinite
+event-driven chart (one that keeps draining events) never trips it, and a
+chart waiting on its own future-dated timer is unbounded — both run as
+long as the chart keeps them running. This guards only the genuine
+*frozen* case (the statecharts eventless-transition loop never advances,
+or events are stranded on un-pumped sessions — almost always a multiplex
+chart missing `^:multi-session?`).
+
 `run!` returns a summary map that now also carries `:status` —
-`:done` on normal quiescence, `:aborted` if `:cancel` fired or
-`:max-iterations` was hit.
+`:done` on normal quiescence, `:aborted` if `:cancel` fired, or
+`:frozen-config` if the wedge guard tripped.
 The same `:status` is included on the
 `:runner/done` transcript event.
 
@@ -2860,8 +2923,6 @@ The pump loop:
 1. **At the top of each iteration (a safe boundary between events, never mid-transcript- or mid-checkpoint-write), check `:cancel`.**
 If it is requesting abort, emit `:runner/aborted`
 `{:reason :cancelled}` and stop with `:status :aborted`.
-(The pre-existing max-iterations bound emits the same `:runner/aborted`
-event with `{:reason :max-iterations}`.)
 2. Drain currently-deliverable events through the processor.
 When a debug controller is supplied (`--debug`), the event queue is an
 `escapement.engine.instrumented-queue` that applies the pause/step gate per event as it drains — so the runner loop, the TUI keys, and the api-server control plane all single-step through one primitive.

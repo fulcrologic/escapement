@@ -90,10 +90,11 @@
                             :data              payload})))))
 
 (defn- captured-text
-  "Pull the assistant text out of a `:llm.idle` event in a chart `script`'s
-  `data` 2nd arg. Returns trimmed string or nil."
-  [data]
-  (some-> (get-in data [:_event :data :text]) str/trim not-empty))
+  "Pull the assistant text out of a `:llm.idle` event in a chart `script`. The
+  conversation delivers its output as an `:output-ref` handle, so this derefs it
+  via `h/deref-output` (`env` + the script's `data`). Returns trimmed string or nil."
+  [env data]
+  (some-> (h/deref-output env data) str/trim not-empty))
 
 (defn- from-id
   "Pull the invokeid string of the conversation that fired this `:llm.idle`.
@@ -288,7 +289,7 @@
                    :target next-id}
         (script {:expr
                  (fn [env data]
-                   (let [text   (captured-text data)
+                   (let [text   (captured-text env data)
                          haiku  (parse-three-lines text)
                          haikus (cond-> (or (:haikus data) [])
                                   haiku (conj haiku))]
@@ -349,7 +350,7 @@
       (transition {:event :llm.idle :target :reported}
         (script {:expr
                  (fn [env data]
-                   (let [text   (captured-text data)
+                   (let [text   (captured-text env data)
                          parsed (parse-pick text 3)]
                      (if parsed
                        (let [[idx0 reason] parsed]
@@ -413,7 +414,7 @@
         (script {:expr
                  (fn [env data]
                    (let [n      (count (:finalists data))
-                         text   (captured-text data)
+                         text   (captured-text env data)
                          parsed (parse-pick text n)]
                      (if parsed
                        (let [[idx0 reason] parsed]
@@ -553,8 +554,8 @@
                      :cond  (fn [_env data] (= "planner" (from-id data)))
                      :target :route-planner}
           (script {:expr
-                   (fn [_env data]
-                     (let [p (parse-planner (captured-text data))]
+                   (fn [env data]
+                     (let [p (parse-planner (captured-text env data))]
                        [(ops/assign :plan p)]))}))
 
         (transition {:event :error.llm :target :aborted}

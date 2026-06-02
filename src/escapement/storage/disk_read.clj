@@ -38,16 +38,22 @@
 (defn normalize-event
   "Map one on-disk bare-key transcript `row` (a JSON-parsed map with keyword keys) to the namespaced
    transcript vocabulary. Surfaces `:io/ref` / `:io/snippet` to the top level when the event's
-   `:data` carries them (captured-I/O events), while keeping the full `:data` under
-   `:transcript/data`."
+   `:data` carries them (captured-I/O events), and surfaces the invocation coordinates
+   `:transcript/node-id` / `:transcript/visit` / `:transcript/turn` (stamped on llm-conversation
+   events at emit time) plus `:transcript/invokeid` (from `:data`) so the reconstruction layer can
+   correlate an invocation's events. The full `:data` is kept under `:transcript/data`."
   [row]
   (let [data (:data row)]
     (cond-> {:transcript/seq  (:seq row)
              :transcript/ts   (:ts row)
              :transcript/kind (->keyword (:event row))
              :transcript/data data}
-      (:io/ref data)     (assoc :io/ref (:io/ref data))
-      (:io/snippet data) (assoc :io/snippet (:io/snippet data)))))
+      (:io/ref data)            (assoc :io/ref (:io/ref data))
+      (:io/snippet data)        (assoc :io/snippet (:io/snippet data))
+      (:transcript/node-id row) (assoc :transcript/node-id (->keyword (:transcript/node-id row)))
+      (some? (:transcript/visit row)) (assoc :transcript/visit (:transcript/visit row))
+      (some? (:transcript/turn row))  (assoc :transcript/turn (:transcript/turn row))
+      (:invokeid data)          (assoc :transcript/invokeid (:invokeid data)))))
 
 (defn events-xform
   "Transducer mapping raw JSON-parsed transcript rows to normalized events, applying the optional

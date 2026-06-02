@@ -676,7 +676,9 @@
       "carries the :limit"
       (get-in @err-seen [:data :limit]) => 3)))
 
-(specification ":on-end-turn-event data now carries :text and :from"
+(specification ":on-end-turn-event data carries inline :text when no artifact store (fallback)"
+  ;; With no `:artifact-store` on the env (the default test env), there is no blob
+  ;; to point at, so the conversation falls back to delivering the full text inline.
   (let [backend (mock-backend [(end-turn-response "the answer is 42")])
         seen    (atom nil)
         chart   (chart/statechart
@@ -694,10 +696,57 @@
     (assertions
       "chart reached :done"
       (dct/in? t :done) => true
-      ":on-end-turn-event data has the assistant's final text"
+      ":on-end-turn-event data has the assistant's final text inline"
       (get-in @seen [:data :text]) => "the answer is 42"
       "and the speaker's invokeid"
-      (get-in @seen [:data :from]) => "advisor")))
+      (get-in @seen [:data :from]) => "advisor"
+      "and no :output-ref handle (none could be written without a store)"
+      (contains? (:data @seen) :output-ref) => false)))
+
+(specification ":on-end-turn-event delivers an :output-ref handle (not inline text) when a store is present"
+  ;; WITH an artifact store, the full assistant text is externalized to
+  ;; nodes/<node-id>/<visit>/turns/<turn>/output.edn and the idle event carries
+  ;; ONLY the :output-ref locator + a ≤80-char :io/snippet — never the full text —
+  ;; so working memory, checkpoints, and the transcript stay tiny. Dereferencing
+  ;; the handle reproduces the full {:text :from} map.
+  (let [dir     (str (java.nio.file.Files/createTempDirectory "llmconv-output"
+                       (into-array java.nio.file.attribute.FileAttribute [])))
+        store   (disk/new-artifact-store dir)
+        backend (mock-backend [(end-turn-response "the answer is 42")])
+        seen    (atom nil)
+        chart   (chart/statechart
+                  {:initial :wrap}
+                  (state {:id :wrap :initial :work}
+                    (state {:id :work}
+                      (h/llm-conversation
+                        {:id      "advisor"
+                         :message "go"})
+                      (transition {:event :llm.idle :target :done}
+                        (script {:expr (fn [_ d] (reset! seen (:_event d)) nil)})))
+                    (final {:id :done})))
+        t       (new-llm-test-env {:statechart     chart
+                                   :backend        backend
+                                   :session-dir    dir
+                                   :artifact-store store})
+        _       (await-config! t :done 3000)
+        ed      (:data @seen)
+        ref     (:output-ref ed)
+        blob    (some-> ref (->> (proto/read-artifact store :test)) (->> (edn/read-string)))]
+    (assertions
+      "chart reached :done"
+      (dct/in? t :done) => true
+      "the idle event carries an :output-ref locator into the captured-io tree"
+      (str/ends-with? (str ref) "/output.edn") => true
+      "the idle event does NOT carry the full text inline"
+      (contains? ed :text) => false
+      "but carries a ≤80-char :io/snippet for human correlation"
+      (:io/snippet ed) => "the answer is 42"
+      "and the speaker's invokeid"
+      (:from ed) => "advisor"
+      "dereferencing the handle reproduces the full assistant text"
+      (:text blob) => "the answer is 42"
+      "the dereferenced blob also carries the speaker's invokeid"
+      (:from blob) => "advisor")))
 
 ;; ---------------------------------------------------------------------------
 ;; R1: event-tool inside a :tool_use turn fires on-end-turn-event (glm-class)

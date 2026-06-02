@@ -71,3 +71,16 @@
     (assertions
       "the seed lands at the invocation-relative seed.edn and round-trips"
       (edn/read-string (proto/read-artifact store "s" "nodes/writer/1/seed.edn")) => seed)))
+
+(specification "capture-output! externalizes the idle/verdict output per turn"
+  (let [store  (mem/new-store)
+        cap    {:store store :session-id "s" :node-id :writer :visit 0}
+        output {:text "the full assistant report, possibly many KB" :verdict {:status :ok} :from "writer"}
+        ref    (capture/capture-output! cap 2 output)]
+    (assertions
+      "the locator is the per-turn output.edn blob"
+      (:io/ref ref) => "nodes/writer/0/turns/2/output.edn"
+      "the snippet is a ≤80-char slice of the assistant text"
+      (:io/snippet ref) => "the full assistant report, possibly many KB"
+      "the full output map (text + verdict + from) round-trips losslessly"
+      (edn/read-string (proto/read-artifact store "s" (:io/ref ref))) => output)))

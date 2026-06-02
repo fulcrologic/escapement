@@ -528,9 +528,10 @@
 
 (def ^:const region-tool-default-timeout-ms
   "Default per-call deadline for a region-tool dispatch when neither the
-   LLM nor the conversation params specify one. 30 seconds matches the
-   plan's worked example (`{:timeout-ms 30000}`)."
-  30000)
+   LLM nor the conversation params specify one. 120 seconds is generous for
+   slower/rate-limited models whose region handlers themselves call an LLM;
+   a chart that needs a different bound passes `:timeout-ms` per call."
+  120000)
 
 (def ^:const region-tool-poll-step-ms
   "Maximum single poll wait for the tool-reply queue. Polling in short
@@ -643,6 +644,18 @@
         (if (m/validate schema decoded)
           (do
             (post-event-to-parent! parent-ctx event decoded)
+            ;; "Events sent": record the chart event this turn fired, stamped with the invocation
+            ;; coordinates (node-id/visit/turn) so the reconstruction layer can interleave it with the
+            ;; turn's request/response/tool-results. Kept inline-small (the event name + decoded input).
+            (transcript! transcript-fn
+              {:event              :llm/event-posted
+               :ts                 (now-ms)
+               :transcript/node-id (:node-id capture)
+               :transcript/visit   (:visit capture)
+               :transcript/turn    turn
+               :data               {:invokeid   (:invokeid parent-ctx)
+                                     :event-name event
+                                     :event-data decoded}})
             (post-tool-result! event false "ok")
             {:result-block  {:type :tool_result :tool_use_id id :content "ok"}
              :posted-event? true})
@@ -1245,14 +1258,32 @@
           :else
           {:verdict decoded})))))
 
+(defn- finalize-idle-data
+  "Externalize the conversation OUTPUT so working memory and the transcript never carry the full
+   assistant text. Given the assembled idle map `full` (`:text` + `:from` + maybe `:verdict`) for
+   `turn`, write `output.edn` via `capture` and return the map with `:text` REPLACED by `:output-ref`
+   (the blob locator) + `:io/snippet` (≤80 chars). When `capture` is absent (no artifact store — most
+   test envs), the inline map is returned unchanged so the chart still receives `:text`."
+  [capture turn full]
+  (let [ref (when (and capture (some? turn))
+              (try (capture/capture-output! capture turn full)
+                   (catch Throwable _ nil)))]
+    (if ref
+      (-> full
+        (dissoc :text)
+        (assoc :output-ref (:io/ref ref) :io/snippet (:io/snippet ref)))
+      full)))
+
 (defn- maybe-run-verdict-and-finalize-idle!
   "When `verdict-schema` is set, run a forced `submit_verdict` inference and
    return a map `{:idle-data <map>}` carrying the verdict (or `{:error
    <reason> <data>}` on failure). When `verdict-schema` is nil, returns
-   `{:idle-data <base-idle-data>}` immediately — preserving today's behavior."
-  [{:keys [transcript-fn parent-ctx] :as ctx} params base-messages verdict-schema base-idle-data]
+   `{:idle-data <base-idle-data>}` immediately. In both success paths the idle
+   data is run through `finalize-idle-data` so the full text is externalized to
+   an `:output-ref` handle (see `finalize-idle-data`)."
+  [{:keys [transcript-fn parent-ctx capture] :as ctx} params base-messages verdict-schema turn base-idle-data]
   (if (nil? verdict-schema)
-    {:idle-data base-idle-data}
+    {:idle-data (finalize-idle-data capture turn base-idle-data)}
     (let [outcome (run-verdict-inference! ctx params base-messages verdict-schema)]
       (cond
         (:verdict outcome)
@@ -1261,7 +1292,8 @@
             {:event :llm/verdict :ts (now-ms)
              :data  {:invokeid (->id-str (:invokeid parent-ctx))
                      :verdict  (:verdict outcome)}})
-          {:idle-data (assoc base-idle-data :verdict (:verdict outcome))})
+          {:idle-data (finalize-idle-data capture turn
+                        (assoc base-idle-data :verdict (:verdict outcome)))})
 
         (:validation-failed outcome)
         {:error :verdict-validation
@@ -1476,7 +1508,7 @@
                                 :from (->id-str (:invokeid parent-ctx))}
                 verdict-schema (:verdict-schema params)
                 wrap           (maybe-run-verdict-and-finalize-idle!
-                                 ctx params @messages-atom verdict-schema base-data)]
+                                 ctx params @messages-atom verdict-schema turn base-data)]
             (cond
               (:idle-data wrap)
               (do
@@ -1547,7 +1579,7 @@
                                     :from (->id-str (:invokeid parent-ctx))}
                     verdict-schema (:verdict-schema params)
                     wrap           (maybe-run-verdict-and-finalize-idle!
-                                     ctx params @messages-atom verdict-schema base-data)]
+                                     ctx params @messages-atom verdict-schema turn base-data)]
                 (cond
                   (:idle-data wrap)
                   (do
@@ -1808,8 +1840,10 @@
          :retry-counts     retry-counts
          :params           params})
       (transcript! (or transcript-fn (fn [_] nil))
-        {:event :llm/start :ts (now-ms)
-         :data  {:invokeid invokeid :session-id parent-session-id}})
+        (cond-> {:event :llm/start :ts (now-ms)
+                 :data  {:invokeid invokeid :session-id parent-session-id}}
+          capture (assoc :transcript/node-id (:node-id capture)
+                         :transcript/visit   (:visit capture))))
       (.start thread)
       true))
 

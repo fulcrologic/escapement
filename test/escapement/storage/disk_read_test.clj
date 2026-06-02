@@ -33,7 +33,20 @@
     (:io/snippet (dr/normalize-event {:event "llm/response" :seq 0 :data {:io/snippet "hello"}}))
     => "hello"
     "omits :io/ref when the data has none"
-    (contains? (dr/normalize-event {:event "x" :seq 0 :data {}}) :io/ref) => false))
+    (contains? (dr/normalize-event {:event "x" :seq 0 :data {}}) :io/ref) => false
+    "surfaces the invocation coordinates stamped on a conversation event (node-id re-keywordized)"
+    (select-keys
+      (dr/normalize-event {:event "llm/event-posted" :seq 7 :data {:invokeid "w" :event-name "count/tick"}
+                           :transcript/node-id "w" :transcript/visit 0 :transcript/turn 1})
+      [:transcript/node-id :transcript/visit :transcript/turn :transcript/invokeid])
+    => {:transcript/node-id :w :transcript/visit 0 :transcript/turn 1 :transcript/invokeid "w"}
+    "tolerates visit/turn 0 (does not drop them as falsey)"
+    (select-keys
+      (dr/normalize-event {:event "llm/start" :seq 1 :data {} :transcript/node-id "w" :transcript/visit 0})
+      [:transcript/node-id :transcript/visit])
+    => {:transcript/node-id :w :transcript/visit 0}
+    "omits the coordinates when the row carries none"
+    (contains? (dr/normalize-event {:event "runner/started" :seq 0 :data {}}) :transcript/node-id) => false))
 
 (specification "->keyword"
   (assertions

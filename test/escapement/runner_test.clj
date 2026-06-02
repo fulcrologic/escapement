@@ -4,6 +4,7 @@
     [clojure.java.io :as io]
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.chart :as chart]
+    [com.fulcrologic.statecharts.data-model.operations :as ops]
     [com.fulcrologic.statecharts.elements :refer [final on-entry script send state transition]]
     [com.fulcrologic.statecharts.invocation.multiplex :as mux :refer [multiplex]]
     [com.fulcrologic.statecharts.invocation.multiplex-options :as mo]
@@ -257,6 +258,55 @@
         (swap! workers dissoc [sid invokeid])))
     true)
   (forward-event! [_ _ _] true))
+
+;; -- chart-owned termination: :max-iterations no longer caps event loops -----
+
+(def ^:private event-loop-count 50)
+
+(def infinite-event-chart
+  ;; Loops on a self-posted event `event-loop-count` times, then finals. Each
+  ;; `:loop/tick` is real progress (a drained event), so the frozen-config
+  ;; counter never accumulates and the chart drives itself to completion. Proves
+  ;; the runner does NOT abort an event-driven chart by a lifetime iteration
+  ;; count: the (now-ignored) :max-iterations is set absurdly low below.
+  (chart/statechart
+    {:initial :work}
+    (state {:id :work :initial :counting}
+      (state {:id :counting}
+        (on-entry {} (send {:event :loop/tick}))
+        (transition {:event :loop/tick
+                     :cond  (fn [_ data] (>= (:n data 0) event-loop-count))
+                     :target :done})
+        (transition {:event :loop/tick :type :internal}
+          (script {:expr (fn [_ data] [(ops/assign :n (inc (:n data 0)))])})
+          (send {:event :loop/tick})))
+      (final {:id :done}))))
+
+(specification "runner does not abort an infinite event-driven chart by iteration count"
+  (let [dir        (tmp-dir "runner-eventloop")
+        transcript (str dir "/run.jsonl")
+        chk        (str dir "/chk")
+        summary    (runner/run! {:chart              infinite-event-chart
+                                 :session-id         :runner-test/eventloop
+                                 :transcript-path    transcript
+                                 :checkpoint-dir     chk
+                                 ;; Absurdly low: the OLD lifetime cap would
+                                 ;; have aborted after 3 pump iterations.
+                                 :max-iterations     3
+                                 :quiescent-sleep-ms 5})
+        rows       (read-jsonl transcript)
+        aborts     (filterv #(= "runner/aborted" (:event %)) rows)
+        ticks      (filterv #(and (= "runner/event-processed" (:event %))
+                               (= "loop/tick" (get-in % [:data :event-name]))) rows)]
+    (assertions
+      "runs to completion despite far exceeding :max-iterations"
+      (:status summary) => :done
+      "reaches the :done final"
+      (boolean (some #{":done" "done"} (map str (:final-config summary)))) => true
+      "never emits a :runner/aborted row (the iteration cap is ignored)"
+      aborts => []
+      "actually processed more events than :max-iterations allowed"
+      (> (count ticks) 3) => true)))
 
 ;; -- frozen-config wedge detection (R2) --------------------------------------
 

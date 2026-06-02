@@ -43,6 +43,8 @@
     (r/captured-kind "nodes/writer/0/turns/2/response.edn") => :response
     "classifies a tool-result locator"
     (r/captured-kind "nodes/writer/0/turns/2/tool-results/abc.edn") => :tool-result
+    "classifies an output locator"
+    (r/captured-kind "nodes/writer/0/turns/2/output.edn") => :output
     "everything else is :other"
     (r/captured-kind "artifacts/report.md") => :other))
 
@@ -57,6 +59,8 @@
               {:artifact/class :captured-io :artifact/path "nodes/writer/0/turns/0/tool-results/t1.edn"
                :transcript/node-id :writer :transcript/visit 0 :transcript/turn 0}
               {:artifact/class :captured-io :artifact/path "nodes/writer/0/turns/1/request.edn"
+               :transcript/node-id :writer :transcript/visit 0 :transcript/turn 1}
+              {:artifact/class :captured-io :artifact/path "nodes/writer/0/turns/1/output.edn"
                :transcript/node-id :writer :transcript/visit 0 :transcript/turn 1}]
         result (r/invocations-from-artifacts arts)
         node   (first result)
@@ -78,7 +82,13 @@
       (:turn/tool-result-refs (first (:invocation/turns visit0)))
       => ["nodes/writer/0/turns/0/tool-results/t1.edn"]
       "a turn with no tool calls has an empty tool-result vector"
-      (:turn/tool-result-refs (second (:invocation/turns visit0))) => [])))
+      (:turn/tool-result-refs (second (:invocation/turns visit0))) => []
+      "wires a turn's output-ref when one was captured"
+      (:turn/output-ref (second (:invocation/turns visit0))) => "nodes/writer/0/turns/1/output.edn"
+      "a turn with no captured output has a nil output-ref"
+      (:turn/output-ref (first (:invocation/turns visit0))) => nil
+      "the visit's invocation-level output-ref is the last turn that captured one"
+      (:invocation/output-ref visit0) => "nodes/writer/0/turns/1/output.edn")))
 
 (specification "remove-functions"
   (assertions
@@ -88,6 +98,57 @@
     (r/remove-functions {:s {:cond inc}}) => {:s {:cond :fn}}
     "leaves non-function data untouched"
     (r/remove-functions {:id :a :n 3 :v [1 2]}) => {:id :a :n 3 :v [1 2]}))
+
+(def ^:private recon-artifacts
+  [{:artifact/class :captured-io :artifact/path "nodes/w/0/seed.edn"
+    :transcript/node-id :w :transcript/visit 0}
+   {:artifact/class :captured-io :artifact/path "nodes/w/0/turns/0/request.edn"
+    :transcript/node-id :w :transcript/visit 0 :transcript/turn 0}
+   {:artifact/class :captured-io :artifact/path "nodes/w/0/turns/0/response.edn"
+    :transcript/node-id :w :transcript/visit 0 :transcript/turn 0}
+   {:artifact/class :captured-io :artifact/path "nodes/w/0/turns/1/request.edn"
+    :transcript/node-id :w :transcript/visit 0 :transcript/turn 1}
+   {:artifact/class :captured-io :artifact/path "nodes/w/0/turns/1/output.edn"
+    :transcript/node-id :w :transcript/visit 0 :transcript/turn 1}])
+
+(def ^:private recon-events
+  [{:transcript/seq 1 :transcript/kind :llm/start :transcript/ts 100
+    :transcript/node-id :w :transcript/visit 0}
+   {:transcript/seq 5 :transcript/kind :llm/event-posted :transcript/ts 150
+    :transcript/node-id :w :transcript/visit 0 :transcript/turn 0
+    :transcript/data {:invokeid "w" :event-name :count/tick :event-data {:n 1}}}
+   {:transcript/seq 9 :transcript/kind :llm/event-posted :transcript/ts 200
+    :transcript/node-id :w :transcript/visit 0 :transcript/turn 1
+    :transcript/data {:invokeid "w" :event-name :count/done :event-data {:total 2}}}])
+
+(specification "reconstruct-invocation"
+  (let [inv      (r/reconstruct-invocation {:session-id "s1" :node-id :w :visit 0
+                                            :artifacts recon-artifacts :events recon-events})
+        timeline (:invocation/timeline inv)]
+    (assertions
+      "carries the invocation ident"
+      (:llm.conversation/invocation-id inv) => ["s1" :w 0]
+      "reports the turn count from the captured artifacts"
+      (:invocation/turn-count inv) => 2
+      "reports started-at from the (stamped) :llm/start event"
+      (:invocation/started-at inv) => 100
+      "surfaces the invocation's final output-ref handle"
+      (:llm.conversation/output-ref inv) => "nodes/w/0/turns/1/output.edn"
+      "interleaves each turn with the events it fired, ordered turn-then-fired"
+      (mapv :timeline/kind timeline) => [:turn :fired-event :turn :fired-event]
+      "the turn entries appear in turn order"
+      (->> timeline (filter #(= :turn (:timeline/kind %))) (mapv :transcript/turn)) => [0 1]
+      "a turn entry carries its request ref"
+      (:turn/request-ref (first timeline)) => "nodes/w/0/turns/0/request.edn"
+      "the fired-event after turn 0 is the event that turn sent"
+      (select-keys (second timeline) [:event/name :event/data])
+      => {:event/name :count/tick :event/data {:n 1}}
+      "the fired-event after turn 1 is that turn's event"
+      (select-keys (nth timeline 3) [:event/name :event/data])
+      => {:event/name :count/done :event/data {:total 2}}
+      "returns nil for a (node-id, visit) with no captured artifacts"
+      (r/reconstruct-invocation {:session-id "s1" :node-id :nope :visit 0
+                                 :artifacts recon-artifacts :events recon-events}) => nil)))
 
 ;; ---------------------------------------------------------------------------
 ;; Resolver integration (over the stub store)
@@ -158,3 +219,45 @@
           [[::sc/session-id "s1"] :session/node-invocations 0 :node/visits 0 :invocation/turns 0
            :turn/request-ref])
         => "nodes/w/0/turns/0/request.edn"))))
+
+(defn- read-counting-store
+  "A read store backed by `recon-artifacts`/`recon-events` whose `read-artifact` bumps `reads` and
+   serves `nodes/w/0/turns/1/output.edn` as a captured output blob. Lets a test prove the
+   `:llm.conversation/output` resolver is lazy (the blob is read only when that key is queried)."
+  [reads]
+  (reify
+    proto/SessionIndex
+    (list-sessions [_] [])
+    proto/TranscriptStore
+    (append-event! [_ _ _] nil)
+    (read-events [_ _ _] recon-events)
+    proto/ArtifactStore
+    (write-artifact! [_ _ _ _ _] nil)
+    (list-artifacts [_ _] recon-artifacts)
+    (read-artifact [_ _ path]
+      (swap! reads inc)
+      (get {"nodes/w/0/turns/1/output.edn"
+            (pr-str {:text "done" :verdict {:ok true} :from "w"})}
+        path))))
+
+(specification "invocation-transcript-resolver + lazy output handle"
+  (let [reads (atom 0)
+        ctx   {:escapement/store (read-counting-store reads)}
+        id    [:llm.conversation/invocation-id ["s1" :w 0]]]
+    (component "reconstruction over the parser"
+      (let [res (get (r/process ctx [{id [:llm.conversation/output-ref :invocation/turn-count
+                                          {:invocation/timeline [:timeline/kind]}]}]) id)]
+        (assertions
+          "reconstructs the invocation timeline"
+          (mapv :timeline/kind (:invocation/timeline res)) => [:turn :fired-event :turn :fired-event]
+          "surfaces the output-ref handle"
+          (:llm.conversation/output-ref res) => "nodes/w/0/turns/1/output.edn"
+          "without dereferencing the output blob (the handle is cheap)"
+          @reads => 0)))
+    (component "the output value is resolved lazily, only when queried"
+      (let [res (get (r/process ctx [{id [:llm.conversation/output]}]) id)]
+        (assertions
+          "dereferences the handle to the full captured output map"
+          (:llm.conversation/output res) => {:text "done" :verdict {:ok true} :from "w"}
+          "reading the blob exactly once"
+          @reads => 1)))))

@@ -227,7 +227,14 @@
     * `:initial-data` (optional) — initial chart data (passed as data-model seed)
     * `:resume?` (default false) — if true and a checkpoint exists, do not call `start!`
     * `:trace?` (default false) — write `:runner/tick` events on every loop turn
-    * `:max-iterations` (default 100000) — safety bound on the pump loop
+    * `:max-iterations` — **DEPRECATED / no-op.** Formerly a lifetime cap on
+                          total pump iterations; removed because it counted
+                          without resetting and so mis-aborted legitimately
+                          infinite *event-driven* charts. The chart owns its own
+                          termination; the only runner backstop is the
+                          `:max-frozen-cycles` wedge guard (which resets on
+                          progress). Still accepted for call-site compatibility,
+                          but ignored.
     * `:quiescent-sleep-ms` (default 50) — how long to sleep when queue is empty
                                            but live invocations exist
     * `:max-frozen-cycles` (default 4000) — number of *consecutive*
@@ -367,14 +374,24 @@
                             :data  {:config (vec (::sc/configuration w0))}}))))
       ;; Pump. The loop returns a terminal status keyword:
       ;;   :done          — quiescent with no live invocations (normal)
-      ;;   :aborted        — host cancel signal fired, or max-iterations hit
+      ;;   :aborted        — host cancel signal fired
       ;;   :frozen-config  — config wedged: no progress with live work for
       ;;                     `:max-frozen-cycles` consecutive cycles
       (let [status
-                       (loop [i             max-iterations
-                              frozen-cycles 0]
+                       ;; A SINGLE counter, `no-progress`, bounds *consecutive*
+                       ;; no-progress quiescent cycles while live work (or stranded
+                       ;; deliverable events) exist — the frozen-config wedge guard.
+                       ;; It RESETS to 0 on any progress, so an infinite *event-driven*
+                       ;; chart (one that keeps draining events) never trips it and runs
+                       ;; forever — the chart owns its own termination. The old
+                       ;; lifetime `:max-iterations` cap is gone: it counted total pump
+                       ;; iterations without resetting, so it mis-aborted legitimately
+                       ;; infinite event charts. The real *transitionless* (eventless)
+                       ;; loop guard lives in the statecharts library (bounded per
+                       ;; macrostep, fresh each event) and is untouched.
+                       (loop [no-progress 0]
                          (when trace?
-                           (transcript-fn {:event :runner/tick :data {:i (- max-iterations i)}}))
+                           (transcript-fn {:event :runner/tick :data {:no-progress no-progress}}))
                          (cond
                            ;; Cancellation is checked FIRST, at the top of the
                            ;; iteration — a safe boundary between events, never
@@ -386,11 +403,6 @@
                                                :data  {:reason :cancelled}})
                                :aborted)
 
-                           (zero? i)
-                           (do (transcript-fn {:event :runner/aborted
-                                               :data  {:reason :max-iterations}})
-                               :aborted)
-
                            :else
                            (let [progressed? (drain-once! {:env            env
                                                            :session-id     session-id
@@ -399,7 +411,7 @@
                              (if progressed?
                                ;; Made progress this pass — the config is moving, so
                                ;; the frozen-config counter resets.
-                               (recur (dec i) 0)
+                               (recur 0)
                                (let [live        (count-live-invocations env)
                                      pending     (engine-queue/pending-count
                                                    (::sc/event-queue env))
@@ -409,38 +421,40 @@
                                    ;; A delayed `send` (e.g. a safety-stop timer) sits
                                    ;; in the queue with a *future* delivery-time. Until
                                    ;; that time arrives `drain-once!` returns no events
-                                   ;; AND `count-live-invocations` may be zero, so
-                                   ;; without this check the loop would declare :done
-                                   ;; and lose the timer. Sleep without bumping the
-                                   ;; frozen counter — this is *planned* idle, not a
-                                   ;; wedge. Gated on `(zero? deliverable)`: if events
+                                   ;; AND `count-live-invocations` is zero, so without
+                                   ;; this check the loop would declare :done and lose
+                                   ;; the timer. Sleep without bumping `no-progress` —
+                                   ;; this is *planned* idle, not a wedge, and a chart
+                                   ;; waiting on its own timer is a RUNNING chart, so it
+                                   ;; is intentionally UNBOUNDED (the chart owns when it
+                                   ;; ends). Gated on `(zero? deliverable)`: if events
                                    ;; are deliverable NOW yet drain made no progress,
                                    ;; they are stranded on sessions this run does not
                                    ;; pump (e.g. a multiplex chart run without
-                                   ;; `:multi-session?`) — that is a wedge, not a
-                                   ;; timer, so fall through to the frozen path rather
-                                   ;; than spinning here forever.
+                                   ;; `:multi-session?`) — that is a wedge, not a timer,
+                                   ;; so it falls through to the frozen path below.
                                    (and (zero? live) (pos? pending) (zero? deliverable))
                                    (do (Thread/sleep ^long quiescent-sleep-ms)
-                                       (recur (dec i) 0))
+                                       (recur 0))
 
                                    (and (zero? live) (zero? deliverable))
                                    :done                    ;; done — no live work, nothing deliverable stuck
 
-                                   ;; No progress AND live invocations exist: this
-                                   ;; quiescent cycle may be the frozen-config wedge.
-                                   ;; Bump the counter; if it reaches the threshold
-                                   ;; the configuration is wedged (the statecharts
-                                   ;; eventless transition loop never advances) —
-                                   ;; emit :runner/error and return a terminal status
-                                   ;; (clean exit, no throw), mirroring :aborted.
-                                   (>= (inc frozen-cycles) max-frozen-cycles)
+                                   ;; No progress AND live work (or stranded
+                                   ;; deliverable events) exist: this quiescent cycle
+                                   ;; may be the frozen-config wedge. Bump the counter;
+                                   ;; if it reaches the threshold the configuration is
+                                   ;; wedged (the statecharts eventless transition loop
+                                   ;; never advances, or events are stranded) — emit
+                                   ;; :runner/error and return a terminal status (clean
+                                   ;; exit, no throw), mirroring :aborted.
+                                   (>= (inc no-progress) max-frozen-cycles)
                                    (do (transcript-fn {:event :runner/error
                                                        :data  {:reason           :frozen-config
                                                                :live-invocations live
                                                                :pending          pending
                                                                :deliverable-now  deliverable
-                                                               :cycles           (inc frozen-cycles)
+                                                               :cycles           (inc no-progress)
                                                                ;; `deliverable-now > 0` with no live work means events
                                                                ;; are stranded on un-pumped sessions — almost always a
                                                                ;; multiplex chart missing `^:multi-session?`.
@@ -450,7 +464,7 @@
 
                                    :else
                                    (do (Thread/sleep ^long quiescent-sleep-ms)
-                                       (recur (dec i) (inc frozen-cycles)))))))))
+                                       (recur (inc no-progress)))))))))
             final-wmem (sp/get-working-memory store env session-id)
             cfg        (vec (::sc/configuration final-wmem #{}))]
         (transcript-fn {:event :runner/done
