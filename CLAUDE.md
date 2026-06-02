@@ -41,6 +41,39 @@ No JVM is required.
 - An optional `:test` alias exists in `deps.edn` for IDE/JVM REPL workflows,
   but the project does **not** depend on it.
 
+## Layering: engine core vs. presentation add-ons
+
+Escapement is a runtime/library **core** plus optional presentation add-ons.
+The dependency direction is strictly one-way (`add-on → core`, never the
+reverse), and that boundary is **enforced by a test**:
+
+- **Engine/library core** — `engine.*`, `runner`, `lib`, `protocols`,
+  `invocation.*` (incl. the `HumanRenderer` protocol + dependency-free
+  `StdinRenderer`, so charts are interactive headlessly), `llm.*`, `tools.*`,
+  `storage.*`, `transcript`, `debug.{controller,control-handle,d2}`, `config`,
+  and the CLI (`cli.clj`). The embeddable entry point is `escapement.lib`. Core
+  must NOT statically require the web/Pathom/RAD UI or the terminal UI.
+- **Web/API add-on** — `escapement.ui.*` + Pathom/EQL/transit + the RAD/CLJS
+  bundle. Loaded **lazily** by `--api-server` via `requiring-resolve`; if its
+  deps are absent the flag fails with a clear message.
+
+  These deps are kept OUT of every downstream-facing dependency manifest so a
+  consumer using only the core lib/CLI is not infected by the Pathom/Fulcro/RAD
+  tree: `pom.xml` (Clojars) omits them, and `deps.edn` base `:deps` omits them —
+  they live in the **`:api` alias** instead (compose as `-M:api:ui-test`, etc.).
+  Only `bb.edn`'s own `:deps` carries them, because the bb runtime/bbin product
+  *is* the full tool (its `--api-server` runs the Pathom surface under bb). The
+  only namespace that requires Pathom is `escapement.ui.resolvers` (via
+  `server.clj`); it is server-side only and is NOT in the browser build graph.
+- **Terminal-UI add-on** — `escapement.tui` (+ JLine). Used by the CLI
+  front-end only; the embeddable library (`escapement.lib`) never pulls it.
+
+`test/escapement/architecture_boundary_test.clj` scans every `ns` form under
+`src/escapement` and fails if a core namespace statically requires the
+forbidden layers (web/Pathom/RAD everywhere; the TUI everywhere except
+`cli.clj`). Lazy `requiring-resolve` bridges are intentionally invisible to it.
+When adding code, keep heavy presentation deps behind that seam.
+
 ## Statecharts caveats
 
 This project uses `com.fulcrologic/statecharts`. The library's
@@ -86,11 +119,58 @@ adopted alongside as appropriate.
 ## Common commands
 
 ```bash
-bb test               # full suite (133 tests, 614 assertions)
+bb test               # engine + queue + control-plane suite (bb, guardrails 1.2.16)
+bb ui-test            # RAD/TUI explorer tests (JVM, guardrails 1.3.2) — render-target-isolated JVMs; see "Web UI"
 bb sanity             # engine smoke
 bb -m escapement.cli run escapement.examples.hello/agent   # run a chart
 bbin install .        # install the CLI
+bb build-ui           # release-compile the browser SPA + refresh resources/escapement-ui.edn
+bb watch-ui           # dev-compile + hot-reload the browser SPA
+bb release-ui         # publish the already-built main.js to GitHub release escapement-<version> (needs gh; verify-not-rebuild)
 ```
+
+## Web UI (RAD explorer + live debugger)
+
+`--api-server <port>` on `run` publishes the read-only EQL/Pathom API (`escapement.ui.server` +
+`escapement.ui.resolvers`) AND serves an optional Fulcro browser SPA (`escapement.ui.client`) on the
+same origin. The SPA is a **statechart-driven RAD explorer** (Sessions → Events → Artifacts) plus a
+live Debugger + embedded statechart visualizer. The RAD reports/model are **shared CLJC** and render
+two ways: Semantic-UI in the browser (`escapement.ui.rendering.semantic-ui`) and a fulcro-tui terminal
+target (`escapement.ui.rendering.tui`). CLJS deps live only in the `:cljs` alias (never on the bb
+runtime). The compiled bundle is gitignored — jar installs serve it from the classpath, `bbin` installs
+fetch it from the GitHub release (SHA-256-verified against the committed `resources/escapement-ui.edn`).
+The bundle now carries the RAD/Semantic-UI/elk stack; `bb build-ui` is otherwise unchanged. **Read
+[`docs/web-ui.md`](docs/web-ui.md) before touching the UI build/release.** After changing
+`client.cljs` (or any UI code), run `bb build-ui` and commit the refreshed manifest; never commit
+`resources/public/js/`. Release order (see docs/web-ui.md): `bb build-ui` → commit `escapement-ui.edn`
+→ maven release (tags) → `bb release-ui` (verify-not-rebuild: publishes the on-disk `main.js`, refusing
+unless its SHA matches the committed manifest and the tag is on origin). bbin installs pin to the latest
+git tag and fetch+verify that tag's manifest SHA, so the served JS is content-addressed to the
+installed ref.
+
+**Live single-stepping:** `--api-server <port> --debug` runs headless + auto-paused; the web Debugger
+drives it through control mutations (`escapement.control/{pause,step,continue,arm-pause-on-next-external}`)
+and live resolvers (`:session/{paused?,step-budget,live-configuration,pending-events}`). The pause gate
+lives in `escapement.engine.instrumented-queue` (engaged only with a `:debug-controller`). `--debug` is
+independent of the TUI.
+
+**Two test paths.** The engine + instrumented queue + control plane + the
+`test/escapement/ui/live_control_http_test.clj` HTTP proof run under **`bb test`** (guardrails 1.2.16,
+the Pathom-under-SCI pin). The RAD/TUI UI code is **JVM-only** (it loads the Fulcro RAD stack which
+wants **guardrails 1.3.2**) and runs via **`bb ui-test`**; those namespaces are listed in
+`bb_test/escapement/test/runner.clj`'s `jvm-only-namespaces` skip-set so `bb test` stays green. The
+engine + api-server stay bb (1.2.16); only the RAD/TUI render code is 1.3.2.
+
+> Render-target isolation: the TUI, Semantic-UI, and headless RAD plugins each register the SAME global
+> `fr/render-field` / `render-element` multimethods, so only one render target can load per JVM (last
+> `defmethod` wins). `bb ui-test` therefore runs three subprocess groups — `tui` (tui-render + tui-form),
+> `web-sui` (web-render), and `headless+core` (screens-load + control + instrumented-queue +
+> control-resolvers) — each in its own JVM. Running all UI test namespaces in one `clojure -M:api:ui-test`
+> process will show spurious failures (plugins clobber each other); always use `bb ui-test`.
+
+> CLJC gotcha: `::fully.qualified.ns/kw` (double-colon + full ns) resolves in CLJS but is an INVALID
+> TOKEN in CLJ — a `.cljc` file using it compiles under shadow yet fails to load under `:ui-test`
+> (JVM). Use the single-colon `:fully.qualified.ns/kw` (or a real `::alias/kw`) in cljc.
 
 ## Model registry
 

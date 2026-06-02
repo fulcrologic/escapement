@@ -40,11 +40,11 @@
         (>= (System/currentTimeMillis) deadline) t
         :else (do (Thread/sleep 25) (recur))))))
 
-(specification "scan chart: fan-out of :found-bug then :scan-complete reaches :finished"
+(specification "scan chart: fan-out of :scan/found-bug then :scan/complete reaches :finished"
   (let [backend (mock-backend
-                  [(tool-use [{:id    "f1" :name "event__found_bug"
+                  [(tool-use [{:id    "f1" :name "event__scan_found_bug"
                                :input {:file "a.clj" :line 10 :summary "thing 1"}}
-                              {:id    "f2" :name "event__found_bug"
+                              {:id    "f2" :name "event__scan_found_bug"
                                :input {:file "b.clj" :line 20 :summary "thing 2"}}])
                    (tool-use [{:id    "c" :name "event__scan_complete"
                                :input {:total_findings 2}}])
@@ -72,7 +72,7 @@
   (let [path        (write-tmp! "interesting marker XYZZY")
         backend     (mock-backend
                       [(tool-use [{:id "r1" :name "fs_read" :input {:path path}}])
-                       (tool-use [{:id    "f1" :name "event__found_bug"
+                       (tool-use [{:id    "f1" :name "event__scan_found_bug"
                                    :input {:file path :line 1 :summary "saw marker"}}])
                        (tool-use [{:id    "c1" :name "event__scan_complete"
                                    :input {:total_findings 1}}])

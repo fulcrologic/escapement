@@ -9,8 +9,8 @@
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.protocols :as sp]
-    [escapement.debug.controller :as dbg]
     [escapement.engine.env :as engine-env]
+    [escapement.engine.instrumented-queue :as iq]
     [escapement.engine.queue :as engine-queue]
     [escapement.invocation.human-input :as human-input]
     [escapement.invocation.llm-conversation :as llm-conv]
@@ -71,38 +71,6 @@
     0
     (::sc/invocation-processors env)))
 
-(defn- external-event?
-  "An event lacks `::sc/source-session-id` only when it was injected from
-   outside the chart (CLI, TUI, fixtures). Internal raises always carry it
-   (set in `engine.queue/send!`)."
-  [event]
-  (nil? (::sc/source-session-id event)))
-
-(defn- maybe-pause!
-  "Honors the debug `controller` (if any) before processing `event`. Two
-   gates apply:
-
-   * `pause-on-next-external?` — flips the controller to `:paused` if `event`
-     came from outside the chart.
-   * `:paused` mode — emits `:debug/awaiting-step` and parks the runner
-     thread until the TUI calls `step!` or `continue!`.
-
-   Skips entirely when `controller` is nil or when a `human-input-active?`
-   thunk returns true (so the chart can answer prompts without the debugger
-   stealing focus)."
-  [{:keys [controller transcript-fn human-input-active?]} event]
-  (when (and controller
-          (not (and human-input-active? (human-input-active?))))
-    (dbg/maybe-arm-from-external! controller (when (external-event? event)
-                                               {:external? true}))
-    (when (dbg/paused? controller)
-      (transcript-fn {:event :debug/awaiting-step
-                      :data  {:event-name (:name event)
-                              :external?  (external-event? event)}})
-      (dbg/await-release! controller))
-    (when (pos? (:step-budget @controller))
-      (dbg/consume-step-budget! controller))))
-
 (defn- process-targeted-event!
   "Advance session `sid` by `event` against its current `wmem`, checkpoint,
    and emit the `:runner/event-processed` transcript row (with the
@@ -139,26 +107,24 @@
   "Drain currently-deliverable events for `session-id` through the processor exactly once,
    checkpointing after each event. Returns true if at least one event was processed.
 
-   When `:controller` is supplied, each event is gated through the debug
-   pause/step controller (see `maybe-pause!`).
+   The debug pause/step gate is NOT applied here: when a `:debug-controller`
+   is supplied to `run!`, the event queue itself is an
+   `escapement.engine.instrumented-queue` that applies the gate per event
+   inside `receive-events!`, BEFORE this handler runs. That keeps the gate a
+   single primitive (the queue) with no double-gating.
 
    When `:multi-session?` is true, drain ALL session queues in this env (used
    by charts that spawn child sessions via the multiplex invocation
    processor, `com.fulcrologic.statecharts.invocation.multiplex`). The
    target sid for each event is read from the event itself, so the parent,
    the multiplex aggregator, and every child are pumped from the one loop."
-  [{:keys [env session-id transcript-fn controller human-input-active?
-           multi-session?]}]
+  [{:keys [env session-id transcript-fn multi-session?]}]
   (let [queue       (::sc/event-queue env)
         store       (::sc/working-memory-store env)
         processor   (::sc/processor env)
         progressed? (atom false)
         handler
         (fn [_ event]
-          (maybe-pause! {:controller          controller
-                         :transcript-fn       transcript-fn
-                         :human-input-active? human-input-active?}
-            event)
           (reset! progressed? true)
           (let [ts            (System/currentTimeMillis)
                 sid           (if multi-session?
@@ -264,7 +230,7 @@
     * `:max-iterations` (default 100000) — safety bound on the pump loop
     * `:quiescent-sleep-ms` (default 50) — how long to sleep when queue is empty
                                            but live invocations exist
-    * `:max-frozen-cycles` (default 200) — number of *consecutive*
+    * `:max-frozen-cycles` (default 4000) — number of *consecutive*
                                            quiescent cycles (queue empty,
                                            no progress) tolerated while
                                            live invocations exist before
@@ -272,22 +238,41 @@
                                            wedged and terminates with
                                            `:runner/error {:reason
                                            :frozen-config}`. Defaults to
-                                           ~200 which, at the default
+                                           4000 which, at the default
                                            50ms `:quiescent-sleep-ms`, is
-                                           a ~10s wall-clock budget —
-                                           generous enough to survive
-                                           legitimately slow invocations
-                                           (network turns, tool calls)
-                                           while still bounding the
-                                           statecharts eventless-transition
-                                           -loop frozen-config
-                                           wedge. The counter resets to 0
-                                           whenever the pump makes
-                                           progress OR no live
-                                           invocations remain, so only an
-                                           unbroken run of no-progress
-                                           cycles with live work can trip
-                                           it.
+                                           a ~200s wall-clock budget. It is
+                                           deliberately larger than any
+                                           chart-level `:safety/stop` timer
+                                           the bundled examples arm (≤150s),
+                                           so a genuinely-stuck chart fires
+                                           its OWN graceful safety stop
+                                           before this runner backstop trips
+                                           a `:frozen-config` error. This
+                                           must comfortably exceed the
+                                           longest *single* no-progress
+                                           span a healthy run produces —
+                                           which, for an `:llm-conversation`,
+                                           is one whole LLM turn: the model
+                                           may think, stream, and make
+                                           several tool round-trips (each
+                                           `fs_read`/`fs_edit`, etc.) with
+                                           NO chart-visible event until the
+                                           turn ends by firing an
+                                           event-tool. On slower backends a
+                                           single such turn routinely
+                                           exceeds 10s, so the historical
+                                           ~200/10s default tripped the
+                                           guard spuriously mid-turn. The
+                                           counter resets to 0 whenever the
+                                           pump makes progress, so the
+                                           budget only needs to cover the
+                                           longest quiet stretch (one
+                                           turn), not the whole run. A
+                                           genuine wedge (a chart stuck in
+                                           an invoking state, or events
+                                           stranded on un-pumped sessions)
+                                           still self-terminates once the
+                                           budget elapses.
     * `:debug-controller` (optional) — `escapement.debug.controller`
                                        atom; when supplied, every event
                                        is gated through pause/step
@@ -309,7 +294,7 @@
            resume?            false
            trace?             false
            max-iterations     100000
-           max-frozen-cycles  200
+           max-frozen-cycles  4000
            quiescent-sleep-ms 50}}]
   [:map => :map]
   (assert chart "chart is required")
@@ -323,10 +308,21 @@
                           (jsonl-fn ev)
                           (try (transcript-tap ev) (catch Throwable _ nil)))
                         jsonl-fn)
+        ;; When a debug controller is supplied, the event queue becomes an
+        ;; instrumented queue that applies the pause/step gate per event (and
+        ;; exposes pending/last-delivered instrumentation to the api-server).
+        ;; With no controller the default in-process queue is used, so normal
+        ;; runs carry zero stepping overhead. The gate's human-input yield is
+        ;; threaded in here so a live human-input modal keeps focus.
+        queue         (when debug-controller
+                        (iq/new-instrumented-queue
+                          {:controller   debug-controller
+                           :human-input? human-input-active?}))
         env           (engine-env/new-env {:checkpoint-dir          checkpoint-dir
                                            :session-dir             session-dir
                                            :artifact-store          (when session-dir
                                                                       (disk/new-artifact-store session-dir))
+                                           :queue                   queue
                                            :store                   store
                                            :llm-backend             backend
                                            :llm-default-models      backend-default-models
@@ -396,12 +392,10 @@
                                :aborted)
 
                            :else
-                           (let [progressed? (drain-once! {:env                 env
-                                                           :session-id          session-id
-                                                           :transcript-fn       transcript-fn
-                                                           :controller          debug-controller
-                                                           :human-input-active? human-input-active?
-                                                           :multi-session?      multi-session?})]
+                           (let [progressed? (drain-once! {:env            env
+                                                           :session-id     session-id
+                                                           :transcript-fn  transcript-fn
+                                                           :multi-session? multi-session?})]
                              (if progressed?
                                ;; Made progress this pass — the config is moving, so
                                ;; the frozen-config counter resets.

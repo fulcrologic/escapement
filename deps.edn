@@ -1,6 +1,6 @@
-{:paths ["src"]
+{:paths ["src" "resources"]
  :deps  {org.clojure/clojure         {:mvn/version "1.12.0"}
-         com.fulcrologic/statecharts {:mvn/version "1.4.0-RC16"}
+         com.fulcrologic/statecharts {:mvn/version "1.4.0-RC18"}
          com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
          metosin/malli               {:mvn/version "0.16.4"}
          cheshire/cheshire           {:mvn/version "5.13.0"}
@@ -10,7 +10,9 @@
          ;; also loads under plain JVM Clojure for IDE/REPL workflows.
          org.jline/jline-terminal    {:mvn/version "3.27.1"}}
  :aliases
- {:demos {:extra-paths ["demos"]}
+ {:api   {:extra-deps {com.wsscode/pathom        {:mvn/version "2.4.0"}
+                       com.cognitect/transit-clj {:mvn/version "1.0.333"}}}
+  :demos {:extra-paths ["demos"]}
   :dev   {:extra-paths ["dev" "spike" "demos"]
           :jvm-opts    ["-Dguardrails.enabled=true"]}
   ;; Tests run under bb (`bb test`). This alias is retained only for an
@@ -27,4 +29,50 @@
   {:extra-paths ["test"]
    :extra-deps  {org.clojure/clojurescript {:mvn/version "1.12.116"}
                  thheller/shadow-cljs      {:mvn/version "3.3.4"}
-                 fulcrologic/fulcro-spec   {:mvn/version "3.2.9"}}}}}
+                 fulcrologic/fulcro-spec   {:mvn/version "3.2.9"}}}
+
+  ;; Browser SPA build (shadow-cljs :main / :browser target). Deps needed only to
+  ;; compile/serve the read-surface UI — NOT pulled into the bb runtime. The SPA's
+  ;; `:remote` posts transit EQL to the server's `/api`. fulcro-inspect (+ its
+  ;; devtools-remote transport) is dev-time only: `ido` elides it from release.
+  ;; This carries the statechart-driven RAD stack (fulcro-rad-statecharts) + the
+  ;; Semantic-UI render plugin. guardrails 1.3.2 here is fine — the browser build
+  ;; never loads under the bb runtime (which stays pinned to 1.2.16 for Pathom).
+  :cljs
+  {:extra-paths ["src"]
+   :extra-deps  {com.fulcrologic/fulcro                 {:mvn/version "3.10.0-RC2"}
+                 com.fulcrologic/fulcro-rad             {:mvn/version "1.6.24"}
+                 com.fulcrologic/fulcro-rad-statecharts {:mvn/version "0.1.5"
+                                                         :exclusions  [com.fulcrologic/statecharts]}
+                 com.fulcrologic/statecharts            {:mvn/version "1.4.0-RC18"}
+                 com.fulcrologic/fulcro-rad-semantic-ui {:local/root "../fulcro-rad-semantic-ui"
+                                                         :exclusions [com.fulcrologic/fulcro-rad]}
+                 com.fulcrologic/guardrails             {:mvn/version "1.3.2"}
+                 com.fulcrologic/fulcro-inspect         {:mvn/version "1.0.4"}
+                 com.fulcrologic/fulcro-devtools-remote {:mvn/version "0.2.8"}
+                 com.cognitect/transit-cljs             {:mvn/version "0.8.280"}
+                 com.taoensso/timbre                    {:mvn/version "6.8.0"}
+                 binaryage/devtools                     {:mvn/version "1.0.6"}
+                 org.clojure/clojurescript              {:mvn/version "1.12.116"}
+                 thheller/shadow-cljs                   {:mvn/version "3.3.4"}}}
+
+  ;; Headless-TUI integration tests + runnable TUI explorer (JVM). Carries the SAME
+  ;; statechart-driven RAD screens as the browser, rendered to a terminal via the
+  ;; fulcro-tui plugin. Runs under the JVM (not bb): on the JVM Pathom 2.4.0 has no
+  ;; SCI constraint, so guardrails 1.3.2 (wanted by fulcro-rad) coexists with Pathom
+  ;; cleanly — sidestepping the bb-only guardrails-1.2.16 pin. The alias' guardrails
+  ;; entry overrides the base :deps pin for this classpath only. Pathom/eql/transit
+  ;; now live in the :api alias (out of base :deps), so run this as
+  ;; `clojure -M:api:ui-test` (see bb's `ui-test` task). fulcro-tui is :local/root
+  ;; (unreleased plugin source).
+  :ui-test
+  {:extra-paths ["src" "test" "demos"]
+   :extra-deps  {com.fulcrologic/fulcro                 {:mvn/version "3.10.0-RC2"}
+                 com.fulcrologic/fulcro-rad             {:mvn/version "1.6.24"}
+                 com.fulcrologic/fulcro-rad-statecharts {:mvn/version "0.1.5"
+                                                         :exclusions  [com.fulcrologic/statecharts]}
+                 com.fulcrologic/statecharts            {:mvn/version "1.4.0-RC18"}
+                 com.fulcrologic/fulcro-tui             {:local/root "../fulcro-tui"}
+                 com.fulcrologic/guardrails             {:mvn/version "1.3.2"}
+                 fulcrologic/fulcro-spec                {:mvn/version "3.2.9"}}
+   :jvm-opts    ["-Dguardrails.enabled=true"]}}}

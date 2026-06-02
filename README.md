@@ -83,6 +83,42 @@ location), `:default-chart` (used when `escapement run` is invoked without a cha
 current directory to find the file, so invocation is location-independent. See the *Project configuration* section of [
 `Guide.adoc`](Guide.adoc) for the full schema and precedence rules.
 
+### Read-only API and web UI
+
+Add `--api-server <port>` to any `run` to publish a **read-only EQL/Pathom API** over the run's
+work-dir (active session, past sessions, transcript, artifacts, the invocation drill-in) and serve an
+optional browser inspector on the same origin:
+
+```bash
+escapement run escapement.examples.hello/agent --api-server 8920
+# EQL API → http://localhost:8920/api   (POST a transit+json EQL query)
+# Web UI  → http://localhost:8920/
+```
+
+The browser app is a statechart-driven **RAD explorer** — a Sessions report that drills into a
+session's events and artifacts — plus a live **Debugger** with an embedded statechart visualizer. The
+same RAD reports/model also render to a terminal via the fulcro-tui target. The UI is optional and
+lazily delivered (it never loads on a normal run). Its compiled bundle is not in git: jar installs
+serve it from the classpath, and `bbin` installs fetch it once from the matching GitHub release
+(SHA-256-verified) and cache it. Develop it with `bb watch-ui`, compile with `bb build-ui`, and
+publish the release asset with `bb release-ui` (uses `gh`). See [`docs/web-ui.md`](docs/web-ui.md) for
+the architecture, dev loop, and release steps.
+
+#### Live single-stepping (`--api-server --debug`)
+
+Add `--debug` alongside `--api-server` to run headless and **auto-paused**, then drive the run from
+the web Debugger:
+
+```bash
+escapement run escapement.examples.hello/agent --api-server 8920 --debug
+# open http://localhost:8920/  → Debugger screen → Pause / Step / Continue / Arm
+```
+
+The pause gate lives in an instrumented event queue, and the browser drives it through control
+mutations (`escapement.control/{pause,step,continue,arm-pause-on-next-external}`) and live resolvers
+(`:session/{paused?,step-budget,live-configuration,pending-events}`) on the same `/api` surface. The
+Chart screen highlights the live configuration over the embedded statechart visualizer as you step.
+
 ## Embedding Escapement as a library
 
 Escapement has **three usage modes**:

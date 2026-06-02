@@ -53,7 +53,7 @@
     "\"content\":\"turn-loop ok\\n\"} to write the file.\n"
     "4. Call `fs_read` again with {\"path\":\"" scratch-path "\"} to "
     "confirm the new contents.\n"
-    "5. Call `event__done` exactly once with "
+    "5. Call `event__turn_done` exactly once with "
     "{\"summary\":\"<one short sentence confirming the write>\"} and end "
     "your turn.\n"
     "Use only these tools. Keep all text terse. Do not repeat steps."))
@@ -67,14 +67,14 @@
           {:id             "coder"
            :system         system-prompt
            :real-tools     [:fs/read :fs/write]
-           :allowed-events [{:event       :done
+           :allowed-events [{:event       :turn/done
                              :description "Signal the turn-loop task is complete."
                              :data-schema [:map [:summary :string]]}]
            :max-turns      8
            :budget-ms      120000
            :message        (str "Run the scratch-file turn-loop task now: "
-                             "plan, read, write, re-read, then call event__done.")})
-        (transition {:event :done :target :finished}
+                             "plan, read, write, re-read, then call event__turn_done.")})
+        (transition {:event :turn/done :target :finished}
           (script {:expr (fn [_env data]
                            [(ops/assign :summary
                               (get-in data [:_event :data :summary]))])})))

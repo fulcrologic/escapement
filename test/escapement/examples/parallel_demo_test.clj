@@ -57,12 +57,12 @@
 
 (specification "parallel-demo chart: two regions each complete via distinct event-tools"
   (let [backend        (routing-backend
-                         {"event__translated"
-                          [(tool-use [{:id    "t1" :name "event__translated"
+                         {"event__parallel_translated"
+                          [(tool-use [{:id    "t1" :name "event__parallel_translated"
                                        :input {:text "Bonjour le monde"}}])
                            (end-turn)]
-                          "event__summarized"
-                          [(tool-use [{:id    "s1" :name "event__summarized"
+                          "event__parallel_summarized"
+                          [(tool-use [{:id    "s1" :name "event__parallel_summarized"
                                        :input {:text "A short summary sentence."}}])
                            (end-turn)]})
         proc           (llmc/new-processor {:backend backend :tool-registry (tp/new-registry)})
@@ -84,5 +84,5 @@
       "two distinct tool sets were used (proving no cross-region collision)"
       (count call-tool-sets) => 2
       "tool names contain both event tools, across distinct invocations"
-      (boolean (and (some #(contains? % "event__translated") call-tool-sets)
-                 (some #(contains? % "event__summarized") call-tool-sets))) => true)))
+      (boolean (and (some #(contains? % "event__parallel_translated") call-tool-sets)
+                 (some #(contains? % "event__parallel_summarized") call-tool-sets))) => true)))

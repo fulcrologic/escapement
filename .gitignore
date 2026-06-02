@@ -23,7 +23,6 @@ workingcontext.md
 scratch/
 .session/
 
-# shadow-cljs / node CLJS test runner (bb cljs-test)
 node_modules/
 out/
 .shadow-cljs/

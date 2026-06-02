@@ -11,7 +11,7 @@
 
     Region 1 (:convo)      — an LLM doing the deterministic, multi-turn
                              counting task from task 002: each turn it writes
-                             `COUNT <n>` and calls the `event__tick`
+                             `COUNT <n>` and calls the `event__count_tick`
                              event-tool with that integer, then ends the
                              turn. It counts until a user message tells it to
                              STOP, then emits `STEERED BANANA` for two turns
@@ -52,19 +52,19 @@
   glm-class models pack the terminating `event__done` into a `:tool_use`
   turn; a literal `end_turn` stop-reason NEVER occurs. For one logical turn
   the parent chart receives, IN THIS EXACT ORDER:
-    1. the event-tool's own chart event (`:tick`/`:done`)
+    1. the event-tool's own chart event (`:count/tick`/`:done`)
        (posted at llm_conversation.clj:574, inside the block doseq);
     2. then `:llm.idle` (default :on-end-turn-event), posted AFTER the
        doseq (llm_conversation.clj:1068), carrying {:text :from}.
 
   Two consequences this chart obeys:
 
-    * In Region :convo, `:tick` is `:type :internal` so the event-tool's
+    * In Region :convo, `:count/tick` is `:type :internal` so the event-tool's
       chart event never tears down `:counting` before the supervisor sees
       `:llm.idle` (task 001 §P1, mirrors iterate.clj's all-internal idiom).
 
     * The supervisor's monitor/steer/capture transitions live in a SEPARATE
-      region. The convo region's `:tick`/`:done` never exit the supervisor's
+      region. The convo region's `:count/tick`/`:done` never exit the supervisor's
       `:watching` state, so when `:llm.idle` is processed (strictly AFTER the
       event-tool event for that turn) the supervisor transition is still
       active and runs steer + capture. This is the parallel-region form of
@@ -118,28 +118,29 @@
     [com.fulcrologic.statecharts.data-model.operations :as ops]
     [com.fulcrologic.statecharts.elements
      :refer [final on-entry parallel script send state transition]]
+    [com.fulcrologic.statecharts.convenience :refer [send-after]]
     [escapement.chart.helpers :as h]))
 
 (def system-prompt
   (str "You perform a slow counting task, ONE step per turn.\n"
     "RULES:\n"
     "1. Each turn: write EXACTLY the line `COUNT <n>` (where <n> is the "
-    "current integer), then call the `event__tick` tool exactly once with "
+    "current integer), then call the `event__count_tick` tool exactly once with "
     "`{\"n\":<n>}`, then END your turn. Do not call it more than once per "
     "turn.\n"
     "2. Start at n=1 and increase n by 1 each turn (1, 2, 3, ...).\n"
     "3. Keep counting turn after turn until a user message tells you to "
     "STOP.\n"
     "4. If a user message says STOP, then from that turn on write ONLY the "
-    "line `STEERED BANANA` and call `event__tick` with `{\"n\":0}`. After "
-    "two `STEERED BANANA` turns, call the `event__done` tool once with "
+    "line `STEERED BANANA` and call `event__count_tick` with `{\"n\":0}`. After "
+    "two `STEERED BANANA` turns, call the `event__count_done` tool once with "
     "`{\"reason\":\"steered\"}` and end your turn.\n"
     "Be terse. Never call more than one tool per turn."))
 
 (def steer-message
   (str "STOP counting now. From this turn on your entire reply is the line "
-    "`STEERED BANANA` and a call to `event__tick` with `{\"n\":0}`. After "
-    "two STEERED turns call `event__done` with `{\"reason\":\"steered\"}`."))
+    "`STEERED BANANA` and a call to `event__count_tick` with `{\"n\":0}`. After "
+    "two STEERED turns call `event__count_done` with `{\"reason\":\"steered\"}`."))
 
 (def agent                                                  ; runnable: bb -m escapement.cli run escapement.examples.supervisor/agent
   (chart/statechart
@@ -159,10 +160,15 @@
                :system         system-prompt
                :real-tools     []
                :allowed-events
-               [{:event       :tick
+               [{:event       :count/tick
                  :description "Record one counting step."
                  :data-schema [:map [:n :int]]}
-                {:event       :done
+                ;; NAMESPACED on purpose. A bare :done would prefix-match the
+                ;; SCXML-reserved `done.state.*` events raised when the parallel
+                ;; regions finalise — re-firing these transitions and wedging the
+                ;; macrostep in an eventless loop. `:count/done` keeps the natural
+                ;; "done" name but namespaces it, so it can never collide.
+                {:event       :count/done
                  :description "End the counting task."
                  :data-schema [:map [:reason :string]]}]
                ;; Conservative budgets so the run can
@@ -171,18 +177,18 @@
                :budget-ms      120000
                :message        "Begin the counting task at n=1."})
             ;; task 001 §P1 ORDERING RULE: the
-            ;; event-tool's chart event (:tick/:done) is
+            ;; event-tool's chart event (:count/tick/:done) is
             ;; posted to the parent STRICTLY BEFORE
-            ;; :llm.idle for the same turn. Keep :tick
+            ;; :llm.idle for the same turn. Keep :count/tick
             ;; :type :internal so it never tears down
             ;; :counting before the supervisor sees
             ;; :llm.idle.
-            (transition {:event :tick :type :internal}
+            (transition {:event :count/tick :type :internal}
               (script {:expr (fn [_env data]
                                [(ops/assign
                                   :last-tick
                                   (get-in data [:_event :data :n]))])}))
-            (transition {:event :done :target :c-done}
+            (transition {:event :count/done :target :c-done}
               (script {:expr (fn [_env data]
                                [(ops/assign
                                   :done-reason
@@ -194,13 +200,15 @@
         ;; primitive-guaranteed turn-end hook (:llm.idle), NEVER
         ;; an LLM-behaviour counter (task 001 §P5).
         (state {:id :supervisor :initial :watching}
-          ;; Hard safety stop: if the model never calls
-          ;; event__done, force the whole chart down after a
-          ;; generous wall-clock budget.
-          (on-entry {}
-            (send {:id    :safety-timer
-                   :event :safety/stop
-                   :delay 150000}))
+          ;; Hard safety stop: if the model never calls event__count_done, force
+          ;; the chart down after a generous wall-clock budget. `send-after`
+          ;; (on-entry send + on-exit cancel) is REQUIRED over a raw `send`: a
+          ;; raw delayed send is NOT cancelled when the chart finishes early, so
+          ;; the runner would idle ~150s waiting for the orphaned timer after
+          ;; the chart already reached :finished. send-after cancels it on exit.
+          (send-after {:id    :safety-timer
+                       :event :safety/stop
+                       :delay 150000})
 
           ;; --- watching: pre-steer ---
           (state {:id :watching}
@@ -238,7 +246,12 @@
               (script {:expr (fn [_env data]
                                [(ops/assign :turns-seen
                                   (inc (long (:turns-seen data 0))))])})
-              (h/capture-llm-output {:as "supervised.md"})))
+              (h/capture-llm-output {:as "supervised.md"})
+              ;; Each `event__count_tick` parks the worker in :awaiting-user, so the
+              ;; chart must resume it to drive the next (post-steer) turn. Nudge
+              ;; with a neutral "Continue." until the model fires event__count_done
+              ;; after its two STEERED BANANA turns. :max-turns / :safety/stop bound it.
+              (h/tell-llm {:expr (fn [_env _data] "Continue.")})))
 
           ;; task 001 §1 / acceptance: the supervisor region
           ;; MUST have a proper exit so the parallel join
@@ -247,8 +260,19 @@
           ;; supervisor to its own region final; combined with
           ;; the convo region reaching :c-done the `parallel`
           ;; raises done.state.work cleanly.
-          (transition {:event :done :target :s-done})
-          (transition {:event :safety/stop :target :s-done})
+          ;; :type :internal is REQUIRED: this transition's source is the region
+          ;; root (:supervisor), so an EXTERNAL transition's domain would be the
+          ;; whole `:work` parallel (LCCA of :supervisor + its child :s-done),
+          ;; making its exit set span BOTH regions — it would then conflict with
+          ;; the convo region's :count/done transition and be dropped by
+          ;; remove-conflicting-transitions, so this region would never finalise.
+          ;; :internal keeps the domain at :supervisor (region-local).
+          (transition {:event :count/done :target :s-done :type :internal})
+          ;; NB: no region-level :safety/stop here. As a region-root EXTERNAL
+          ;; transition its domain would be the whole `:work` parallel, so on a
+          ;; safety stop it would EXIT+RE-ENTER `:work` — restarting the live
+          ;; conversation instead of terminating. The top-level
+          ;; `:safety/stop -> :finished` (below) ends the chart cleanly.
           (final {:id :s-done})))
 
       ;; Both regions reached their region final -> parallel raises
@@ -256,7 +280,11 @@
       (transition {:event :done.state.work :target :finished})
       ;; Belt-and-braces terminators (also reachable before both regions
       ;; finalise): the convo region's :done, or the safety timer.
-      (transition {:event :done :target :finished})
+      (transition {:event :count/done :target :finished})
       (transition {:event :safety/stop :target :finished})
+      ;; If a chatty model ignores the steer and burns the conversation's
+      ;; :max-turns budget, the worker self-cancels with :error.llm.max-turns.
+      ;; Terminate promptly+cleanly on it rather than idling until :safety/stop.
+      (transition {:event :error.llm.max-turns :target :finished})
 
       (final {:id :finished}))))

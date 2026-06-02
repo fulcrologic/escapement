@@ -8,10 +8,10 @@
   One long `:llm-conversation` is bound at the top of `:work`. The chart authors
   the LLM's vocabulary by exposing four event-tools:
 
-    * `:spec-ready`       — fired from `:read-spec` after the LLM has read the spec
-    * `:patch-applied`    — fired from `:propose-patch` after `:fs/edit` has run
-    * `:retry`            — fired from `:reflect` to loop back to `:propose-patch`
-    * `:give-up`          — fired from `:reflect` to terminate as failure
+    * `:iterate/spec-ready`    — fired from `:read-spec` after the LLM has read the spec
+    * `:iterate/patch-applied` — fired from `:propose-patch` after `:fs/edit` has run
+    * `:iterate/retry`         — fired from `:reflect` to loop back to `:propose-patch`
+    * `:iterate/give-up`       — fired from `:reflect` to terminate as failure
 
   Test execution is NOT an LLM tool — it is a chart-controlled `script` action on
   `:run-tests` entry that calls `tools/dispatch` for `:shell/run`. The result is
@@ -43,33 +43,33 @@
     "explain unless asked. The chart progresses ONLY when you call event tools.\n\n"
     "Workflow:\n"
     "1. When asked to read the spec, call `fs_read` on the spec path, then "
-    "call `event__spec_ready` with a one-sentence `summary`.\n"
+    "call `event__iterate_spec_ready` with a one-sentence `summary`.\n"
     "2. When asked to propose a patch, read the target file if needed via `fs_read`, "
     "then make a minimal change with `fs_edit` (prefer `fs_edit`; use `fs_write` only "
-    "if you need to create a missing file). Then call `event__patch_applied` with a "
+    "if you need to create a missing file). Then call `event__iterate_patch_applied` with a "
     "one-sentence `rationale`.\n"
-    "3. When tests fail, the chart will tell you so. Decide: call `event__retry` "
-    "with `reasoning` to attempt another patch, or `event__give_up` with `reason` if "
+    "3. When tests fail, the chart will tell you so. Decide: call `event__iterate_retry` "
+    "with `reasoning` to attempt another patch, or `event__iterate_give_up` with `reason` if "
     "you cannot progress.\n"
     "Do not call any event tool more than once per turn. End your turn after the event tool."))
 
 (defn- user-message-for-read-spec [data]
   (str "Step 1: read the spec at " (pr-str (:spec-path data))
-    " using fs_read, then call event__spec_ready with a one-sentence summary."))
+    " using fs_read, then call event__iterate_spec_ready with a one-sentence summary."))
 
 (defn- user-message-for-propose [data]
   (str "Step 2: propose a patch. Edit " (pr-str (:target-path data))
     " (use fs_read first if you need to see its current contents) so the spec is satisfied. "
-    "Then call event__patch_applied. Iteration "
+    "Then call event__iterate_patch_applied. Iteration "
     (inc (or (:iterations data) 0)) " of " (or (:max-iterations data) 3) "."))
 
 (defn- failure-message [data]
   (str "Tests failed. Output:\n" (or (:last-test-output data) "<no output>")
-    "\nChoose: call event__retry with a different approach, or event__give_up if blocked."))
+    "\nChoose: call event__iterate_retry with a different approach, or event__iterate_give_up if blocked."))
 
 (defn- run-tests-action
   "Chart-side script: runs the configured test command via `:shell/run` and posts
-   either `:tests-pass` or `:tests-fail` back to ourselves. Reads the registry via
+   either `:iterate/tests-pass` or `:iterate/tests-fail` back to ourselves. Reads the registry via
    the `env`'s engine map."
   []
   (script
@@ -92,7 +92,7 @@
                queue env
                {:target            sid
                 :source-session-id sid
-                :event             (if is-error :tests-fail :tests-pass)
+                :event             (if is-error :iterate/tests-fail :iterate/tests-pass)
                 :data              {:output output}})))
          [(ops/assign :last-test-output output)]))}))
 
@@ -107,47 +107,47 @@
           {:id             "coder"
            :system         system-prompt
            :real-tools     [:fs/read :fs/edit :fs/write]
-           :allowed-events [{:event       :spec-ready
+           :allowed-events [{:event       :iterate/spec-ready
                              :data-schema [:map [:summary :string]]}
-                            {:event       :patch-applied
+                            {:event       :iterate/patch-applied
                              :data-schema [:map [:rationale :string]]}
-                            {:event       :retry
+                            {:event       :iterate/retry
                              :data-schema [:map [:reasoning :string]]}
-                            {:event       :give-up
+                            {:event       :iterate/give-up
                              :data-schema [:map [:reason :string]]}]
            :message        (fn [_env data] (user-message-for-read-spec data))})
 
         (state {:id :read-spec}
-          (transition {:event :spec-ready :target :propose-patch :type :internal}))
+          (transition {:event :iterate/spec-ready :target :propose-patch :type :internal}))
 
         (state {:id :propose-patch}
           (on-entry {}
             (h/tell-llm {:expr (fn [_env data] (user-message-for-propose data))}))
-          (transition {:event :patch-applied :target :run-tests :type :internal}
+          (transition {:event :iterate/patch-applied :target :run-tests :type :internal}
             (script {:expr (fn [_env data]
                              [(ops/assign :iterations
                                 (inc (or (:iterations data) 0)))])})))
 
         (state {:id :run-tests}
           (on-entry {} (run-tests-action))
-          (transition {:event :tests-pass :target :finished})
-          (transition {:event :tests-fail :target :reflect :type :internal}))
+          (transition {:event :iterate/tests-pass :target :finished})
+          (transition {:event :iterate/tests-fail :target :reflect :type :internal}))
 
         (state {:id :reflect}
           (on-entry {}
             (h/tell-llm {:expr (fn [_env data] (failure-message data))}))
           ;; Retry only if we have headroom; otherwise mark exhausted on patch-applied returns
-          (transition {:event :retry :target :propose-patch :type :internal
+          (transition {:event :iterate/retry :target :propose-patch :type :internal
                        :cond  (fn [_env data]
                                 (< (or (:iterations data) 0)
                                   (or (:max-iterations data) 3)))})
-          (transition {:event :retry :target :finished
+          (transition {:event :iterate/retry :target :finished
                        :cond  (fn [_env data]
                                 (>= (or (:iterations data) 0)
                                   (or (:max-iterations data) 3)))}
             (script {:expr (fn [_env _]
                              [(ops/assign :final-status :exhausted)])}))
-          (transition {:event :give-up :target :finished}
+          (transition {:event :iterate/give-up :target :finished}
             (script {:expr (fn [_env _]
                              [(ops/assign :final-status :gave-up)])}))))
 
