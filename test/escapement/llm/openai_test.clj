@@ -79,6 +79,77 @@
       (get-in wire ["tools" 0 "function" "parameters" :type]) => "object"
       (contains? (get-in wire ["tools" 0]) "cache_control") => false)))
 
+(defn- cache-markers-anywhere
+  "Deep-walk a wire map and collect every \"cache_control\" / \"cache-control\"
+   value found at any nesting depth (keys may be strings or keywords)."
+  [wire]
+  (->> (tree-seq coll? seq wire)
+    (filter map?)
+    (mapcat (fn [m] (keep #(get m %) ["cache_control" "cache-control"
+                                      :cache_control :cache-control])))
+    (vec)))
+
+(def message-cache-request
+  "A Request whose MESSAGES carry the message-LEVEL :cache-control marker that
+   the rolling-placement fn (escapement.llm.prompt-cache) stamps onto the
+   message map itself ([idx :cache-control]) — NOT only on a content block.
+   On Anthropic this serializes; on OpenAI it must be a complete no-op."
+  {:model      "gpt-5"
+   :system     "You are helpful."
+   :messages   [{:role          :user
+                 :content       [{:type :text :text "First turn"}]
+                 ;; message-LEVEL marker (the prompt-cache placement shape)
+                 :cache-control {:type :ephemeral}}
+                {:role    :assistant
+                 :content [{:type :text :text "ok"}]
+                 ;; message-level marker with an explicit ttl, too
+                 :cache-control {:type :ephemeral :ttl :1h}}
+                {:role    :user
+                 :content [{:type          :text :text "Latest turn"
+                            ;; block-level marker as well, to be thorough
+                            :cache-control {:type :ephemeral}}]}]
+   :max-tokens 256})
+
+(specification "message-level :cache-control is a no-op on the OpenAI wire (regression)"
+  ;; Regression guard: the message-prefix-caching feature (Anthropic-only) must
+  ;; never leak `cache_control` onto a non-Anthropic backend's wire. Markers may
+  ;; sit on the message MAP itself (the placement shape) and/or on a content
+  ;; block; OpenAI's translator rebuilds messages from a key whitelist, so the
+  ;; marker is structurally dropped. Lock that contract here.
+  (let [wire (oai/request->openai-json message-cache-request)]
+    (assertions
+      "NO cache_control marker survives anywhere in the wire (any depth)"
+      (cache-markers-anywhere wire) => []
+      "the request is otherwise valid: system + every message still present"
+      (get-in wire ["messages" 0 "role"]) => "system"
+      (get-in wire ["messages" 1 "role"]) => "user"
+      (get-in wire ["messages" 1 "content"]) => [{"type" "text" "text" "First turn"}]
+      (get-in wire ["messages" 2 "role"]) => "assistant"
+      (get-in wire ["messages" 2 "content"]) => "ok"
+      (get-in wire ["messages" 3 "role"]) => "user"
+      (get-in wire ["messages" 3 "content"]) => [{"type" "text" "text" "Latest turn"}]
+      "no stray cache_control on the top-level body either"
+      (contains? wire "cache_control") => false)))
+
+(specification "usage cached_tokens still surfaces as :cache-read-input-tokens (regression)"
+  ;; Guard the read-back half: dropping the WRITE marker must not disturb the
+  ;; READ path. OpenAI reports its own implicit prefix-cache hits on
+  ;; usage.prompt_tokens_details.cached_tokens; we keep surfacing it.
+  (let [resp (oai/openai-json->response
+               {"model"   "gpt-5"
+                "choices" [{"finish_reason" "stop"
+                            "message"       {"role" "assistant" "content" "hi"}}]
+                "usage"   {"prompt_tokens"         42
+                           "completion_tokens"     7
+                           "prompt_tokens_details" {"cached_tokens" 30}}}
+               "gpt-5")]
+    (assertions
+      "cached_tokens -> :cache-read-input-tokens"
+      (get-in resp [:usage :cache-read-input-tokens]) => 30
+      "ordinary token counts unaffected"
+      (get-in resp [:usage :input-tokens]) => 42
+      (get-in resp [:usage :output-tokens]) => 7)))
+
 (specification "max_tokens key flip for legacy models"
   (assertions
     "gpt-4o uses legacy max_tokens"

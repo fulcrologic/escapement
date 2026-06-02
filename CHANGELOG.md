@@ -1,5 +1,49 @@
 # Changelog
 
+## [unreleased] — feat/cache-conversation-history — 2026-06-02
+
+Extends Anthropic prompt caching from the static system+tools prefix to the
+**accumulated conversation transcript**. Long tool loops previously
+re-billed the entire growing `messages` array at full input price every
+turn; now the bulk of the transcript reads at cache-read rates and only the
+newest exchange is re-prefilled.
+
+### Added
+
+- **Transcript caching for `:llm-conversation`.** The growing message
+  history now gets a rolling, message-level `cache_control` breakpoint that
+  lands on the last *stable* message (the one just before the newest turn)
+  and advances every turn — so the cached prefix grows with the conversation
+  and the newest turn is never the marker site. On by default whenever
+  `:auto-cache?` is true.
+- **`:message-cache-control` authoring knob** on the conversation node,
+  sibling to `:system-cache-control` / `:tools-cache-control`. Values:
+  `nil`/absent (default ON, strategy `:last-stable`, 5-minute TTL); `false`
+  (disable only the message breakpoint, leaving system/tools markers);
+  a map `{:strategy :last-stable | {:tail N} :ttl :5m | :1h}` for explicit
+  control. `:auto-cache? false` still disables every marker, messages
+  included.
+
+### Changed
+
+- Anthropic's 4-breakpoint cap is now shared across system, tools, and
+  messages, allocated in prompt order **system → tools → messages**:
+  messages receive the remaining budget and the total can never exceed 4
+  (an over-budget `{:tail N}` is silently capped).
+
+### Notes
+
+- **Anthropic-only.** The breakpoint is placed on the provider-neutral
+  request; the Anthropic wire serializes it, every other backend drops it.
+  On **OpenAI** (and OpenAI-compatible backends, incl. `openai-codex`) the
+  message-level marker is a complete wire no-op — OpenAI caches prefixes
+  automatically server-side, so nothing is lost, and `cached_tokens` still
+  reads back as `:cache-read-input-tokens`. **Gemini** out-of-band
+  `CachedContent` caching is not implemented (future work).
+- Verify it from the transcript: `cache-read-input-tokens` in `usage` should
+  grow across turns within a state instead of staying flat at the
+  system+tools prefix size.
+
 ## [unreleased] — feat/llm-facade — 2026-06-02
 
 A public, script-facing LLM API for making LLM calls directly from a chart's

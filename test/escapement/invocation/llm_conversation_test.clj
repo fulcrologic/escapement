@@ -54,6 +54,13 @@
    :usage       {:input-tokens 1 :output-tokens 1}
    :model       "mock"})
 
+(defrecord AlwaysOkTool []
+  tp/Tool
+  (tool-name [_] :test/noop)
+  (description [_] "always succeeds, posts no chart event")
+  (input-schema [_] [:map])
+  (invoke [_ _] {:result "ok" :is-error false}))
+
 (defrecord ThrowingBackend [throw-fn]
   llm/LLMBackend
   (send-turn [_ _] (p/do! (throw (throw-fn)))))
@@ -460,6 +467,150 @@
         (-> req :tools last :cache-control) => {:type :ephemeral}))))
 
 ;; ---------------------------------------------------------------------------
+;; #3e: rolling MESSAGE-level cache breakpoints (task 003)
+;; ---------------------------------------------------------------------------
+
+(defn- total-cache-markers
+  "Count cache_control markers a Request map carries across system + tools +
+   messages (placement-level, pre-wire). Mirrors Anthropic's 4-breakpoint cap."
+  [req]
+  (+ (if (:system-cache-control req) 1 0)
+     (count (filter :cache-control (:tools req)))
+     (count (filter :cache-control (:messages req)))))
+
+(defn- message-marker-indices
+  "Indices of `:messages` carrying a `:cache-control` marker."
+  [req]
+  (->> (:messages req)
+    (map-indexed (fn [i m] (when (:cache-control m) i)))
+    (filter some?)
+    vec))
+
+(defn- run-multi-turn-cache-chart!
+  "Drive a single conversation through N tool_use turns then an end_turn, using a
+   real (chart-invisible) tool so the transcript grows turn-over-turn. Returns the
+   vector of Request maps the mock backend recorded, one per turn."
+  [n-tool-turns params-extra]
+  (let [tool-turn (tool-use-response [{:id "u" :name "test_noop" :input {}}])
+        backend   (mock-backend (into (vec (repeat n-tool-turns tool-turn))
+                                  [(end-turn-response "ok")]))
+        registry  (tp/new-registry [(->AlwaysOkTool)])
+        base      {:system         "stable system prompt"
+                   :real-tools     [:test/noop]
+                   :message        "go"}
+        chart     (chart/statechart
+                    {:initial :wrap}
+                    (state {:id :wrap :initial :work}
+                      (state {:id :work}
+                        (h/llm-conversation
+                          (assoc (merge base params-extra) :id "rolling"))
+                        (transition {:event :llm.idle :target :finished}))
+                      (final {:id :finished})))
+        t         (new-llm-test-env {:statechart chart :backend backend :tool-registry registry})
+        _         (await-config! t :finished 4000)]
+    (-> backend :call-log deref vec)))
+
+(specification "rolling message breakpoints across a multi-turn conversation"
+  (let [reqs (run-multi-turn-cache-chart! 3 {})]
+    (assertions
+      "the backend saw >= 3 turns"
+      (>= (count reqs) 3) => true
+
+      "the FIRST turn (only the inbound user msg) carries NO message marker"
+      (message-marker-indices (first reqs)) => []
+
+      "later turns place a marker, and never on the newest (trailing) message"
+      (every? (fn [req]
+                (let [idxs (message-marker-indices req)
+                      last-idx (dec (count (:messages req)))]
+                  (or (empty? idxs)
+                    (and (not (some #{last-idx} idxs))
+                      ;; at least one stable message exists past turn 1
+                      (<= (apply max idxs) (dec last-idx))))))
+        reqs)
+      => true
+
+      "the message-marker index ADVANCES turn-over-turn as the transcript grows"
+      (let [maxes (->> reqs
+                    (map message-marker-indices)
+                    (filter seq)
+                    (map (fn [idxs] (apply max idxs))))]
+        (= maxes (sort maxes))) => true
+
+      "at least one later turn actually placed a message marker"
+      (boolean (some (comp seq message-marker-indices) reqs)) => true)))
+
+(specification "message + system + tools markers never exceed the 4-cap"
+  (let [reqs (run-multi-turn-cache-chart! 3 {})]
+    (assertions
+      "every turn stays within Anthropic's 4 breakpoints"
+      (every? #(<= (total-cache-markers %) 4) reqs) => true)))
+
+(specification "budget priority: system+tools consume budget first, messages get the remainder"
+  ;; auto-cache on => system (1) + last-tool (1) = 2 used, leaving 2 for messages.
+  ;; A {:tail 5} message strategy WANTS many markers but may only take the remainder.
+  (let [reqs (run-multi-turn-cache-chart! 4 {:message-cache-control {:strategy {:tail 5}}})]
+    (assertions
+      "system marker present on every turn"
+      (every? :system-cache-control reqs) => true
+
+      "last tool marker present on every turn"
+      (every? #(-> % :tools last :cache-control) reqs) => true
+
+      "no turn ever exceeds 4 total markers"
+      (every? #(<= (total-cache-markers %) 4) reqs) => true
+
+      "message markers are capped at the remaining budget (4 - 2 = 2)"
+      (every? #(<= (count (message-marker-indices %)) 2) reqs) => true
+
+      "a later turn with enough stable messages uses the FULL remaining budget"
+      (some #(= 2 (count (message-marker-indices %))) reqs) => true)))
+
+(specification "message-cache-control knob enables/disables message markers"
+  (component ":message-cache-control false disables message markers but keeps system/tools"
+    (let [reqs (run-multi-turn-cache-chart! 3 {:message-cache-control false})]
+      (assertions
+        "no message marker on any turn"
+        (every? (comp empty? message-marker-indices) reqs) => true
+
+        "system marker still present (auto-cache default)"
+        (every? :system-cache-control reqs) => true
+
+        "tools marker still present"
+        (every? #(-> % :tools last :cache-control) reqs) => true)))
+
+  (component ":message-cache-control default (nil) → message markers ARE placed under auto-cache"
+    (let [reqs (run-multi-turn-cache-chart! 3 {})]
+      (assertions
+        "at least one turn carries a message marker"
+        (boolean (some (comp seq message-marker-indices) reqs)) => true)))
+
+  (component "explicit :ttl flows onto the message marker"
+    (let [reqs (run-multi-turn-cache-chart! 3 {:message-cache-control {:ttl :1h}})
+          marked (->> reqs
+                   (mapcat :messages)
+                   (keep :cache-control)
+                   first)]
+      (assertions
+        "message marker carries the 1h ttl"
+        marked => {:type :ephemeral :ttl :1h}))))
+
+(specification ":auto-cache? false disables ALL markers including messages (regression)"
+  (let [reqs (run-multi-turn-cache-chart! 3 {:auto-cache? false})]
+    (assertions
+      "no system marker"
+      (every? (comp nil? :system-cache-control) reqs) => true
+
+      "no tool markers"
+      (every? (fn [req] (every? nil? (map :cache-control (:tools req)))) reqs) => true
+
+      "no message markers"
+      (every? (comp empty? message-marker-indices) reqs) => true
+
+      "total markers are zero on every turn"
+      (every? #(zero? (total-cache-markers %)) reqs) => true)))
+
+;; ---------------------------------------------------------------------------
 ;; #4: Bad input twice -> fatal error
 ;; ---------------------------------------------------------------------------
 
@@ -634,13 +785,6 @@
 ;; ---------------------------------------------------------------------------
 ;; #8: Per-invocation budgets — :max-turns and :max-conversation-duration-ms
 ;; ---------------------------------------------------------------------------
-
-(defrecord AlwaysOkTool []
-  tp/Tool
-  (tool-name [_] :test/noop)
-  (description [_] "always succeeds, posts no chart event")
-  (input-schema [_] [:map])
-  (invoke [_ _] {:result "ok" :is-error false}))
 
 (specification ":max-turns budget fires :error.llm.max-turns"
   ;; The model keeps emitting tool_use forever (infinite loop). Without a
