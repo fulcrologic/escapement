@@ -77,7 +77,13 @@
       (:io/ref (first (dr/read-events* root "s1" {:types #{:llm/request}})))
       => "nodes/w/0/turns/0/request.edn"
       "returns nil for a session with no transcript"
-      (dr/read-events* root "missing" nil) => nil)))
+      (dr/read-events* root "missing" nil) => nil
+      ;; Regression: a session-id may arrive as a java.util.UUID (e.g. a live/active session), while
+      ;; the on-disk directory is its string form. read-events* must coerce, not throw on io/file.
+      "tolerates a java.util.UUID session-id (coerced to the string dir name)"
+      (let [uid (java.util.UUID/randomUUID)]
+        (write-session! root (str uid) [{:event "runner/started" :ts 1 :seq 0 :data {}}])
+        (mapv :transcript/seq (dr/read-events* root uid nil))) => [0])))
 
 (specification "list-sessions* (real files)"
   (let [root (tmp-dir)]

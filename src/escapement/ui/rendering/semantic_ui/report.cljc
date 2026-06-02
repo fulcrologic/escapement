@@ -33,29 +33,39 @@
     [com.fulcrologic.rad.statechart.report :as report]))
 
 (defn- render-report-controls
-  "Renders the control bar: action buttons (right-floated) + input control rows, each via the
-   `statechart.control/render-control` multimethod. Wrapped in a Semantic-UI attached segment + form."
+  "Renders the control bar: input control rows on the left, action buttons on the right, each via the
+   `statechart.control/render-control` multimethod. Laid out with flexbox (NOT a CSS float): a
+   right-floated button group collapses its parent segment, letting the following full-width `ui form`
+   paint ON TOP of the buttons and swallow their clicks. The flex row keeps the form and buttons as
+   side-by-side, non-overlapping siblings so the buttons stay clickable."
   [report-instance _options]
   (let [{:keys [action-layout input-layout]} (control/standard-control-layout report-instance)
         controls (control/component-controls report-instance)]
     (dom/div {:className "ui top attached compact segment"}
-      (dom/div {:className "ui right floated buttons"}
-        (mapv (fn [control-key]
-                (let [{:keys [type] :or {type :button}} (get controls control-key)
-                      style (or (:style (get controls control-key)) :default)]
-                  (control/render-control type style report-instance control-key)))
-          action-layout))
-      (when (seq input-layout)
-        (dom/div {:className "ui form"}
-          (mapv (fn [row]
-                  (dom/div {:key (str row) :className "fields"}
-                    (mapv (fn [control-key]
-                            (when (keyword? control-key)
-                              (let [{:keys [type] :or {type :string}} (get controls control-key)
-                                    style (or (:style (get controls control-key)) :default)]
-                                (control/render-control type style report-instance control-key))))
-                      row)))
-            input-layout))))))
+      (dom/div {:style {:display         "flex"
+                        :alignItems      "flex-end"
+                        :justifyContent  "space-between"
+                        :gap             "1em"}}
+        ;; Inputs on the left (grows to fill, pushing the buttons to the right). Empty spacer when none.
+        (if (seq input-layout)
+          (dom/div {:className "ui form" :style {:flex "1 1 auto" :margin 0}}
+            (mapv (fn [row]
+                    (dom/div {:key (str row) :className "fields"}
+                      (mapv (fn [control-key]
+                              (when (keyword? control-key)
+                                (let [{:keys [type] :or {type :string}} (get controls control-key)
+                                      style (or (:style (get controls control-key)) :default)]
+                                  (control/render-control type style report-instance control-key))))
+                        row)))
+              input-layout))
+          (dom/div {:style {:flex "1 1 auto"}}))
+        ;; Action buttons on the right.
+        (dom/div {:className "ui buttons" :style {:flex "0 0 auto"}}
+          (mapv (fn [control-key]
+                  (let [{:keys [type] :or {type :button}} (get controls control-key)
+                        style (or (:style (get controls control-key)) :default)]
+                    (control/render-control type style report-instance control-key)))
+            action-layout))))))
 
 (defn- render-column-headings
   "Renders the `<thead>` row of column headings (clicking a heading sorts that column)."

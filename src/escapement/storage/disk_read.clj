@@ -68,7 +68,10 @@
    (see `events-xform`). Returns a vector in `:transcript/seq` order, or `nil` if the session has no
    transcript. Realized inside `with-open`; `:limit` short-circuits so large logs are not fully read."
   [work-dir session-id query]
-  (let [f (io/file work-dir session-id transcript-name)]
+  ;; `session-id` may arrive as a String or a java.util.UUID (the on-disk session directory is the
+  ;; UUID's string form); `io/file` rejects a UUID, so normalize to the string name.
+  (let [session-id (str session-id)
+        f          (io/file work-dir session-id transcript-name)]
     (when (.isFile f)
       (with-open [r (io/reader f)]
         (into []
@@ -103,7 +106,8 @@
    transcript. Parent/child correlation is not derived in v1 (`:session/parent-id` nil,
    `:session/child-ids` empty)."
   [work-dir session-id]
-  (let [f (io/file work-dir session-id transcript-name)
+  (let [session-id (str session-id)                          ; tolerate a UUID session-id (see read-events*)
+        f          (io/file work-dir session-id transcript-name)
         {:keys [started-at ended-at chart-id resume? status count]} (scan-transcript f)]
     {::sc/session-id     session-id
      ::sc/statechart-src (->keyword chart-id)

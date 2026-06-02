@@ -155,7 +155,7 @@
         (str/includes? html "ui selectable celled attached table") => true
         "emits the Semantic-UI control-bar segment + buttons classes from render-report-controls"
         (and (str/includes? html "ui top attached compact segment")
-          (str/includes? html "ui right floated buttons")) => true
+          (str/includes? html "ui buttons")) => true
         "renders the RAD container + header classes"
         (and (str/includes? html "ui container") (str/includes? html "ui header")) => true
         "renders the Status + Chart column headings"
@@ -164,8 +164,8 @@
         (and (str/includes? html "Done") (str/includes? html "Incomplete")) => true
         "renders both fixture sessions' chart sources (Writer + Hello)"
         (and (str/includes? html "Writer") (str/includes? html "Hello")) => true
-        "renders a fixture session's started-at epoch cell value"
-        (str/includes? html "200") => true
+        "renders a fixture session's started-at as a formatted Bogota date/time (epoch 200ms → 1969-12-31), not raw ms"
+        (str/includes? html "1969-12-31") => true
         "renders the row-action buttons (Events drill-in) as tiny SUI buttons"
         (and (str/includes? html "Events") (str/includes? html "ui tiny button")) => true))))
 

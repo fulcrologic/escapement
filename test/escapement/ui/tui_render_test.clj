@@ -143,8 +143,8 @@
         (and (boolean (re-find #"\bDone\b" screen)) (boolean (re-find #"\bIncomplete\b" screen))) => true
         "renders both sessions' chart sources (Writer + Hello)"
         (and (boolean (re-find #"\bWriter\b" screen)) (boolean (re-find #"\bHello\b" screen))) => true
-        "renders the started-at epoch value of a fixture session"
-        (boolean (re-find #"\b200\b" screen)) => true))))
+        "renders the started-at as a formatted Bogota date/time (epoch 200ms → 1969-12-31), not raw ms"
+        (boolean (re-find #"1969-12-31" screen)) => true))))
 
 (specification "explorer: drill-in from a session row renders that session's events"
   (log/with-merged-config {:min-level :error}

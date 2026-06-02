@@ -40,20 +40,19 @@
                                          :action (fn [this]
                                                    (let [sid (control/current-value this ::sc/session-id)]
                                                      (scr/route-to! this
-                                                       :escapement.ui.screens.session-detail/ArtifactsReport
+                                                       `escapement.ui.screens.session-detail/ArtifactsReport
                                                        {::sc/session-id sid})))}
                         ::sessions      {:type   :button
                                          :label  "All Sessions"
                                          :local? true
                                          :action (fn [this]
                                                    (scr/route-to! this
-                                                     :escapement.ui.screens.sessions-report/SessionsReport {}))}
+                                                     `escapement.ui.screens.sessions-report/SessionsReport {}))}
                         ::refresh       {:type   :button
                                          :label  "Refresh"
                                          :local? true
                                          :action (fn [this] (control/run! this))}}
    ro/control-layout   {:action-buttons [::sessions ::artifacts ::refresh]}
-
    ro/run-on-mount?    true
    ro/route            "session-events"})
 
