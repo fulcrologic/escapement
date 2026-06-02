@@ -62,16 +62,22 @@
 ;; Reference example config (verbatim from fixlibfacade.md "Reference example")
 ;; ---------------------------------------------------------------------------
 
+;; Mandatory-aliases model: every target is named by an alias; preferences are
+;; a vector of alias keywords; ratings are keyed by alias keyword.
+(def reference-aliases
+  {:glm  [{:provider :z-ai-plan :model "glm-5.1"}]
+   :opus [{:provider :anthropic :model "claude-opus-4-7"}]
+   :gpt  [{:provider :openai :model "gpt-5"}]})
+
 (def reference-config
-  {:llm/preferences
-   [{:provider :z-ai-plan :model "glm-5.1"}
-    {:provider :anthropic :model "claude-opus-4-7"}
-    {:provider :openai :model "gpt-5"}]
+  {:llm/aliases reference-aliases
+
+   :llm/preferences [:glm :opus :gpt]
 
    :llm/ratings
-   {"glm-5.1"         {:clojure 7 :ux 5}
-    "claude-opus-4-7" {:clojure 9 :ux 4}
-    "gpt-5"           {:clojure 5 :ux 8}}
+   {:glm  {:clojure 7 :ux 5}
+    :opus {:clojure 9 :ux 4}
+    :gpt  {:clojure 5 :ux 8}}
 
    :llm/eligibility-strict? true})
 
@@ -145,25 +151,25 @@
     ;; preference order; only :llm/ratings differs. Under the old global this
     ;; was impossible — the first deref froze the table process-wide.
     (let [needs {:clojure [:>= 7]}
-          prefs [{:provider :z-ai-plan :model "glm-5.1"}
-                 {:provider :anthropic :model "claude-opus-4-7"}
-                 {:provider :openai :model "gpt-5"}]
-          ;; Run A: only gpt-5 clears :clojure>=7 ⇒ gpt-5 selected.
+          prefs [:glm :opus :gpt]
+          ;; Run A: only :gpt clears :clojure>=7 ⇒ gpt-5 selected.
           a     (hermetic
                   #(run-gate {:needs       needs
                               :credentials reference-credentials
-                              :config      {:llm/preferences prefs
-                                            :llm/ratings     {"glm-5.1"         {:clojure 2}
-                                                              "claude-opus-4-7" {:clojure 3}
-                                                              "gpt-5"           {:clojure 9}}}}))
-          ;; Run B: only glm-5.1 clears it ⇒ glm-5.1 selected (first in prefs).
+                              :config      {:llm/aliases     reference-aliases
+                                            :llm/preferences prefs
+                                            :llm/ratings     {:glm  {:clojure 2}
+                                                              :opus {:clojure 3}
+                                                              :gpt  {:clojure 9}}}}))
+          ;; Run B: only :glm clears it ⇒ glm-5.1 selected (first in prefs).
           b     (hermetic
                   #(run-gate {:needs       needs
                               :credentials reference-credentials
-                              :config      {:llm/preferences prefs
-                                            :llm/ratings     {"glm-5.1"         {:clojure 9}
-                                                              "claude-opus-4-7" {:clojure 2}
-                                                              "gpt-5"           {:clojure 1}}}}))]
+                              :config      {:llm/aliases     reference-aliases
+                                            :llm/preferences prefs
+                                            :llm/ratings     {:glm  {:clojure 9}
+                                                              :opus {:clojure 2}
+                                                              :gpt  {:clojure 1}}}}))]
       (assertions
         "run A selected the only model its ratings let through the gate"
         (:model a) => "gpt-5"

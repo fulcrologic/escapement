@@ -1,72 +1,72 @@
 (ns escapement.llm.preferences-test
-  "Priority-ordered (provider, model) preference list: validation against
-   the catalog, config extraction/fallback, and the pure list transforms
-   (`sanitize`/`available`/`model-order`) the llm-conversation path consumes."
+  "Preference list as a vector of ALIAS KEYWORDS (mandatory-aliases model):
+   config extraction/fallback, the built-in default alias set + default
+   preference vector, and the alias-flatten transforms (`flatten-targets`/
+   `model-order`/`provider-order`) the llm-conversation + providers paths
+   consume. (Full R1–R8 acceptance coverage lives in task 004.)"
   (:require
     [escapement.llm.preferences :as prefs]
     [fulcro-spec.core :refer [=> assertions component specification]]))
 
-;; A pair the catalog is asserted to reach by
-;; `catalog_test.clj` "default preferences stay reachable".
-(def ^:private valid (first prefs/default-preferences))
-(def ^:private bogus {:provider :no-such-provider :model "no-such-model"})
-
-(specification "preferences"
-  (component "valid-entry? — only catalog-reachable pairs"
+(specification "preferences (alias-keyword vector)"
+  (component "default alias set + default preference vector"
     (assertions
-      "a default entry validates"
-      (prefs/valid-entry? valid) => true
-      "unknown provider/model is rejected"
-      (prefs/valid-entry? bogus) => false
-      "missing provider or model is rejected"
-      (prefs/valid-entry? {:model "x"}) => false
-      (prefs/valid-entry? {:provider :z-ai}) => false))
+      "default-preferences is a vector of keywords"
+      (every? keyword? prefs/default-preferences) => true
+      "every default preference keyword is a default-aliases key"
+      (every? (set (keys prefs/default-aliases)) prefs/default-preferences) => true))
 
   (component "from-config — flat key, nested key, or nil"
     (assertions
       "flat :llm/preferences wins"
-      (prefs/from-config {:llm/preferences [valid]}) => [valid]
+      (prefs/from-config {:llm/preferences [:fast :smart]}) => [:fast :smart]
       "nested [:llm :preferences] is accepted"
-      (prefs/from-config {:llm {:preferences [valid]}}) => [valid]
+      (prefs/from-config {:llm {:preferences [:fast]}}) => [:fast]
       "absent → nil so caller can fall back"
       (prefs/from-config {}) => nil))
 
-  (component "sanitize — coerce, validate, preserve order"
+  (component "aliases-from-config — config wins, else built-in defaults"
     (assertions
-      "tuple [:provider \"model\"] form is accepted alongside maps"
-      (prefs/sanitize [[(:provider valid) (:model valid)]]) => [valid]
-      "invalid entries are dropped, valid order preserved"
-      (prefs/sanitize [bogus valid bogus]) => [valid]
-      "extra keys on a map entry are stripped to :provider/:model"
-      (prefs/sanitize [(assoc valid :note "hi")]) => [valid]
-      "empty in, empty out"
-      (prefs/sanitize []) => []))
+      "flat :llm/aliases wins"
+      (prefs/aliases-from-config {:llm/aliases {:x [{:provider :a :model "m"}]}})
+      => {:x [{:provider :a :model "m"}]}
+      "absent → built-in default-aliases"
+      (prefs/aliases-from-config {}) => prefs/default-aliases))
 
-  (component "preferences — config overrides, else default"
+  (component "preferences — config overrides, else default vector"
     (assertions
-      "explicit config is sanitized and used"
-      (prefs/preferences {:llm/preferences [valid bogus]}) => [valid]
-      "absent config falls back to the sanitized default list"
-      (prefs/preferences {}) => (prefs/sanitize prefs/default-preferences)))
+      "explicit alias-keyword config is used as-is"
+      (prefs/preferences {:llm/preferences [:fast :smart]}) => [:fast :smart]
+      "absent config falls back to the default preference vector"
+      (prefs/preferences {}) => prefs/default-preferences))
 
-  (component "available — keep priority order, filter unusable providers"
-    (let [a {:provider :a :model "m1"}
-          b {:provider :b :model "m2"}
-          c {:provider :a :model "m3"}]
+  (component "flatten-targets — alias keywords → ordered, de-duped targets"
+    (let [aliases {:a [{:provider :p1 :model "x"} {:provider :p2 :model "y"}]
+                   :b [{:provider :p2 :model "y"} {:provider :p3 :model "z"}]}]
       (assertions
-        "no predicate → everything, order preserved"
-        (prefs/available [a b c]) => [a b c]
-        "predicate filters by provider, order preserved"
-        (prefs/available [a b c] #{:a}) => [a c]
-        "nothing usable → empty"
-        (prefs/available [a b c] (constantly false)) => [])))
+        "flattens in preference order, de-duping repeated targets"
+        (prefs/flatten-targets [:a :b] aliases)
+        => [{:provider :p1 :model "x"} {:provider :p2 :model "y"} {:provider :p3 :model "z"}]
+        "unknown alias keywords contribute nothing"
+        (prefs/flatten-targets [:a :nope] aliases)
+        => [{:provider :p1 :model "x"} {:provider :p2 :model "y"}])))
 
   (component "model-order — distinct model ids in priority order"
-    (assertions
-      "dedupes while keeping first-seen order"
-      (prefs/model-order [{:provider :a :model "x"}
-                          {:provider :b :model "x"}
-                          {:provider :c :model "y"}])
-      => ["x" "y"]
-      "empty in, empty out"
-      (prefs/model-order []) => [])))
+    (let [aliases {:a [{:provider :p1 :model "x"} {:provider :p2 :model "x"}]
+                   :b [{:provider :p3 :model "y"}]}]
+      (assertions
+        "two-arg: flatten aliases then dedupe model ids"
+        (prefs/model-order [:a :b] aliases) => ["x" "y"]
+        "one-arg legacy seam: already-flattened target maps → model ids"
+        (prefs/model-order [{:provider :a :model "x"}
+                            {:provider :b :model "x"}
+                            {:provider :c :model "y"}]) => ["x" "y"]
+        "empty in, empty out"
+        (prefs/model-order [] {}) => [])))
+
+  (component "provider-order — distinct providers in preference order"
+    (let [aliases {:a [{:provider :p1 :model "x"} {:provider :p2 :model "y"}]
+                   :b [{:provider :p2 :model "z"} {:provider :p3 :model "w"}]}]
+      (assertions
+        "providers in flattened order, de-duped"
+        (prefs/provider-order [:a :b] aliases) => [:p1 :p2 :p3]))))

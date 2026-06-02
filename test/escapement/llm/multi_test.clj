@@ -106,6 +106,75 @@
         (-> (p/await! (proto/send-turn b {:model "gpt-5-mini" :messages []}))
           :backend-metadata :tag) => :anthropic))))
 
+(specification "MultiBackend provider-keyed dispatch (R3)"
+  (component "request :provider selects the provider-tagged sub-backend"
+    (let [b (multi/new-backend
+              {:routes [[#"^claude-" anth :anthropic]
+                        [#"^gpt-5" codex :codex]]})]
+      (assertions
+        "explicit :provider bypasses the model regex (model that would match no route)"
+        (-> (p/await! (proto/send-turn b {:provider :codex :model "kimi-k2.6" :messages []}))
+          :backend-metadata :tag) => :codex
+
+        "explicit :provider overrides what the model regex would have picked"
+        (-> (p/await! (proto/send-turn b {:provider :anthropic :model "gpt-5.2" :messages []}))
+          :backend-metadata :tag) => :anthropic)))
+
+  (component "absent :provider is inert — legacy matcher path unchanged"
+    (let [b (multi/new-backend
+              {:routes [[#"^claude-" anth :anthropic]
+                        [#"^gpt-5" codex :codex]]})]
+      (assertions
+        "no :provider → routes by model regex exactly as before"
+        (-> (p/await! (proto/send-turn b {:model "claude-sonnet-4-6" :messages []}))
+          :backend-metadata :tag) => :anthropic)))
+
+  (component "unknown :provider falls back to matcher logic"
+    (let [b (multi/new-backend
+              {:routes          [[#"^claude-" anth :anthropic]]
+               :default-backend fallback})]
+      (assertions
+        "untagged provider → not in index → matcher/default path"
+        (-> (p/await! (proto/send-turn b {:provider :nonesuch :model "claude-x" :messages []}))
+          :backend-metadata :tag) => :anthropic
+
+        "untagged provider + non-matching model → default"
+        (-> (p/await! (proto/send-turn b {:provider :nonesuch :model "haiku" :messages []}))
+          :backend-metadata :tag) => :fallback)))
+
+  (component "legacy 2-tuple routes build an empty provider index (provider branch inert)"
+    (let [b (multi/new-backend
+              {:routes [[#"^claude-" anth] [#"^gpt-5" codex]]})]
+      (assertions
+        "provider-index empty for untagged routes"
+        (:provider-index b) => {}
+
+        "a :provider on the request with no tagged routes still routes by model"
+        (-> (p/await! (proto/send-turn b {:provider :anthropic :model "gpt-5.2" :messages []}))
+          :backend-metadata :tag) => :codex)))
+
+  (component "first provider occurrence wins in the index"
+    (let [b (multi/new-backend
+              {:routes [[#"^a" anth :dup] [#"^b" codex :dup]]})]
+      (assertions
+        "index keeps the first sub-backend tagged with a given provider"
+        (-> (p/await! (proto/send-turn b {:provider :dup :model "zzz" :messages []}))
+          :backend-metadata :tag) => :anthropic)))
+
+  (component "streaming variant honors provider-keyed dispatch"
+    (let [b (multi/new-backend
+              {:routes [[#"^stream-" streamer :streamer]]})
+          seen (atom [])
+          resp (p/await! (proto/stream-turn
+                           b {:provider :streamer :model "no-match" :messages []}
+                           #(swap! seen conj %)))]
+      (assertions
+        "provider-tagged streaming sub-backend selected despite non-matching model"
+        (-> resp :backend-metadata :tag) => :streamer
+
+        "deltas still forwarded"
+        (mapv :text @seen) => ["He" "llo" "!"]))))
+
 (specification "MultiBackend streaming forwarding"
   (component "streaming? reflects picked sub-backend"
     (let [stream-multi (multi/new-backend

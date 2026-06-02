@@ -32,9 +32,15 @@
       the caller (CLI: from disk config at startup; lib facade Step 4: from
       injected `:config`). Defaults to `{}` in the processor.
     * `:llm-eligibility-strict?` (optional) - fail-closed flag for the
-      eligibility gate (see `escapement.invocation.llm-conversation/new-processor`)."
+      eligibility gate (see `escapement.invocation.llm-conversation/new-processor`).
+    * `:llm-aliases` (optional) - `:llm/aliases` map (`{alias-kw [target-map …]}`)
+      threaded to the llm-conversation processor for keyword-`:model` resolution.
+    * `:llm-preferences` (optional) - `:llm/preferences` vector of alias keywords;
+      the default candidate set flattened when a node names no model. Defaults to
+      the built-in `preferences/default-preferences` in the processor."
   [{:keys [checkpoint-dir invocation-processors registry queue store
            llm-backend llm-default-models llm-catalog-ratings llm-eligibility-strict?
+           llm-aliases llm-preferences
            tool-registry transcript-fn human-renderer
            session-dir artifact-store]
     :or   {invocation-processors []}}]
@@ -49,7 +55,9 @@
                                               :transcript-fn       transcript-fn
                                               :default-models      llm-default-models
                                               :catalog-ratings     llm-catalog-ratings
-                                              :eligibility-strict? llm-eligibility-strict?})]
+                                              :eligibility-strict? llm-eligibility-strict?
+                                              :aliases             llm-aliases
+                                              :preferences         llm-preferences})]
                     [])
         hi-procs  (if human-renderer
                     [(human-input/new-processor {:renderer      human-renderer

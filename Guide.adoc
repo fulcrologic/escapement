@@ -76,26 +76,27 @@ bb -m escapement.cli run escapement.examples.hello/agent
 
 ==== Multi-backend auto-fallback
 
-When more than one credential is configured, Escapement wires a multi-dispatch backend AND builds a preference-ordered list of model ids.
-That order comes from `:llm/preferences` in `.escapement.edn`
-(see <<project-config>>) intersected with the reachable credentials, falling back to a built-in default order when unset.
-At conversation time, if a model errors out (HTTP 429, network blip, parse error, etc.) the InvocationProcessor marks it `:down` for the rest of the process and tries the next candidate. `:error.llm.backend` is only fired once every candidate has failed.
+When more than one credential is configured, Escapement wires a multi-dispatch backend AND derives a preference-ordered candidate set of targets.
+That order comes from `:llm/preferences` in `.escapement.edn` — now an **ordered vector of alias keywords** (see <<project-config>> and <<llm-aliases>>) — whose aliases flatten into provider-keyed targets; the credential-backend route order follows the distinct, first-seen providers of those flattened targets.
+When `:llm/preferences` is unset, a built-in default alias set + default preference vector supply a sane order (see <<llm-aliases>>).
+At conversation time, if a target errors out (HTTP 429, network blip, parse error, etc.) the InvocationProcessor marks it `:down` for the rest of the process and tries the next candidate. `:error.llm.backend` is only fired once every candidate has failed.
 Each fallback is logged as
 `[llm/model-down] <model> — <message>  next=[...]`, and every
 `[llm/req]` / `[llm/resp]` line now shows the model in use, so the TUI/log stream makes the switch visible.
 
-Two ways for a chart to influence the auto-fallback list:
+Two ways for a chart to influence the candidate set:
 
-* `:model "..."` or `:models [...]` on the `:llm-conversation` node — explicit pick(s).
-When set, the auto-list is *not* consulted; only your strings are tried (with the same `:down`-marking fallback when you give a multi-element list).
+* `:model :alias` or `:models [:alias …]` on the `:llm-conversation` node — explicit pick(s), naming aliases by keyword.
+When set, `:llm/preferences` is *not* consulted; only the named aliases (flattened to their targets, in author order) are tried, with the same `:down`-marking failover across targets.
+A bare string `:model` / string in `:models` is **not** a model id — it is a categorized error (see <<llm-aliases>>); keyword is the only legal model reference.
 * `:needs {...}` on the `:llm-conversation` node — a declarative
-**eligibility gate** over the auto-list (see <<params-fn,the
+**eligibility gate** over the candidate set (see <<params-fn,the
 conversation authoring keys>>).
 A flat `fact → constraint` map over *any* model fact — objective (`:vision?`, `:tool-call?`, `:context-tokens`, …) or subjective (`:intelligence` plus any opinion key defined via
 `:llm/ratings`).
 Useful when a state genuinely requires, say, vision plus Sonnet-class reasoning.
-The gate **filters**; it never reorders — ranking is the sole job of `:llm/preferences`.
-If it excludes every reachable model the unfiltered list is used as a best-effort fallback and an `:llm/model-policy-empty` warning is emitted to the transcript (the lib facade can opt into fail-closed instead; see
+The gate **filters at target granularity**; it never reorders — ordering is the author order of the candidate aliases' targets.
+If it excludes every eligible target the unfiltered list is used as a best-effort fallback and an `:llm/model-policy-empty` warning is emitted to the transcript (the lib facade can opt into fail-closed instead; see
 <<hosted-config>>).
 The legacy `:intelligence N` shorthand still works and is folded into the gate as `:needs {:intelligence [:>= N]}`.
 
@@ -531,23 +532,25 @@ When non-empty it takes precedence over
 Use it when the opening turn is more than a single plain-text string.
 
 `:model`::
-Optional string passed through to the backend.
-Examples:
-`"claude-opus-4-7"`, `"claude-sonnet-4-6"`, `"claude-haiku-4-5"`,
-`"glm-4.6"` (when targeting the z.ai compat endpoint).
-When set, Escapement uses *exactly this model* — auto-fallback across other configured backends is disabled for this state (your explicit pick is honored).
-If absent, the auto-fallback list kicks in (see
+Optional **alias keyword** (e.g. `:kimi2.6`) resolved through `:llm/aliases` into an ordered list of cross-provider targets with failover.
+See <<llm-aliases>>.
+When set, Escapement uses *exactly that alias's targets* — `:llm/preferences` is not consulted for this state (your explicit pick is honored).
+If absent, the candidate set comes from `:llm/preferences` (see
 `:models` and `:intelligence` below).
-Per-state selection is the point: one chart state can drive Opus for hard reasoning, the next Sonnet for routine edits, the next Haiku for cheap fan-out.
+Per-state selection is the point: one chart state can drive an Opus-class alias for hard reasoning, the next a Sonnet alias for routine edits, the next Haiku for cheap fan-out.
++
+**Keyword is the only legal model reference.** A *string* `:model` (e.g. `"claude-opus-4-7"`) is no longer passed through — it is a categorized `:error.llm.invalid-request` (`:detail :string-model`); define an alias and name it by keyword instead.
+See the <<llm-aliases-migration,Migration>> note.
 
 `:models`::
-Optional ordered vector of model id strings.
-Tried in order; on a backend failure (HTTP 429, network error, etc.) the next candidate is tried and the failing one is marked `:down` for the rest of the process so later turns and later invocations skip it.
+Optional ordered vector of **alias keywords**.
+Their targets are flattened in order; on a backend failure (HTTP 429, network error, etc.) the next target is tried and the failing one is marked `:down` for the rest of the process so later turns and later invocations skip it.
 As with
-`:model`, an explicit list disables the auto-detected default fallback list — only the strings you name are tried.
+`:model`, an explicit list disables the `:llm/preferences` default — only the named aliases are tried.
+A *string* element is a categorized error (`:detail :string-models`); aliases only.
 
 `:needs`::
-Optional **eligibility gate** over the auto-detected fallback list — the ergonomic chart-node surface.
+Optional **eligibility gate** over the candidate set — the ergonomic chart-node surface.
 Only meaningful when neither
 `:model` nor `:models` is set.
 It is a **flat** `fact → constraint`
@@ -589,22 +592,26 @@ map (one nesting level); each entry states its own rule by shape:
 | `:knowledge` | knowledge-cutoff string
 |===
 +
-* **Subjective ratings** — any host-defined key from `:llm/ratings`
-(`:intelligence`, `:clojure`, `:ux`, `:tier`, …).
-These mix into the *same* keyspace; they are deliberately not enumerated (free-form, host-owned).
+* **Subjective ratings** — any host-defined key from `:llm/ratings`,
+which is keyed by **alias keyword** (`{:kimi2.6 {:intelligence 90 …}}`).
+The opinion keys (`:intelligence`, `:clojure`, `:ux`, `:tier`, …) mix into the *same* keyspace; they are deliberately not enumerated (free-form, host-owned).
 With no ratings configured, a subjective clause matches nothing.
 +
-  The gate **filters** the preference-ordered candidate list; it
-  **never reorders** — *all* ranking comes from the sorted
-  `:llm/preferences`. A model rated `:clojure 7` and one rated
-  `:clojure 10` are interchangeable under `[:>= 6]`; preference order
-  alone decides which survivor runs. If the gate removes every
-  candidate the default is **fail-open** (the unfiltered list is used
-  as a best-effort fallback and an `:llm/model-policy-empty` warning,
-  carrying the resolved `:policy` and the rejected `:default-models`,
-  is emitted to the transcript). The lib facade can opt into
-  **fail-closed** via `:config :llm/eligibility-strict? true` — see
-  <<hosted-config>>.
+  The gate **filters at target granularity**; it **never reorders** —
+  ordering is the author order of the candidate aliases' targets.
+  Objective facts are looked up per target's provider+model; subjective
+  scores are read from the originating **alias's** rating. Within a
+  multi-provider alias, individual ineligible targets are dropped; an
+  alias survives iff at least one of its targets is eligible; an alias
+  whose targets all fail drops out entirely; surviving targets keep
+  author order. If the gate removes every eligible target the default is
+  **fail-open** (the unfiltered candidate list is used as a best-effort
+  fallback and an `:llm/model-policy-empty` warning, carrying the
+  resolved `:policy` and the rejected `:candidates`, is emitted to the
+  transcript). The lib facade can opt into **fail-closed** via
+  `:config :llm/eligibility-strict? true` — the node then fails with
+  `:error.llm.invalid-request` (`:detail :eligibility-empty-strict`);
+  see <<hosted-config>>.
 +
   The legacy `:intelligence N` key is still accepted on the node and is
   equivalent to `:needs {:intelligence [:>= N]}`.
@@ -782,6 +789,154 @@ Recovery happens *before* these fire.
 A transient category (`:rate-limited` / `:overloaded` / `:timeout` / `:transport`) is auto-retried with backoff per the `:resilience` param (see
 <<params-fn>>), so `:error.llm.rate-limited` and friends now fire only after retries are exhausted; terminal categories (`:auth` /
 `:invalid-request` / `:context-length`) still fire immediately.
+
+[[llm-aliases]]
+=== LLM model aliases (`:llm/aliases`)
+
+The same logical model is spelled differently on every provider — Kimi K2.6 is `kimi-k2.6` on opencode-go, `moonshotai/Kimi-K2.6` on deepinfra, `accounts/fireworks/models/kimi-k2p6` on fireworks-ai — with no common prefix the string router can key on, and some ids collide across providers.
+`:llm/aliases` is the **single source of truth** for any (provider, model, call-params) target.
+A chart names a model by a short keyword nickname and Escapement resolves it to an **ordered list of explicit, provider-keyed targets** tried in author order, failing over across providers.
+Every other model reference — `:llm/preferences`, `:llm/ratings`, a node's `:model`/`:models` — is now a *reference* to a named alias by keyword.
+A bare model-id string is no longer a legal way to name a target anywhere.
+This removes both the per-provider model-string guessing and the fragile model-string regex routing, and collapses ratings/eligibility onto the logical model (the alias) rather than its six per-provider spellings.
+
+==== Config shape
+
+`:llm/aliases` is an optional key in `.escapement.edn` (project or `~/.escapement.edn`, deep-merged like the rest of config).
+It maps an alias keyword to a **non-empty, ordered vector of target maps**:
+
+[source,clojure]
+----
+{:llm/aliases
+ {:kimi2.6 [{:provider :opencode-go :model "kimi-k2.6"}
+            {:provider :deepinfra   :model "moonshotai/Kimi-K2.6" :temperature 0.3}
+            {:provider :fireworks   :model "accounts/fireworks/models/kimi-k2p6"}]}}
+----
+
+Each target is a **closed** map: required `:provider` (keyword) and `:model` (provider-specific id string), plus optional per-target generation params `:temperature`, `:top-p`, `:top-k`, `:thinking`, and `:max-tokens`.
+A single-element vector is the degenerate single-target case.
+The alias **schema is unchanged** — only its role (now the *only* target definition) and the surrounding references changed.
+
+==== `:llm/preferences` and `:llm/ratings` are alias references
+
+`:llm/preferences` is an **ordered vector of alias keywords** — the default candidate set used when a node names no model:
+
+[source,clojure]
+----
+:llm/preferences [:default-glm :default-opus :default-gpt]
+----
+
+A preference keyword not present in `:llm/aliases` is a **validation error** (referential integrity) with a clear message naming the offending keyword.
+
+`:llm/ratings` is **keyed by alias keyword**:
+
+[source,clojure]
+----
+:llm/ratings {:default-glm {:clojure 7 :ux 5}
+              :default-opus {:clojure 9 :ux 4}}
+----
+
+A rating key not present in `:llm/aliases` is rejected the same way.
+
+==== Using an alias on a node
+
+A node references the alias as its `:model` (or a vector of aliases via `:models`):
+
+[source,clojure]
+----
+(h/llm-conversation
+ {:id     :coder
+  :system "…"
+  :model  :kimi2.6})    ; keyword ⇒ alias
+----
+
+**Keyword is the only legal model reference.**
+A *string* `:model`, a string element in `:models`, or a `{:provider :model}` pair in `:llm/preferences` is a **categorized error**, never a passthrough to a backend:
+
+[cols="2,2",options="header"]
+|===
+| Illegal shape | Error
+| string `:model "…"` on a node | `:error.llm.invalid-request` `:detail :string-model`
+| string element in `:models` | `:error.llm.invalid-request` `:detail :string-models`
+| `{:provider :model}` pair in `:llm/preferences` | config validation error (not a keyword)
+| model-id string key in `:llm/ratings` | config validation error (not a keyword)
+|===
+
+A node with **no** `:model`/`:models` resolves through `:llm/preferences`. Both paths produce the same flattened, ordered `{:provider :model :params}` candidate list.
+
+==== Failover and provider-keyed dispatch
+
+A node's effective candidate sequence is the flatten of its alias-keyword vector (its explicit `:model`/`:models`, else `:llm/preferences`) over `:llm/aliases`, in **author order** (no rating-based reordering), de-duped.
+The first target's request carries its `:provider` keyword and provider-specific `:model` to dispatch — routing is by provider, not by re-matching the model-string regex.
+On a backend error the conversation fails over to the next target — switching provider, model, **and** params together — reusing the same mark-`:down`-and-advance mechanism, now across *all* flattened targets (cross-target and cross-provider).
+Only after every target fails does the failure surface as `:error.llm.<category>`.
+
+An **unknown** alias keyword explicitly named on a node (not in `:llm/aliases`) fails fast with a categorized `:error.llm.invalid-request` (`:detail :unknown-alias`, with the `:known` aliases) and an `:llm/error` transcript event — the keyword is never shipped to a backend as a model string. (Dangling preference keywords are caught earlier, at config load.)
+
+==== `:needs` filtering at target granularity
+
+A `:needs` gate filters the flattened candidate list at **target granularity**: objective facts are looked up per target's provider+model; subjective scores are read from the originating **alias's** `:llm/ratings` entry.
+Within a multi-provider alias, individual ineligible targets are dropped; an alias survives iff at least one of its targets is eligible; an alias whose targets all fail drops out entirely; surviving targets keep author order.
+When the gate empties the eligible list, the default is **fail-open** (the unfiltered list runs; an `:llm/model-policy-empty` transcript event marks the gap). `:config :llm/eligibility-strict? true` makes it **fail-closed** — the node fails with `:error.llm.invalid-request` (`:detail :eligibility-empty-strict`); the gap event still fires.
+
+==== Built-in defaults and route ordering
+
+When config omits `:llm/aliases` and/or `:llm/preferences`, a built-in default alias set plus a default preference vector make the no-config case resolve a sane default purely through the alias path.
+The credential-backend route ordering derives from the **preference aliases' providers** — the distinct, first-seen provider order across the flattened preference targets.
+
+==== Param precedence
+
+A target's optional `:temperature` / `:top-p` / `:top-k` / `:thinking` are **defaults** for that attempt.
+An explicit node authoring-key value for the same key always **overrides** the target value (merge order is target-under-node).
+A target with no params just inherits the node/backend defaults.
+
+==== `:thinking` and the output cap
+
+`:max-tokens` is intentionally not a chart param (see <<tokens-and-turns>>) — the per-turn output cap is resolved from the model catalog.
+When a target enables `:thinking {:type :enabled :budget-tokens N}`, the cap must satisfy `max-tokens > N`.
+If the catalog cap for that target's model is unknown or too low, set an **alias-only `:max-tokens` hint on the target**; it is preferred over the catalog value during resolution and is consumed solely by the output-cap logic — it never becomes a chart-node param.
+
+[[llm-aliases-migration]]
+==== Migration from the old pair/string shapes
+
+This model deliberately **reverses** the earlier additive aliases feature: the old `{:provider :model}` preference pairs, bare string `:model`/`:models`, and string-keyed `:llm/ratings` are gone. Each now produces a **loud, categorized error** rather than silently working — so migration is mechanical.
+
+. **Pair-shaped `:llm/preferences`** → define named aliases, reference them by keyword:
++
+[source,clojure]
+----
+;; OLD
+:llm/preferences [{:provider :anthropic :model "claude-opus-4-7"}
+                  {:provider :z-ai      :model "glm-4.6"}]
+
+;; NEW
+:llm/aliases     {:opus [{:provider :anthropic :model "claude-opus-4-7"}]
+                  :glm  [{:provider :z-ai      :model "glm-4.6"}]}
+:llm/preferences [:opus :glm]            ; ordered vector of alias keywords
+----
+A non-keyword preference entry is rejected at config load.
+
+. **Bare string `:model` / string `:models` on a node** → define an alias and name it by keyword:
++
+[source,clojure]
+----
+;; OLD                          ;; NEW
+{:model "claude-opus-4-7"}      {:model :opus}
+{:models ["glm-4.6" "gpt-5"]}   {:models [:glm :gpt5]}
+----
+A string `:model` raises `:error.llm.invalid-request` (`:detail :string-model`); a string in `:models` raises `:detail :string-models`.
+
+. **String-keyed `:llm/ratings`** → re-key onto alias keywords:
++
+[source,clojure]
+----
+;; OLD
+:llm/ratings {"claude-opus-4-7" {:intelligence 10 :clojure 10}}
+
+;; NEW
+:llm/ratings {:opus {:intelligence 10 :clojure 10}}
+----
+A non-keyword rating key (and any key not present in `:llm/aliases`) is rejected at config load. The old dated-id → family longest-prefix resolution is gone; lookup is exact by alias keyword (the alias already collapses the per-provider naming divergence).
 
 [[tell-llm-helper]]
 === `h/tell-llm`
@@ -2236,6 +2391,12 @@ Routes are tried in order; first match wins.
 If no route matches, `:default-backend` handles the request, or an
 `ex-info` is thrown when no default is configured.
 
+Each route is either the 2-tuple `[matcher sub-backend]` or the 3-tuple
+`[matcher sub-backend provider-kw]`.
+The optional third element **tags** the sub-backend with its provider keyword: when a request carries an explicit `:provider` (the path `:llm/aliases` candidates take — see <<llm-aliases>>), the dispatcher routes straight to the matching tagged sub-backend, **bypassing the model-string regex entirely**.
+When `:provider` is absent (the legacy bare-string path) or names an untagged provider, selection falls back to the matcher logic above, so behavior is byte-for-byte unchanged for every model-string request.
+The credential-assembled backend the CLI/lib build tags every route this way; the first occurrence of a provider wins (mirroring first-match-wins).
+
 `new-backend` returns a dispatcher that **also implements
 `StreamingLLMBackend`** iff every selectable sub-backend (all routed backends plus any `:default-backend`) supports streaming, so the request-less `protocol/streaming?` faithfully reflects the sub-backend that would be picked.
 When it streams, `stream-turn` selects the sub-backend via the *same* routing logic as `send-turn` (no duplicate selection, no re-counting) and forwards deltas + the final Response through.
@@ -2808,16 +2969,19 @@ Schema (validated with Malli on load; unknown keys are rejected):
                  "default" "open {{path}}"}   ;; see Viewers below
  :d2            {:command "d2" :layout "elk"} ;; chart rendering (see Viz)
  :debug         {:auto-pause? true}           ;; --debug pause-on-start
- :llm/preferences [{:provider :anthropic :model "claude-opus-4-7"}
-                   {:provider :z-ai      :model "glm-4.6"}]
- ;; ^ priority-ordered {:provider :model} pairs; validated against the
- ;;   catalog (unreachable entries are dropped). Sets the default
- ;;   backend and the auto-fallback model order. Built-in default order
- ;;   is used when unset.
- :llm/ratings   {"claude-opus-4-7" {:intelligence 10 :clojure 10}}}
- ;; ^ subjective opinion overlay; there is no built-in opinion, so the
- ;;   table comes entirely from config. Any key here becomes filterable
- ;;   via a node's :needs gate. Dated ids resolve to the family entry.
+ :llm/aliases   {:opus [{:provider :anthropic :model "claude-opus-4-7"}]
+                 :glm  [{:provider :z-ai      :model "glm-4.6"}]}
+ ;; ^ the ONLY target definition: alias keyword → ordered, non-empty
+ ;;   vector of {:provider :model & optional params} targets (failover).
+ ;;   Built-in default alias set is used when unset.
+ :llm/preferences [:opus :glm]
+ ;; ^ ordered vector of ALIAS KEYWORDS — the default candidate set when a
+ ;;   node names no model. Each must be present in :llm/aliases (a dangling
+ ;;   keyword, or an old {:provider :model} pair, is rejected at load).
+ :llm/ratings   {:opus {:intelligence 10 :clojure 10}}}
+ ;; ^ subjective opinion overlay, KEYED BY ALIAS KEYWORD; there is no
+ ;;   built-in opinion. Any inner key becomes filterable via a node's :needs
+ ;;   gate. A non-alias / string key is rejected at load.
  ;; :llm/eligibility-strict? false}
  ;; ^ honored by the hermetic lib facade only (see Hosted library):
  ;;   true ⇒ fail-closed when a :needs gate empties; default fail-open.
@@ -3155,7 +3319,7 @@ Only these keys are accepted:
 | `:chart` | **required** | — | statechart value (from `chart/statechart`)
 | `:session-id` | **required** | — | session id (keyword / string / uuid)
 | `:credentials` | **required** | — | ordered vector of provider descriptor maps; the backend is assembled from these hermetically (no env/disk). See <<hosted-config>>
-| `:config` | optional | `{}` ⇒ empty ratings + default preferences | `.escapement.edn`-shaped map (`:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`); never a disk fallback. See <<hosted-config>>
+| `:config` | optional | `{}` ⇒ empty ratings + built-in default alias set + default preferences | `.escapement.edn`-shaped map (`:llm/aliases`, `:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`); never a disk fallback. See <<hosted-config>>
 | `:backend` | optional | none | an `LLMBackend`; an escape hatch that wins verbatim over `:credentials` assembly
 | `:tool-registry` | optional | none | tool registry atom. **Required in practice for any chart containing an `:llm-conversation`**: the facade registers the LLM invocation processor only when *both* a backend (from `:credentials`) and a `:tool-registry` are present — omit it and the invocation cannot start (`No processor for :llm-conversation`, chart quiesces early). Pass `(escapement.tools.protocol/new-registry)` for an empty registry or `(escapement.tools.builtin/new-builtin-registry)` for one with the fs/shell/repl built-ins.
 | `:initial-data` | optional | none | data-model seed (`[:maybe :map]`)
@@ -3253,15 +3417,18 @@ assembly.
 [source,clojure]
 ----
 (def llm-config
-  {:llm/preferences                       ; THE ranking — sorted, priority-first
-   [{:provider :z-ai-plan :model "glm-5.1"}
-    {:provider :anthropic :model "claude-opus-4-7"}
-    {:provider :openai    :model "gpt-5"}]
+  {:llm/aliases                           ; THE only target definition
+   {:glm5  [{:provider :z-ai-plan :model "glm-5.1"}]
+    :opus  [{:provider :anthropic :model "claude-opus-4-7"}]
+    :gpt5  [{:provider :openai    :model "gpt-5"}]}
 
-   :llm/ratings                           ; subjective opinion — host-owned scale
-   {"glm-5.1"         {:clojure 7 :ux 5}
-    "claude-opus-4-7" {:clojure 9 :ux 4}
-    "gpt-5"           {:clojure 5 :ux 8}}
+   :llm/preferences                       ; THE candidate set — ordered alias keywords
+   [:glm5 :opus :gpt5]
+
+   :llm/ratings                           ; subjective opinion — keyed by ALIAS keyword
+   {:glm5 {:clojure 7 :ux 5}
+    :opus {:clojure 9 :ux 4}
+    :gpt5 {:clojure 5 :ux 8}}
 
    :llm/eligibility-strict? true})        ; webapp: error a node, never run wrong model
 ----
@@ -3271,19 +3438,18 @@ Absent `:config` ⇒ an empty ratings table (`{}`) and the built-in
 
 ==== Three orthogonal pieces, each with one job
 
-`:llm/preferences` — **the only ranking.** A sorted vector of
-`{:provider P :model M}` pairs, highest priority first.
-Nothing else reorders.
-Absent ⇒ `default-preferences`.
+`:llm/aliases` — **the only target definition.** Alias keyword → ordered, non-empty vector of `{:provider :model & params}` targets (failover order). Everything else references aliases by keyword. Absent ⇒ built-in default alias set.
+
+`:llm/preferences` — **the candidate set + ordering.** An ordered vector of alias keywords (each present in `:llm/aliases`), highest priority first. Their flattened targets, in author order, form the default candidate list. Nothing else reorders. Absent ⇒ `default-preferences`.
 
 The `:needs` gate (a chart-node conversation key; see
-<<params-fn,`:needs`>>) — **filters, never ranks.** It removes ineligible models from the preference-ordered list; the survivors stay in preference order.
-A model rated `:clojure 7` and one rated
-`:clojure 10` are interchangeable under `[:>= 6]` — preference order alone decides which survivor runs.
+<<params-fn,`:needs`>>) — **filters, never ranks.** It removes ineligible *targets* (target granularity) from the candidate list; survivors stay in author order.
+A target rated `:clojure 7` and one rated
+`:clojure 10` are interchangeable under `[:>= 6]` — order alone decides which survivor runs.
 Do **not** expect "higher rating wins."
 
-`:llm/ratings` — **subjective, optional.** A host-owned `id → opinion`
-table whose keys (`:clojure`, `:ux`, `:tier`, …) mix into the same keyspace as the objective `eligibility-facts`.
+`:llm/ratings` — **subjective, optional.** A host-owned `alias → opinion`
+table whose keys (`:clojure`, `:ux`, `:tier`, …) mix into the same keyspace as the objective `eligibility-facts`. Keyed by alias keyword (objective facts are still per provider+model).
 With nothing configured, a subjective `:needs` clause matches nothing.
 
 ==== `:needs` syntax and the fact vocabulary
@@ -3377,21 +3543,21 @@ Resolution against the config above:
 
 [cols="1,2,3,2,1",options="header"]
 |===
-| Node | `:needs` | Clears gate | Preferences pick | Provider
+| Node | `:needs` | Clears gate (by alias) | Preferences pick | Provider
 | `:refactor`
 | `:tool-call? true` + `:clojure [:>= 7]`
-| `glm-5.1` (clj 7 ✓), `claude-opus-4-7` (clj 9 ✓) — `gpt-5` dropped (clj 5)
-| **`glm-5.1`** (first in preferences)
+| `:glm5` (clj 7 ✓), `:opus` (clj 9 ✓) — `:gpt5` dropped (clj 5)
+| **`:glm5`** (first in preferences)
 | `:z-ai-plan`
 | `:design-review`
 | `:vision? true` + `:ux [:>= 6]`
-| only `gpt-5` (ux 8 ✓, vision ✓) — `glm-5.1`/`opus` dropped (ux 5 / 4)
-| **`gpt-5`** (only survivor)
+| only `:gpt5` (ux 8 ✓, vision ✓) — `:glm5`/`:opus` dropped (ux 5 / 4)
+| **`:gpt5`** (only survivor)
 | `:openai`
 |===
 
-The gate **never reordered** anything — it removed ineligible models; the sorted `:llm/preferences` chose among survivors.
-Node 2 shows the gate overriding preference *priority*: `gpt-5` is last in preferences yet selected because it is the only model clearing its gate.
+The gate **never reordered** anything — it removed ineligible targets; the candidate aliases' author order chose among survivors.
+Node 2 shows the gate overriding preference *priority*: `:gpt5` is last in preferences yet selected because it is the only alias clearing its gate.
 
 The host invokes it with everything injected as data:
 
@@ -3483,7 +3649,7 @@ It is
 . **`:run-id` and `:store` formalized now.** `:run-id` is generated by the facade, returned, and emitted on `:runner/started`; `:store` is an optional passthrough to `engine.env/new-env`.
 . **Hermetic config + credentials are explicit data.** The facade reads no disk and no env. `:credentials` is a required closed-schema key (app-lifetime injection, like a DB pool); `:config` is optional and mirrors `.escapement.edn` but is host-supplied, never a disk fallback.
 Ratings/preferences flow as plain values threaded through the invocation context — no dynamic var, no process global — so concurrent runs with different `:config` resolve independently.
-. **`:needs` is an eligibility *gate*, not a ranker.** It filters the preference-ordered candidate list; *all* ordering comes from the sorted `:llm/preferences`.
+. **`:needs` is an eligibility *gate*, not a ranker.** It filters the candidate list at target granularity; *all* ordering comes from the author order of the candidate aliases' targets.
 Only `=` / `[:>= n]` / `[:<= n]` are supported.
 Fail-open by default; `:llm/eligibility-strict? true` opts the lib path into fail-closed.
 . **Explicitly deferred:** a `TranscriptSink` protocol, DB-backed stores beyond the `:store` passthrough, a broader lifecycle-hook taxonomy, and the daemon API.

@@ -65,6 +65,7 @@
     [escapement.debug.d2 :as d2]
     [escapement.invocation.human-input :as human-input]
     [escapement.llm.providers :as providers]
+    [escapement.llm.preferences :as preferences]
     [escapement.llm.ratings :as ratings]
     [escapement.runner :as runner]
     [escapement.tui :as tui]
@@ -599,6 +600,13 @@
         ;; `satisfies-policy?` seam.
         run-cfg                (config/load-config)
         catalog-ratings        (ratings/ratings run-cfg)
+        ;; Falls back to the built-in `default-aliases` so a node naming a
+        ;; default alias resolves even with no `:llm/aliases` configured (R7).
+        llm-aliases            (preferences/aliases-from-config run-cfg)
+        ;; `:llm/preferences` (a vector of alias keywords) is the default
+        ;; candidate set the resolver flattens when a node names no model;
+        ;; falls back to the built-in `default-preferences`.
+        llm-preferences        (preferences/preferences run-cfg)
         eligibility-strict?    (boolean
                                  (or (:llm/eligibility-strict? run-cfg)
                                    (get-in run-cfg [:llm :eligibility-strict?])))
@@ -665,6 +673,8 @@
                                           :backend                backend
                                           :backend-default-models backend-default-models
                                           :catalog-ratings        catalog-ratings
+                                          :llm-aliases            llm-aliases
+                                          :llm-preferences        llm-preferences
                                           :eligibility-strict?    eligibility-strict?
                                           :tool-registry          tool-registry
                                           :human-renderer         human-renderer

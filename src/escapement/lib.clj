@@ -181,16 +181,28 @@
         ;; behavior.
         cfg             (or config {})
         resolved-prefs  (preferences/preferences cfg)
-        default-models  (preferences/model-order resolved-prefs)
+        ;; `:llm/aliases` falls back to the built-in `default-aliases` so the
+        ;; no-config path resolves THROUGH the alias layer (R7).
+        llm-aliases     (preferences/aliases-from-config cfg)
+        ;; Flatten the preference aliases' targets into the ordered model-id
+        ;; fallback list the processor consumes when a node pins no `:model`.
+        default-models  (preferences/model-order resolved-prefs llm-aliases)
         catalog-ratings (ratings/ratings cfg)
         strict?         (boolean (or (:llm/eligibility-strict? cfg)
                                    (get-in cfg [:llm :eligibility-strict?])))
         ;; Backend assembly: explicit `:backend` escape hatch wins
         ;; verbatim; otherwise build hermetically from `:credentials`
         ;; ordered by the resolved preference list.
+        ;; Route ordering: `build-injected-credentials-backend` ranks
+        ;; providers by their first appearance in this list. Feed it the
+        ;; FLATTENED preference-alias targets (which carry `:provider`) so the
+        ;; ordering derives from the preference aliases' providers (R8). Task
+        ;; 003 may formalize this inside `providers.clj`; the data shape it
+        ;; receives is the alias-flattened target list.
+        pref-targets    (preferences/flatten-targets resolved-prefs llm-aliases)
         backend         (or backend
                           (providers/build-injected-credentials-backend
-                            credentials resolved-prefs))
+                            credentials pref-targets))
         run-id          (str (UUID/randomUUID))
         tmp-dir         (when (or (nil? transcript-path) (nil? checkpoint-dir))
                           (str (fs/create-temp-dir {:prefix "escapement-run-"})))
@@ -207,6 +219,8 @@
                                  ;; Step 2 injection seam: resolved ONCE here,
                                  ;; threaded as plain values (no global).
                                  :catalog-ratings        catalog-ratings
+                                 :llm-aliases            llm-aliases
+                                 :llm-preferences        resolved-prefs
                                  :backend-default-models default-models
                                  :eligibility-strict?    strict?}
                           backend (assoc :backend backend)

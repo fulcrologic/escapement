@@ -81,8 +81,12 @@
     (state {:id :work :initial :running}
       (state {:id :running}
         (h/llm-conversation
+          ;; Mandatory-aliases model: a chart node names a model only by alias
+          ;; keyword; :stub resolves (via :config :llm/aliases below) to
+          ;; {:provider :openai :model "stub-x"}, whose "stub-x" id matches the
+          ;; multi route.
           {:id             "main"
-           :model          "stub-x"
+           :model          :stub
            :stream?        true
            :system         "do it"
            :real-tools     []
@@ -113,6 +117,7 @@
         ;; schema-required (closed contract) but not consulted for assembly.
         result  (lib/run {:chart          smoke-chart
                           :session-id     :hosted-smoke
+                          :config         {:llm/aliases {:stub [{:provider :openai :model "stub-x"}]}}
                           :backend        backend
                           :credentials    [{:provider :anthropic :api-key "sk-unused"}]
                           :tool-registry  (tp/new-registry)

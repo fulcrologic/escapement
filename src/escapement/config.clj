@@ -119,6 +119,40 @@
   [cfg]
   (or (get-in cfg [:viewers "url"]) :internal))
 
+(def thinking-schema
+  "A per-target extended-thinking directive: `{:type :enabled
+   :budget-tokens N}`. Mirrors the chart-level `:thinking` shape consumed
+   by `escapement.invocation.llm-conversation`."
+  [:map {:closed true}
+   [:type [:= :enabled]]
+   [:budget-tokens :int]])
+
+(def alias-target-schema
+  "One alias target: a concrete `{:provider :model …}` bundle. `:provider`
+   (keyword) and `:model` (string) are required; the generation params are
+   optional defaults that `escapement.invocation.llm-conversation` merges
+   UNDER explicit node params (node wins). `:temperature`/`:top-p` are
+   restricted to `(0,1]`. `:max-tokens` is an alias-only escape hatch (NOT a
+   chart param): when a target enables `:thinking`, its budget must stay below
+   the output cap (`max-tokens > budget-tokens`); supply `:max-tokens` here when
+   the catalog's `max-output-tokens` is unknown or too low to satisfy that. It
+   is consumed only by `effective-max-tokens` resolution, never put on a chart."
+  [:map {:closed true}
+   [:provider :keyword]
+   [:model :string]
+   [:temperature {:optional true} [:and number? [:> 0] [:<= 1]]]
+   [:top-p {:optional true} [:and number? [:> 0] [:<= 1]]]
+   [:top-k {:optional true} :int]
+   [:thinking {:optional true} thinking-schema]
+   [:max-tokens {:optional true} :int]])
+
+(def aliases-schema
+  "Schema for `:llm/aliases` — a map from an alias keyword to an ORDERED,
+   non-empty vector of targets. A node naming the alias as its `:model`
+   tries the targets in order, failing over across providers. A
+   single-element vector is the degenerate single-target case."
+  [:map-of :keyword [:and [:vector alias-target-schema] [:fn {:error/message "alias target list must be a non-empty vector"} seq]]])
+
 (def project-schema
   [:map {:closed true}
    [:source-paths {:optional true} [:vector :string]]
@@ -131,14 +165,28 @@
    [:debug {:optional true} :any]
    [:viewers {:optional true} :any]
    [:d2 {:optional true} :any]
-   ;; LLM model selection overlays. Validated/sanitized downstream by
-   ;; `escapement.llm.preferences` / `escapement.llm.ratings` against the
-   ;; catalog, so kept `:any` here (same as the user-level keys above).
-   ;; Both the flat `:llm/preferences`/`:llm/ratings` keys and the nested
-   ;; `:llm` map (`[:llm :preferences]` / `[:llm :ratings]`) are accepted,
-   ;; matching those namespaces' `from-config`.
-   [:llm/preferences {:optional true} :any]
-   [:llm/ratings {:optional true} :any]
+   ;; LLM model selection overlays. As of the mandatory-aliases model these
+   ;; are REFERENCES into `:llm/aliases` (the only target definition):
+   ;;   * `:llm/preferences` — an ORDERED VECTOR OF ALIAS KEYWORDS (the default
+   ;;     candidate set when a node names no model). The old `[{:provider
+   ;;     :model}]` pair shape is rejected structurally (keyword-only) and any
+   ;;     keyword not present in `:llm/aliases` is rejected with a clear message
+   ;;     by the referential-integrity check in `validate-project-config!`.
+   ;;   * `:llm/ratings` — an ALIAS-KEYED map (`{:alias-kw {…}}`). The old
+   ;;     model-id-STRING keys are rejected structurally; any alias key not in
+   ;;     `:llm/aliases` is rejected by the same referential-integrity check.
+   ;; The nested `:llm` map (`[:llm :preferences]`/`[:llm :ratings]`) is also
+   ;; checked. Referential integrity spans keys, so it lives in the loader
+   ;; (after the structural schema passes), not in the malli schema.
+   [:llm/preferences {:optional true} [:vector :keyword]]
+   [:llm/ratings {:optional true} [:map-of :keyword [:map-of :keyword :any]]]
+   ;; `:llm/aliases` — short keyword nicknames resolving to an ordered
+   ;; vector of explicit cross-provider targets, expanded at dispatch time
+   ;; by `escapement.invocation.llm-conversation` when a node's `:model` is
+   ;; a keyword. Validated structurally here (unlike the `:any` overlays
+   ;; above) so malformed targets are rejected at load time with a clear
+   ;; message. Additive: configs without the key are unaffected.
+   [:llm/aliases {:optional true} aliases-schema]
    [:llm {:optional true} :any]])
 
 (defn find-project-config
@@ -159,12 +207,72 @@
   (with-open [r (java.io.PushbackReader. (io/reader f))]
     (edn/read {:eof nil} r)))
 
+;; NOTE: kept in sync with `escapement.llm.preferences/default-aliases`. It is
+;; duplicated here (rather than required) to avoid a circular dependency —
+;; `preferences` requires `config`. These are the alias keys the empty-config
+;; path resolves through, so a `:llm/preferences`/`:llm/ratings` reference is
+;; valid against them when the config defines no `:llm/aliases`.
+(def ^:private builtin-default-alias-keys
+  #{:default-glm :default-sonnet :default-opus :default-gpt})
+
+(defn- alias-keys
+  "The set of alias keywords a reference may point at: the config's
+   `:llm/aliases` keys (flat or nested) if present, else the built-in
+   `default-aliases` keys (mirroring `preferences/aliases-from-config`)."
+  [cfg]
+  (if-let [als (or (:llm/aliases cfg) (get-in cfg [:llm :aliases]))]
+    (set (keys als))
+    builtin-default-alias-keys))
+
+(defn- check-alias-references!
+  "Referential-integrity check that spans config keys: every `:llm/preferences`
+   alias keyword and every `:llm/ratings` key MUST be a key in `:llm/aliases`
+   (or the built-in default alias set when no `:llm/aliases` is configured).
+   Rejects the OLD shapes too — a `{:provider :model}` pair in preferences or a
+   model-id-STRING key in ratings is a non-keyword and is reported as such.
+   Throws a humanized `ex-info`; returns `cfg` on success."
+  [cfg path]
+  (let [known   (alias-keys cfg)
+        prefs   (or (:llm/preferences cfg) (get-in cfg [:llm :preferences]))
+        ratings (or (:llm/ratings cfg) (get-in cfg [:llm :ratings]))
+        errs    (cond-> []
+                  (some (complement keyword?) prefs)
+                  (conj (str ":llm/preferences must be a vector of alias keywords; "
+                          "the old {:provider :model} pair / string shape is no longer "
+                          "supported. Offending entries: "
+                          (pr-str (vec (remove keyword? prefs)))))
+
+                  (some (complement keyword?) (keys ratings))
+                  (conj (str ":llm/ratings must be keyed by alias keyword; "
+                          "model-id string keys are no longer supported. "
+                          "Offending keys: "
+                          (pr-str (vec (remove keyword? (keys ratings))))))
+
+                  (seq (remove known (filter keyword? prefs)))
+                  (conj (str ":llm/preferences references unknown alias(es) "
+                          (pr-str (vec (remove known (filter keyword? prefs))))
+                          " — every preference keyword must be a key in :llm/aliases. "
+                          "Known aliases: " (pr-str (vec (sort known)))))
+
+                  (seq (remove known (filter keyword? (keys ratings))))
+                  (conj (str ":llm/ratings references unknown alias(es) "
+                          (pr-str (vec (remove known (filter keyword? (keys ratings)))))
+                          " — every rating key must be a key in :llm/aliases. "
+                          "Known aliases: " (pr-str (vec (sort known))))))]
+    (if (empty? errs)
+      cfg
+      (throw (ex-info (str "Invalid .escapement.edn at " path)
+               {:path   (str path)
+                :errors errs})))))
+
 (defn validate-project-config!
-  "Validates `cfg` against `project-schema`. Throws `ex-info` with a
-   humanized error map on failure. Returns `cfg` on success."
+  "Validates `cfg` against `project-schema` (structural) and then runs the
+   cross-key referential-integrity check (`:llm/preferences`/`:llm/ratings`
+   reference `:llm/aliases`). Throws `ex-info` with a humanized error map on
+   failure. Returns `cfg` on success."
   [cfg path]
   (if (m/validate project-schema cfg)
-    cfg
+    (check-alias-references! cfg path)
     (throw (ex-info (str "Invalid .escapement.edn at " path)
              {:path   (str path)
               :errors (me/humanize (m/explain project-schema cfg))}))))
