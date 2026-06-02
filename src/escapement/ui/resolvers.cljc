@@ -331,6 +331,11 @@
       {::p/mutate  pc/mutate
        ::p/env     {::p/reader [p/map-reader pc/reader2 pc/ident-reader pc/index-reader]}
        ::p/plugins [(pc/connect-plugin {::pc/register all-resolvers})
+                    ;; Strip Pathom's `::p/not-found` sentinel from results: a queried-but-unresolved
+                    ;; attribute (e.g. `:io/snippet` on an event that has none) otherwise leaks the
+                    ;; keyword `:com.wsscode.pathom.core/not-found` to the client, where a RAD report
+                    ;; cell renders it as a raw React child and throws. Eliding returns it as absent/nil.
+                    (p/post-process-parser-plugin p/elide-not-found)
                     p/error-handler-plugin]})))
 
 (defn process

@@ -21,7 +21,6 @@
   ;; `clojure -M:api:ui-test`, or for a JVM api-server REPL `clojure -M:api`.
   ;; (The bb runtime gets these from bb.edn's own :deps, not from here.)
   :api   {:extra-deps {com.wsscode/pathom        {:mvn/version "2.4.0"}
-                       edn-query-language/eql    {:mvn/version "1.0.2"}
                        com.cognitect/transit-clj {:mvn/version "1.0.333"}}}
   :demos {:extra-paths ["demos"]}
   :dev   {:extra-paths ["dev" "spike" "demos"]

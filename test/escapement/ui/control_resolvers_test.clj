@@ -6,7 +6,6 @@
   (:require
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.protocols :as sp]
-    [com.wsscode.pathom.core :as p]
     [escapement.debug.control-handle :as ch]
     [escapement.debug.controller :as dbg]
     [escapement.engine.instrumented-queue :as iq]
@@ -73,8 +72,8 @@
 (specification "live resolvers are nil-tolerant with no live handle/controller"
   (let [ctx {:escapement/store nil}]
     (assertions
-      "session/paused? resolves to not-found (no value, no crash) when no controller is attached"
-      (:session/paused? (r/process ctx [:session/paused?])) => ::p/not-found
+      "session/paused? resolves to nil (the not-found sentinel is elided; no value, no crash) when no controller is attached"
+      (:session/paused? (r/process ctx [:session/paused?])) => nil
       "session/pending-events yields an empty list when no live queue exists"
       (r/process ctx [{:session/pending-events [:event/name]}]) => {:session/pending-events []})))
 

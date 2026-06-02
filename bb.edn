@@ -7,7 +7,6 @@
             ;; 1.2.16 above or Pathom's transitive 0.0.12 breaks bb. transit-clj is
             ;; the /api wire format; org.httpkit.server is bundled with bb.
             com.wsscode/pathom          {:mvn/version "2.4.0"}
-            edn-query-language/eql      {:mvn/version "1.0.2"}
             com.cognitect/transit-clj   {:mvn/version "1.0.333"}}
  :bbin/bin {escapement {:main-opts ["-m" "escapement.cli"]}}
  :tasks    {repl   {:override-builtin true

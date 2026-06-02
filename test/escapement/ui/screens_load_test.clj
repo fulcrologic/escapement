@@ -72,7 +72,12 @@
           "limit + session-id param page the events for that session"
           (mapv :transcript/seq rows) => [0 1]
           "each row carries the tuple ident [sid seq]"
-          (:transcript/id (first rows)) => ["s1" 0])))
+          (:transcript/id (first rows)) => ["s1" 0]
+          ;; Regression: the parser's elide-not-found plugin must strip Pathom's `::p/not-found`
+          ;; sentinel for queried-but-absent optional attrs (here `:io/snippet`). Otherwise the
+          ;; keyword `:com.wsscode.pathom.core/not-found` reaches a RAD report cell and React throws.
+          "an absent optional attr (:io/snippet) comes back nil, never the ::p/not-found sentinel"
+          (some (fn [r] (some #{:com.wsscode.pathom.core/not-found} (vals r))) rows) => nil)))
     (component "ArtifactsReport source (:escapement/session-artifacts), session id via params"
       (let [rows (:escapement/session-artifacts
                    (r/process ctx [{(list :escapement/session-artifacts {::sc/session-id "s1"})
