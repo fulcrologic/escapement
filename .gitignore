@@ -28,3 +28,6 @@ node_modules/
 out/
 .shadow-cljs/
 package-lock.json
+resources/public/js/main/cljs-runtime
+resources/public/js/main/main.js
+resources/public/js/main/manifest.edn
