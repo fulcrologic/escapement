@@ -1,5 +1,57 @@
 # Changelog
 
+## [unreleased] — llm-aliases-mandatory — 2026-05-27
+
+Makes named `:llm/aliases` the single, mandatory way to define an LLM
+target. Every model reference is now a keyword that resolves through
+`:llm/aliases` into an ordered, cross-provider failover list; the legacy
+bare-string and `{:provider :model}` pair shapes are removed and now raise
+loud, categorized errors instead of silently working.
+
+### Changed
+
+- **BREAKING-CHANGE:** `:llm/aliases` is the only target definition. A node
+  selects a model by **alias keyword** (`:model :opus`, `:models [:opus
+  :glm]`); `:llm/preferences` is now an ordered **vector of alias keywords**;
+  `:llm/ratings` is **keyed by alias keyword**. Each alias maps to a
+  non-empty, ordered vector of provider-keyed target maps (`{:provider
+  :model …}`, with optional per-target `:temperature`/`:top-p`/`:top-k`/
+  `:thinking`/`:max-tokens`), tried in author order with failover across
+  providers.
+- `:needs` eligibility filtering now operates at **target granularity**:
+  ineligible targets are dropped, an alias survives if ≥1 target is
+  eligible, subjective scores are read from the originating alias's
+  `:llm/ratings` entry. Empty result is fail-open by default;
+  `:llm/eligibility-strict? true` makes it fail-closed.
+- Credential-backend route ordering now derives from the distinct,
+  first-seen provider order across the flattened preference targets.
+- No-config path now resolves through a built-in default alias set plus a
+  default preference vector (still purely via the alias path).
+- `:llm/ratings` lookup is exact by alias keyword; the old dated-id →
+  family longest-prefix string resolution is gone (the alias already
+  collapses per-provider naming divergence).
+
+### Removed
+
+- **BREAKING-CHANGE:** Bare model-id string `:model`/`:models` on a node,
+  `{:provider :model}` pairs in `:llm/preferences`, and string-keyed
+  `:llm/ratings` are no longer legal. A string `:model` raises
+  `:error.llm.invalid-request` (`:detail :string-model`); a string in
+  `:models` raises `:detail :string-models`; non-keyword preference or
+  rating entries (and any keyword not present in `:llm/aliases`, i.e. a
+  dangling reference) are rejected at config load with a message naming the
+  offending key. An unknown alias named on a node fails fast with
+  `:detail :unknown-alias` (never shipped to a backend as a model string).
+
+### Notes
+
+- Config validation gained referential-integrity checks: `:llm/preferences`
+  and `:llm/ratings` keys must each exist in `:llm/aliases`.
+- Migration is mechanical — see Guide.adoc `<<llm-aliases-migration>>`:
+  wrap old pairs/strings as named aliases and reference them by keyword.
+- Examples/demos migrated to the alias model (`demos/lib/embed_example.clj`,
+  `examples/clj_refactor.cljc` docstring).
+
 ## [unreleased] — io-refactor-capture-replay — 2026-05-27
 
 First slice of the IO refactor: heavy LLM I/O is no longer the body of the

@@ -846,9 +846,8 @@ A node references the alias as its `:model` (or a vector of aliases via `:models
 ----
 (h/llm-conversation
  {:id     :coder
-  :params (fn [_ _]
-            {:system "…"
-             :model  :kimi2.6})})    ; keyword ⇒ alias
+  :system "…"
+  :model  :kimi2.6})    ; keyword ⇒ alias
 ----
 
 **Keyword is the only legal model reference.**
@@ -888,7 +887,7 @@ The credential-backend route ordering derives from the **preference aliases' pro
 ==== Param precedence
 
 A target's optional `:temperature` / `:top-p` / `:top-k` / `:thinking` are **defaults** for that attempt.
-An explicit node `params-fn` value for the same key always **overrides** the target value (merge order is target-under-node).
+An explicit node authoring-key value for the same key always **overrides** the target value (merge order is target-under-node).
 A target with no params just inherits the node/backend defaults.
 
 ==== `:thinking` and the output cap
