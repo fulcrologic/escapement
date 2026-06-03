@@ -93,4 +93,15 @@
       artifact-store (assoc :escapement/artifact-store artifact-store)
       ;; Surface the transcript fn on the env so chart actions (e.g.
       ;; `helpers/capture-llm-output`) can emit `:artifact/captured`.
-      transcript-fn (assoc :escapement/transcript-fn transcript-fn))))
+      transcript-fn (assoc :escapement/transcript-fn transcript-fn)
+      ;; Surface the LLM backend + model-resolution inputs so chart `<script>`
+      ;; expressions can make one-shot / fan-out LLM calls via the env-aware
+      ;; `escapement.llm/ask` + `map-prompt` helpers, resolving aliases exactly
+      ;; as the `:llm-conversation` worker does. (The worker still receives these
+      ;; directly via its processor; this only ALSO exposes them on the env.)
+      llm-backend             (assoc :escapement/llm-backend llm-backend)
+      llm-default-models      (assoc :escapement/llm-default-models llm-default-models)
+      llm-aliases             (assoc :escapement/llm-aliases llm-aliases)
+      llm-preferences         (assoc :escapement/llm-preferences llm-preferences)
+      llm-catalog-ratings     (assoc :escapement/llm-catalog-ratings llm-catalog-ratings)
+      llm-eligibility-strict? (assoc :escapement/llm-eligibility-strict? llm-eligibility-strict?))))

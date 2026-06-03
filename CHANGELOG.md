@@ -1,5 +1,64 @@
 # Changelog
 
+## [unreleased] — feat/llm-facade — 2026-06-02
+
+A public, script-facing LLM API for making LLM calls directly from a chart's
+`<script>` expressions (or any core code), backed by the same
+model-resolution + failover engine the `:llm-conversation` worker already uses.
+
+### Added
+
+- **`escapement.llm` namespace — one-shot & fan-out LLM calls from a script.**
+  - `(llm/ask env {:prompt "…"})` issues ONE LLM turn and returns a result
+    envelope whose `:response` (on success) is the extracted assistant text;
+    `(llm/ask* env {:prompt "…"})` is identical but returns the full Response
+    map instead of just the text. Both accept alias-keyword `:model`/`:models`
+    (resolved through `:llm/aliases` + `:llm/preferences` exactly as a
+    conversation node does) plus the usual generation knobs (`:system`,
+    `:temperature`, `:max-tokens`, `:needs`, `:resilience`, `:tools`, …).
+  - `(llm/elect-model env params)` resolves + verifies a working model once
+    (issuing a tiny probe turn) and returns a reusable *pinned* ctx; pass it
+    back to `ask`/`map-prompt` to skip re-resolution and run that exact model.
+  - `(llm/map-prompt env opts ->prompt coll)` fans the same prompt across a
+    collection with **bounded concurrency** (`:concurrency`, default 16),
+    returning a vector of per-item result envelopes in input order. It elects a
+    working model by running item 0, pins it for the rest, re-elects (bounded)
+    if that model dies mid-run, and supports `:on-error :collect` (default —
+    each failure is its own envelope) or `:abort` (stop dispatching; remaining
+    items return `:status :skipped`/`:aborted`). The motivating use case is
+    "analyze N documents/files in parallel from one script."
+  - Every public call returns a **uniform status envelope** — `:status` is
+    `:ok` or a categorized failure (`:exhausted`, `:eligibility-empty`,
+    `:unknown-alias`, `:string-model`, `:string-models`, `:interrupted`) — so a
+    caller can branch on per-item outcome (e.g. a batch that runs out of credit
+    mid-run) instead of catching exceptions; these helpers never throw on a
+    backend/categorized failure.
+- **Chart env now exposes the LLM backend + resolution inputs.** `new-env`
+  surfaces `:escapement/llm-backend` plus the alias/preference/ratings/
+  eligibility matrix on the env map, so a chart `<script>` can call the
+  env-aware `llm/ask`/`map-prompt` arities and get full alias resolution for
+  free — the same matrix the `:llm-conversation` worker resolves against.
+
+### Changed
+
+- **Model resolution + single-turn retry/failover is now shared, single-source.**
+  The keyword-alias → ordered-candidate resolution, the `:needs` eligibility
+  gate, transient-error retry/backoff, and cross-provider failover all live in
+  `escapement.llm` (`resolve-candidates`, `run-turn`). The `:llm-conversation`
+  worker's `try-models!` is now a thin hook-driven adapter over
+  `escapement.llm/run-turn` (it still owns its transcript events and request
+  capture via `:hooks`); conversation behavior is unchanged.
+
+### Notes
+
+- `escapement.llm` is a `.clj` (JVM/bb) namespace, not `.cljc`: it uses
+  blocking `p/await!` and `future`-based fan-out, exactly like the sibling
+  `:llm-conversation` worker. It pulls only the LLM core + statechart promise —
+  no web/Pathom/RAD/TUI code.
+- Live behavior against a real provider is credential-gated (needs an API
+  key/subscription); the suite exercises resolution, envelope shapes, and
+  fan-out wiring with a mock backend.
+
 ## [unreleased] — chart-owned-termination + output-handles + invocation-reconstruction — 2026-06-02
 
 Three internal improvements driven by debuggability and correctness.

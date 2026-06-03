@@ -942,6 +942,99 @@ A string `:model` raises `:error.llm.invalid-request` (`:detail :string-model`);
 ----
 A non-keyword rating key (and any key not present in `:llm/aliases`) is rejected at config load. The old dated-id → family longest-prefix resolution is gone; lookup is exact by alias keyword (the alias already collapses the per-provider naming divergence).
 
+[[llm-script-api]]
+=== One-shot & fan-out LLM calls from a script
+
+A `:llm-conversation` is the right tool when you want a *live worker* bound to a state — it loops on tools, accumulates context, and reacts to events.
+But sometimes a chart `script` (or other core code) just needs a single answer right now, or wants to run the *same* prompt over a whole collection in parallel.
+The `escapement.llm` namespace is the script-facing API for exactly that.
+It resolves models through `:llm/aliases` / `:llm/preferences` and fails over across providers using the **same** engine the conversation worker uses (`escapement.llm/run-turn`) — so model selection, the `:needs` gate, and retry/backoff behave identically.
+
+[NOTE]
+====
+`escapement.llm` is a `.clj` (JVM/bb) namespace, not `.cljc`: it blocks on the result and uses `future`-based fan-out, like the conversation worker.
+It pulls only the LLM core — no web/Pathom/RAD/TUI code.
+====
+
+==== Result envelope
+
+Every public call returns a uniform map so a caller branches on status instead of catching exceptions (these helpers never throw on a backend/categorized failure):
+
+[source,clojure]
+----
+{:status   :ok            ; or :exhausted | :eligibility-empty | :unknown-alias
+                          ;    | :string-model | :string-models | :interrupted
+ :response <payload>      ; :ok ⇒ assistant text (ask) / full Response (ask*)
+                          ;       / a reusable pinned ctx (elect-model); nil on failure
+ :model    "claude-…"     ; the model that actually ran, when known
+ :usage    { … }          ; token usage, on success
+ :error    { … }}         ; failure detail (category/message/attempts, …)
+----
+
+==== `ask` / `ask*` — one prompt, one answer
+
+Both take a context and an options map and issue ONE turn.
+The first argument is normally the chart **env** (it carries the session's backend + alias matrix surfaced by `escapement.engine.env`, so resolution is free); it can also be a slim resolution ctx or a pinned ctx from `elect-model`.
+
+[source,clojure]
+----
+(require '[escapement.llm :as llm])
+
+;; From a chart script — `env` is the first arg passed to an :expr fn:
+(script {:expr (fn [env data]
+                 (let [{:keys [status response]}
+                       (llm/ask env {:prompt "One word: is this Clojure idiomatic? <code>"
+                                     :model  :default-glm})]    ; alias keyword
+                   (when (= :ok status)
+                     [(ops/assign :verdict response)])))})      ; response = text
+----
+
+`ask` puts the extracted assistant **text** under `:response`; `ask*` puts the full Response map there instead (use it when you need tool-use blocks, stop reason, etc.).
+`opts` accepts:
+
+* `:prompt` — user text (shorthand for a single user-turn `:messages`), or `:messages` for an explicit vector;
+* `:model` / `:models` — alias keyword(s); omit to use the env/ctx `:llm/preferences`;
+* `:tools` — tool definitions (optional);
+* any generation knob: `:system`, `:temperature`, `:top-p`, `:top-k`, `:max-tokens`, `:thinking`, `:stop-sequences`, `:needs`, `:resilience`, …
+
+==== `elect-model` — resolve a working model once
+
+`(llm/elect-model env params)` resolves candidates and runs one (tiny) probe turn to find the first *actually-working* model, then returns it pinned under `:response`.
+Hand that pinned ctx back to `ask`/`map-prompt` to skip re-resolution and run that exact model with cheap per-call retry (no failover scan each time).
+
+==== `map-prompt` — fan-out with bounded concurrency
+
+The headline use case: **analyze N documents/files in parallel from one script.**
+`(llm/map-prompt env opts ->prompt coll)` runs the same prompt across `coll`, mapping each element to its user text via `->prompt`, and returns a vector of result envelopes **in input order**.
+
+[source,clojure]
+----
+(script {:expr (fn [env data]
+                 (let [results (llm/map-prompt
+                                 env
+                                 {:system      "Summarize the document in one sentence."
+                                  :model       :default-glm
+                                  :concurrency 8
+                                  :on-error    :collect}
+                                 (fn [path] (str "Summarize:\n\n" (slurp path)))
+                                 (:doc-paths data))
+                       summaries (->> results
+                                   (filter #(= :ok (:status %)))
+                                   (mapv :response))]
+                   [(ops/assign :summaries summaries)]))})
+----
+
+Concurrency model — **election by doing**: unless `env` is already a pinned ctx, item 0 runs through full resolution + failover; if that election fails nothing works and the batch aborts, otherwise the winning model is pinned and items 1..N ride it cheaply.
+A bounded re-election kicks in if the pinned model dies mid-run.
+`opts`:
+
+* `:concurrency` — max calls in flight (default 16);
+* `:model` / `:models` — alias keyword(s) (ignored once a pinned ctx is supplied);
+* `:tools`, `:system`, and any generation knob — applied to every call;
+* `:on-error` — `:collect` (default: each failure is its own `:status`-`:error` envelope) or `:abort` (stop dispatching after the first failure; not-yet-started items come back `:status :skipped`).
+
+Because each item carries its own envelope, a batch that exhausts credit or hits a rate limit partway through still returns the successful results plus per-item failure detail, rather than throwing away the whole run.
+
 [[tell-llm-helper]]
 === `h/tell-llm`
 
