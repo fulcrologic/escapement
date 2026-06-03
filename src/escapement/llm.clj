@@ -46,6 +46,7 @@
     [escapement.llm.catalog :as catalog]
     [escapement.llm.needs :as needs]
     [escapement.llm.preferences :as preferences]
+    [escapement.llm.prompt-cache :as prompt-cache]
     [escapement.llm.protocol :as proto]))
 
 (defn- now-ms [] (System/currentTimeMillis))
@@ -103,10 +104,20 @@
      * `:tools-cache-control` — Same shape; applies to the LAST entry in
        `:tools` so the prefix-through-end of `tools` is cached. Defaulted
        to `{:type :ephemeral}` via `:auto-cache?`; pass `false` to disable.
+     * `:message-cache-control` — rolling prompt-cache breakpoint(s) on the
+       growing `:messages` transcript (so long conversations cache the bulk
+       of their context instead of re-prefilling every turn). Defaulted ON
+       under `:auto-cache?` (strategy `:last-stable`, ttl `:5m`). Pass
+       `false` to disable JUST message caching, or a map
+       `{:strategy <:last-stable | {:tail N}> :ttl <:5m | :1h>}` to tune it.
+       Placement is provider-neutral and coordinated with the system/tools
+       markers so the TOTAL never exceeds Anthropic's 4-breakpoint cap: the
+       message strategy may only consume the budget left after system/tools.
+       The NEWEST inbound turn is never marked. See `escapement.llm.prompt-cache`.
      * `:conv-id` — conversation correlation id; used as prompt cache key by openai-codex (string/keyword/uuid)"
   [{:keys [system messages tools model max-tokens conv-id
            temperature top-p top-k stop-sequences thinking tool-choice metadata
-           system-cache-control tools-cache-control auto-cache?]
+           system-cache-control tools-cache-control message-cache-control auto-cache?]
     :or   {auto-cache? true}}]
   ;; Auto-cache defaulting: an absent (== `nil`) cache-control marker
   ;; becomes ephemeral when :auto-cache? is true. Anthropic ignores
@@ -123,7 +134,29 @@
                                (false? tools-cache-control) nil
                                (some? tools-cache-control) tools-cache-control
                                auto-cache? {:type :ephemeral}
-                               :else nil)]
+                               :else nil)
+        ;; Rolling MESSAGE-level breakpoint config, mirroring the system/tools
+        ;; defaulting `cond`: `false` disables just messages; an explicit map
+        ;; is honored; otherwise messages cache by default under :auto-cache?.
+        ;; Resolves to a `prompt-cache` opts map (`nil` => no message markers).
+        message-cache        (cond
+                               (false? message-cache-control) nil
+                               (map? message-cache-control)    message-cache-control
+                               auto-cache?                     {}
+                               :else                           nil)
+        ;; The static prefix markers (system + last tool) consume breakpoints
+        ;; first; messages may only use what's left of Anthropic's 4-cap. We do
+        ;; NOT branch on provider — the wire layer serializes (Anthropic) or
+        ;; drops (OpenAI, etc.) the markers regardless.
+        used                 (+ (if system-cache-control 1 0)
+                               (if (and (seq tools) tools-cache-control) 1 0))
+        remaining-budget     (max 0 (- 4 used))
+        messages             (if message-cache
+                               (prompt-cache/place-message-breakpoints
+                                 (vec messages)
+                                 (merge {:remaining-budget remaining-budget}
+                                   message-cache))
+                               messages)]
     ;; Note: :model is omitted from the Request when the caller didn't supply
     ;; one. The backend's `send-turn` fills it from its configured
     ;; `:default-model` before schema validation. That way the chart can simply
@@ -472,6 +505,7 @@
                                     :metadata             (:metadata params)
                                     :system-cache-control (:system-cache-control params)
                                     :tools-cache-control  (:tools-cache-control params)
+                                    :message-cache-control (:message-cache-control params)
                                     :auto-cache?          (get params :auto-cache? true)
                                     :conv-id              (:conversation/id params)})
                            ;; R3 dispatch: an alias candidate carries a provider

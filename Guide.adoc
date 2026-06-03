@@ -705,9 +705,9 @@ Use a stable, non-PII identifier (e.g. a hash).
 `:auto-cache?`::
 Boolean, **default `true`**.
 When true, any absent
-`:system-cache-control` / `:tools-cache-control` key is filled in with `{:type :ephemeral}` (Anthropic's 5-minute cache window — cheap; the 1-hour `:ttl :1h` variant costs noticeably more).
+`:system-cache-control` / `:tools-cache-control` key is filled in with `{:type :ephemeral}` (Anthropic's 5-minute cache window — cheap; the 1-hour `:ttl :1h` variant costs noticeably more), and the accumulated transcript gets a rolling message-level breakpoint (see `:message-cache-control` below).
 Set
-`:auto-cache? false` to skip defaulting entirely (no cache markers emitted at all).
+`:auto-cache? false` to skip defaulting entirely (no cache markers emitted at all — system, tools, AND messages).
 See <<prompt-caching>> for the rationale.
 
 `:system-cache-control` and `:tools-cache-control`::
@@ -723,6 +723,21 @@ stamps the LAST tool def so the prefix-through-end of `tools` is cached.
 The biggest wins are in tool-heavy single-state loops (refine in the unit-test demo is the canonical case).
 See <<prompt-caching>>
 for the full explanation and when caching is wasted effort.
+
+`:message-cache-control`::
+Optional control over caching the accumulated *transcript* (the growing
+`messages` array), as opposed to the static system/tools prefix above.
+**Anthropic-only**; a no-op on every other backend (see below).
+One of:
++
+* absent / `nil` (DEFAULT) — message caching is ON whenever `:auto-cache?` is true, using strategy `:last-stable` and the 5-minute TTL. A single rolling ephemeral breakpoint lands on the last *stable* message (the one just before the newest turn) and advances every turn, so the cached prefix keeps growing while the newest turn stays uncached.
+* `false` — disable ONLY the message-level breakpoint; `:system-cache-control` / `:tools-cache-control` are untouched.
+* a map `{:strategy <s> :ttl <t>}` — explicit. `:strategy` is `:last-stable` (default, one breakpoint before the newest turn) or `{:tail N}` (mark up to N stable boundaries, freshest-first, bounded by the remaining breakpoint budget). `:ttl` is `:5m` (default) or `:1h`.
++
+The message breakpoint shares Anthropic's 4-breakpoint total cap with the
+system and tools markers (allocated system → tools → messages; messages
+get whatever budget remains, never pushing the total over 4).
+See <<prompt-caching>> for the full explanation and provider scope.
 
 `:on-end-turn-event`::
 Optional chart event keyword fired to the parent when the LLM returns
@@ -1164,12 +1179,14 @@ The next state's worker starts cold.
 
 Anthropic prompt-caching reuses the *prefix* of a request when its content matches a recent prior request.
 Cache hits return the cached tokens at 0.1× the normal input price; cache writes cost 1.25×.
-The prefix is everything UP TO the last `cache_control` marker — typically the system prompt and the tool definitions.
+The prefix is everything UP TO a `cache_control` marker.
+Escapement marks up to four breakpoints: the system prompt, the tail of the tool definitions, and a rolling breakpoint inside the accumulated transcript (see <<transcript-caching>>).
 
 * **Within a state**: a tool-heavy loop (refine in the unit-test demo is ~25 round-trips against a 13 KB system prompt and 8 tools) is the prime caching target.
 The system + tools prefix is identical on every HTTP call; only the growing tail of tool_result/text differs.
 Marking
 `system` and the tail-end of `tools` with `cache_control` makes every call after the first read those prefix tokens at 10% price.
+With transcript caching on (the default), the bulk of the *message history* is cached too, so each turn re-bills only the newest exchange at full price instead of the entire growing conversation.
 * **Across states**: the cache window is 5 minutes (`{:type :ephemeral}`
 default) or 1 hour with the Anthropic extended-cache-ttl beta.
 So cache CAN technically survive a state transition if the next state's conversation happens to share a long prefix.
@@ -1214,6 +1231,66 @@ Set the explicit map:
 `tools-cache-control` stamps the *last* tool def because Anthropic caches everything up through the marker — stamping the tail therefore covers every tool.
 You normally want either both flags set to the same value or neither: caching system but not tools means the tools section ends the cache prefix, so the system prefix is the only thing reused.
 
+[[transcript-caching]]
+==== Caching the growing transcript
+
+The system + tools markers above cache only the *static* prefix. The
+`messages` array — the conversation transcript that grows monotonically
+within a state — historically sat past the last breakpoint and was
+re-billed in full on every turn. For a long tool loop that is the dominant
+cost: by turn 25 you re-prefill 24 turns of context to add one.
+
+By default Escapement now also stamps a **rolling message-level breakpoint**
+on the transcript. The breakpoint lands on the *last stable* message — the
+one just before the newest inbound turn — never on the newest turn itself
+(caching the newest turn buys nothing, since it changes every call). Each
+turn the breakpoint advances, so the cached prefix keeps growing with the
+conversation and only the newest exchange is billed at full input price.
+This is controlled by `:message-cache-control` on the conversation node.
+
+The breakpoint budget is shared. Anthropic caps a request at **4
+`cache_control` breakpoints total**. Escapement allocates them in prompt
+order — **system → tools → messages**: at most one for the system prompt,
+at most one for the tail tool def, and the *remaining* budget goes to
+message breakpoints. The message strategy can never push the total over 4
+(an over-budget `{:tail N}` request is silently capped at the remaining
+budget — with both system and tools on, messages get at most 2).
+
+`:message-cache-control` values:
+
+* absent / `nil` (DEFAULT) — ON under `:auto-cache?`; strategy `:last-stable`, 5-minute TTL.
+* `false` — disable just the message breakpoint; system/tools markers untouched.
+* `{:strategy :last-stable}` (default) — one breakpoint before the newest turn.
+* `{:strategy {:tail N}}` — up to N stable boundaries, freshest-first, bounded by remaining budget.
+* `{:ttl :1h}` — 1-hour TTL on the message breakpoint (costs more to write; default is `:5m`).
+* `:auto-cache? false` disables everything, messages included.
+
+[source,clojure]
+----
+{:system               (slurp "prompts/refine.md")
+ :message-cache-control {:strategy {:tail 2} :ttl :1h}   ; explicit transcript caching
+ :real-tools           [:fs/read :fs/edit :shell/run]
+ :message              "..."}
+----
+
+===== Provider scope
+
+Transcript caching is **Anthropic-only** (the same mechanism as the
+system/tools markers — caller-placed breakpoints). The breakpoint is placed
+on the provider-neutral `Request`; the Anthropic wire serializes it, every
+other backend drops it structurally:
+
+* **OpenAI** (and OpenAI-compatible backends, incl. `openai-codex`) — the
+  message-level marker is a complete **no-op**. These backends rebuild every
+  message from a key whitelist that never copies `:cache-control`, so nothing
+  reaches the wire. OpenAI does prefix caching automatically server-side, so
+  this loses nothing; the cached read-back still surfaces as
+  `:cache-read-input-tokens`. (Explicit `prompt_cache_key` steering is future
+  work.)
+* **Gemini** — not yet implemented. Gemini caches out-of-band via
+  `CachedContent`, a different mechanism; message-level markers are dropped.
+  Noted as future work.
+
 ==== When the cache wins are real
 
 * Long system prompts (4 KB+).
@@ -1242,7 +1319,11 @@ jq -r 'select(.event == "llm/response") |
                               ."cache-read-input-tokens"] | @tsv' transcript.jsonl
 ----
 
-First request shows a creation count, subsequent ones show reads.
+First request shows a creation count, subsequent ones show reads. With
+transcript caching on, `cache-read-input-tokens` should **grow across
+turns** within a state (rather than staying flat at the system + tools
+prefix size), because the rolling message breakpoint extends the cached
+prefix deeper into the transcript each turn.
 
 [[context-tracking]]
 === Context-window tracking
