@@ -1338,6 +1338,55 @@ transcript. See `docs/web-ui.md` for the resolver API in detail.
 
 These captured blobs are also the input to the replay primitive — see <<refine-turn>>.
 
+[[working-tree-vs-output]]
+==== Working-tree writes vs. captured output (`--base-dir`)
+
+An `:llm-conversation` produces two **distinct** kinds of output, with
+different owners, locations, and lifecycles. Keeping them separate is a hard
+invariant, not a convenience.
+
+*Channel A — working-tree artifacts (side effects).* The file tools
+`:fs/write`, `:fs/edit`, `:fs/multi-edit` (and any `:shell/run` that writes)
+mutate a real directory. Relative paths resolve against the tool **base-dir**,
+and `:shell/run` runs *in* it. The base-dir defaults to the session dir, but
+`--base-dir <path>` overrides it — it sets the registry's
+`:escapement/base-dir` meta, which `tp/dispatch` binds for both the `:fs/*`
+tools and `:shell/run` — so a chart can point the agent at a repo / working
+tree it operates on, **decoupled from the session dir**. The *file itself* is
+the artifact; its absolute path is returned to the model as `:resolved-path`
+and captured in that turn's `:llm/tool-result` blob, so "what files were
+written, and where" is reconstructable from the `:invocation/timeline` with no
+extra bookkeeping. Escapement does **not** copy working-tree content into the
+session store; persisting these artifacts (e.g. a git commit of the working
+tree) is the chart's job.
+
+*Channel B — captured turn output (decisions).* The assistant's final text for
+a turn is written to `output.edn` as the `:output-ref` of `:on-end-turn-event`
+(see above), kept inline only as an ≤80-char `:io/snippet`, and derefed on
+demand with `h/deref-output`. A chart that needs a durable *named* blob can
+also write one under `<session-dir>/artifacts/<name>` via the artifact helpers
+(`h/read-artifact!` and friends). A chart typically *hoists* this output into
+its data model — via `h/tell-llm` or the event the turn raised — as a
+decision/summary it routes on downstream. These live under the **session dir**
+and are never part of the working tree.
+
+*The invariant.* `base-dir` (the working tree) and the session dir (captured
+I/O: transcript, checkpoints, node blobs, `output.edn`, `artifacts/`) **must be
+disjoint**. If they overlap, two failures follow: (1) a chart that commits its
+working tree will sweep escapement's own transcript/checkpoints into that
+commit, and (2) the agent's product files collide with the capture tree. The
+default (base-dir = session dir) is fine only for charts whose agents do not
+write durable product into a *separate* tracked tree; any chart that does
+(e.g. one that clones a repo and opens a merge request) should pass
+`--base-dir` at that tree and keep `--work-dir` / the session dir outside it.
+
+*Which channel for what.* Durable files the run is meant to leave behind
+(source, generated assets) → write them with the file tools into base-dir and
+let the chart persist them. Decisions, plans, summaries, verdicts the chart
+branches on → take them as captured turn output / a named artifact and lift
+them into the data model; do **not** write them as files into the working tree
+(they would pollute the product the chart commits).
+
 ==== Plotting usage from a transcript
 
 [source,bash]

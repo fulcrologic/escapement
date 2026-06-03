@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <groupId>com.fulcrologic</groupId>
     <artifactId>escapement</artifactId>
@@ -42,10 +43,10 @@
                 </excludes>
             </resource>
             <!-- index.html + the fetch manifest (escapement-ui.edn) ship in the jar. The compiled
-                 SPA bundle is NOT in git (avoids bloat); run `bb build-ui` before packaging so
-                 resources/public/js/main/main.js exists in the working tree and gets bundled into
-                 the jar too. bbin installs (git tree, no bundle) instead fetch it from the GitHub
-                 release on demand. Served by escapement.ui.server from the classpath. -->
+                       SPA bundle is NOT in git (avoids bloat); run `bb build-ui` before packaging so
+                       resources/public/js/main/main.js exists in the working tree and gets bundled into
+                       the jar too. bbin installs (git tree, no bundle) instead fetch it from the GitHub
+                       release on demand. Served by escapement.ui.server from the classpath. -->
             <resource>
                 <directory>resources</directory>
             </resource>
@@ -112,7 +113,7 @@
         <dependency>
             <groupId>com.fulcrologic</groupId>
             <artifactId>statecharts</artifactId>
-            <version>1.4.0-RC16</version>
+            <version>1.4.0-RC18</version>
         </dependency>
     </dependencies>
 </project>
