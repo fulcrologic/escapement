@@ -333,7 +333,9 @@
    [:cwd {:optional true} :string]                          ;; default "."
    [:limit {:optional true} pos-int?]                       ;; default 200
    ;; Sort results most-recently-modified first when true (default true).
-   [:by-mtime? {:optional true} :boolean]])
+   ;; NOTE: no `?` suffix — Anthropic tool input_schema property keys must match
+   ;; ^[a-zA-Z0-9_.-]{1,64}$, which forbids `?`.
+   [:by-mtime {:optional true} :boolean]])
 
 (defn- glob-match-fn
   "Build a path predicate from `pattern`. Java's `**/*.foo` only matches files
@@ -355,11 +357,11 @@
   (description [_]
     (str "Find files matching a glob pattern (e.g. `**/*.cljc`, `src/**/foo.clj`). "
          "Walks `cwd` (default `.`) recursively and returns matching paths. "
-         "Sorted most-recently-modified first by default; pass by_mtime? false "
+         "Sorted most-recently-modified first by default; pass by-mtime false "
          "for lexicographic order. Capped at `limit` (default 200)."))
   (input-schema [_] fs-glob-schema)
-  (invoke [_ {:keys [pattern cwd limit by-mtime?]
-              :or   {by-mtime? true}}]
+  (invoke [_ {:keys [pattern cwd limit by-mtime]
+              :or   {by-mtime true}}]
     (let [root      (resolve-file (or cwd "."))
           _         (when-not (.exists root)
                       (throw (ex-info "glob root does not exist"
@@ -380,7 +382,7 @@
                                      {:path  (str (.toAbsolutePath p))
                                       :mtime (.toMillis (Files/getLastModifiedTime
                                                          p (into-array LinkOption [])))}))))
-              ordered (if by-mtime?
+              ordered (if by-mtime
                         (sort-by (comp - :mtime) hits)
                         (sort-by :path hits))
               kept    (vec (take cap ordered))

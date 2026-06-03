@@ -154,7 +154,7 @@
                    (.mkdirs (io/file sub))
                    (tmp-file sub "d.cljc" "(ns d)"))
                  (component "pattern matches recursively"
-                            (let [r (tp/dispatch reg :fs/glob {:pattern "**/*.cljc" :cwd dir :by-mtime? false})]
+                            (let [r (tp/dispatch reg :fs/glob {:pattern "**/*.cljc" :cwd dir :by-mtime false})]
                               (assertions
                                "non-error" (:is-error r) => false
                                "matches b.cljc" (clojure.string/includes? (:result r) "/b.cljc") => true
