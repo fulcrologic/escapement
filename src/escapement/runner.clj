@@ -440,14 +440,28 @@
                                    (and (zero? live) (zero? deliverable))
                                    :done                    ;; done — no live work, nothing deliverable stuck
 
-                                   ;; No progress AND live work (or stranded
-                                   ;; deliverable events) exist: this quiescent cycle
-                                   ;; may be the frozen-config wedge. Bump the counter;
-                                   ;; if it reaches the threshold the configuration is
-                                   ;; wedged (the statecharts eventless transition loop
-                                   ;; never advances, or events are stranded) — emit
-                                   ;; :runner/error and return a terminal status (clean
-                                   ;; exit, no throw), mirroring :aborted.
+                                   ;; A LIVE invocation is in-flight (e.g. an LLM turn
+                                   ;; mid-generation) — the run is WORKING, not wedged.
+                                   ;; Wait UNBOUNDEDLY without bumping the frozen counter:
+                                   ;; a slow model (or a long turn over a big context)
+                                   ;; must not be aborted as "frozen" — the agent should
+                                   ;; STOP itself (idle/done/need-human), never BE stopped
+                                   ;; mid-thought. A genuinely hung HTTP call is caught by
+                                   ;; the backend's own request timeout, which posts an
+                                   ;; error event → progress → this loop advances. The
+                                   ;; frozen-config guard below therefore targets only the
+                                   ;; real wedge: events STRANDED on un-drained sessions
+                                   ;; (live = 0, deliverable > 0).
+                                   (pos? live)
+                                   (do (Thread/sleep ^long quiescent-sleep-ms)
+                                       (recur 0))
+
+                                   ;; No progress, no live work, but deliverable events
+                                   ;; remain (stranded on un-pumped sessions — almost
+                                   ;; always a multiplex chart missing `^:multi-session?`).
+                                   ;; This is the genuine wedge: bump; at the threshold
+                                   ;; emit :runner/error and return a terminal status
+                                   ;; (clean exit, no throw), mirroring :aborted.
                                    (>= (inc no-progress) max-frozen-cycles)
                                    (do (transcript-fn {:event :runner/error
                                                        :data  {:reason           :frozen-config
