@@ -111,6 +111,9 @@
      * `:message`             — initial user message; alias for the processor's
                                 `:initial-user-message`. Usually a lambda.
      * `:max-turns`           — turn cap.
+     * `:budget-extender`     — RAW pass-through fn (not resolved as `(fn [env data])`).
+                                The worker calls it at the turn cap with a single map
+                                to decide whether to extend the budget or stop.
      * `:budget-ms`           — wall-clock budget; alias for the processor's
                                 `:max-conversation-duration-ms`.
      * `:allowed-events`      — event-tool declarations the LLM may emit.
@@ -132,8 +135,11 @@
                :auto-forward? autoforward?
                :params        (fn [env data]
                                 (resolve-flat-params opts env data
+                                  ;; :budget-extender is RAW — it IS the fn the worker
+                                  ;; calls at the turn cap (a 1-arg fn), so it must pass
+                                  ;; through untouched, not be resolved as a `(fn [env data])`.
                                   {:drop-ks [:id :autoforward?]
-                                   :raw-ks  #{}
+                                   :raw-ks  #{:budget-extender}
                                    :aliases llm-aliases}))}))
 
 (defn human-input

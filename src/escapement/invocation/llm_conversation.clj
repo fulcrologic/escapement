@@ -1225,11 +1225,25 @@
    Drives the LLM via `backend`, dispatches tools, posts events back to parent.
 
    Per-invocation budgets:
-     :max-turns                    — maximum total LLM round-trips before the
-                                     worker self-cancels with :error.llm.max-turns.
+     :max-turns                    — total LLM round-trips before the worker
+                                     self-cancels with :error.llm.max-turns. When
+                                     a :budget-extender is supplied this is a SOFT
+                                     checkpoint, not a hard kill (see below).
      :max-conversation-duration-ms — wall-clock budget (in ms) from worker
                                      start to a clean :end_turn. Self-cancels
-                                     with :error.llm.timeout when exceeded.
+                                     with :error.llm.timeout when exceeded. (Always
+                                     a HARD limit — a :budget-extender cannot raise
+                                     it, so it backstops runaway turn extensions.)
+     :budget-extender              — OPTIONAL fn. When :max-turns is reached it is
+                                     called with {:messages :turn-count :max-turns
+                                     :elapsed-ms :params} and may return a NEW,
+                                     larger turn limit to continue (logged as
+                                     :llm/budget-extended), or nil/<= current to
+                                     stop (→ :error.llm.max-turns, exactly as when
+                                     no extender is set). Lets a caller replace the
+                                     dumb integer with a progress decision (e.g. a
+                                     judge-panel vote). Errors in it are caught and
+                                     treated as a stop.
 
    Streaming:
      :stream? — when true AND the backend implements
@@ -1269,8 +1283,9 @@
            name->tool-kw name->event-entry tool-defs
            worker-state messages-atom user-msg-queue retry-counts
            params parent-ctx turn-count] :as ctx}]
-  (let [{:keys [on-end-turn-event max-turns max-conversation-duration-ms]
+  (let [{:keys [on-end-turn-event max-turns max-conversation-duration-ms budget-extender]
          :or   {on-end-turn-event :llm.idle}} params
+        eff-max-turns (atom (when max-turns (long max-turns)))
         started-at  (now-ms)
         post-error! (fn [reason data]
                       (post-event-to-parent! parent-ctx (error-event reason)
@@ -1300,14 +1315,34 @@
             (cond
               ;; Budget checks BEFORE issuing the next call. Fire the canonical
               ;; error and die — chart authors transition on :error.llm.*.
-              (and max-turns (>= @turn-count (long max-turns)))
-              (do
-                (transcript! transcript-fn
-                  {:event :llm/error :ts (now-ms)
-                   :data  {:reason :max-turns :limit max-turns}})
-                (post-error! :max-turns {:limit max-turns :turns @turn-count})
-                (reset! worker-state :dying)
-                (recur))
+              (and max-turns (>= @turn-count (long @eff-max-turns)))
+              (let [extension (when budget-extender
+                                (try
+                                  (budget-extender {:messages   @messages-atom
+                                                    :turn-count @turn-count
+                                                    :max-turns  @eff-max-turns
+                                                    :elapsed-ms (- (now-ms) started-at)
+                                                    :params     params
+                                                    :env        (:env parent-ctx)})
+                                  (catch Throwable t
+                                    (transcript! transcript-fn
+                                      {:event :llm/budget-extender-error :ts (now-ms)
+                                       :data  {:message (.getMessage t)}})
+                                    nil)))]
+                (if (and extension (> (long extension) (long @eff-max-turns)))
+                  (do
+                    (transcript! transcript-fn
+                      {:event :llm/budget-extended :ts (now-ms)
+                       :data  {:from @eff-max-turns :to (long extension) :turns @turn-count}})
+                    (reset! eff-max-turns (long extension))
+                    (recur))
+                  (do
+                    (transcript! transcript-fn
+                      {:event :llm/error :ts (now-ms)
+                       :data  {:reason :max-turns :limit @eff-max-turns}})
+                    (post-error! :max-turns {:limit @eff-max-turns :turns @turn-count})
+                    (reset! worker-state :dying)
+                    (recur))))
 
               (and max-conversation-duration-ms
                 (>= (- (now-ms) started-at) (long max-conversation-duration-ms)))
