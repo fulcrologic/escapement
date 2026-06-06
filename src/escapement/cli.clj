@@ -787,10 +787,11 @@
                                                                                                :controller debug-controller}))))}
                                       max-frozen-cycles (assoc :max-frozen-cycles max-frozen-cycles)
                                       quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)))]
-            ;; In debug mode, hold the TUI open after the chart finishes so the
-            ;; user can keep browsing the inspector (artifacts, history, viz).
-            ;; Ctrl-C from the input thread breaks await-quit!.
-            (when (and tui-handle debug?)
+            ;; Hold the TUI open after the chart finishes so the user can keep
+            ;; browsing the inspector (transcripts, artifacts, history, viz)
+            ;; instead of the process exiting out from under them. Ctrl-C from
+            ;; the input thread breaks await-quit!.
+            (when tui-handle
               (tui/await-quit! tui-handle))
             (when tui-handle (tui/stop! tui-handle))
             (println "session         " session)

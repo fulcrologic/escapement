@@ -18,6 +18,7 @@
     no-ops so the calling code path stays uniform; the renderer falls through
     to stdin behavior in that case."
   (:require
+    [clojure.edn :as edn]
     [clojure.java.io :as io]
     [clojure.pprint :as pp]
     [clojure.string :as str]
@@ -292,7 +293,7 @@
                   :else (str src))]
         (str "[" tag "] " (:summary e))))))
 
-(declare chart-from-env stop!)
+(declare chart-from-env stop! color-for event!* live-agg)
 
 ;; ---------------------------------------------------------------------------
 ;; Internal state
@@ -392,13 +393,45 @@
                   :ev            ev})
            events))))
 
+(defn- wrap-line
+  "Word-wrap one logical line to `width` columns, preserving leading
+   indentation on continuation rows. A word longer than the line is
+   hard-split. Returns a vector of physical lines (never empty)."
+  [width s]
+  (let [width (max 1 width)
+        s     (str s)]
+    (if (<= (count s) width)
+      [s]
+      (let [indent (let [i (apply str (take-while #{\space} s))]
+                     (if (< (count i) width) i ""))
+            words  (str/split (str/triml s) #"\s+")]
+        (loop [ws words, cur indent, out []]
+          (if-let [w (first ws)]
+            (cond
+              ;; a single word too long for any line → hard char-split it
+              (> (+ (count indent) (count w)) width)
+              (let [room (max 1 (- width (count cur)))
+                    here (subs w 0 (min room (count w)))
+                    left (subs w (count here))]
+                (if (str/blank? (str/trim cur))
+                  (recur (cons left (rest ws)) "" (conj out (str cur here)))
+                  (recur ws indent (conj out cur))))
+              ;; fits on the current line
+              (<= (+ (count cur) (if (= cur indent) 0 1) (count w)) width)
+              (recur (rest ws) (if (= cur indent) (str cur w) (str cur " " w)) out)
+              ;; doesn't fit → flush and wrap
+              :else (recur ws indent (conj out cur)))
+            (conj out cur)))))))
+
 (defn- render-pager-lines
-  "Render lines for the pager into `buf` between rows `r0` and `r1`."
+  "Render lines for the pager into `buf` between rows `r0` and `r1`. Long lines
+   are word-wrapped to the terminal width so nothing is truncated off-screen."
   [^StringBuilder buf {:keys [title lines offset]} r0 r1 term-w]
   (.append buf (move-to-s r0 1))
   (.append buf (truncate (str " ── " title " ── (PgUp/PgDn, Esc=close)") term-w))
   (.append buf clear-eol-s)
   (let [room  (max 1 (- r1 r0))
+        lines (into [] (mapcat #(wrap-line term-w %)) lines)
         start (min (max 0 (or offset 0)) (max 0 (- (count lines) 1)))
         slice (subvec lines start (min (count lines) (+ start room)))]
     (doseq [[i ln] (map-indexed vector slice)]
@@ -450,6 +483,166 @@
       ;; default — pretty the whole event
       (str hdr "\n\n" (pretty ev)))))
 
+;; ---------------------------------------------------------------------------
+;; Per-invocation transcript (system prompt + turns + tool uses) for the
+;; inspector drill-in. Built from the buffered scrollback events (full text)
+;; plus the captured request blob for the full system prompt.
+;; ---------------------------------------------------------------------------
+
+(defn- indent-block
+  "Indent every line of `s` by `pad` spaces. Blank/nil → empty string."
+  [pad s]
+  (let [s (str/trimr (str s))]
+    (if (str/blank? s)
+      ""
+      (->> (str/split-lines s)
+        (map #(str pad %))
+        (str/join "\n")))))
+
+(defn- read-blob-system
+  "Best-effort read of the full system prompt from a captured `request.edn`
+   blob given the session-dir and the event's `:io/ref` (relative path).
+   Returns the system string or nil (truncated previews are the fallback)."
+  [sdir io-ref]
+  (when (and sdir io-ref)
+    (try
+      (-> (slurp (str sdir "/" io-ref)) edn/read-string :system)
+      (catch Throwable _ nil))))
+
+(defn- read-blob-content
+  "Best-effort read of the FULL assistant content blocks from a captured
+   `response.edn` blob (`:io/ref`). The inline `:content` in the transcript
+   event is only an ≤80-char snippet per block; the blob holds the full text.
+   Returns the content vector or nil."
+  [sdir io-ref]
+  (when (and sdir io-ref)
+    (try
+      (let [data (-> (slurp (str sdir "/" io-ref)) edn/read-string)]
+        (cond (vector? data) data
+              (map? data)     (:content data)
+              :else           nil))
+      (catch Throwable _ nil))))
+
+(defn- read-blob-text
+  "Best-effort read of a captured blob's full text (e.g. a tool-result
+   `:io/ref`). Returns the string content or nil."
+  [sdir io-ref]
+  (when (and sdir io-ref)
+    (try
+      (let [data (-> (slurp (str sdir "/" io-ref)) edn/read-string)]
+        (cond (string? data) data
+              (map? data)    (or (:content data) (:text data))
+              :else          nil))
+      (catch Throwable _ nil))))
+
+(defn- fmt-transcript-event
+  "Render one transcript event as a labeled, indented section for the
+   per-invocation transcript pager. `sdir` is the session dir, used to read the
+   FULL text of a turn back from its captured blob (the inline `:content` is
+   only an ≤80-char snippet). Returns a string (may be empty)."
+  [sdir {:keys [event data ts]}]
+  (let [hms (ts->hms ts)]
+    (case event
+      :llm/user-message
+      (str "▸ USER  " hms "\n" (indent-block "    " (:text data)))
+
+      :llm/response
+      (let [stop  (:stop-reason data)
+            usage (:usage data)
+            tps   (:output-tps data)
+            head  (str "◂ ASSISTANT  " hms
+                    "   [stop=" stop
+                    " tok in:" (:input-tokens usage "?") "/out:" (:output-tokens usage "?")
+                    (when tps (str "  " tps " t/s")) "]")
+            ;; Prefer the full content blocks from the captured response blob;
+            ;; fall back to the inline snippet blocks when the blob is missing.
+            content (or (read-blob-content sdir (:io/ref data)) (:content data))
+            blocks (for [b content
+                         :let [t (:type b)]
+                         :when (#{:text :thinking :tool_use} t)]
+                     (case t
+                       :text     (indent-block "    " (:text b))
+                       :thinking (str "    · thinking ·\n" (indent-block "      " (:thinking b)))
+                       :tool_use (str "    ⚙ tool_use " (:name b) "\n"
+                                   (indent-block "      " (pretty (or (:input b) {}))))))]
+        (str head "\n" (str/join "\n\n" (remove str/blank? blocks))))
+
+      :llm/tool-result
+      (str "↩ TOOL RESULT  " hms "  tool=" (:tool data)
+        (when (:is-error data) "  (ERROR)") "\n"
+        (indent-block "    " (or (read-blob-text sdir (:io/ref data))
+                               (:content-preview data))))
+
+      :llm/error
+      (str "⚠ ERROR  " hms "\n" (indent-block "    " (:message data)))
+
+      :llm/model-down
+      (str "⚠ model-down  " hms "  " (:model data) " — " (:message data))
+
+      :llm/worker-exit
+      (str "○ worker exit  " hms "  reason=" (:reason data))
+
+      ;; start/request/delta/retry/etc. are folded into the header — skip here.
+      "")))
+
+(defn- invocation-transcript-text
+  "Build the full, human-readable transcript for one invocation: a header
+   (model, turn/token totals), the full SYSTEM prompt (from the captured
+   request blob, falling back to the truncated preview), then every USER /
+   ASSISTANT / tool turn in order. Plus a trailing artifacts list."
+  [h invokeid]
+  (let [s          @(:state h)
+        env        (some-> (:env h) deref)
+        sdir       (session-dir-from-env env)
+        evs        (->> (:scrollback s)
+                     (keep (fn [e]
+                             (when (= invokeid (some-> (:source e) str))
+                               (:ev e))))
+                     (filter map?)
+                     vec)
+        requests   (filter #(= :llm/request (:event %)) evs)
+        responses  (filter #(= :llm/response (:event %)) evs)
+        first-req  (first requests)
+        system     (or (read-blob-system sdir (get-in first-req [:data :io/ref]))
+                     (get-in first-req [:data :system-preview])
+                     "(system prompt not captured)")
+        live       (live-agg (get-in s [:live invokeid :sessions]))
+        models     (->> evs (keep #(get-in % [:data :model])) distinct (remove nil?))
+        models     (if (and (empty? models) (:model live)) [(:model live)] models)
+        out-toks   (reduce + 0 (keep #(get-in % [:data :usage :output-tokens]) responses))
+        arts       (list-artifacts sdir invokeid)
+        abs-sdir   (when sdir (try (.getAbsolutePath (io/file sdir)) (catch Throwable _ sdir)))
+        status     (case (:status live)
+                     :waiting   "  ⟳ waiting for first token…"
+                     :streaming "  ⟳ streaming…"
+                     :error     "  ✗ error"
+                     "")
+        header     (str "Invocation: " invokeid "\n"
+                     "Model(s):   " (if (seq models) (str/join ", " models) "—") "\n"
+                     "Turns:      " (count responses)
+                     "    Output tokens: " out-toks status "\n"
+                     "Session dir: " (or abs-sdir "—") "\n"
+                     "Artifacts:   " (or abs-sdir "—") "/artifacts/\n")
+        ;; In-flight assistant turn: the deltas streamed so far for the current
+        ;; turn, not yet finalized into an `:llm/response` scrollback entry.
+        live-txt   (:text live)
+        pending    (when (and live-txt (not (str/blank? live-txt)))
+                     (str "◂ ASSISTANT  (streaming"
+                       (when-let [t (:tokens live)] (str " · " t " tok"))
+                       "…)\n" (indent-block "    " live-txt)))
+        body       (->> (concat (map #(fmt-transcript-event sdir %) evs) [pending])
+                     (remove str/blank?)
+                     (str/join "\n\n"))]
+    (str header "\n"
+      "════════════════════ SYSTEM ════════════════════\n\n"
+      (str/trimr system) "\n\n"
+      "════════════════════ CONVERSATION ════════════════════\n\n"
+      (if (str/blank? body) "(no turns recorded in the live buffer)" body)
+      (when (seq arts)
+        (str "\n\n════════════════════ ARTIFACTS ════════════════════\n"
+          (str/join "\n" (map #(str "  • " (or abs-sdir sdir) "/artifacts/" %) arts))
+          "\n\n(press o on the invocation list to open artifacts)")))))
+
 (defn- render-overlay!
   "Renders the inspector overlay into the scrollback region. Row range
    `[r0..r1]` is inclusive."
@@ -469,14 +662,20 @@
                            :chart tabs
                            :status tabs
                            "")
-                         "  (j/k g/G Enter=drill o=open Esc/h=back  s/c/p/P=ctrl v=viz)"
+                         "  (j/k g/G Enter=transcript o=artifacts Esc/h=back  s/c/p/P=ctrl v=viz)"
                          pending-suffix
                          " ── ")]
     (.append buf (move-to-s r0 1))
     (.append buf (truncate title term-w))
     (.append buf clear-eol-s)
     (if-let [pager (:pager ov)]
-      (render-pager-lines buf pager (inc r0) r1 term-w)
+      ;; A transcript pager carries `:live-invokeid` and is rebuilt from current
+      ;; state every frame so streamed tokens appear live as they arrive.
+      (let [pager (if-let [iid (:live-invokeid pager)]
+                    (assoc pager :lines
+                      (vec (str/split-lines (invocation-transcript-text h iid))))
+                    pager)]
+        (render-pager-lines buf pager (inc r0) r1 term-w))
       ;; Each view returns {:rows [strings] :hl-offset N} where hl-offset is
       ;; the index into :rows corresponding to cursor=0. That keeps decorative
       ;; header lines from throwing off the selection highlight.
@@ -549,13 +748,17 @@
                  :selectable? (seq erows)})
 
               :status
-              (let [c  (:debug-controller h)
-                    cs (when c @c)]
+              (let [c    (:debug-controller h)
+                    cs   (when c @c)
+                    sdir (session-dir-from-env env)
+                    abs  (when sdir (try (.getAbsolutePath (io/file sdir))
+                                         (catch Throwable _ sdir)))]
                 {:rows      [(str " mode:           " (or (:mode cs) "n/a"))
                              (str " step-budget:    " (or (:step-budget cs) 0))
                              (str " pause-on-ext?:  " (boolean (:pause-on-next-external? cs)))
                              (str " buffered events: " (count events))
-                             (str " session-dir:    " (session-dir-from-env env))]
+                             (str " session-dir:    " (or abs "—"))
+                             (str " artifacts-dir:  " (when abs (str abs "/artifacts/")))]
                  :hl-offset nil :selectable? false})
 
               {:rows [" (unknown view)"] :hl-offset nil :selectable? false})
@@ -590,6 +793,132 @@
     {:slice (subvec scrollback start end)
      :start start}))
 
+;; ---------------------------------------------------------------------------
+;; Live streaming-token region
+;; ---------------------------------------------------------------------------
+
+(def ^:private live-max-groups
+  "Cap on how many invocation GROUPS (one per invokeid/role) get rendered."
+  4)
+
+(def ^:private live-group-children
+  "Cap on how many concurrent sessions are shown indented under one group
+   before they collapse into a `└ …+N more` summary."
+  6)
+
+(def ^:private status-rank
+  {:streaming 0 :waiting 1 :error 2 :done 3})
+
+(defn- live-count
+  "Best available token count for a live entry: the provider's running
+   `:output-tokens` usage if it streamed any, else the raw text-delta chunk
+   count as a proxy (one chunk ≈ one token for the local OpenAI-compat path)."
+  [v]
+  (or (:tokens v) (:chunks v) 0))
+
+(defn- live-tps
+  "Tokens/sec for a live entry from first→last delta wall-clock."
+  [v]
+  (let [secs (/ (max 1 (- (or (:last-ts v) 0) (or (:first-ts v) 0))) 1000.0)]
+    (if (pos? secs) (/ (live-count v) secs) 0.0)))
+
+(defn- live-status
+  "Per-status [rank glyph label] for the live panel. Lower rank sorts first so
+   in-flight invocations stay on top and finished ones sink below."
+  [v]
+  (case (:status v)
+    :streaming [0 (if (= :thinking (:kind v)) \… \◂) "streaming"]
+    :waiting   [1 \◷ "waiting"]
+    :error     [2 \✗ "error"]
+    :done      [3 \✓ "done"]
+    [3 \· (or (some-> (:status v) name) "—")]))
+
+(defn- short-session
+  "Short label for a child session: drop the `multiplex.` prefix and leading
+   colon so `multiplex.judges-r1.5` → `judges-r1.5`. Capped for the panel."
+  [sid]
+  (-> (str sid)
+    (str/replace #"^:" "")
+    (str/replace #"^multiplex\." "")
+    (truncate 16)))
+
+(defn- live-agg
+  "Aggregate one invokeid group's sessions into a summary used by the panel
+   header and the transcript pager: total tokens, the most in-flight status,
+   active/total counts, latest activity, a representative model, and the
+   in-flight partial text of the most active session."
+  [sessions]
+  (let [vs   (vals sessions)
+        best (->> vs (sort-by #(get status-rank (:status %) 3)) first)]
+    {:tokens   (reduce + 0 (map live-count vs))
+     :status   (:status best)
+     :n        (count vs)
+     :n-active (count (filter #(#{:streaming :waiting} (:status %)) vs))
+     :last-ts  (reduce max 0 (map #(or (:last-ts %) 0) vs))
+     :model    (some :model vs)
+     :text     (:text best)}))
+
+(defn- live-display-lines
+  "Hierarchical live region. One GROUP per invokeid/role (planner, judge1, …),
+   sorted so in-flight groups stay on top. A role with a single session renders
+   as one flat line; a role with concurrent sessions (the multiplex children)
+   renders a group header with aggregate tokens + active count, then each
+   session indented beneath (├/└), capped with a `…+N more` roll-up. Colored to
+   the role's scrollback color. Empty when nothing has run yet."
+  [s term-w]
+  (let [groups (->> (:live s)
+                 (map (fn [[iid sess-map]]
+                        (let [sessions (:sessions sess-map)]
+                          (assoc (live-agg sessions) :iid iid :sessions sessions))))
+                 (sort-by (fn [g] [(get status-rank (:status g) 3) (- (:last-ts g))])))]
+    (if (empty? groups)
+      []
+      (let [colorize  (fn [code body]
+                        (if code
+                          (str (esc (str code "m")) (truncate body term-w) reset-attrs-s)
+                          (truncate body term-w)))
+            n-active  (reduce + 0 (map :n-active groups))
+            n-total   (reduce + 0 (map :n groups))
+            n-roles   (count groups)
+            hdr       (truncate (str " ── live · " n-active " active · " n-total
+                                  " LLMs · " n-roles " roles ──") term-w)
+            group->lines
+            (fn [{:keys [iid sessions n] :as g}]
+              (let [code (color-for s iid)]
+                (if (<= n 1)
+                  ;; single session → one flat line (planner / host / a lone poet)
+                  (let [v (first (vals sessions))
+                        [_ glyph label] (live-status v)]
+                    [(colorize code
+                       (format "  %-13s %s %-9s %5d tok  %5.1f t/s  %s"
+                         (or (short-invokeid iid) "?") glyph label
+                         (long (live-count v)) (double (live-tps v)) (or (:model v) "")))])
+                  ;; multiple concurrent sessions → group header + indented kids
+                  (let [head (colorize code
+                               (format "  %-13s ◇ %5d tok  (%d/%d active)  %s"
+                                 (or (short-invokeid iid) "?")
+                                 (long (:tokens g)) (:n-active g) n (or (:model g) "")))
+                        kids (->> (vals sessions)
+                               (sort-by (fn [v] [(get status-rank (:status v) 3)
+                                                 (- (or (:last-ts v) 0))]))
+                               (take live-group-children))
+                        more (- n (count kids))
+                        kid-lines
+                        (map-indexed
+                          (fn [i v]
+                            (let [last? (and (zero? more) (= i (dec (count kids))))
+                                  [_ glyph label] (live-status v)]
+                              (colorize code
+                                (format "    %s %-13s %s %-9s %5d tok  %5.1f t/s"
+                                  (if last? "└" "├")
+                                  (short-session (:session v)) glyph label
+                                  (long (live-count v)) (double (live-tps v))))))
+                          kids)]
+                    (concat [head] kid-lines
+                      (when (pos? more)
+                        [(colorize code (str "    └ …+" more " more"))]))))))]
+        (vec (concat [hdr] (mapcat group->lines (take live-max-groups groups))))))))
+
 (defn- render-frame!
   [{:keys [state lock terminal] :as h}]
   (locking lock
@@ -616,7 +945,12 @@
           ;; Inspector overlay opens OVER a live modal — user can drill into
           ;; scrollback, hit Esc to close, and then answer the modal.
           overlay-open? (and (:inspector? h) (get-in s [:debug-overlay :open?]))
-          vis           (when-not overlay-open? (visible-scrollback s term-h))
+          ;; Live streaming-token rows sit between the status line and the
+          ;; scrollback; they steal height from the scrollback region only
+          ;; while something is actually streaming.
+          live-lines    (live-display-lines s term-w)
+          live-n        (count live-lines)
+          vis           (when-not overlay-open? (visible-scrollback s (- term-h live-n)))
           lines         (:slice vis)
           slice-start   (:start vis 0)
           cursor-idx    (:cursor-idx s)
@@ -645,8 +979,13 @@
       (.append buf (move-to-s 2 1))
       (.append buf (truncate status term-w))
       (.append buf clear-eol-s)
-      ;; scrollback region: rows 3 .. (term-h - 2)
-      (let [first-row 3
+      ;; live region: rows 3 .. (2 + live-n), drawn only while streaming.
+      (doseq [[i ln] (map-indexed vector live-lines)]
+        (.append buf (move-to-s (+ 3 i) 1))
+        (.append buf ln)                                    ;; pre-truncated + colored
+        (.append buf clear-eol-s))
+      ;; scrollback region: rows (3 + live-n) .. (term-h - 2)
+      (let [first-row (+ 3 live-n)
             last-row  (- term-h 2)]
         (if overlay-open?
           (render-overlay! buf h s first-row last-row term-w)
@@ -1096,6 +1435,18 @@
     (when-let [{:keys [ev event-name]} (nth rows cursor nil)]
       (open-pager! state (str "event " event-name) (pretty ev)))))
 
+(defn- open-invocation-transcript!
+  "Open the per-invocation transcript (system prompt + every turn + tool uses)
+   in the pager for the invocation at `cursor` in the history list."
+  [h state cursor]
+  (let [hist (get-in @state [:debug-overlay :invocations])]
+    (when-let [{:keys [invokeid]} (nth hist cursor nil)]
+      (open-pager! state (str invokeid " · transcript")
+        (invocation-transcript-text h invokeid))
+      ;; Tag the pager so render rebuilds it live (streamed tokens appear as
+      ;; they arrive, including the in-flight assistant turn).
+      (swap! state assoc-in [:debug-overlay :pager :live-invokeid] invokeid))))
+
 (defn- handle-debug-key!
   "Dispatch a key while the debug overlay is open. Pager keys take precedence
    when the pager is up."
@@ -1173,13 +1524,17 @@
           :invocations
           (if (:focus ov)
             (open-focused-artifact! h state)
-            (focus-invocation! state (:invocations ov) (:cursor ov 0)))
+            ;; Enter on the list → show that invocation's full transcript.
+            (open-invocation-transcript! h state (:cursor ov 0)))
           :chart (open-event-detail! h state (:cursor ov 0))
           nil)
 
         (= k [:char \o])
-        (when (and (= :invocations (:view ov)) (:focus ov))
-          (open-focused-artifact! h state))
+        (when (= :invocations (:view ov))
+          (if (:focus ov)
+            (open-focused-artifact! h state)
+            ;; o on the list → drill into the artifact list for this invocation.
+            (focus-invocation! state (:invocations ov) (:cursor ov 0))))
 
         ;; Controller keys also work while overlay is open
         (and (:debug-controller h) (= k [:char \s]))
@@ -1367,6 +1722,7 @@
                           :scrollback      []
                           :scroll-offset   0
                           :cursor-idx      nil              ;; nil = no selection; index into scrollback
+                          :live            {}               ;; invokeid → live streaming token counter
                           :invokeid-colors {}               ;; invokeid → SGR code string
                           :next-color-idx  0
                           :modal           nil
@@ -1490,6 +1846,73 @@
 
       :else history)))
 
+(defn- fold-live-event
+  "Fold one transcript event into the `:live` map (invokeid → live counter).
+   Returns the updated map. Tracks streaming progress per invocation:
+
+     :llm/start         — register the invocation (shows as `0 tok` while the
+                          model is thinking before the first token).
+     :llm/delta         — accumulate chunk/char counts, running token usage
+                          (if the provider streamed it), kind (text/thinking),
+                          first/last timestamps for the t/s rate.
+     :llm/response,
+     :llm/worker-exit   — the turn/worker finished; drop it from the live panel.
+
+   Keyed by invokeid so parallel + multiplexed child sessions (which all share
+   the env's single transcript-fn) each get their own row."
+  [live {:keys [event data ts]}]
+  (let [iid (some-> (:invokeid data) str)
+        ;; Parallel multiplex children share one invokeid (every judge1 child is
+        ;; "judge1"); the session-id disambiguates them. Nested as
+        ;; invokeid → {:sessions {session-id → counter}} so the panel can show a
+        ;; per-role group with its concurrent sessions indented beneath.
+        sid (or (some-> (:session-id data) str) iid)
+        ts  (or ts (System/currentTimeMillis))
+        p   [iid :sessions sid]]
+    (if (nil? iid)
+      live
+      (case event
+        :llm/start
+        (assoc-in live p {:chunks 0 :chars 0 :first-ts ts :last-ts ts
+                          :status :waiting :text "" :model (:model data) :session sid})
+
+        :llm/delta
+        (let [cur  (or (get-in live p) {:chunks 0 :chars 0 :first-ts ts :text "" :session sid})
+              toks (get-in data [:usage :output-tokens])]
+          (assoc-in live p
+            (cond-> (-> cur
+                      (update :chunks inc)
+                      (update :chars + (count (or (:text data) "")))
+                      (update :text str (or (:text data) ""))
+                      (assoc :last-ts ts
+                             :status  :streaming
+                             :model   (:model data)
+                             :session sid
+                             :kind    (if (= :thinking-delta (:type data))
+                                        :thinking :text)))
+              toks (assoc :tokens toks))))
+
+        ;; Turn finalized → it is now in the scrollback transcript; keep the row
+        ;; visible as `done` but clear the in-flight partial so it isn't shown
+        ;; twice. A subsequent turn's deltas flip it back to `streaming`.
+        :llm/response
+        (assoc-in live p (-> (or (get-in live p) {:session sid})
+                           (assoc :status :done :text "" :last-ts ts
+                                  :reason (:stop-reason data))))
+
+        (:llm/error :llm/model-down)
+        (assoc-in live p (-> (or (get-in live p) {:session sid})
+                           (assoc :status :error :last-ts ts
+                                  :reason (or (:message data) (:model data)))))
+
+        :llm/worker-exit
+        (assoc-in live p (-> (or (get-in live p) {:session sid})
+                           (assoc :status (if (= :error (:status (get-in live p))) :error :done)
+                                  :reason (or (:reason data) (:reason (get-in live p)))
+                                  :text "" :last-ts ts)))
+
+        live))))
+
 ;; ---------------------------------------------------------------------------
 ;; Color allocator + entry → rendered line
 ;; ---------------------------------------------------------------------------
@@ -1548,6 +1971,21 @@
    the status line when the event carries a new chart configuration."
   [h ev]
   (when (:enabled? h)
+    ;; Streaming deltas are high-frequency and must NEVER hit the scrollback
+    ;; (entries-for has no case for them → they'd spam the default branch).
+    ;; Fold them into the live panel and repaint, nothing else.
+    (if (= :llm/delta (:event ev))
+      (do (swap! (:state h) update :live fold-live-event ev)
+          (render-frame! h)
+          nil)
+      (event!* h ev)))
+  nil)
+
+(defn- event!*
+  "Non-delta transcript-event handling: scrollback + inspector + live-panel
+   lifecycle. Split out of `event!` so the hot `:llm/delta` path stays tiny."
+  [h ev]
+  (when (:enabled? h)
     (let [entries   (entries-for ev)
           cfg       (get-in ev [:data :config-after])
           start-cfg (when (= (:event ev) :runner/start-config)
@@ -1587,7 +2025,13 @@
                     (if (> n 1000) (subvec v' (- n 1000)) v'))))
               (#{:llm/start :llm/worker-exit} (:event ev))
               (update-in [:debug-overlay :invocations]
-                update-invocation-history ev)))))
+                update-invocation-history ev)
+
+              ;; Keep the live status panel current for the non-delta lifecycle
+              ;; events (deltas are folded on the fast path in `event!`).
+              (#{:llm/start :llm/response :llm/error :llm/model-down :llm/worker-exit}
+                (:event ev))
+              (update :live fold-live-event ev)))))
       (render-frame! h)))
   nil)
 

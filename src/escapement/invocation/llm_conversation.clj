@@ -711,7 +711,11 @@
                       (fn [d]
                         (transcript! transcript-fn
                           {:event :llm/delta :ts (now-ms)
-                           :data  (assoc d :model m :invokeid invokeid)}))))
+                           :data  (assoc d :model m :invokeid invokeid
+                                    ;; session-id distinguishes the parallel
+                                    ;; multiplex children that share one invokeid
+                                    ;; (every judge1 child uses invokeid "judge1").
+                                    :session-id (:parent-session-id parent-ctx))}))))
                   :on-retry
                   (fn [{:keys [model category attempt max-retries]}]
                     (transcript! transcript-fn
@@ -728,7 +732,9 @@
                        :data  {:model     model
                                :message   (:message (throwable->details throwable))
                                :category  category
-                               :remaining remaining}}))
+                               :remaining remaining
+                               :invokeid   invokeid
+                               :session-id (:parent-session-id parent-ctx)}}))
                   :on-policy-empty
                   (fn [{:keys [policy strict?]}]
                     (transcript! transcript-fn
@@ -1049,7 +1055,9 @@
       (do
         (transcript! transcript-fn
           {:event :llm/worker-exit :ts (now-ms)
-           :data  {:reason :interrupted-mid-turn}})
+           :data  {:reason :interrupted-mid-turn
+                   :invokeid (:invokeid parent-ctx)
+                   :session-id (:parent-session-id parent-ctx)}})
         (reset! worker-state :dying)
         :error-and-die)
 
@@ -1100,7 +1108,8 @@
                            :n-blocks    (count content)
                            :usage       (or usage {})
                            :content     (mapv ->transcript-content-block content)
-                           :invokeid    (:invokeid parent-ctx)}
+                           :invokeid    (:invokeid parent-ctx)
+                           :session-id  (:parent-session-id parent-ctx)}
                     model (assoc :model model)
                     elapsed-ms (assoc :elapsed-ms elapsed-ms)
                     output-tps (assoc :output-tps output-tps)
@@ -1281,7 +1290,10 @@
         (let [s @worker-state]
           (cond
             (= :dying s)
-            (transcript! transcript-fn {:event :llm/worker-exit :ts (now-ms) :data {:reason :stopped}})
+            (transcript! transcript-fn {:event :llm/worker-exit :ts (now-ms)
+                                        :data {:reason :stopped
+                                               :invokeid (:invokeid parent-ctx)
+                                               :session-id (:parent-session-id parent-ctx)}})
 
             (= :awaiting-user s)
             ;; park until a user message arrives or stop is signaled
@@ -1336,11 +1348,16 @@
             :else
             (recur))))
       (catch InterruptedException _
-        (transcript! transcript-fn {:event :llm/worker-exit :ts (now-ms) :data {:reason :interrupted}}))
+        (transcript! transcript-fn {:event :llm/worker-exit :ts (now-ms)
+                                    :data {:reason :interrupted
+                                           :invokeid (:invokeid parent-ctx)
+                                           :session-id (:parent-session-id parent-ctx)}}))
       (catch Throwable t
         (transcript! transcript-fn {:event :llm/worker-exit :ts (now-ms)
                                     :data  {:reason  :exception
-                                            :message (.getMessage t)}})
+                                            :message (.getMessage t)
+                                            :invokeid (:invokeid parent-ctx)
+                                            :session-id (:parent-session-id parent-ctx)}})
         (try
           (post-error! :worker-exception {:message (.getMessage t)})
           (catch Throwable _ nil))))))

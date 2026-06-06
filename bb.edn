@@ -17,6 +17,17 @@
                                           (deref (promise)))}
             sanity {:doc  "Run the bb sanity script for the engine."
                     :task (shell "bb bb_test/sanity.clj")}
+            haiku
+            {:doc  "Run the dynamic haiku tournament on a fast LOCAL model (ollama gemma3:1b) with the interactive TUI + live streaming-token panel. Needs `ollama serve` running and `ollama pull gemma3:1b`. For poets/judges to STREAM CONCURRENTLY (not one at a time) start the server with parallelism — `OLLAMA_NUM_PARALLEL=4 ollama serve` — it defaults to 1 (sequential). Override the field/theme via the first arg, e.g. `bb haiku 'Run a tournament with 6 poets and 5 judges. Theme: first snow.'`"
+             :task (let [prompt (or (first *command-line-args*)
+                                  "Run a tournament with 4 poets and 4 judges. Theme: lanterns over the river.")]
+                     (shell {:extra-env {"OLLAMA_API_KEY" "dummy"}}
+                       "bb" "-m" "escapement.cli" "run"
+                       "escapement.examples.haiku-tournament-dynamic/agent"
+                       "--backend" "ollama"
+                       "--api-base-url" "http://localhost:11434/v1"
+                       "--model" "gemma3:1b"
+                       "--param" (str "user-input=" (pr-str prompt))))}
             ui-test
             {:doc  "Run the JVM RAD/TUI UI tests (clojure -M:ui-test), grouped by render target into ISOLATED JVMs. The TUI, Semantic-UI, and headless RAD render plugins each register the SAME global fr/render-field / render-element multimethods, so only one render target may load per JVM (last defmethod wins). In production each target is its own process; here we run one subprocess per group so the whole UI suite is green together."
              :task (let [groups [["tui"           ["escapement.ui.tui-render-test"
