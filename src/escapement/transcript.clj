@@ -14,7 +14,8 @@
   (:require
     [cheshire.core :as json]
     [clojure.java.io :as io]
-    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]])
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [escapement.threads :as threads])
   (:import
     (java.io BufferedWriter)
     (java.util.concurrent LinkedBlockingQueue)))
@@ -117,8 +118,7 @@
         bw          (BufferedWriter. w)
         raf-fn      (fn [] nil)                             ; fsync support stubbed; would need RandomAccessFile to do properly
         runnable    (fn [] (writer-loop q bw seq-counter fsync? raf-fn))
-        ^Thread t   (doto (Thread. ^Runnable runnable "transcript-writer")
-                      (.setDaemon true))
+        ^Thread t   (threads/unstarted-daemon "transcript-writer" runnable)
         closed?     (atom false)]
     (.start t)
     (->TranscriptSink q t seq-counter path closed?)))

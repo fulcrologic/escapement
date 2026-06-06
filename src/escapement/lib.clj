@@ -133,16 +133,17 @@
 
 (defn- with-quiet-logging
   "Run `thunk` with Timbre's min level raised to :warn so the statecharts-impl
-  DEBUG/INFO chatter does not flood the host's stderr. Restores the prior
-  Timbre config afterwards. CLI verbosity is untouched (the CLI never calls
-  this facade)."
+  DEBUG/INFO chatter does not flood the host's stderr. CLI verbosity is
+  untouched (the CLI never calls this facade).
+
+  Uses a thread-local `binding` of Timbre's `*config*` rather than a global
+  `set-min-level!`/`alter-var-root`. That matters for multi-tenant hosting:
+  many concurrent `run`s no longer serialize on (and race to restore) the
+  process-global Timbre var — each run's quieting is scoped to the thread that
+  drives its runner pump. See issue #11 (logging serialization)."
   [thunk]
-  (let [prior log/*config*]
-    (try
-      (log/set-min-level! :warn)
-      (thunk)
-      (finally
-        (alter-var-root #'log/*config* (constantly prior))))))
+  (binding [log/*config* (assoc log/*config* :min-level :warn)]
+    (thunk)))
 
 ;; ---------------------------------------------------------------------------
 ;; Public entry
