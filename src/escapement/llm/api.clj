@@ -70,10 +70,70 @@
                        content-wire)]
     {"role" (name role) "content" content-wire}))
 
+;;; Tool input-schema property-key sanitization.
+;;; Anthropic ENFORCES that tool input_schema property keys match
+;;; ^[a-zA-Z0-9_.-]{1,64}$ (HTTP 400 otherwise). Clojure idiom uses ?/!/* etc. in
+;;; keyword names. z.ai's Anthropic-compatible endpoint does NOT enforce this, so
+;;; an illegal key silently works there but 400s on Anthropic (same wire shape).
+;;; We reversibly ENCODE illegal property keys on the way out (munge) and RESTORE
+;;; them on the returned tool_use input (demunge) — so chart-author schemas keep
+;;; idiomatic keys regardless of provider strictness.
+
+(def ^:private illegal-char->token
+  {\? "_QMARK_", \! "_BANG_", \* "_STAR_", \+ "_PLUS_", \= "_EQ_",
+   \< "_LT_", \> "_GT_", \& "_AMP_", \' "_SQUOTE_", \/ "_SLASH_"})
+(def ^:private token->char (into {} (map (fn [[c t]] [t (str c)]) illegal-char->token)))
+
+(defn- legal-key-char? [c]
+  (or (Character/isLetterOrDigit ^char c) (= c \_) (= c \.) (= c \-)))
+
+(defn- legal-prop-key? [s]
+  (and (<= 1 (count s) 64) (every? legal-key-char? s)))
+
+(defn- munge-prop-key
+  "Reversibly encode an Anthropic-illegal property key. Legal keys pass through."
+  [k]
+  (let [s (name k)]
+    (if (legal-prop-key? s)
+      s
+      (apply str (map (fn [c]
+                        (cond
+                          (legal-key-char? c)     c
+                          (illegal-char->token c) (illegal-char->token c)
+                          :else                   (format "_U%04X_" (int c))))
+                   s)))))
+
+(defn- demunge-prop-key
+  "Inverse of `munge-prop-key` — restores the original tool_use input key."
+  [s]
+  (-> (reduce-kv (fn [a t c] (str/replace a t c)) s token->char)
+    (str/replace #"_U([0-9A-Fa-f]{4})_"
+      (fn [[_ h]] (str (char (Integer/parseInt h 16)))))))
+
+(defn- sanitize-tool-schema
+  "Recursively munge JSON-Schema `properties` keys and `required` entries so every
+  tool property key is Anthropic-legal."
+  [schema]
+  (cond
+    (map? schema)
+    (reduce-kv
+      (fn [acc k v]
+        (let [kn (if (keyword? k) (name k) (str k))]
+          (assoc acc k
+            (cond
+              (and (= kn "properties") (map? v))
+              (reduce-kv (fn [p pk pv] (assoc p (munge-prop-key pk) (sanitize-tool-schema pv))) {} v)
+              (and (= kn "required") (sequential? v))
+              (mapv munge-prop-key v)
+              :else (sanitize-tool-schema v)))))
+      {} schema)
+    (sequential? schema) (mapv sanitize-tool-schema schema)
+    :else schema))
+
 (defn- tool->wire [{:keys [name description input-schema cache-control]}]
   (cond-> {"name"         name
            "description"  description
-           "input_schema" input-schema}
+           "input_schema" (sanitize-tool-schema input-schema)}
     cache-control (assoc "cache_control" (cc->wire cache-control))))
 
 (defn- system->wire [system system-cc]
@@ -154,7 +214,7 @@
                 ;; schemas everywhere. Nested map values are left as-is by cheshire's default.
                 :input (let [raw (get blk "input" {})]
                          (if (map? raw)
-                           (reduce-kv (fn [m k v] (assoc m (keyword k) v)) {} raw)
+                           (reduce-kv (fn [m k v] (assoc m (keyword (demunge-prop-key k)) v)) {} raw)
                            raw))}
     "tool_result" (cond-> {:type        :tool_result
                            :tool_use_id (get blk "tool_use_id")
