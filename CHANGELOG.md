@@ -32,11 +32,13 @@ thread-per-session ceiling wherever the runtime supports virtual threads.
 
 ### Notes
 
-- The scaling benefit is exercised by an out-of-tree Docker load harness, not
-  the unit suite. Measured result: peak thread count stays flat at 94 under
-  virtual threads versus 3060 (C=1000) / 6545 (C=3000) on platform threads,
-  with 0 errors. The full `bb test` suite passes with virtual threads auto-on
-  under Babashka.
+- The scaling benefit is exercised by an out-of-tree Docker load harness (see
+  `docs/benchmark.md`), not the unit suite. On a 2 CPU / 2 GB container, OS-level
+  peak thread count stays flat at ~8 under virtual threads regardless of
+  concurrency, versus ~2× the session count on platform threads (e.g. 2,012 at
+  C=1000, 4,013 at C=2000). The platform build dies at C=8000 (~16k threads,
+  600s timeout) while the virtual build completes with 0 errors. The full
+  `bb test` suite passes with virtual threads auto-on under Babashka.
 
 ## [unreleased] — feat/cache-conversation-history — 2026-06-02
 

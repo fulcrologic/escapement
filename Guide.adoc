@@ -3425,8 +3425,9 @@ increments `:iterations` so retries respect the cap).
 
 * **The library passes the triggering event as `:_event`.** Inside a transition `script`, `(get-in data [:_event :data ...])` is the standard way to read the event payload.
 
-* **Daemon threads only.** All worker threads (`llm-conv-...`) and the transcript writer are daemon threads.
-They do not prevent bb exit.
+* **Non-blocking worker threads.** All worker threads (`llm-conv-...`) and the transcript writer are virtual
+threads where the runtime supports them, otherwise platform daemon threads (see the scaling note under
+`escapement.lib/run`). Either way they do not prevent bb exit.
 
 [[testing]]
 == Testing
