@@ -355,3 +355,33 @@
                           (seq (:text %))) (:content resp))) => true))
     (do (println "[skip] ZAI_API_KEY not set; skipping live z.ai test")
         (assertions "skipped" true => true))))
+
+(specification "tool property keys are sanitized for Anthropic (reversibly)"
+  ;; Anthropic enforces input_schema property keys ^[a-zA-Z0-9_.-]{1,64}$ (HTTP 400
+  ;; otherwise); z.ai does not. Clojure idiom uses ?/!/* etc. We encode illegal keys
+  ;; on the way out and decode the returned tool_use input.
+  (let [munge   @#'api/munge-prop-key
+        demunge @#'api/demunge-prop-key
+        sani    @#'api/sanitize-tool-schema
+        legal?  (fn [s] (boolean (re-matches #"[A-Za-z0-9_.-]{1,64}" s)))]
+    (assertions
+      "idiomatic keys round-trip exactly"
+      (mapv #(demunge (munge %)) ["clean?" "verified-in-failing-state?" "foo!" "weird/key" "evidence"])
+      => ["clean?" "verified-in-failing-state?" "foo!" "weird/key" "evidence"]
+      "encoded keys are Anthropic-legal"
+      (every? legal? (map munge ["clean?" "foo!" "weird/key"])) => true
+      "a legal key is left untouched"
+      (munge "evidence") => "evidence")
+    (let [s (sani {"type"       "object"
+                   "properties" {"clean?" {"type" "boolean"} "evidence" {"type" "string"}}
+                   "required"   ["clean?" "evidence"]})]
+      (assertions
+        "schema property keys are munged recursively"
+        (every? legal? (keys (get s "properties"))) => true
+        "required entries are munged too"
+        (every? legal? (get s "required")) => true))
+    (assertions
+      "a returned tool_use input demunges back to the original keyword"
+      (:input (#'api/wire->block {"type"  "tool_use" "id" "t" "name" "decide"
+                                  "input" {"clean_QMARK_" true "evidence" "x"}}))
+      => {:clean? true :evidence "x"})))
