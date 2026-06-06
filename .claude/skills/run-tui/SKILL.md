@@ -131,19 +131,29 @@ Clean up: the window self-closes after the `sleep 60`, or
 
 ## Key reference (driving the TUI)
 
+**Mission-control frame** (header strip + side-by-side LIVE / LOG panes + a
+contextual footer; the focused pane gets a heavy/bright border). Narrow
+terminals (< 100 cols) fall back to a single stacked column.
+
 | Key | Action |
 |---|---|
-| `?` | Toggle inspector |
-| `Esc` / `h` | Back / close inspector pane |
+| `Tab` | Cycle focus between the LIVE and LOG panes (heavy border moves) |
+| `Enter` | Maximize the focused pane (toggle split ↔ full) |
+| `Esc` | Restore the split if maximized; otherwise interrupt the running chart |
+| `PgUp` / `PgDn` | Scroll the **focused** pane (page) |
+| `j` / `k` | Scroll the focused pane (line up / down) |
+| `g` / `G` | Jump the focused pane to top / bottom |
+| `?` | Toggle inspector overlay |
+| `o` | Show artifacts for the selection (inspector) |
+| `v` | Statechart visualizer |
+| `s` / `c` / `p` / `P` | Live control: step / continue / pause / arm-pause |
 | `Ctrl-C` | Quit |
-| `Esc` | Interrupt the running chart |
-| `PgUp` / `PgDn` | Scroll the log / transcript |
+| **Inspector overlay (`?` open):** | |
+| `Esc` / `h` | Back / close inspector pane |
 | `1` / `2` / `3` | Inspector tabs: Invocations / Chart / Status |
 | `j` / `k`, `g` / `G` | Navigate the invocation list |
 | `Enter` | Open transcript of the selected invocation |
-| `o` | Show artifacts for the selection |
-| `v` | Statechart visualizer |
-| `s` / `c` / `p` / `P` | Live control: step / continue / pause / arm-pause |
+| `PgUp` / `PgDn` | Scroll the transcript pager |
 
 ## What "done" looks like
 
