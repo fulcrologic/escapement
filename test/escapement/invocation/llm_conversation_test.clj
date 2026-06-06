@@ -112,6 +112,20 @@
         (>= (System/currentTimeMillis) deadline) t
         :else (do (Thread/sleep 25) (recur))))))
 
+(defn- await-pred!
+  "Poll until 0-arg `pred` returns truthy or `max-ms` elapses, draining the
+   testing-env each iteration so async worker-thread events get processed.
+   Returns the testing-env. Use instead of a fixed `Thread/sleep` when waiting
+   on work a worker thread performs off the pump (e.g. a backend call landing)."
+  [t pred max-ms]
+  (let [deadline (+ (System/currentTimeMillis) max-ms)]
+    (loop []
+      (dct/drain! t)
+      (cond
+        (pred) t
+        (>= (System/currentTimeMillis) deadline) t
+        :else (do (Thread/sleep 25) (recur))))))
+
 ;; ---------------------------------------------------------------------------
 ;; #1: Happy path, one event-tool fired
 ;; ---------------------------------------------------------------------------
@@ -1009,17 +1023,20 @@
                                              :tool-registry (tp/new-registry)})
         t               (-> (dct/new-testing-env {:statechart chart} proc)
                           (dct/start!))]
-    ;; Wait for both initial turns and the workers to reach :awaiting-user.
-    (Thread/sleep 250)
-    (dct/drain! t)
+    ;; Wait for both initial turns to land and the workers to reach
+    ;; :awaiting-user (poll, don't fixed-sleep: the turns complete on worker
+    ;; threads, off the pump).
+    (await-pred! t #(and (>= (count @(:call-log main-backend)) 1)
+                         (>= (count @(:call-log advisor-backend)) 1))
+      3000)
     (let [queue (::sc/event-queue (:env t))
           sid   (:session-id t)]
       (sp/send! queue (:env t)
         {:target sid :source-session-id sid
          :event  :llm.user-message
          :data   {:text "for advisor only" :target "advisor"}}))
-    (Thread/sleep 250)
-    (dct/drain! t)
+    ;; Wait until the targeted second turn actually reaches advisor's backend.
+    (await-pred! t #(>= (count @(:call-log advisor-backend)) 2) 3000)
     (assertions
       "main backend was called exactly once (initial turn only)"
       (count @(:call-log main-backend)) => 1

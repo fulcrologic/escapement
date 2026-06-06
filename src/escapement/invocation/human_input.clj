@@ -42,6 +42,7 @@
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.environment :as env-ns]
     [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.threads :as threads]
     [malli.core :as m]
     [malli.error :as me]
     [com.fulcrologic.statecharts.promise :as p]))
@@ -311,9 +312,9 @@
                              :transcript-fn transcript-fn
                              :data          data}
           runnable          (fn [] (run-worker! ctx))
-          ^Thread thread    (doto (Thread. ^Runnable runnable
-                                    (str "human-input-" parent-session-id "-" invokeid))
-                              (.setDaemon true))]
+          ^Thread thread    (threads/unstarted-daemon
+                              (str "human-input-" parent-session-id "-" invokeid)
+                              runnable)]
       (swap! workers assoc k {:thread thread :worker-state worker-state})
       (.start thread)
       true))

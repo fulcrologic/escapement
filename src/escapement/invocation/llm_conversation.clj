@@ -27,6 +27,7 @@
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.capture :as capture]
     [escapement.chart.service :as service]
+    [escapement.threads :as threads]
     [escapement.llm :as ellm]
     [escapement.llm.catalog :as catalog]
     [escapement.llm.preferences :as preferences]
@@ -1446,9 +1447,9 @@
                              :params              params
                              :parent-ctx          parent-ctx}
           runnable          (fn [] (run-worker! ctx))
-          ^Thread thread    (doto (Thread. ^Runnable runnable
-                                    (str "llm-conv-" parent-session-id "-" invokeid))
-                              (.setDaemon true))]
+          ^Thread thread    (threads/unstarted-daemon
+                              (str "llm-conv-" parent-session-id "-" invokeid)
+                              runnable)]
       (swap! workers assoc k
         {:thread           thread
          :worker-state     worker-state

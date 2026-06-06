@@ -1,5 +1,43 @@
 # Changelog
 
+## [unreleased] — feat/multitenant-logging-vthreads — 2026-06-04
+
+Addresses two scaling concerns for multi-tenant hosting (issue #11): a
+logging-isolation fix so concurrent hosted runs no longer race on the
+process-global logger, and a virtual-thread seam that lifts the platform
+thread-per-session ceiling wherever the runtime supports virtual threads.
+
+### Added
+
+- **Virtual threads for engine worker threads (auto-on).** The engine's
+  long-lived worker threads (transcript-writer, llm-conversation worker,
+  human-input worker) now run on Loom virtual threads by default on any host
+  whose runtime supports `Thread/ofVirtual` (Java 21+, including recent
+  Babashka/GraalVM builds), removing the platform thread-per-session ceiling
+  for high-concurrency hosting. Hosts without virtual-thread support
+  transparently fall back to named platform daemon threads — the prior
+  behavior — so pre-Java-21 embedders are unaffected and never crash.
+  The choice is overridable: `escapement.threads/set-virtual-threads!`
+  (programmatic, for library embedders that cannot pass JVM flags) or the
+  `escapement.virtual-threads` system property (`"true"`/`"false"`) take
+  precedence over auto-detection.
+
+### Changed
+
+- **`escapement.lib/run` quiet-logging is now per-run thread-local.** Quieting
+  the statecharts DEBUG/INFO chatter no longer mutates the process-global
+  Timbre config; each run scopes its `:warn` min-level to its own thread via a
+  `binding`. Concurrent hosted runs no longer serialize on, or race to restore,
+  the shared logger. Behavior for a single run is unchanged.
+
+### Notes
+
+- The scaling benefit is exercised by an out-of-tree Docker load harness, not
+  the unit suite. Measured result: peak thread count stays flat at 94 under
+  virtual threads versus 3060 (C=1000) / 6545 (C=3000) on platform threads,
+  with 0 errors. The full `bb test` suite passes with virtual threads auto-on
+  under Babashka.
+
 ## [unreleased] — feat/cache-conversation-history — 2026-06-02
 
 Extends Anthropic prompt caching from the static system+tools prefix to the
