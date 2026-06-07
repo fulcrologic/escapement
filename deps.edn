@@ -13,7 +13,7 @@
  {:api   {:extra-deps {com.wsscode/pathom        {:mvn/version "2.4.0"}
                        com.cognitect/transit-clj {:mvn/version "1.0.333"}}}
   :demos {:extra-paths ["demos"]}
-  :dev   {:extra-paths ["dev" "spike" "demos"]
+  :dev   {:extra-paths ["dev" "spike" "demos" "tui"]
           :jvm-opts    ["-Dguardrails.enabled=true"]}
   ;; Tests run under bb (`bb test`). This alias is retained only for an
   ;; optional JVM REPL/IDE workflow; the project itself does not require it.

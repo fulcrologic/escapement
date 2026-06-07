@@ -1,7 +1,7 @@
 # OpenTUI sidecar wire schema
 
 This is the **canonical JSON wire contract** between the Escapement agent (Clojure / Babashka,
-`escapement.ui.*` add-on) and the OpenTUI sidecar (Bun / SolidJS, `opentui/`). It is the
+`escapement.ui.*` add-on) and the OpenTUI sidecar (Bun / SolidJS, `tui/opentui/`). It is the
 authoritative spec that tasks 002 (WS push), 003 (RemoteUiRenderer), 004 (CLI spawn), and
 005/006 (UI clients/domain) build against. Keep it **additive**: prefer new fields over
 restructuring.
@@ -90,7 +90,7 @@ change — only the framing. **WS is chosen; downstream tasks must not re-litiga
 ## 3. Forward event envelope (agent → UI)
 
 Every forward transcript event is one envelope. It **mirrors the on-disk transcript line shape**
-(which is already this shape — see `opentui/test/fixtures/haiku-sample.jsonl`), so the WS push, the
+(which is already this shape — see `tui/opentui/test/fixtures/haiku-sample.jsonl`), so the WS push, the
 JSONL replay, and snapshot tests all consume the identical structure:
 
 ```jsonc
@@ -300,6 +300,21 @@ Live debugger + interrupt/quit. Primary form is a WS `control` message; each map
 - `ui-interrupt` → forward `:ui.interrupt` to the runner (task 004 wires the flag → event)
 - `ui-quit` → forward `:ui.quit` (clean teardown + TTY restore is task 004)
 
+**Agent→UI control op (the one exception to UI→agent direction):**
+
+```jsonc
+{ "kind": "control", "op": "run-finished", "final-config": "[:done]" }  // chart reached final-config under keep-alive
+```
+
+- `run-finished` is pushed ONCE by the agent (via `ws-push/broadcast!`) when a chart reaches
+  final-config and keep-alive is active (`--keep-alive`, default on for interactive-TTY runs). It is
+  the only `control` frame that flows agent→UI. `final-config` is a `pr-str` of the final
+  configuration vector (informational; the UI may ignore it).
+- On receipt the sidecar keeps the renderer **live** (it does NOT tear down on this frame or on WS
+  close) and overlays a `✓ Run finished — press Ctrl-C to quit` banner above the footer; the
+  LIVE/LOG panes + inspector stay browsable. The Bun process exits only on the user's Ctrl-C, which
+  sends `ui-quit` back over this same channel.
+
 Live debugger **reads** (`paused?`, `step-budget`, `live-configuration`, `pending-events`) come from
 the existing live resolvers via EQL `POST /api` (poll) — or, optionally, the agent may push a
 `debug/awaiting-step` / `debug/awaiting-quit` forward event (§3.1) on state change so the UI need not
@@ -343,7 +358,7 @@ Outbound from the UI: only `answer` and `control`. Everything else flows agent�
 
 ## 8. Recorded-JSONL replay fixture format
 
-`opentui/test/fixtures/*.jsonl` — **one forward envelope per line** (§3 shape, including
+`tui/opentui/test/fixtures/*.jsonl` — **one forward envelope per line** (§3 shape, including
 `"kind":"event"`; `phase`/`prompt` lines may also appear to exercise those routes). This is what the
 UI's offline **replay dev mode** (task 005) and the **snapshot tests** (task 016) consume: feed the
 lines through the same decoder + store the live WS path uses, in `seq` order, to get a deterministic
@@ -353,7 +368,7 @@ render with **no live agent and no model**.
 - A replay run is exactly the byte stream of a real transcript with each line wrapped to add
   `"kind":"event"` (the wrapper is what the WS push prepends; the fixture pre-wraps it so replay and
   live share one path).
-- `opentui/test/fixtures/haiku-sample.jsonl` is the canonical sample: a real `gemma3:1b` haiku
+- `tui/opentui/test/fixtures/haiku-sample.jsonl` is the canonical sample: a real `gemma3:1b` haiku
   tournament transcript (start → request → 28 text deltas → response with usage/tps → worker-exit →
   event-processed/config transitions → done), plus appended representative lines the short real run
   did not exercise: a `llm/tool-result`, a `llm/error`, a second concurrent `invokeid` to exercise

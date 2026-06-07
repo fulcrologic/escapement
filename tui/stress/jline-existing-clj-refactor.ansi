@@ -1,0 +1,50 @@
+OLLAMA_API_KEY=dummy OLLAMA_NUM_PARALLEL=4 bb -m escapement.cli run escapement.examples.clj-refactor/agent --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-tokens 2048
+ --overrun-retries 2 --overrun-temp-bump 0.3
+[1m[32m➜  [36mescapement[0m OLLAMA_API_KEY=dummy OLLAMA_NUM_PARALLEL=4 bb -m escapement.cli run escapement.examples.clj-refactor/agent --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --m
+ax-tokens 2048 --overrun-retries 2 --overrun-temp-bump 0.3
+2026-06-07T14:34:09.969Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:34:09.972Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:34:09.972Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:34:09.972Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:34:09.972Z omarflow DEBUG [clojure.core:218] - (get-effective-target-states env t) => #{:run}
+2026-06-07T14:34:09.973Z omarflow DEBUG [clojure.core:219] - (chart/nearest-ancestor-state statechart t) => :initial32854
+2026-06-07T14:34:09.973Z omarflow DEBUG [clojure.core:226] - (:id (chart/find-least-common-compound-ancestor statechart (into (if tsource [tsource] []) tstates))) => :ROOT
+2026-06-07T14:34:09.973Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:34:09.973Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:34:09.973Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:34:09.973Z omarflow DEBUG [clojure.core:495] - entry set => [#{:run :refactor} #{:run} {}]
+2026-06-07T14:34:09.973Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :run
+2026-06-07T14:34:09.973Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32855, :target [:refactor], :type :external, :node-type :transi
+tion, :parent :initial32856}
+2026-06-07T14:34:09.973Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:34:09.973Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :refactor
+2026-06-07T14:34:09.973Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:34:09.973Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :refactor}
+2026-06-07T14:34:09.974Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:34:09.974Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:662] - Starting invocation id = clj-refactor, type = :llm-conversation, src = , params = {:system "You ar
+e a Clojure refactoring agent. Apply the requested change to idiomatic, bb-compatible Clojure using the `fs_read` and `fs_edit` tools on the file given in the request. When the edit is complete, call
+the `event__refactor_done` tool exactly once with a one-line `summary` of what changed. Then end your turn.", :needs {:clojure [:>= 8], :tool-calling [:>= 6]}, :real-tools [:fs/read :fs/edit], :allowe
+d-events [{:event :refactor/done, :data-schema [:map [:summary :string]]}], :initial-user-message "Rename the function `foo` to `bar` in `src/example.clj` and update all of its call sites. Use fs_read
+ to inspect the file, then fs_edit to make the change."}
+2026-06-07T14:34:10.076Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:34:10.076Z omarflow DEBUG [clojure.core:930] - external-event => {:type :com.fulcrologic.statecharts/chart, :name :error.llm.invalid-request, :target :session/90d4fd66-cfe4-4f26-8fb8-c19
+78efc733b, :data {:message "OpenAI API error: HTTP 400", :class "clojure.lang.ExceptionInfo", :category :invalid-request, :attempts [{:model "gemma3:1b", :error {:message "OpenAI API error: HTTP 400",
+ :class "clojure.lang.ExceptionInfo"}}], :reason :invalid-request}, :com.fulcrologic.statecharts/source-session-id :session/90d4fd66-cfe4-4f26-8fb8-c1978efc733b, :origin :session/90d4fd66-cfe4-4f26-8f
+b8-c1978efc733b, :origintype :com.fulcrologic.statecharts/chart, :com.fulcrologic.statecharts/event-name :error.llm.invalid-request}
+2026-06-07T14:34:10.077Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:34:10.077Z omarflow DEBUG [clojure.core:615] - enabled transitions => #{}
+2026-06-07T14:34:10.077Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:34:10.077Z omarflow DEBUG [clojure.core:495] - entry set => [#{} #{} {}]
+2026-06-07T14:34:10.077Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :refactor}
+2026-06-07T14:34:10.077Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+session          90d4fd66-cfe4-4f26-8fb8-c1978efc733b
+transcript       .escapement/90d4fd66-cfe4-4f26-8fb8-c1978efc733b/transcript.jsonl
+checkpoint-dir   .escapement/90d4fd66-cfe4-4f26-8fb8-c1978efc733b/checkpoints
+final-config     [:run :refactor]
+[1m[32m➜  [36mescapement[0m [1m[34mgit:([31mfeat/live-token-tui[34m) [33m✗[0m
+
+
+
+
+
+

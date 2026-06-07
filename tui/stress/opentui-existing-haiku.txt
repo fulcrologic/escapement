@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│escapement · session ·                                                                                                                                                                          ◷ 0:14│
+│▶ —                                                                                                                                                                          55 LLMs · 1 act · 117 t/s│
+│states: [run summarizing]                                                                                                                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─LIVE─────────────────────────────────────────────────────────────────────────────────────────────╮┏━LOG━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│ host         ◂ ▰▱▱▱▱▱▱▱▱▱  gemma3:1b         724 tok  117.2 t/s ▏                                │┃18:39:13 judge2 · invocation start session=multiplex.judges-r2.4                                  ┃
+│ judge2       ◇ 5/5 done ██████████                   143 tok                                     │┃18:39:13 judge2 · req model=gemma3:1b n-messages=1                                                ┃
+│  ├ judges-r2.3   ✓ done       gemma3:1b          34 tok   42.1 t/s                               │┃18:39:13 chart · haiku/tally-r1-done  ["run" "tallying-r1"] → ["run" "judging-r2"]                ┃
+│  ├ judges-r2.0   ✓ done       gemma3:1b          36 tok   42.2 t/s                               │┃18:39:14 judge2 ◂ 1: just an integer between 1 and 6                                              ┃
+│  ├ judges-r2.4   ✓ done       gemma3:1b          36 tok   42.9 t/s                               │┃18:39:14 judge2 ✓ resp stop=end_turn model=gemma3:1b tokens=in:319/out:12 19.7t/s 609ms           ┃
+│  ├ judges-r2.1   ✓ done       gemma3:1b          26 tok   34.8 t/s                               │┃18:39:14 judge2 · invocation exit reason=interrupted                                              ┃
+│  └ judges-r2.2   ✓ done       gemma3:1b          11 tok   19.7 t/s                               │┃18:39:14 chart · llm.idle  ["working"] → []                                                       ┃
+│ judge1       ◇ 30/30 done ██████████                  1208 tok                                   │┃18:39:14 chart · haiku/judge2-result  ["run" "judging-r2"] → ["run" "judging-r2"]                 ┃
+│  ├ judges-r1.17  ✓ done       gemma3:1b          35 tok    8.8 t/s                               │┃18:39:14 chart · done.invoke.multiplex.judges-r2.2  ["counting"] → ["counting"]                   ┃
+│  ├ judges-r1.29  ✓ done       gemma3:1b          33 tok    8.4 t/s                               │┃18:39:14 chart · done.invoke.multiplex.judges-r2.2  ["run" "judging-r2"] → ["run" "judging-r2"]   ┃
+│  ├ judges-r1.14  ✓ done       gemma3:1b          48 tok   12.0 t/s                               │┃18:39:14 judge2 ◂ 1: just 2 The opening evokes a potent, immediate sense of warmth and a burgeoni…┃
+│  ├ judges-r1.23  ✓ done       gemma3:1b          49 tok   12.5 t/s                               │┃18:39:14 judge2 ✓ resp stop=end_turn model=gemma3:1b tokens=in:319/out:27 34.75t/s 777ms          ┃
+│  ├ judges-r1.27  ✓ done       gemma3:1b          55 tok   14.5 t/s                               │┃18:39:14 judge2 · invocation exit reason=interrupted                                              ┃
+│  ├ judges-r1.26  ✓ done       gemma3:1b          31 tok    8.8 t/s                               │┃18:39:14 chart · llm.idle  ["working"] → []                                                       ┃
+│  └ …+24 more sessions                                                                            │┃18:39:14 chart · done.invoke.multiplex.judges-r2.1  ["counting"] → ["counting"]                   ┃
+│ poet-3       ◇ 6/6 done ██████████                   129 tok                                     │┃18:39:14 chart · haiku/judge2-result  ["run" "judging-r2"] → ["run" "judging-r2"]                 ┃
+│  ├ poets.4       ✓ done       gemma3:1b          22 tok   48.2 t/s                               │┃18:39:14 chart · done.invoke.multiplex.judges-r2.1  ["run" "judging-r2"] → ["run" "judging-r2"]   ┃
+│  ├ poets.2       ✓ done       gemma3:1b          23 tok   49.3 t/s                               │┃18:39:14 judge2 ◂ Line 1: 1 Reason: The first line establishes a sense of quiet anticipation, sug…┃
+│  ├ poets.1       ✓ done       gemma3:1b          22 tok   47.9 t/s                               │┃18:39:14 judge2 ✓ resp stop=end_turn model=gemma3:1b tokens=in:323/out:35 42.12t/s 831ms          ┃
+│  ├ poets.0       ✓ done       gemma3:1b          20 tok   45.9 t/s                               │┃18:39:14 judge2 ◂ 1: 5 2: The phrases present a sense of connection and nascent love, adhering cl…┃
+│  ├ poets.5       ✓ done       gemma3:1b          22 tok   49.4 t/s                               │┃18:39:14 judge2 ✓ resp stop=end_turn model=gemma3:1b tokens=in:326/out:37 42.19t/s 877ms          ┃
+│  └ poets.3       ✓ done       gemma3:1b          20 tok   45.3 t/s                               │┃18:39:14 judge2 ◂ Line 1: Dawn’s pale blush, a summer’s breeze, One short sentence explaining my… ┃
+│                                                                                                  │┃18:39:14 judge2 ✓ resp stop=end_turn model=gemma3:1b tokens=in:323/out:37 42.92t/s 862ms          ┃
+│                                                                                                  │┃18:39:14 judge2 · invocation exit reason=interrupted                                              ┃
+│                                                                                                  │┃18:39:14 chart · llm.idle  ["working"] → []                                                       ┃
+│                                                                                                  │┃18:39:14 chart · done.invoke.multiplex.judges-r2.4  ["counting"] → ["counting"]                   ┃
+│                                                                                                  │┃18:39:14 judge2 · invocation exit reason=interrupted                                              ┃
+│                                                                                                  │┃18:39:14 chart · llm.idle  ["working"] → []                                                       ┃
+│                                                                                                  │┃18:39:14 judge2 · invocation exit reason=interrupted                                              ┃
+│                                                                                                  │┃18:39:14 chart · llm.idle  ["working"] → []                                                       ┃
+│                                                                                                  │┃18:39:14 chart · haiku/judge2-result  ["run" "judging-r2"] → ["run" "judging-r2"]                 ┃
+│                                                                                                  │┃18:39:14 chart · done.invoke.multiplex.judges-r2.4  ["run" "judging-r2"] → ["run" "judging-r2"]   ┃
+│                                                                                                  │┃18:39:14 chart · haiku/judge2-result  ["run" "judging-r2"] → ["run" "judging-r2"]                 ┃
+│                                                                                                  │┃18:39:14 chart · haiku/judge2-result  ["run" "judging-r2"] → ["run" "judging-r2"]                 ┃
+│                                                                                                  │┃18:39:14 chart · done.invoke.multiplex.judges-r2.0  ["counting"] → ["counting"]                   ┃
+│                                                                                                  │┃18:39:14 chart · done.invoke.multiplex.judges-r2.3  ["counting"] → []                             ┃
+│                                                                                                  │┃18:39:14 chart · done.invoke.multiplex.judges-r2.0  ["run" "judging-r2"] → ["run" "judging-r2"]   ┃
+│                                                                                                  │┃18:39:14 chart · done.invoke.multiplex.judges-r2.3  ["run" "judging-r2"] → ["run" "judging-r2"]   ┃
+│                                                                                                  │┃18:39:14 chart · done.invoke.judges-r2  ["run" "judging-r2"] → ["run" "tallying-r2"]              ┃
+│                                                                                                  │┃18:39:14 host · invocation start session=session/98954010-576f-465a-b26a-55cf2bc0a1ae             ┃
+│                                                                                                  │┃18:39:14 chart · haiku/tally-r2-done  ["run" "tallying-r2"] → ["run" "summarizing"]               ┃
+│                                                                                                  │┃18:39:14 host · req model=gemma3:1b n-messages=1                                                  ┃
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━⇅ 458/458━┛
+ LOG · ⇅ scroll · Enter transcript · m maximize · Tab → LIVE · ? inspector · a artifacts · Esc interrupt · Ctrl-C quit

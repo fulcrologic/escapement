@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│escapement · escapement.examples.stress.edge/agent · 734298c8                                                                                                                                   ◷ 0:00│
+│▶ run › finished                                                                                                                                                                0 LLMs · 0 act · 0 t/s│
+│emit · ◉ finished                                                                                                                                                                                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ LIVE ────────────────────────────────────────────────────────────────────────────────────────────╮▛ LOG ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ ⇅ 15/15 ▜
+│                                                                                                  │▌19:11:24 chart · config-loaded {:path "/home/naomarik/github/escapement/.escapement.edn", :keys […▐
+│                                                                                                  │▌19:11:24 debug · runner started session=:session/734298c8-8f92-4774-bea9-e68c9a0148ca chart=:esca…▐
+│                                                                                                  │▌19:11:24 chart · captured {:name "edge-unicode-emoji.txt", :bytes 267}                            ▐
+│                                                                                                  │▌19:11:24 chart · captured {:name "edge-cjk.txt", :bytes 150}                                      ▐
+│                                                                                                  │▌19:11:24 chart · captured {:name "edge-rtl.txt", :bytes 167}                                      ▐
+│                                                                                                  │▌19:11:24 chart · captured {:name "edge-zero-width.txt", :bytes 232}                               ▐
+│                                                                                                  │▌19:11:24 chart · captured {:name "edge-ansi-escapes.txt", :bytes 308}                             ▐
+│                                                                                                  │▌19:11:24 chart · captured {:name "edge-control-chars.txt", :bytes 266}                            ▐
+│                                                                                                  │▌19:11:24 chart · captured {:name "edge-box-drawing.txt", :bytes 234}                              ▐
+│                                                                                                  │▌19:11:24 chart · captured {:name "edge-long-no-space.txt", :bytes 8075}                           ▐
+│                                                                                                  │▌19:11:24 chart · captured {:name "edge-empty.txt", :bytes 0}                                      ▐
+│                                                                                                  │▌19:11:24 chart · captured {:name "edge-mixed.txt", :bytes 368}                                    ▐
+│                                                                                                  │▌19:11:24 debug · start config=[:run :finished]                                                    ▐
+│                                                                                                  │▌19:11:24 debug · done final=[:run :finished]                                                      ▐
+│                                                                                                  │▌19:11:24 debug · Chart finished. Inspector still live — press Ctrl-C to quit.                     ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+
+ LOG · ⇅ scroll · Enter transcript · m maximize · Tab → LIVE · ? inspector · a artifacts · Esc interrupt · Ctrl-C quit

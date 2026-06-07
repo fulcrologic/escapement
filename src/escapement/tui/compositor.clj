@@ -45,6 +45,90 @@
     (if (<= (count s) n) s (str (subs s 0 (max 0 (- n 1))) "…"))))
 
 ;; ---------------------------------------------------------------------------
+;; Escape-sequence sanitizer (pager content → inert literal text)
+;;
+;; The artifact/event pager renders arbitrary file content. Embedded ESC
+;; sequences must NOT take effect (no SGR paint, cursor moves, or OSC window-
+;; title hijack). Mirrors the OpenTUI sidecar's "inert literal" model: ESC-
+;; introduced sequences are turned into a VISIBLE placeholder so the user can
+;; see that an escape was present, and — crucially — the bytes that followed
+;; the ESC are never silently consumed (#5). C0 controls (other than the ones
+;; that carry structural meaning to the wrapper, i.e. \n which is split before
+;; this runs) are mapped to a visible space; CJK/wide chars pass through
+;; untouched so downstream display-width accounting stays correct.
+;; ---------------------------------------------------------------------------
+
+(defn sanitize-content
+  "Neutralize ESC-introduced control sequences in pager content, rendering them
+   as inert, visible text. Returns a string safe to wrap/truncate without any
+   terminal side effect.
+
+   * CSI  (`ESC [` … final byte 0x40–0x7E)        → `^[` + the literal bytes.
+   * OSC  (`ESC ]` … `BEL` | `ESC \\` (ST))        → `^[` + the literal bytes,
+                                                     terminator shown as text.
+   * lone ESC (or `ESC` + anything not `[`/`]`)    → `^[`, WITHOUT eating the
+                                                     following character (#5).
+   * other C0 controls (0x00–0x1F except \\t, DEL) → a single space.
+
+   `\\t` is preserved (the wrapper/display-width treat it benignly); `\\n` is
+   expected to be split out by the caller before this runs."
+  [s]
+  (let [s   (str s)
+        len (.length s)
+        sb  (StringBuilder.)]
+    (loop [i 0]
+      (if (>= i len)
+        (.toString sb)
+        (let [c (.charAt s i)]
+          (cond
+            (= c ESC-CHAR)
+            (let [nxt (when (< (inc i) len) (.charAt s (inc i)))]
+              (cond
+                ;; CSI: ESC [ params/intermediates ... final 0x40-0x7E
+                (= nxt \[)
+                (let [end (loop [k (+ i 2)]
+                            (if (>= k len)
+                              k
+                              (let [d (.charAt s k)]
+                                (if (<= 0x40 (int d) 0x7E) (inc k) (recur (inc k))))))]
+                  (.append sb "^[")
+                  (.append sb (.subSequence s (inc i) end))
+                  (recur end))
+                ;; OSC: ESC ] ... terminated by BEL (0x07) or ST (ESC \)
+                (= nxt \])
+                (let [end (loop [k (+ i 2)]
+                            (cond
+                              (>= k len) k
+                              (= (.charAt s k) (char 0x07)) (inc k) ;; BEL
+                              (and (= (.charAt s k) ESC-CHAR)
+                                (< (inc k) len) (= (.charAt s (inc k)) \\))
+                              (+ k 2)                                ;; ST
+                              :else (recur (inc k))))]
+                  (.append sb "^[")
+                  ;; copy the body but render any embedded controls (BEL/ESC)
+                  ;; visibly so nothing in it can act.
+                  (doseq [^Character d (seq (.subSequence s (inc i) end))]
+                    (let [cp (int d)]
+                      (cond
+                        (= cp 0x1B) (.append sb "^[")
+                        (= cp 0x07) (.append sb "^G")
+                        (and (< cp 0x20) (not= cp 0x09)) (.append sb \space)
+                        :else (.append sb d))))
+                  (recur end))
+                ;; lone ESC / ESC + other — show ^[ and DO NOT consume `nxt`.
+                :else
+                (do (.append sb "^[")
+                    (recur (inc i)))))
+            ;; other C0 controls → visible space (keep \t and \n; \n is split
+            ;; by the caller, but tolerate it here too)
+            (and (< (int c) 0x20) (not= c \tab) (not= c \newline))
+            (do (.append sb \space) (recur (inc i)))
+            (= (int c) 0x7F)
+            (do (.append sb \space) (recur (inc i)))
+            :else
+            (do (.append sb c) (recur (inc i)))))))))
+
+;; ---------------------------------------------------------------------------
 ;; Pane / box compositor + responsive layout
 ;;
 ;; Draws bordered panes into the frame StringBuilder at arbitrary
@@ -112,6 +196,51 @@
               (recur (+ i 2) (+ w (if (wide-codepoint? cp) 2 1))))
             :else
             (recur (inc i) (+ w (if (wide-codepoint? (int c)) 2 1)))))))))
+
+(defn grapheme-clusters
+  "Split `s` into a vector of grapheme-cluster strings so a ZWJ family / skin-
+   tone / VS-16 / regional-indicator sequence stays attached to its base and is
+   never split across a wrap boundary. Uses `java.text.BreakIterator` (available
+   under bb/SCI — verified), falling back to a codepoint-cluster heuristic that
+   keeps ZWJ (U+200D), skin-tone modifiers (U+1F3FB–U+1F3FF), and VS-16
+   (U+FE0F) glued to the preceding cluster."
+  [s]
+  (let [s (str s)]
+    (if (zero? (.length s))
+      []
+      (try
+        (let [bi (java.text.BreakIterator/getCharacterInstance)]
+          (.setText bi s)
+          (loop [start (.first bi)
+                 end   (.next bi)
+                 out   (transient [])]
+            (if (= end java.text.BreakIterator/DONE)
+              (persistent! out)
+              (recur end (.next bi)
+                (conj! out (subs s start end))))))
+        (catch Throwable _
+          ;; heuristic fallback: walk codepoints, gluing combiners/ZWJ/VS/skin
+          (let [len (.length s)]
+            (loop [i 0, cur (StringBuilder.), out (transient [])]
+              (if (>= i len)
+                (persistent! (if (pos? (.length cur)) (conj! out (.toString cur)) out))
+                (let [hi    (.charAt s i)
+                      pair? (and (Character/isHighSurrogate hi) (< (inc i) len)
+                              (Character/isLowSurrogate (.charAt s (inc i))))
+                      nxt   (if pair? (+ i 2) (inc i))
+                      cp    (if pair? (Character/toCodePoint hi (.charAt s (inc i))) (int hi))
+                      glue? (or (= cp 0x200D)                ;; ZWJ
+                              (= cp 0xFE0F)                  ;; VS-16
+                              (<= 0x1F3FB cp 0x1F3FF)        ;; skin-tone
+                              (<= 0x0300 cp 0x036F)          ;; combining marks
+                              (and (pos? (.length cur))      ;; combiner-after-ZWJ
+                                (= 0x200D (.codePointBefore cur (.length cur)))))
+                      seg   (subs s i nxt)]
+                  (if (and glue? (pos? (.length cur)))
+                    (recur nxt (.append cur seg) out)
+                    (if (pos? (.length cur))
+                      (recur nxt (doto (StringBuilder.) (.append seg)) (conj! out (.toString cur)))
+                      (recur nxt (.append cur seg) out))))))))))))
 
 (defn truncate-display
   "Return `s` adjusted to occupy exactly `n` terminal columns: clipped (with a

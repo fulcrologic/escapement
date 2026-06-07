@@ -183,6 +183,24 @@
                                          (catch Throwable _ nil)))}}})
   path)
 
+(defn restore-console-logging!
+  "Undo `route-logs-to-file!`: re-enable the console (`:println`) appender and
+   disable the file appender. Called ONLY after the TUI's alt-screen has been
+   fully exited (post `tui/stop!` / OpenTUI teardown), so that:
+
+   - while the TUI owns the terminal, no library DEBUG line can scribble over
+     the alt-screen (the classic `omarflow DEBUG` scrollback wall on a fast
+     finish/error — a stray log emitted DURING teardown reaches the console
+     after `alt-screen-off`); and
+   - once the terminal is back to the normal screen, ordinary CLI errors /
+     run-summary lines print again.
+
+   Idempotent; SCI/bb-safe (plain `:println` appender, no JVM-only deps)."
+  []
+  (timbre/merge-config!
+   {:appenders {:println {:enabled? true}
+                :file    {:enabled? false}}}))
+
 (defn- read-edn-file [path]
   (with-open [r (java.io.PushbackReader. (io/reader path))]
     (edn/read r)))
@@ -589,7 +607,8 @@
 
 (defn- cmd-run [args]
   (let [{:keys [positional opts]}
-        (parse-args args #{:resume :trace :no-tui :debug :dump-d2 :no-spawn} #{:param :tools-ns})
+        (parse-args args #{:resume :trace :no-tui :debug :dump-d2 :no-spawn
+                           :keep-alive :no-keep-alive} #{:param :tools-ns})
         _                      (let [[tag v] (resolve-log-level opts)]
                                  (if (= tag :error)
                                    (die! v 2)
@@ -682,16 +701,31 @@
         tui-mode               (decide-tui opts chart-meta)
         jline?                 (= tui-mode :jline)
         opentui?               (= tui-mode :opentui)
+        ;; #2 keep-alive / pause-on-finish. When ON, a finished/errored run
+        ;; HOLDS a live frame instead of tearing the UI down (JLine already does
+        ;; this via `await-quit!`; OpenTUI gets the analog below). Default rule:
+        ;;   ON  for an interactive TTY run that owns a UI (jline or opentui);
+        ;;   OFF for headless / non-TTY / UI-less runs (so CI + `--api-server`-
+        ;;       only invocations never block on a human key).
+        ;; `--keep-alive` forces it on (still gated on a UI + TTY — a headless run
+        ;; has no frame to hold); `--no-keep-alive` forces it off.
+        keep-alive?            (let [tty? (tui/interactive-terminal?)]
+                                 (cond
+                                   (:no-keep-alive opts) false
+                                   (not tui-mode)        false   ; no UI → nothing to hold
+                                   (not tty?)            false   ; non-TTY → never block
+                                   (:keep-alive opts)    true
+                                   :else                 true))
         ;; --tui=opentui: resolve the Bun sidecar entry up-front so we fail fast
-        ;; (before any session machinery) if the opentui/ workspace is missing.
+        ;; (before any session machinery) if the tui/opentui/ workspace is missing.
         ;; Reached only via requiring-resolve (architecture boundary).
         sidecar-entry          (when opentui?
-                                 (let [e (try ((requiring-resolve 'escapement.ui.opentui-sidecar/sidecar-entry))
+                                 (let [e (try ((requiring-resolve 'opentui.sidecar/sidecar-entry))
                                               (catch Throwable _ nil))]
                                    (when-not e
                                      (die! (str "--tui=opentui could not find the OpenTUI sidecar entry "
-                                                "(opentui/src/main.tsx). Run from the escapement repo, set "
-                                                "OPENTUI_DIR=<path-to-opentui>, and `bun install` in opentui/.")
+                                                "(tui/opentui/src/main.tsx). Run from the escapement repo, set "
+                                                "OPENTUI_DIR=<path-to-opentui>, and `bun install` in tui/opentui/.")
                                            1))
                                    e))
         ;; When ANY TUI is active it owns the terminal. For JLine the alt-screen
@@ -742,7 +776,7 @@
         ;; Reuse an explicit --api-server port if given, else auto-pick a free one.
         api-server-port        (cond
                                  explicit-api-port explicit-api-port
-                                 opentui? ((requiring-resolve 'escapement.ui.opentui-sidecar/free-port))
+                                 opentui? ((requiring-resolve 'opentui.sidecar/free-port))
                                  :else nil)
         ;; Shared control handle: created here (before the env exists) and given
         ;; to BOTH the api-server ctx and `run!`'s on-env-ready (which fills it
@@ -787,7 +821,7 @@
                                  (let [pub (requiring-resolve 'escapement.ui.ws-push/publish-debug!)]
                                    (fn [snap] (pub ws-hub snap))))
         ws-handlers            (when opentui?
-                                 ((requiring-resolve 'escapement.ui.opentui-sidecar/make-ws-handlers)
+                                 ((requiring-resolve 'opentui.sidecar/make-ws-handlers)
                                   {:control-handle control-handle
                                    :controller     debug-controller
                                    :publish-debug! publish-debug!
@@ -796,7 +830,7 @@
                                                        (fn [] (clear! ws-hub))))
                                    :on-quit        (fn []
                                                      (when-let [p @sidecar-proc]
-                                                       (try ((requiring-resolve 'escapement.ui.opentui-sidecar/destroy!) p)
+                                                       (try ((requiring-resolve 'opentui.sidecar/destroy!) p)
                                                             (catch Throwable _ nil))))}))
         ;; Read-only EQL API over the work-dir, scoped to this run's session,
         ;; PLUS a live control plane (pause/step/continue) when a debug
@@ -836,10 +870,14 @@
                                      (try ((requiring-resolve 'escapement.ui.server/stop!) api-handle)
                                           (catch Throwable _ nil)))
                                    (when-let [p @sidecar-proc]
-                                     (try ((requiring-resolve 'escapement.ui.opentui-sidecar/destroy!) p)
+                                     (try ((requiring-resolve 'opentui.sidecar/destroy!) p)
                                           (catch Throwable _ nil)))
-                                   (try ((requiring-resolve 'escapement.ui.opentui-sidecar/restore-terminal!))
+                                   (try ((requiring-resolve 'opentui.sidecar/restore-terminal!))
                                         (catch Throwable _ nil))
+                                   ;; #3 parity: the sidecar owned the tty; now that it is
+                                   ;; restored, re-enable the console log appender so ordinary
+                                   ;; CLI errors print on the normal screen again.
+                                   (when log-file (restore-console-logging!))
                                    (when code (System/exit code))))
         exit-code
         (try
@@ -850,7 +888,7 @@
                 ;; dies abnormally (restoring the terminal). --no-spawn skips the
                 ;; spawn so an externally-launched UI can attach (debug aid).
                 _                  (when (and opentui? (not (:no-spawn opts)))
-                                     (let [spawn!  (requiring-resolve 'escapement.ui.opentui-sidecar/spawn!)
+                                     (let [spawn!  (requiring-resolve 'opentui.sidecar/spawn!)
                                            proc    (spawn! {:entry       sidecar-entry
                                                             :port        api-server-port
                                                             :session-id  session
@@ -954,9 +992,19 @@
             ;; browsing the inspector (transcripts, artifacts, history, viz)
             ;; instead of the process exiting out from under them. Ctrl-C from
             ;; the input thread breaks await-quit!.
-            (when tui-handle
+            ;; #2: hold the finished JLine frame open (inspector stays live)
+            ;; until the user presses Ctrl-C — unless `--no-keep-alive`.
+            (when (and tui-handle keep-alive?)
               (tui/await-quit! tui-handle))
-            (when tui-handle (tui/stop! tui-handle))
+            ;; #3: stop the JLine TUI (exits the alt-screen) BEFORE re-enabling
+            ;; the console log appender. Logs stayed file-routed for the whole
+            ;; run (incl. teardown), so no library DEBUG line can land on the
+            ;; alt-screen after `alt-screen-off` — the fast-finish/error debug
+            ;; scrollback wall. Only once the normal screen is restored do we
+            ;; let the console appender (and the summary prints below) speak.
+            (when tui-handle
+              (tui/stop! tui-handle)
+              (when log-file (restore-console-logging!)))
             ;; OpenTUI: the agent finished first → signal the sidecar to exit and
             ;; restore the terminal. (Its watcher thread also fires on its own exit;
             ;; teardown is idempotent.) The summary lines go to the log, not the
@@ -970,7 +1018,30 @@
                                "\nfinal-config " (pr-str (:final-config summary)) "\n")
                           :append true)
                     (catch Throwable _ nil)))
-                (teardown-opentui! nil))
+                ;; #2 OpenTUI keep-alive: the agent finished first. Instead of
+                ;; tearing the sidecar down to a black frame, push a `run/finished`
+                ;; control frame so the sidecar can show a "finished — press
+                ;; Ctrl-C to quit" banner over its last live frame, then HOLD this
+                ;; process until the sidecar exits (the user's Ctrl-C → an inbound
+                ;; `ui-quit` → `on-quit` `destroy!`s it; or the WS/proc closes).
+                ;; The watcher thread runs `teardown-opentui!` on that exit; we
+                ;; only fall through to an explicit teardown when keep-alive is off
+                ;; (`--no-keep-alive` / non-TTY) or if the proc is already gone.
+                ;; Default rule mirrors `keep-alive?`: held for interactive TTY,
+                ;; immediate teardown otherwise — CI never blocks.
+                (if (and keep-alive? ws-hub @sidecar-proc)
+                  (do
+                    (try ((requiring-resolve 'escapement.ui.ws-push/broadcast!)
+                          ws-hub
+                          {:kind "control" :op "run-finished"
+                           :final-config (pr-str (:final-config summary))})
+                         (catch Throwable _ nil))
+                    ;; block until the sidecar exits (Ctrl-C → ui-quit → destroy!,
+                    ;; or any WS/process close); then run idempotent teardown in
+                    ;; case the watcher thread hasn't yet.
+                    (try (.waitFor ^Process @sidecar-proc) (catch Throwable _ nil))
+                    (teardown-opentui! nil))
+                  (teardown-opentui! nil)))
               (do
                 (println "session         " session)
                 (println "transcript      " transcript)
@@ -979,8 +1050,12 @@
                 (println "final-config    " (:final-config summary))))
             0)
           (catch Throwable t
+            ;; #3: tear down the UI (alt-screen exit / tty restore) FIRST, then
+            ;; re-enable console logging, so the failure line lands on the normal
+            ;; screen — never on the alt-screen behind a debug-scrollback wall.
             (when tui-handle (tui/stop! tui-handle))
             (when opentui? (teardown-opentui! nil))
+            (when (and log-file (not opentui?)) (restore-console-logging!))
             (binding [*out* *err*]
               (println "[cli] chart run failed:" (.getMessage t)))
             1)
@@ -1047,12 +1122,20 @@ Common `run` flags:
                                 --max-frozen-cycles N covers more time.
   --tui (jline|opentui)         Select the terminal UI. jline (default) is the
                                 in-process JLine TUI; opentui spawns the OpenTUI
-                                Bun sidecar (requires a TTY + bun + opentui/ built;
+                                Bun sidecar (requires a TTY + bun + tui/opentui/ built;
                                 starts the api-server+WS, runs the agent headless).
   --no-spawn                    With --tui=opentui: do NOT spawn the sidecar; start
                                 the server+WS and print the ws:// URL so an
                                 externally-launched UI can attach (debug aid).
   --no-tui                      Force-disable the TUI (overrides ^:interactive?).
+  --keep-alive / --no-keep-alive
+                                Pause-on-finish: hold the finished/errored UI
+                                frame open until you press Ctrl-C, instead of
+                                exiting out from under you (JLine keeps the
+                                inspector live; OpenTUI shows a finished banner).
+                                Default ON for an interactive TTY run with a UI;
+                                always OFF for headless/non-TTY/UI-less runs (so
+                                CI + --api-server-only never block).
   --dump-d2                     Print the chart's d2 diagram source and exit
                                 (no run, no backend). Pipe to `d2 -` to render.
   --api-server <port>           Serve a read-only EQL HTTP API on <port> during

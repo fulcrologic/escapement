@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│escapement · escapement.examples.stress.mid/agent · 969c5fe4                                                                                                                                    ◷ 0:00│
+│▶ run › work › ⫶ (4 regions)                                                                                                                                                    4 LLMs · 0 act · 0 t/s│
+│◉ delta-working · ◉ gamma-working · ◉ beta-working · ◉ alpha-working                                                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ LIVE ────────────────────────────────────────────────────────────────────────────────────────────╮▛ LOG ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ ⇅ 31/31 ▜
+│ gamma        ✗ error                                                             0 tok    0.0 t/s│▌19:15:51 chart · config-loaded {:path "/home/naomarik/github/escapement/.escapement.edn", :keys […▐
+│ beta         ✗ error                                                             0 tok    0.0 t/s│▌19:15:51 debug · runner started session=:session/969c5fe4-001b-4daa-b9f4-01d5cd4d5cde chart=:esca…▐
+│ delta        ✗ error                                                             0 tok    0.0 t/s│▌19:15:51 chart · captured {:name "manifest.md", :bytes 212}                                       ▐
+│ alpha        ✗ error                                                             0 tok    0.0 t/s│▌19:15:51 chart · captured {:name "plan.json", :bytes 67}                                          ▐
+│                                                                                                  │▌19:15:51 alpha · invocation start session=:session/969c5fe4-001b-4daa-b9f4-01d5cd4d5cde           ▐
+│                                                                                                  │▌19:15:51 beta · invocation start session=:session/969c5fe4-001b-4daa-b9f4-01d5cd4d5cde            ▐
+│                                                                                                  │▌19:15:51 alpha · req model=gemma3:1b n-messages=1                                                 ▐
+│                                                                                                  │▌19:15:51 beta · req model=gemma3:1b n-messages=1                                                  ▐
+│                                                                                                  │▌19:15:51 gamma · invocation start session=:session/969c5fe4-001b-4daa-b9f4-01d5cd4d5cde           ▐
+│                                                                                                  │▌19:15:51 gamma · req model=gemma3:1b n-messages=1                                                 ▐
+│                                                                                                  │▌19:15:51 delta · invocation start session=:session/969c5fe4-001b-4daa-b9f4-01d5cd4d5cde           ▐
+│                                                                                                  │▌19:15:51 delta · req model=gemma3:1b n-messages=1                                                 ▐
+│                                                                                                  │▌19:15:51 debug · start config=[:run :delta-working :beta :work :gamma-working :beta-working :delt…▐
+│                                                                                                  │▌19:15:51 error ⚠ model-down gemma3:1b — OpenAI API error: HTTP 400                                ▐
+│                                                                                                  │▌19:15:51 error ⚠ llm error OpenAI API error: HTTP 400                                             ▐
+│                                                                                                  │▌19:15:51 alpha · invocation exit reason=:stopped                                                  ▐
+│                                                                                                  │▌19:15:51 error ⚠ model-down gemma3:1b — OpenAI API error: HTTP 400                                ▐
+│                                                                                                  │▌19:15:51 error ⚠ llm error OpenAI API error: HTTP 400                                             ▐
+│                                                                                                  │▌19:15:51 delta · invocation exit reason=:stopped                                                  ▐
+│                                                                                                  │▌19:15:51 error ⚠ model-down gemma3:1b — OpenAI API error: HTTP 400                                ▐
+│                                                                                                  │▌19:15:51 error ⚠ llm error OpenAI API error: HTTP 400                                             ▐
+│                                                                                                  │▌19:15:51 beta · invocation exit reason=:stopped                                                   ▐
+│                                                                                                  │▌19:15:51 error ⚠ model-down gemma3:1b — OpenAI API error: HTTP 400                                ▐
+│                                                                                                  │▌19:15:51 error ⚠ llm error OpenAI API error: HTTP 400                                             ▐
+│                                                                                                  │▌19:15:51 gamma · invocation exit reason=:stopped                                                  ▐
+│                                                                                                  │▌19:15:51 chart · :error.llm.invalid-request  [:run :delta-working :beta :work :gamma-working :bet…▐
+│                                                                                                  │▌19:15:51 chart · :error.llm.invalid-request  [:run :delta-working :beta :work :gamma-working :bet…▐
+│                                                                                                  │▌19:15:51 chart · :error.llm.invalid-request  [:run :delta-working :beta :work :gamma-working :bet…▐
+│                                                                                                  │▌19:15:51 chart · :error.llm.invalid-request  [:run :delta-working :beta :work :gamma-working :bet…▐
+│                                                                                                  │▌19:15:51 debug · done final=[:run :delta-working :beta :work :gamma-working :beta-working :delta …▐
+│                                                                                                  │▌19:15:51 debug · Chart finished. Inspector still live — press Ctrl-C to quit.                     ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+
+ LOG · ⇅ scroll · Enter transcript · m maximize · Tab → LIVE · ? inspector · a artifacts · Esc interrupt · Ctrl-C quit

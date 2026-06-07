@@ -1,0 +1,50 @@
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :run
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32945, :target [:work], :type :external, :node-type :transition
+, :parent :initial32946}
+2026-06-07T14:30:13.717Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :work
+2026-06-07T14:30:13.717Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :convo
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32947, :target [:counting], :type :external, :node-type :transi
+tion, :parent :initial32948}
+2026-06-07T14:30:13.717Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :counting
+2026-06-07T14:30:13.717Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :probe
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :on-entry32923, :node-type :on-entry, :children [:safety-timer], :parent :
+probe}
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:347] - Send event {:id :safety-timer, :event :safety/stop, :delay 150000, :node-type :send, :parent :on-e
+ntry32923}
+2026-06-07T14:30:13.717Z omarflow DEBUG [clojure.core:323] - Computed send event data => {}
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32949, :target [:serving], :type :external, :node-type :transit
+ion, :parent :initial32950}
+2026-06-07T14:30:13.717Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :serving
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :on-entry32927, :node-type :on-entry, :children [:script32926], :parent :s
+erving}
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:91] - Running expression #object[sci.impl.fns$fun$arity_2__1346 0x4bf5a5d "sci.impl.fns$fun$arity_2__1346
+@4bf5a5d"]
+2026-06-07T14:30:13.717Z omarflow DEBUG [clojure.core:92] - (sp/run-expression! execution-model env expr) => nil
+2026-06-07T14:30:13.717Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:30:13.717Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:convo :run :work :counting :serving :probe}
+2026-06-07T14:30:13.717Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:30:13.717Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:662] - Starting invocation id = subject, type = :llm-conversation, src = , params = {:system "You perform
+ a slow counting task, ONE step per turn.\nRULES:\n1. At the START of EVERY turn, FIRST call the `region__steer_probe` tool exactly once with `{\"t\":<this turn's number>}` (turn 1, 2, 3, ...). It ret
+urns a string `PROBE-ACK t=<t>`; copy that exact string as the FIRST line of your reply.\n2. THEN, on the SAME turn, write the line `COUNT <n>` (n starts at 1 and increases by 1 each turn) and call th
+e `event__count_tick` tool exactly once with `{\"n\":<n>}`, then END your turn.\n3. Keep doing this turn after turn until a user message tells you to STOP.\n4. If a user message says STOP: from that t
+urn on, still call `region__steer_probe` first and echo its `PROBE-ACK t=<t>` line, but then write ONLY the line `STEERED MANGO` (no more `COUNT`) and call `event__count_tick` with `{\"n\":0}`. After
+two `STEERED MANGO` turns, call the `event__count_done` tool once with `{\"reason\":\"steered\"}` and end your turn.\nBe terse. One `event__count_tick` per turn; never skip the `region__steer_probe` c
+all.", :real-tools [], :chart-tools [{:owner :serving}], :allowed-events [{:event :count/tick, :description "Record one counting step.", :data-schema [:map [:n :int]]} {:event :count/done, :descriptio
+n "End the counting task.", :data-schema [:map [:reason :string]]}], :max-turns 8, :initial-user-message "Begin the counting task at turn 1, n=1.", :max-conversation-duration-ms 120000}
+2026-06-07T14:30:13.821Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:30:13.821Z omarflow DEBUG [clojure.core:930] - external-event => {:type :com.fulcrologic.statecharts/chart, :name :error.llm.invalid-request, :target :session/a9bfc4f8-a793-404a-8d70-ee9
+e3e071ecf, :data {:message "OpenAI API error: HTTP 400", :class "clojure.lang.ExceptionInfo", :category :invalid-request, :attempts [{:model "gemma3:1b", :error {:message "OpenAI API error: HTTP 400",
+ :class "clojure.lang.ExceptionInfo"}}], :reason :invalid-request}, :com.fulcrologic.statecharts/source-session-id :session/a9bfc4f8-a793-404a-8d70-ee9e3e071ecf, :origin :session/a9bfc4f8-a793-404a-8d
+70-ee9e3e071ecf, :origintype :com.fulcrologic.statecharts/chart, :com.fulcrologic.statecharts/event-name :error.llm.invalid-request}
+2026-06-07T14:30:13.822Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:30:13.822Z omarflow DEBUG [clojure.core:615] - enabled transitions => #{}
+2026-06-07T14:30:13.822Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:30:13.822Z omarflow DEBUG [clojure.core:495] - entry set => [#{} #{} {}]
+2026-06-07T14:30:13.822Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:convo :run :work :counting :serving :probe}
+2026-06-07T14:30:13.822Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+

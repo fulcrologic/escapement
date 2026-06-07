@@ -1,0 +1,50 @@
+2026-06-07T14:26:56.947Z omarflow DEBUG [clojure.core:552] - (get-transition-domain env t) => :run
+2026-06-07T14:26:56.947Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:753] - Leaving state  :work
+2026-06-07T14:26:56.947Z omarflow DEBUG [clojure.core:728] - Stopping invocations for  => :work
+2026-06-07T14:26:56.947Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:722] - Stopping invocation :workers
+2026-06-07T14:26:56.947Z omarflow DEBUG [com.fulcrologic.statecharts.invocation.statechart:52] - Stop invocation :workers
+2026-06-07T14:26:56.947Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :com.fulcrologic.statecharts.invocation.multiplex-processor/aggregator-workers
+2026-06-07T14:26:56.947Z omarflow DEBUG [clojure.core:827] - (chart/in-exit-order statechart (:com.fulcrologic.statecharts/configuration (clojure.core/deref vwmem))) => []
+2026-06-07T14:26:56.947Z omarflow DEBUG [com.fulcrologic.statecharts.invocation.statechart:52] - Stop invocation :multiplex.workers.0
+2026-06-07T14:26:56.947Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.examples.n-subagents-demo/worker-chart
+2026-06-07T14:26:56.947Z omarflow DEBUG [clojure.core:827] - (chart/in-exit-order statechart (:com.fulcrologic.statecharts/configuration (clojure.core/deref vwmem))) => []
+2026-06-07T14:26:56.948Z omarflow DEBUG [com.fulcrologic.statecharts.invocation.statechart:52] - Stop invocation :multiplex.workers.1
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.examples.n-subagents-demo/worker-chart
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:827] - (chart/in-exit-order statechart (:com.fulcrologic.statecharts/configuration (clojure.core/deref vwmem))) => []
+2026-06-07T14:26:56.948Z omarflow DEBUG [com.fulcrologic.statecharts.invocation.statechart:52] - Stop invocation :multiplex.workers.2
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.examples.n-subagents-demo/worker-chart
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:827] - (chart/in-exit-order statechart (:com.fulcrologic.statecharts/configuration (clojure.core/deref vwmem))) => []
+2026-06-07T14:26:56.948Z omarflow DEBUG [com.fulcrologic.statecharts.invocation.statechart:52] - Stop invocation :multiplex.workers.3
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.examples.n-subagents-demo/worker-chart
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:827] - (chart/in-exit-order statechart (:com.fulcrologic.statecharts/configuration (clojure.core/deref vwmem))) => []
+2026-06-07T14:26:56.948Z omarflow DEBUG [com.fulcrologic.statecharts.invocation.statechart:52] - Stop invocation :multiplex.workers.4
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.examples.n-subagents-demo/worker-chart
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:827] - (chart/in-exit-order statechart (:com.fulcrologic.statecharts/configuration (clojure.core/deref vwmem))) => []
+2026-06-07T14:26:56.948Z omarflow DEBUG [com.fulcrologic.statecharts.invocation.statechart:52] - Stop invocation :multiplex.workers.5
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.examples.n-subagents-demo/worker-chart
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:827] - (chart/in-exit-order statechart (:com.fulcrologic.statecharts/configuration (clojure.core/deref vwmem))) => []
+2026-06-07T14:26:56.948Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of :transition32685
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:212] - target(s) => [:finished]
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:197] - target => :finished
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:199] - target-element => :finished
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:218] - (get-effective-target-states env t) => #{:finished}
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:219] - (chart/nearest-ancestor-state statechart t) => :work
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:226] - (:id (chart/find-least-common-compound-ancestor statechart (into (if tsource [tsource] []) tstates))) => :run
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:212] - target(s) => [:finished]
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:197] - target => :finished
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:199] - target-element => :finished
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:495] - entry set => [#{:finished} #{} {}]
+2026-06-07T14:26:56.948Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :finished
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => true
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :finished}
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:789] - internal-event => {:type :internal, :sendid :finished, :data {}, :name :done.state.run, :com.fulcrologic.statecharts/event-name :done.state
+.run}
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:615] - enabled transitions => #{}
+2026-06-07T14:26:56.948Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+session          5ced4c32-8ae0-496f-af40-b4eb8387bd12
+transcript       .escapement/5ced4c32-8ae0-496f-af40-b4eb8387bd12/transcript.jsonl
+checkpoint-dir   .escapement/5ced4c32-8ae0-496f-af40-b4eb8387bd12/checkpoints
+final-config     [:run :finished]
+➜  escapement git:(feat/live-token-tui) ✗

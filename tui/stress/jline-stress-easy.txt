@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│escapement · escapement.examples.stress.easy/agent · 5383e50d                                                                                                                                   ◷ 0:00│
+│▶ run › greeting                                                                                                                                                                1 LLMs · 0 act · 0 t/s│
+│◉ greeting · finished                                                                                                                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ LIVE ────────────────────────────────────────────────────────────────────────────────────────────╮▛ LOG ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ ⇅ 11/11 ▜
+│ easy         ✗ error                                                             0 tok    0.0 t/s│▌19:15:06 chart · config-loaded {:path "/home/naomarik/github/escapement/.escapement.edn", :keys […▐
+│                                                                                                  │▌19:15:06 debug · runner started session=:session/5383e50d-afe0-41b6-8e72-8b4541324081 chart=:esca…▐
+│                                                                                                  │▌19:15:05 easy · invocation start session=:session/5383e50d-afe0-41b6-8e72-8b4541324081            ▐
+│                                                                                                  │▌19:15:05 easy · req model=gemma3:1b n-messages=1                                                  ▐
+│                                                                                                  │▌19:15:06 debug · start config=[:run :greeting]                                                    ▐
+│                                                                                                  │▌19:15:06 error ⚠ model-down gemma3:1b — OpenAI API error: HTTP 400                                ▐
+│                                                                                                  │▌19:15:06 error ⚠ llm error OpenAI API error: HTTP 400                                             ▐
+│                                                                                                  │▌19:15:06 easy · invocation exit reason=:stopped                                                   ▐
+│                                                                                                  │▌19:15:06 chart · :error.llm.invalid-request  [:run :greeting] → [:run :greeting]                  ▐
+│                                                                                                  │▌19:15:06 debug · done final=[:run :greeting]                                                      ▐
+│                                                                                                  │▌19:15:06 debug · Chart finished. Inspector still live — press Ctrl-C to quit.                     ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+│                                                                                                  │▌                                                                                                  ▐
+
+ LOG · ⇅ scroll · Enter transcript · m maximize · Tab → LIVE · ? inspector · a artifacts · Esc interrupt · Ctrl-C quit

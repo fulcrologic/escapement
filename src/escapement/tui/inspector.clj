@@ -30,7 +30,7 @@
 (defn open-pager!
   "Push a pager (title + lines) onto the overlay state."
   [state title text]
-  (let [lines (vec (str/split-lines (str text)))]
+  (let [lines (mapv cmp/sanitize-content (str/split-lines (str text)))]
     (swap! state assoc-in [:debug-overlay :pager]
       {:title title :lines lines :offset 0})))
 
@@ -58,34 +58,59 @@
                   :ev            ev})
            events))))
 
+(defn- hard-split-graphemes
+  "Hard-split a word that is wider than the available column budget, never
+   splitting a grapheme cluster. Returns `[head tail]` where `head` fits within
+   `room` display columns (at least one cluster, even if it overflows when a
+   single wide cluster exceeds `room`) and `tail` is the remainder (may be \"\")."
+  [w room]
+  (let [room (max 1 room)
+        gs   (cmp/grapheme-clusters w)]
+    (loop [gs gs, w-cols 0, head (StringBuilder.)]
+      (if-let [g (first gs)]
+        (let [gw (cmp/display-width g)]
+          (if (or (zero? (.length head))           ;; always take ≥1 cluster
+                (<= (+ w-cols gw) room))
+            (recur (rest gs) (+ w-cols gw) (.append head g))
+            [(.toString head) (apply str gs)]))
+        [(.toString head) ""]))))
+
 (defn- wrap-line
-  "Word-wrap one logical line to `width` columns, preserving leading
-   indentation on continuation rows. A word longer than the line is
-   hard-split. Returns a vector of physical lines (never empty)."
+  "Word-wrap one logical line to `width` DISPLAY columns, preserving leading
+   indentation on continuation rows. Width is measured with
+   `compositor/display-width` (wide CJK/emoji count as 2; any residual sanitized
+   escapes count as their literal text) and words too long for a line are
+   hard-split on GRAPHEME-CLUSTER boundaries so ZWJ families / skin-tone / CJK
+   glyphs never straddle the right border. Returns a vector of physical lines
+   (never empty)."
   [width s]
   (let [width (max 1 width)
         s     (str s)]
-    (if (<= (count s) width)
+    (if (<= (cmp/display-width s) width)
       [s]
-      (let [indent (let [i (apply str (take-while #{\space} s))]
-                     (if (< (count i) width) i ""))
-            words  (str/split (str/triml s) #"\s+")]
-        (loop [ws words, cur indent, out []]
+      (let [indent  (let [i (apply str (take-while #{\space} s))]
+                      (if (< (count i) width) i ""))
+            ind-w   (count indent)
+            words   (str/split (str/triml s) #"\s+")]
+        (loop [ws words, cur indent, cur-w ind-w, out []]
           (if-let [w (first ws)]
-            (cond
-              ;; a single word too long for any line → hard char-split it
-              (> (+ (count indent) (count w)) width)
-              (let [room (max 1 (- width (count cur)))
-                    here (subs w 0 (min room (count w)))
-                    left (subs w (count here))]
-                (if (str/blank? (str/trim cur))
-                  (recur (cons left (rest ws)) "" (conj out (str cur here)))
-                  (recur ws indent (conj out cur))))
-              ;; fits on the current line
-              (<= (+ (count cur) (if (= cur indent) 0 1) (count w)) width)
-              (recur (rest ws) (if (= cur indent) (str cur w) (str cur " " w)) out)
-              ;; doesn't fit → flush and wrap
-              :else (recur ws indent (conj out cur)))
+            (let [ww (cmp/display-width w)]
+              (cond
+                ;; a single word too long for any line → hard grapheme-split it
+                (> (+ ind-w ww) width)
+                (let [room (max 1 (- width cur-w))
+                      [here left] (hard-split-graphemes w room)]
+                  (if (str/blank? (str/trim cur))
+                    (recur (cons left (filter seq (rest ws))) "" 0
+                      (conj out (str cur here)))
+                    (recur ws indent ind-w (conj out cur))))
+                ;; fits on the current line (+1 col for the joining space)
+                (<= (+ cur-w (if (= cur indent) 0 1) ww) width)
+                (let [sep (if (= cur indent) "" " ")]
+                  (recur (rest ws) (str cur sep w)
+                    (+ cur-w (count sep) ww) out))
+                ;; doesn't fit → flush and wrap
+                :else (recur ws indent ind-w (conj out cur))))
             (conj out cur)))))))
 
 (defn render-pager-lines

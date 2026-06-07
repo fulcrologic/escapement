@@ -1,0 +1,50 @@
+OLLAMA_API_KEY=dummy bb -m escapement.cli run escapement.examples.hello/agent --tui=opentui --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-tokens 2048 --overrun-retr
+ies 2 --overrun-temp-bump 0.3
+➜  escapement OLLAMA_API_KEY=dummy bb -m escapement.cli run escapement.examples.hello/agent --tui=opentui --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-tokens 2048
+--overrun-retries 2 --overrun-temp-bump 0.3
+➜  escapement git:(feat/live-token-tui) ✗
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

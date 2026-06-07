@@ -207,3 +207,34 @@
       (cli/resolve-log-level {}) => [:level nil]
       "explicit flag overrides headless default"
       (cli/resolve-log-level {:no-tui true :log-level "warn"}) => [:level :warn])))
+
+(specification "log routing toggle (#3 clean teardown)"
+  ;; While a TUI owns the terminal, logs must be file-routed (console appender
+  ;; OFF) so no library DEBUG line scribbles over the alt-screen. After the
+  ;; alt-screen is exited the console appender comes back so ordinary CLI
+  ;; errors print. Verify both transitions flip the appender enabled flags.
+  (require '[taoensso.timbre :as timbre])
+  (let [dir       (str (Files/createTempDirectory "escapement-cli-log" (into-array FileAttribute [])))
+        path      (str dir "/escapement.log")
+        cfg-var   (resolve 'taoensso.timbre/*config*)
+        set-cfg!  (resolve 'taoensso.timbre/set-config!)
+        enabled?  (fn [k] (get-in (var-get cfg-var) [:appenders k :enabled?]))
+        orig      (var-get cfg-var)]
+    (try
+      (let [ret (cli/route-logs-to-file! path)]
+        (assertions
+          "route-logs-to-file! returns the path"
+          ret => path
+          "console (:println) appender is disabled while the TUI owns the tty"
+          (enabled? :println) => false
+          "file appender is enabled (logs land in the session log)"
+          (enabled? :file) => true))
+      (cli/restore-console-logging!)
+      (assertions
+        "after alt-screen exit the console appender is re-enabled"
+        (enabled? :println) => true
+        "and the file appender is disabled again"
+        (enabled? :file) => false)
+      (finally
+        ;; restore timbre to its pre-test config so other specs are unaffected
+        (set-cfg! orig)))))

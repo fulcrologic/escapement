@@ -1,0 +1,50 @@
+d ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-tokens 2048 --overrun-retries 2 --overrun-temp-bump 0.3
+➜  escapement OLLAMA_API_KEY=dummy bb -m escapement.cli run escapement.examples.iterate/agent --param spec-path=/tmp/iter-demo/spec.txt --param target-path=/tmp/iter-demo/target.clj --param 'test-cmd=
+true' --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-tokens 2048 --overrun-retries 2 --overrun-temp-bump 0.3
+2026-06-07T14:35:08.518Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:35:08.520Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:35:08.521Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:35:08.521Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:35:08.521Z omarflow DEBUG [clojure.core:218] - (get-effective-target-states env t) => #{:run}
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:219] - (chart/nearest-ancestor-state statechart t) => :initial32915
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:226] - (:id (chart/find-least-common-compound-ancestor statechart (into (if tsource [tsource] []) tstates))) => :ROOT
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:495] - entry set => [#{:run :read-spec :work} #{:run :work} {}]
+2026-06-07T14:35:08.522Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :run
+2026-06-07T14:35:08.522Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32916, :target [:work], :type :external, :node-type :transition
+, :parent :initial32917}
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:35:08.522Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :work
+2026-06-07T14:35:08.522Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32918, :target [:read-spec], :type :external, :node-type :trans
+ition, :parent :initial32919}
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:35:08.522Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :read-spec
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :read-spec :work}
+2026-06-07T14:35:08.522Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:35:08.522Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:662] - Starting invocation id = coder, type = :llm-conversation, src = , params = {:system "You are a foc
+used coding agent driving a small statechart. Be brief; do not explain unless asked. The chart progresses ONLY when you call event tools.\n\nWorkflow:\n1. When asked to read the spec, call `fs_read` o
+n the spec path, then call `event__iterate_spec_ready` with a one-sentence `summary`.\n2. When asked to propose a patch, read the target file if needed via `fs_read`, then make a minimal change with `
+fs_edit` (prefer `fs_edit`; use `fs_write` only if you need to create a missing file). Then call `event__iterate_patch_applied` with a one-sentence `rationale`.\n3. When tests fail, the chart will tel
+l you so. Decide: call `event__iterate_retry` with `reasoning` to attempt another patch, or `event__iterate_give_up` with `reason` if you cannot progress.\nDo not call any event tool more than once pe
+r turn. End your turn after the event tool.", :real-tools [:fs/read :fs/edit :fs/write], :allowed-events [{:event :iterate/spec-ready, :data-schema [:map [:summary :string]]} {:event :iterate/patch-ap
+plied, :data-schema [:map [:rationale :string]]} {:event :iterate/retry, :data-schema [:map [:reasoning :string]]} {:event :iterate/give-up, :data-schema [:map [:reason :string]]}], :initial-user-mess
+age "Step 1: read the spec at \"/tmp/iter-demo/spec.txt\" using fs_read, then call event__iterate_spec_ready with a one-sentence summary."}
+2026-06-07T14:35:08.625Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:35:08.626Z omarflow DEBUG [clojure.core:930] - external-event => {:type :com.fulcrologic.statecharts/chart, :name :error.llm.invalid-request, :target :session/e68f4689-1a58-4832-a65a-366
+d39a4685c, :data {:message "OpenAI API error: HTTP 400", :class "clojure.lang.ExceptionInfo", :category :invalid-request, :attempts [{:model "gemma3:1b", :error {:message "OpenAI API error: HTTP 400",
+ :class "clojure.lang.ExceptionInfo"}}], :reason :invalid-request}, :com.fulcrologic.statecharts/source-session-id :session/e68f4689-1a58-4832-a65a-366d39a4685c, :origin :session/e68f4689-1a58-4832-a6
+5a-366d39a4685c, :origintype :com.fulcrologic.statecharts/chart, :com.fulcrologic.statecharts/event-name :error.llm.invalid-request}
+2026-06-07T14:35:08.626Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:35:08.626Z omarflow DEBUG [clojure.core:615] - enabled transitions => #{}
+2026-06-07T14:35:08.626Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:35:08.626Z omarflow DEBUG [clojure.core:495] - entry set => [#{} #{} {}]
+2026-06-07T14:35:08.626Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :read-spec :work}
+2026-06-07T14:35:08.626Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+session          e68f4689-1a58-4832-a65a-366d39a4685c
+transcript       .escapement/e68f4689-1a58-4832-a65a-366d39a4685c/transcript.jsonl
+checkpoint-dir   .escapement/e68f4689-1a58-4832-a65a-366d39a4685c/checkpoints
+final-config     [:run :read-spec :work]
+➜  escapement git:(feat/live-token-tui) ✗

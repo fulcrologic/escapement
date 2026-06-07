@@ -9,7 +9,7 @@ It is **purely additive**. The default terminal UI is still the in-process **JLi
 (`escapement.tui`); OpenTUI is selected with `--tui=opentui`. A normal `escapement run` never loads
 any of this code, and the engine library (`escapement.lib`) never pulls it.
 
-This doc covers the architecture, how to run it, how to develop and test it, the `opentui/` layout,
+This doc covers the architecture, how to run it, how to develop and test it, the `tui/opentui/` layout,
 how it relates to the JLine and browser UIs, and the known limitations. For the byte-level message
 contract see [`docs/opentui-wire.md`](opentui-wire.md); for the original feasibility analysis see
 [`docs/opentui-port-analysis.md`](opentui-port-analysis.md).
@@ -35,7 +35,7 @@ sidecar:
                                        │  agent→UI: event / phase / prompt / progress / debug-snap  (session-dir/artifacts)
                                        │  UI→agent: answer / control                          ▲
   ┌────────────────────────────────────▼──────────────────────────────────────────────┐    │
-  │  Bun sidecar (opentui/) — OWNS the real TTY (raw mode, alt-screen, keys)            │    │
+  │  Bun sidecar (tui/opentui/) — OWNS the real TTY (raw mode, alt-screen, keys)            │    │
   │   transport ▶ domain store (Solid) ▶ OpenTUI/Solid render tree                      │────┘
   │   Shell: header/phase · LIVE token panel │ LOG pane · inspector/transcript · modals │
   └─────────────────────────────────────────────────────────────────────────────────────┘
@@ -49,9 +49,9 @@ sidecar:
 | WS route | `src/escapement/ui/server.clj` | Adds `GET /ws` (http-kit `as-channel`) when the ctx carries a hub; `POST /api` (transit EQL reads + control) is unchanged. |
 | Remote renderer | `src/escapement/ui/remote_renderer.clj` | `RemoteUiRenderer` satisfies the `HumanRenderer` protocol (`escapement.invocation.human-input`): serializes each prompt to the wire, parks the chart worker on a promise keyed by `prompt-id`, delivers the answer when it arrives, rejects with `{:reason :cancelled}` on cancel, and integrates with the debug pause gate (`human-input-active?`). A process-wide registry (`deliver-answer!` / `cancel-answer!` / `cancel-all!`) is fed identically by the WS `answer` frame and the `escapement.human/answer` EQL mutation. |
 | Answer mutation | `src/escapement/ui/resolvers.cljc` | `escapement.human/answer` EQL mutation (secondary/fallback to the WS `answer` frame). |
-| Spawn / lifecycle | `src/escapement/ui/opentui_sidecar.clj` | `--tui=opentui` glue: pick a free port, resolve `opentui/src/main.tsx`, build the WS back-channel handler seam, **spawn** `bun run` with **CWD = `opentui/`** (so `bunfig.toml`'s Solid preload loads) and the real TTY **inherited**, supervise, and **restore the terminal** (`/dev/tty` ANSI + `stty sane; tput cnorm; tput sgr0`) if the sidecar dies abnormally. |
+| Spawn / lifecycle | `src/escapement/ui/opentui_sidecar.clj` | `--tui=opentui` glue: pick a free port, resolve `tui/opentui/src/main.tsx`, build the WS back-channel handler seam, **spawn** `bun run` with **CWD = `tui/opentui/`** (so `bunfig.toml`'s Solid preload loads) and the real TTY **inherited**, supervise, and **restore the terminal** (`/dev/tty` ANSI + `stty sane; tput cnorm; tput sgr0`) if the sidecar dies abnormally. |
 | CLI wiring | `src/escapement/cli.clj` | `--tui=opentui` mode: forces the api-server+WS on, installs the `RemoteUiRenderer`, supplies the WS handler seam, spawns+supervises the sidecar, runs the agent headless with `*out*/*err*` captured to the session log, and tears down cleanly. All add-on code is reached via `requiring-resolve`. |
-| Bun sidecar | `opentui/` | The TypeScript/SolidJS/OpenTUI UI (its own layout below). |
+| Bun sidecar | `tui/opentui/` | The TypeScript/SolidJS/OpenTUI UI (its own layout below). |
 
 **Why these choices** (full rationale in the plan and `opentui-port-analysis.md`):
 - **Sidecar, not in-process** — bb has no C-FFI; OpenTUI's Zig core is only reachable from a JS runtime.
@@ -76,7 +76,7 @@ The engine core must never statically require a presentation add-on
 - All agent-side glue lives in the **`escapement.ui.*`** add-on (`ws_push`, `remote_renderer`,
   `opentui_sidecar`, the `resolvers` mutation).
 - `cli.clj` reaches it **only via `requiring-resolve`** (same pattern as `--api-server`).
-- The `opentui/` TypeScript tree is **outside `src/`**, so the boundary scanner never sees it.
+- The `tui/opentui/` TypeScript tree is **outside `src/`**, so the boundary scanner never sees it.
 
 ---
 
@@ -104,7 +104,7 @@ The canonical contract is [`docs/opentui-wire.md`](opentui-wire.md). In brief:
 **Prereqs**
 - A real TTY (the sidecar owns the terminal; non-TTY/headless never spawns it).
 - `bun` on `PATH` (or `BUN_BIN=/path/to/bun`). Bun ≥ 1.3.0 (1.3.5 is the tested version).
-- `bun install` already run **in `opentui/`** (creates `opentui/node_modules`).
+- `bun install` already run **in `tui/opentui/`** (creates `tui/opentui/node_modules`).
 - For the local-model commands below: `ollama serve` running with `gemma3:1b` pulled, and
   `OLLAMA_NUM_PARALLEL=4` exported so concurrent poets/judges actually stream in parallel.
 
@@ -168,7 +168,7 @@ deterministic snapshot tests possible.
 |------|---------|-------|
 | Agent-side (WS push + RemoteUiRenderer + answer round-trip + boundary) | `bb test` | `test/escapement/ui/opentui_push_test.clj`. Part of the normal bb suite; the architecture-boundary test is in the same run. |
 | Engine smoke | `bb sanity` | |
-| UI unit + snapshot | `bb opentui-test` (= `bun test` in `opentui/`) | Pure-logic unit tests (aggregation, tok/s, theme capability, wrapping, transcript blocks) + reconciler-driven snapshot tests over recorded JSONL. No model, no network, deterministic. |
+| UI unit + snapshot | `bb opentui-test` (= `bun test` in `tui/opentui/`) | Pure-logic unit tests (aggregation, tok/s, theme capability, wrapping, transcript blocks) + reconciler-driven snapshot tests over recorded JSONL. No model, no network, deterministic. |
 | UI typecheck | `bb opentui-build` (= `bun x tsc --noEmit`) | |
 | Visual E2E (vision-verified) | `OLLAMA_NUM_PARALLEL=4 bb haiku-opentui '<prompt>'` + capture | See below. |
 | Functional E2E (local model) | `--tui=opentui` runs of `hello`/`ask`/`scan`/`parallel_demo` against gemma3:1b | See below. |
@@ -189,7 +189,7 @@ RUN_CMD="OLLAMA_NUM_PARALLEL=4 bb haiku-opentui" SHOT_SECS=9 \
 
 Use a LARGE tournament (e.g. 8 poets / 6 judges) + `SHOT_SECS≈9` to catch streaming/shimmer; a small
 tournament + `SHOT_SECS≈22` for the finished frame. Vision-verified frames are committed under
-`opentui/test/visual/` (`haiku-opentui-streaming.png`, `haiku-opentui-finished.png`). The same driver
+`tui/opentui/test/visual/` (`haiku-opentui-streaming.png`, `haiku-opentui-finished.png`). The same driver
 also has a `headless` (tmux text capture) and `headful` mode.
 
 **What the E2E confirmed** (tasks 018/019): live in-flight token streaming with growing token counts +
@@ -201,13 +201,13 @@ terminal with a live model.
 
 ---
 
-## The `opentui/` layout
+## The `tui/opentui/` layout
 
 ```
-opentui/
-  package.json        @opentui/core@0.3.2 + @opentui/solid@0.3.2 + solid-js@1.9.12 (exact pins); scripts
-  tsconfig.json       jsxImportSource @opentui/solid; module Preserve + moduleResolution bundler (NOT NodeNext)
-  bunfig.toml         preload = ["@opentui/solid/preload"]  ← MANDATORY: compiles Solid JSX (loaded via CWD)
+tui/opentui/
+  package.json        @tui/opentui/core@0.3.2 + @tui/opentui/solid@0.3.2 + solid-js@1.9.12 (exact pins); scripts
+  tsconfig.json       jsxImportSource @tui/opentui/solid; module Preserve + moduleResolution bundler (NOT NodeNext)
+  bunfig.toml         preload = ["@tui/opentui/solid/preload"]  ← MANDATORY: compiles Solid JSX (loaded via CWD)
   src/
     main.tsx          render() entry: createEventSource → domain store → Shell + panes + overlays + modals
     transport/        wire (JSON envelope codec), event-source (the one interface), ws-client, replay, eql-client, index (factory)
@@ -224,7 +224,7 @@ opentui/
     visual/           haiku-opentui-{streaming,finished}.png (vision-verified E2E evidence — tracked)
 ```
 
-`node_modules/` and build/cache artifacts are gitignored (`opentui/.gitignore`); the committed
+`node_modules/` and build/cache artifacts are gitignored (`tui/opentui/.gitignore`); the committed
 `test/visual/*.png` frames are intentionally tracked.
 
 > Updating snapshots: `cd opentui && bun test test/snapshot/ -u` rewrites the `.snap` files; review

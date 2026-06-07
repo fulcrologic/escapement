@@ -1,0 +1,50 @@
+2026-06-07T14:29:42.419Z omarflow DEBUG [clojure.core:219] - (chart/nearest-ancestor-state statechart t) => :initial32932
+2026-06-07T14:29:42.419Z omarflow DEBUG [clojure.core:226] - (:id (chart/find-least-common-compound-ancestor statechart (into (if tsource [tsource] []) tstates))) => :ROOT
+2026-06-07T14:29:42.419Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:29:42.419Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:29:42.419Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:29:42.419Z omarflow DEBUG [clojure.core:495] - entry set => [#{:convo :run :work :counting :monitor :watching} #{:convo :run :monitor} {}]
+2026-06-07T14:29:42.419Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :run
+2026-06-07T14:29:42.419Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32933, :target [:work], :type :external, :node-type :transition
+, :parent :initial32934}
+2026-06-07T14:29:42.420Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:29:42.420Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :work
+2026-06-07T14:29:42.420Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:29:42.420Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :convo
+2026-06-07T14:29:42.420Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32935, :target [:counting], :type :external, :node-type :transi
+tion, :parent :initial32936}
+2026-06-07T14:29:42.420Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:29:42.420Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :counting
+2026-06-07T14:29:42.420Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:29:42.420Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :monitor
+2026-06-07T14:29:42.420Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :on-entry32917, :node-type :on-entry, :children [:safety-timer], :parent :
+monitor}
+2026-06-07T14:29:42.420Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:347] - Send event {:id :safety-timer, :event :safety/stop, :delay 150000, :node-type :send, :parent :on-e
+ntry32917}
+2026-06-07T14:29:42.420Z omarflow DEBUG [clojure.core:323] - Computed send event data => {}
+2026-06-07T14:29:42.420Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32937, :target [:watching], :type :external, :node-type :transi
+tion, :parent :initial32938}
+2026-06-07T14:29:42.420Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:29:42.420Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :watching
+2026-06-07T14:29:42.420Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:29:42.420Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:convo :run :work :counting :monitor :watching}
+2026-06-07T14:29:42.420Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:29:42.420Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:662] - Starting invocation id = subject, type = :llm-conversation, src = , params = {:system "You perform
+ a slow counting task, ONE step per turn.\nRULES:\n1. Each turn: write EXACTLY the line `COUNT <n>` (where <n> is the current integer), then call the `event__count_tick` tool exactly once with `{\"n\"
+:<n>}`, then END your turn. Do not call it more than once per turn.\n2. Start at n=1 and increase n by 1 each turn (1, 2, 3, ...).\n3. Keep counting turn after turn until a user message tells you to S
+TOP.\n4. If a user message says STOP, then from that turn on write ONLY the line `STEERED BANANA` and call `event__count_tick` with `{\"n\":0}`. After two `STEERED BANANA` turns, call the `event__coun
+t_done` tool once with `{\"reason\":\"steered\"}` and end your turn.\nBe terse. Never call more than one tool per turn.", :real-tools [], :allowed-events [{:event :count/tick, :description "Record one
+ counting step.", :data-schema [:map [:n :int]]} {:event :count/done, :description "End the counting task.", :data-schema [:map [:reason :string]]}], :max-turns 8, :initial-user-message "Begin the cou
+nting task at n=1.", :max-conversation-duration-ms 120000}
+2026-06-07T14:29:42.522Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:29:42.523Z omarflow DEBUG [clojure.core:930] - external-event => {:type :com.fulcrologic.statecharts/chart, :name :error.llm.invalid-request, :target :session/202563e2-f1f0-4b09-8322-807
+52ed2b636, :data {:message "OpenAI API error: HTTP 400", :class "clojure.lang.ExceptionInfo", :category :invalid-request, :attempts [{:model "gemma3:1b", :error {:message "OpenAI API error: HTTP 400",
+ :class "clojure.lang.ExceptionInfo"}}], :reason :invalid-request}, :com.fulcrologic.statecharts/source-session-id :session/202563e2-f1f0-4b09-8322-80752ed2b636, :origin :session/202563e2-f1f0-4b09-83
+22-80752ed2b636, :origintype :com.fulcrologic.statecharts/chart, :com.fulcrologic.statecharts/event-name :error.llm.invalid-request}
+2026-06-07T14:29:42.523Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:29:42.523Z omarflow DEBUG [clojure.core:615] - enabled transitions => #{}
+2026-06-07T14:29:42.523Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:29:42.523Z omarflow DEBUG [clojure.core:495] - entry set => [#{} #{} {}]
+2026-06-07T14:29:42.523Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:convo :run :work :counting :monitor :watching}
+2026-06-07T14:29:42.524Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+

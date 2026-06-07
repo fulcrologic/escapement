@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│escapement · session ·                                                                                                                                                                          ◷ 0:06│
+│▶ —                                                                                                                                                                             0 LLMs · 0 act · 0 t/s│
+│states: [run finished]                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─LIVE─────────────────────────────────────────────────────────────────────────────────────────────╮┏━LOG━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│  (no live activity yet)                                                                          │┃19:22:41 chart · cli/config-loaded {:path "/home/naomarik/github/escapement/.escapement.edn", :ke…┃
+│                                                                                                  │┃19:22:41 debug · runner started session=:session/fbe0a9b3-cb68-4359-9430-54da3a7e3497 chart=:esca…┃
+│                                                                                                  │┃19:22:41 chart · artifact/captured {:name "edge-unicode-emoji.txt", :bytes 267}                   ┃
+│                                                                                                  │┃19:22:41 chart · artifact/captured {:name "edge-cjk.txt", :bytes 150}                             ┃
+│                                                                                                  │┃19:22:41 chart · artifact/captured {:name "edge-rtl.txt", :bytes 167}                             ┃
+│                                                                                                  │┃19:22:41 chart · artifact/captured {:name "edge-zero-width.txt", :bytes 232}                      ┃
+│                                                                                                  │┃19:22:41 chart · artifact/captured {:name "edge-ansi-escapes.txt", :bytes 308}                    ┃
+│                                                                                                  │┃19:22:41 chart · artifact/captured {:name "edge-control-chars.txt", :bytes 266}                   ┃
+│                                                                                                  │┃19:22:41 chart · artifact/captured {:name "edge-box-drawing.txt", :bytes 234}                     ┃
+│                                                                                                  │┃19:22:41 chart · artifact/captured {:name "edge-long-no-space.txt", :bytes 8075}                  ┃
+│                                                                                                  │┃19:22:41 chart · artifact/captured {:name "edge-empty.txt", :bytes 0}                             ┃
+│                                                                                                  │┃19:22:41 chart · artifact/captured {:name "edge-mixed.txt", :bytes 368}                           ┃
+│                                                                                                  │┃19:22:41 debug · start config=["run" "finished"]                                                  ┃
+│                                                                                                  │┃19:22:41 debug · done final=["run" "finished"]                                                    ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━⇅ 14/14━┛
+ LOG · ⇅ scroll · Enter transcript · m maximize · Tab → LIVE · ? inspector · a artifacts · Esc interrupt · Ctrl-C quit
