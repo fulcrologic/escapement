@@ -752,6 +752,7 @@
                    params messages tools)]
     (case (:status env)
       :ok                {:ok (:response env) :model-used (:model env)}
+      :overrun           {:overrun (:response env) :model-used (:model env)}
       :exhausted         {:exhausted      (get-in env [:error :attempts])
                           :last-throwable (:last-throwable env)}
       :interrupted       {:interrupted (get-in env [:error :throwable])}
@@ -783,7 +784,16 @@
    forward progress and is surfaced via `:no-progress` rather than a malformed
    tool call ever being dispatched."
   [{:keys [transcript-fn parent-ctx] :as ctx} params base-messages tools]
-  (loop [acc-content nil
+  ;; Overrun primitive (escapement.llm `:resilience :overrun`): when a per-turn
+  ;; output ceiling with reruns is configured, a `:max_tokens` stop is the
+  ;; truncation trip wire — NOT an invitation to stitch an unbounded
+  ;; continuation. `run-turn` already reran the identical turn up to
+  ;; `:max-retries`; we must therefore SKIP continuation here, or it would undo
+  ;; the cap by resuming the runaway. The single returned turn is terminal:
+  ;; `:ok` (truncate accepted) or `:overrun` (`:on-exhausted :fail`).
+  (if (pos? (long (or (:max-retries (:overrun (params->resilience params))) 0)))
+    (try-models! ctx params (vec base-messages) tools)
+    (loop [acc-content nil
          acc-usage   {}
          seg         0]
     (let [msgs    (if (seq acc-content)
@@ -815,7 +825,7 @@
                          :blocks   (count content)
                          :usage    (or usage {})
                          :invokeid (:invokeid parent-ctx)}})
-              (recur merged merged-usage (inc seg)))))))))
+              (recur merged merged-usage (inc seg))))))))))
 
 (defn- run-verdict-inference!
   "Run a single forced-tool inference asking the model to call `submit_verdict`
@@ -953,6 +963,12 @@
                  :stop-reason :max_tokens
                  :detail      :verdict-no-progress}}
 
+        (:overrun outcome)
+        {:error :unexpected-stop
+         :data  {:reason      :unexpected-stop
+                 :stop-reason :max_tokens
+                 :detail      :verdict-overrun-retries-exhausted}}
+
         :else
         {:error :backend
          :data  {:reason :backend
@@ -1048,6 +1064,21 @@
                    :detail      :no-forward-progress}})
         (post-error! :unexpected-stop {:stop-reason :max_tokens
                                        :detail      :no-forward-progress})
+        (reset! worker-state :dying)
+        :error-and-die)
+
+      ;; Overrun primitive with `:on-exhausted :fail`: the turn was still
+      ;; truncated at the cap after exhausting reruns. Fail the node rather than
+      ;; accept a truncated message.
+      (:overrun outcome)
+      (do
+        (transcript! transcript-fn
+          {:event :llm/error :ts (now-ms)
+           :data  {:reason      :unexpected-stop
+                   :stop-reason :max_tokens
+                   :detail      :overrun-retries-exhausted}})
+        (post-error! :unexpected-stop {:stop-reason :max_tokens
+                                       :detail      :overrun-retries-exhausted})
         (reset! worker-state :dying)
         :error-and-die)
 
@@ -1377,13 +1408,20 @@
       (catch Throwable _ nil))))
 
 (defrecord LlmConversationProcessor [backend tool-registry transcript-fn workers model-status default-models
-                                     catalog-ratings eligibility-strict? aliases preferences]
+                                     catalog-ratings eligibility-strict? aliases preferences resilience]
   sp/InvocationProcessor
   (supports-invocation-type? [_ typ]
     (= typ :llm-conversation))
 
   (start-invocation! [_this env {:keys [invokeid params]}]
-    (let [parent-session-id (env-ns/session-id env)
+    (let [;; Inject the processor-level resilience (from config/CLI) as a BASE
+          ;; under any node-supplied `:resilience` (node wins). This is what
+          ;; lets the overrun primitive be enabled run-wide without editing a
+          ;; chart. nil/empty processor resilience leaves params untouched.
+          params            (if (seq resilience)
+                              (update params :resilience #(merge resilience %))
+                              params)
+          parent-session-id (env-ns/session-id env)
           k                 (worker-key parent-session-id invokeid)
           ;; Idempotency: signal any pre-existing worker for this key to die
           ;; gracefully (it polls `:worker-state` between turns). We deliberately
@@ -1576,15 +1614,22 @@
      Resolution is uniform: the node's `:model`/`:models` (a vector of alias
      keywords) OR `:preferences` (when the node names nothing) are flattened
      over `:aliases` into the same ordered `{:provider :model :params}`
-     candidate list. Defaults to the built-in `preferences/default-preferences`."
+     candidate list. Defaults to the built-in `preferences/default-preferences`.
+   * `:resilience` (optional) — a partial `escapement.llm/default-resilience`
+     map injected as a BASE under every node's own `:resilience` (node wins).
+     This is the run-wide enable seam for the overrun primitive (output cap +
+     rerun-on-truncation) without editing a chart; the CLI builds it from
+     `--max-tokens` / `--overrun-retries` and `:llm/resilience` config.
+     Defaults to `{}` (leaves node params untouched)."
   [{:keys [backend tool-registry transcript-fn default-models
-           catalog-ratings eligibility-strict? aliases preferences]}]
+           catalog-ratings eligibility-strict? aliases preferences resilience]}]
   (assert backend "backend is required")
   (assert tool-registry "tool-registry is required")
   (->LlmConversationProcessor backend tool-registry (or transcript-fn (fn [_] nil))
     (atom {}) (atom {}) (vec default-models)
     (or catalog-ratings {}) (boolean eligibility-strict?) (or aliases {})
-    (if (seq preferences) (vec preferences) preferences/default-preferences)))
+    (if (seq preferences) (vec preferences) preferences/default-preferences)
+    (or resilience {})))
 
 (>defn active-worker-count
   "Returns the number of workers whose state is not `:dying`. Used by the runner

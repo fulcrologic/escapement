@@ -292,7 +292,7 @@
                                           focus."
   [{:keys [chart chart-id session-id transcript-path checkpoint-dir
            session-dir backend backend-default-models
-           catalog-ratings eligibility-strict? llm-aliases llm-preferences
+           catalog-ratings eligibility-strict? llm-aliases llm-preferences llm-resilience
            tool-registry initial-data resume? trace?
            max-iterations max-frozen-cycles quiescent-sleep-ms human-renderer
            on-env-ready transcript-tap prelude-events store run-id cancel
@@ -337,6 +337,7 @@
                                            :llm-eligibility-strict? eligibility-strict?
                                            :llm-aliases             llm-aliases
                                            :llm-preferences         llm-preferences
+                                           :llm-resilience          llm-resilience
                                            :tool-registry           tool-registry
                                            :human-renderer          human-renderer
                                            :transcript-fn           transcript-fn})

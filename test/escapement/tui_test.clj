@@ -889,13 +889,16 @@
         max-log    (tui/footer-text {:focus :log :maximized? true :debug? false})
         dbg        (tui/footer-text {:focus :log :maximized? false :debug? true})]
     (assertions
-      "split LOG names LOG and offers Enter maximize + Esc interrupt"
+      "split LOG names LOG and offers Enter=transcript + m maximize + Esc interrupt"
       (and (str/includes? split-log "LOG")
-        (str/includes? split-log "Enter maximize")
+        (str/includes? split-log "Enter transcript")
+        (str/includes? split-log "m maximize")
+        (not (str/includes? split-log "Enter maximize"))
         (str/includes? split-log "Tab → LIVE")
         (str/includes? split-log "Esc interrupt")) => true
-      "split LIVE points Tab at LOG"
-      (str/includes? split-live "Tab → LOG") => true
+      "split LIVE points Tab at LOG and shows j/k select"
+      (and (str/includes? split-live "Tab → LOG")
+        (str/includes? split-live "j/k select")) => true
       "maximized LOG offers Esc restore split, not interrupt"
       (and (str/includes? max-log "(max)")
         (str/includes? max-log "Esc restore split")
@@ -916,3 +919,80 @@
       (tui/theme-color? col-theme) => true
       "role-sgr-themed under :none returns empty (no escape) regardless of TERM"
       (tui/role-sgr-themed none-theme s "poet-1") => "")))
+
+(specification "dispatch-key — Enter=transcript, m=maximize, j/k context-sensitive"
+  (assertions
+    "Enter → open the transcript (no longer maximizes)"
+    (tui/dispatch-key :enter {:focus :live :maximized? false}) => :open-transcript
+    "m → maximize the focused pane"
+    (tui/dispatch-key [:char \m] {:focus :log :maximized? false}) => :maximize
+    "Tab → focus-cycle"
+    (tui/dispatch-key :tab {:focus :live :maximized? false}) => :focus-cycle
+    "Esc while maximized restores the split"
+    (tui/dispatch-key :esc {:focus :log :maximized? true}) => :restore-split
+    "Esc otherwise interrupts"
+    (tui/dispatch-key :esc {:focus :log :maximized? false}) => :interrupt
+    "j while LIVE focused moves the selection cursor"
+    (tui/dispatch-key [:char \j] {:focus :live :maximized? false}) => :live-cursor-down
+    "k while LIVE focused moves the selection cursor up"
+    (tui/dispatch-key [:char \k] {:focus :live :maximized? false}) => :live-cursor-up
+    "g/G while LIVE focused jump the cursor"
+    (tui/dispatch-key [:char \g] {:focus :live :maximized? false}) => :live-cursor-top
+    (tui/dispatch-key [:char \G] {:focus :live :maximized? false}) => :live-cursor-bottom
+    "j while LOG focused scrolls the pane (no cursor)"
+    (tui/dispatch-key [:char \j] {:focus :log :maximized? false}) => :scroll-down
+    (tui/dispatch-key [:char \k] {:focus :log :maximized? false}) => :scroll-up
+    "arrow Down/Up follow the same LIVE-vs-LOG rule"
+    (tui/dispatch-key :down {:focus :live :maximized? false}) => :live-cursor-down
+    (tui/dispatch-key :down {:focus :log :maximized? false}) => :scroll-down
+    "unknown key → nil (falls through to misc handlers)"
+    (tui/dispatch-key [:char \v] {:focus :log :maximized? false}) => nil))
+
+(specification "clamp-live-cursor — bounds the LIVE selection cursor"
+  (assertions
+    "nil clamps to 0"            (tui/clamp-live-cursor nil 5) => 0
+    "within range passes"       (tui/clamp-live-cursor 3 5) => 3
+    "past the end clamps"       (tui/clamp-live-cursor 99 5) => 4
+    "negative clamps to 0"      (tui/clamp-live-cursor -2 5) => 0
+    "empty pane ⇒ 0"            (tui/clamp-live-cursor 3 0) => 0))
+
+(def ^:private theme-256 (escapement.tui.theme/theme-for :256))
+(def ^:private theme-none (escapement.tui.theme/theme-for :none))
+
+(specification "paused-banner — themed PAUSED debug banner (task 008)"
+  (assertions
+    "carries the PAUSED label + all step/continue/pause/arm hints"
+    (let [b (tui/paused-banner theme-256 "[P] ")]
+      (and (str/includes? b "PAUSED")
+        (str/includes? b "s=step")
+        (str/includes? b "c=continue")
+        (str/includes? b "p=pause")
+        (str/includes? b "P=arm")
+        (str/includes? b "?=inspector"))) => true
+    "includes the status-indicator prefix verbatim"
+    (str/includes? (tui/paused-banner theme-256 "[P] ") "[P]") => true
+    "a colored theme emits SGR escape(s)"
+    (str/includes? (tui/paused-banner theme-256 "") "[") => true
+    "NO_COLOR / :none theme emits ZERO escapes"
+    (str/includes? (tui/paused-banner theme-none "[P] ") "") => false
+    ":none banner is plain readable text"
+    (tui/paused-banner theme-none "[P] ")
+    => " [P] PAUSED  s=step  c=continue  p=pause  P=arm  ?=inspector"))
+
+(specification "viz-entry — themed scrollback entry for the v launcher (task 008)"
+  (assertions
+    "sources the entry as :viz so the LOG pane role-colors it"
+    (:source (tui/viz-entry theme-256 "live: http://x")) => :viz
+    "info entries get the ◆ glyph"
+    (:glyph (tui/viz-entry theme-256 "live: http://x")) => \◆
+    "error entries get the ✗ glyph"
+    (:glyph (tui/viz-entry theme-256 "boom" :error? true)) => \✗
+    "summary carries the plain message body (LOG pane themes it)"
+    (:summary (tui/viz-entry theme-256 "live: http://x")) => "live: http://x"
+    "legacy :line is PLAIN (escape-free) so truncate/collapse-ws can't mangle it"
+    (let [line (:line (tui/viz-entry theme-256 "live: http://x"))]
+      (and (str/includes? line "[viz]")
+        (str/includes? line "live: http://x")
+        (not (str/includes? line "")))) => true
+    "the entry itself contributes zero escapes (NO_COLOR-safe by construction)"
+    (str/includes? (pr-str (tui/viz-entry theme-256 "x")) "") => false))

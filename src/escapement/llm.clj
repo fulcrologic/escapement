@@ -368,8 +368,38 @@
 
 (def default-resilience
   "Applied when a caller omits (or partially specifies) `:resilience`. Recovery
-   is ON by default and per-call tunable; `:max-retries 0` disables retry."
-  {:max-retries 3 :backoff-ms 500})
+   is ON by default and per-call tunable; `:max-retries 0` disables retry.
+
+   `:overrun` is the OUTPUT-TOKEN-CEILING primitive. When a turn's output is
+   forcibly truncated at the cap (`stop-reason :max_tokens`), rerun the SAME
+   turn with the IDENTICAL context up to `:max-retries` times instead of
+   letting a runaway model stream forever (or stitch an unbounded
+   continuation). It is OFF by default (`:overrun {:max-retries 0}`) so
+   existing behavior is unchanged. Keys:
+
+     * `:max-output-tokens` — the per-turn cap that serves as the trip wire.
+       Also used as a `:max-tokens` FALLBACK on the request when the catalog
+       doesn't know the model (so a local/unknown model can't run away in a
+       single segment). nil ⇒ rely on the explicit/catalog cap only.
+     * `:max-retries` — how many times to rerun on truncation (0 = disabled).
+     * `:on-exhausted` — once retries are spent and the turn is still
+       truncated: `:truncate` (default — accept the truncated turn as `:ok`)
+       or `:fail` (surface a `:status :overrun` failure envelope).
+     * `:temperature-bump` — optional per-rerun temperature increment. A
+       deterministic model (temperature 0) would re-truncate on an identical
+       rerun forever; bumping temperature each rerun (attempt N adds
+       `N × bump` to the base temperature, clamped to `:temperature-max`)
+       forces sampling variance so a different, terminating output can emerge.
+       nil ⇒ rerun with the identical request (no bump).
+     * `:temperature-max` — clamp for the bumped temperature (default 1.0).
+
+   A plain rerun only helps when sampling already varies the output
+   (temperature > 0); pair `:temperature-bump` with a deterministic model so a
+   runaway can actually break out instead of re-truncating until
+   `:max-retries` is hit and `:on-exhausted` decides."
+  {:max-retries 3 :backoff-ms 500
+   :overrun     {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
+                 :temperature-bump nil :temperature-max 1.0}})
 
 (def transient-error-categories
   "Backend error categories that warrant a bounded automatic retry of the same
@@ -452,7 +482,9 @@
   (let [model-status (or model-status (atom {}))
         {:keys [before-send delta-sink on-retry on-model-down on-policy-empty alive?]}
         (merge no-op-hooks hooks)
-        {:keys [max-retries backoff-ms]} (params->resilience params)
+        {:keys [max-retries backoff-ms overrun]} (params->resilience params)
+        overrun-max  (long (or (:max-retries overrun) 0))
+        overrun-fail? (= :fail (:on-exhausted overrun))
         policy     (params->policy params)
         resolution (if pinned
                      {:candidates [pinned]}
@@ -489,7 +521,8 @@
                 ;; alias target's hint, else the catalog cap for the model.
                 max-tok  (or (:max-tokens (:params cand))
                            (:max-tokens params)
-                           (effective-max-tokens m))
+                           (effective-max-tokens m)
+                           (:max-output-tokens overrun))
                 request  (cond-> (build-request
                                    {:system               (:system params)
                                     :messages             messages
@@ -514,27 +547,60 @@
                            (:provider cand) (assoc :provider (:provider cand)))
                 _        (before-send request m)
                 on-delta (delta-sink m)
+                ;; A deterministic model re-truncates on an identical rerun, so
+                ;; an overrun rerun can bump temperature to force sampling
+                ;; variance (clamped to `:temperature-max`, default 1.0). Off
+                ;; unless `:overrun :temperature-bump` is set.
+                base-temp (:temperature eff)
+                temp-bump (:temperature-bump overrun)
+                temp-max  (double (or (:temperature-max overrun) 1.0))
                 ;; Bounded same-model retry for transient categories with
-                ;; exponential backoff before falling back to the next candidate.
-                response (loop [retry 0]
-                           (let [t0  (now-ms)
-                                 r   (try (let [resp (p/await! (proto/send-turn* backend request on-delta))]
+                ;; exponential backoff before falling back to the next
+                ;; candidate, PLUS a bounded rerun of an OVERRUN turn (output
+                ;; truncated at the cap → `stop-reason :max_tokens`) with the
+                ;; identical context (optionally with a bumped temperature).
+                response (loop [retry 0 over 0]
+                           (let [bumped? (and temp-bump (pos? over))
+                                 req     (if bumped?
+                                           (assoc request :temperature
+                                             ;; round to 3 dp so the wire value is
+                                             ;; clean (avoids 3×0.3 = 0.8999…).
+                                             (-> (min temp-max
+                                                   (+ (double (or base-temp 0.0))
+                                                     (* (double over) (double temp-bump))))
+                                               (* 1000.0) Math/round (/ 1000.0)))
+                                           request)
+                                 _       (when bumped? (before-send req m))
+                                 t0  (now-ms)
+                                 r   (try (let [resp (p/await! (proto/send-turn* backend req on-delta))]
                                             (assoc resp :elapsed-ms (- (now-ms) t0)))
                                           (catch Throwable t {:_throw t}))
                                  t   (:_throw r)
                                  cat (when t (proto/error-category t))]
-                             (if (and t
-                                   (contains? transient-error-categories cat)
-                                   (< retry (long max-retries))
-                                   (not (instance? InterruptedException t))
-                                   (not (instance? InterruptedException (ex-cause t)))
-                                   (alive?))
+                             (cond
+                               (and t
+                                 (contains? transient-error-categories cat)
+                                 (< retry (long max-retries))
+                                 (not (instance? InterruptedException t))
+                                 (not (instance? InterruptedException (ex-cause t)))
+                                 (alive?))
                                (do
                                  (on-retry {:model m :category cat
                                             :attempt (inc retry) :max-retries max-retries})
                                  (sleep-while-alive! (backoff-delay-ms backoff-ms retry t) alive?)
-                                 (recur (inc retry)))
-                               r)))]
+                                 (recur (inc retry) over))
+
+                               (and (not t)
+                                 (pos? overrun-max)
+                                 (= :max_tokens (:stop-reason r))
+                                 (< over overrun-max)
+                                 (alive?))
+                               (do
+                                 (on-retry {:model m :category :overrun
+                                            :attempt (inc over) :max-retries overrun-max})
+                                 (recur retry (inc over)))
+
+                               :else r)))]
             (cond
               (and (:_throw response)
                 (or (instance? InterruptedException (:_throw response))
@@ -561,6 +627,20 @@
                   {:status :exhausted
                    :error  {:category category :message message :attempts attempts'}
                    :last-throwable t}))
+
+              ;; Overrun retries spent and still truncated, with
+              ;; `:on-exhausted :fail` — surface a failure envelope instead of
+              ;; an `:ok` truncated turn. (`:truncate`, the default, falls
+              ;; through to `:ok` below.)
+              (and overrun-fail?
+                (pos? overrun-max)
+                (= :max_tokens (:stop-reason response)))
+              {:status :overrun :response response :model m
+               :usage  (:usage response) :candidate cand
+               :error  {:category :overrun
+                        :message  (str "output truncated at the token cap after "
+                                    overrun-max " retr" (if (= 1 overrun-max) "y" "ies"))
+                        :max-retries overrun-max}}
 
               :else
               {:status :ok :response response :model m

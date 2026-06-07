@@ -74,11 +74,21 @@
 ;; Helpers for building a test env with the LLM processor
 ;; ---------------------------------------------------------------------------
 
+(defn- truncated-response
+  "A `:max_tokens` assistant response — the API forcibly cut the model off."
+  [text]
+  {:stop-reason :max_tokens
+   :content     [{:type :text :text (or text "cut off")}]
+   :usage       {:input-tokens 1 :output-tokens 99}
+   :model       "mock"})
+
 (defn- new-llm-test-env
-  [{:keys [statechart backend tool-registry transcript-fn session-dir artifact-store]}]
+  [{:keys [statechart backend tool-registry transcript-fn session-dir artifact-store
+           resilience]}]
   (let [processor (llmc/new-processor {:backend       backend
                                        :tool-registry (or tool-registry (tp/new-registry))
-                                       :transcript-fn (or transcript-fn (fn [_] nil))})]
+                                       :transcript-fn (or transcript-fn (fn [_] nil))
+                                       :resilience    resilience})]
     (-> (dct/new-testing-env
           (cond-> {:statechart statechart}
             session-dir    (assoc :session-dir session-dir)
@@ -169,6 +179,74 @@
       "captured a request and a response in transcript"
       (some #(= :llm/request (:event %)) @captured) => true
       (some #(= :llm/response (:event %)) @captured) => true)))
+
+(specification "overrun primitive: a truncated turn is rerun (not continued) and recovers"
+  ;; Processor-level resilience (the global-enable path: config/CLI → processor)
+  ;; turns the overrun primitive on without a chart edit. First turn is
+  ;; truncated at the cap; the rerun (identical context) finishes with an
+  ;; event-tool that drives the chart to :done. Crucially the truncated segment
+  ;; is NOT stitched via continuation — it is rerun from scratch.
+  (let [captured (atom [])
+        backend  (mock-backend
+                   [(truncated-response "half")
+                    (tool-use-response [{:id "u1" :name "event__ok" :input {:msg "hi"}}])])
+        chart    (chart/statechart
+                   {:initial :work}
+                   (state {:id :work :initial :running}
+                     (state {:id :running}
+                       (h/llm-conversation
+                         {:id             "main"
+                          :system         "do it"
+                          :real-tools     []
+                          :allowed-events [{:event :ok :data-schema [:map [:msg :string]]}]
+                          :message        "go"})
+                       (transition {:event :ok :target :done}))
+                     (final {:id :done})))
+        t        (new-llm-test-env
+                   {:statechart    chart
+                    :backend       backend
+                    :resilience    {:overrun {:max-retries 2}}
+                    :transcript-fn (fn [ev] (swap! captured conj ev))})
+        t        (await-config! t :done 3000)]
+    (assertions
+      "the rerun's event-tool drove the chart to :done"
+      (dct/in? t :done) => true
+      "exactly two backend calls — the original plus ONE overrun rerun"
+      (count @(:call-log backend)) => 2
+      "both calls carried the identical message context (same turn, rerun)"
+      (apply = (map :messages @(:call-log backend))) => true
+      "a retry event was emitted, categorized :overrun"
+      (some #(and (= :llm/retry (:event %))
+               (= :overrun (:category (:data %)))) @captured) => true)))
+
+(specification "overrun primitive: :on-exhausted :fail fails the node after reruns are spent"
+  (let [backend  (mock-backend
+                   [(truncated-response "runaway-1")
+                    (truncated-response "runaway-2")])
+        chart    (chart/statechart
+                   {:initial :work}
+                   (state {:id :work :initial :running}
+                     (state {:id :running}
+                       (h/llm-conversation
+                         {:id             "main"
+                          :system         "do it"
+                          :real-tools     []
+                          :allowed-events [{:event :ok :data-schema [:map [:msg :string]]}]
+                          :message        "go"})
+                       (transition {:event :error.llm.unexpected-stop :target :failed}))
+                     (final {:id :done})
+                     (final {:id :failed})))
+        t        (new-llm-test-env
+                   {:statechart chart
+                    :backend    backend
+                    :resilience {:overrun {:max-retries 1 :on-exhausted :fail}}})
+        t        (await-config! t :failed 3000)]
+    (assertions
+      "the node failed via :error.llm.unexpected-stop, never reaching :done"
+      (dct/in? t :failed) => true
+      (dct/in? t :done) => false
+      "original attempt plus exactly :max-retries reruns were issued"
+      (count @(:call-log backend)) => 2)))
 
 (specification "stringified-JSON coercion: nested vector/map in tool_use input is re-parsed"
   ;; Small open-weight models (e.g. llama3.2:3b) regularly emit nested
@@ -1538,9 +1616,14 @@
 (specification "resilience + continuation pure helpers"
   (assertions
     "params->resilience: defaults, per-key override keeps the rest"
-    (#'llmc/params->resilience nil) => {:max-retries 3 :backoff-ms 500}
+    (#'llmc/params->resilience nil)
+    => {:max-retries 3 :backoff-ms 500
+        :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
+                  :temperature-bump nil :temperature-max 1.0}}
     (#'llmc/params->resilience {:resilience {:max-retries 0}})
-    => {:max-retries 0 :backoff-ms 500}
+    => {:max-retries 0 :backoff-ms 500
+        :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
+                  :temperature-bump nil :temperature-max 1.0}}
     "merge-segment-content stitches text across a truncation boundary"
     (#'llmc/merge-segment-content [{:type :text :text "Hel"}]
       [{:type :text :text "lo"}])
