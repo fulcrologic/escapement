@@ -187,6 +187,26 @@
    ;; above) so malformed targets are rejected at load time with a clear
    ;; message. Additive: configs without the key are unaffected.
    [:llm/aliases {:optional true} aliases-schema]
+   ;; `:llm/credential-sources` — named external JSON credential stores the
+   ;; `:llm/credentials` `:key-from` references read at startup, so API keys
+   ;; live in ONE place (e.g. another tool's auth file) and never in this file.
+   ;; `{<source-kw> "<path to a JSON file>"}` (`~` is expanded).
+   [:llm/credential-sources {:optional true} [:map-of :keyword :string]]
+   ;; `:llm/credentials` — ordered provider descriptors the CLI assembles into a
+   ;; multi-dispatch backend (the same hermetic path as the embeddable lib), used
+   ;; when no `--backend` flag is given. Each names a `:provider` (a key in
+   ;; `providers/provider-templates`). The API key is supplied EITHER inline via
+   ;; `:api-key` (discouraged) OR resolved from a store via
+   ;; `:key-from [<source-kw> <json-path…>]`. `:codex` needs neither (OAuth file).
+   [:llm/credentials {:optional true}
+    [:vector [:map
+              [:provider :keyword]
+              [:api-key {:optional true} :string]
+              [:key-from {:optional true} [:vector :any]]
+              [:base-url {:optional true} :string]
+              [:default-model {:optional true} :string]
+              [:model {:optional true} :string]
+              [:subscription {:optional true} :boolean]]]]
    [:llm {:optional true} :any]])
 
 (defn find-project-config

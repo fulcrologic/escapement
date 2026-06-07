@@ -30,3 +30,7 @@ package-lock.json
 resources/public/js/main/cljs-runtime
 resources/public/js/main/main.js
 resources/public/js/main/manifest.edn
+
+
+# Local project config — points at personal cred store; use .escapement.edn.example
+.escapement.edn

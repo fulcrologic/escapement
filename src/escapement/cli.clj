@@ -65,6 +65,7 @@
 
   Exit codes: 0 success, 1 chart error, 2 usage error."
   (:require
+   [cheshire.core :as json]
    [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
@@ -285,6 +286,55 @@
           (println (str "[cli]   default backend → " (name (:kind (ffirst built))))))
         {:backend        (build-multi-backend {:routes routes :default-backend default-backend})
          :default-models (mapv (fn [[c _]] (:default-model c)) built)}))))
+
+(defn- expand-home
+  "Expand a leading `~` to the user's home directory."
+  [path]
+  (if (str/starts-with? path "~")
+    (str (System/getProperty "user.home") (subs path 1))
+    path))
+
+(defn- read-json-store
+  "Slurp + parse a JSON credential store (e.g. another tool's auth file).
+   Returns the parsed map (string keys) or nil if absent/unparsable."
+  [path]
+  (let [f (io/file (expand-home path))]
+    (when (.exists f)
+      (try (json/parse-string (slurp f))
+           (catch Throwable _ nil)))))
+
+(defn- resolve-config-credentials
+  "Resolve `:llm/credentials` from `run-cfg` into concrete descriptor maps for
+   `providers/build-injected-credentials-backend`. Each descriptor's API key is
+   taken inline (`:api-key`) or fetched from a `:llm/credential-sources` store
+   via `:key-from [<source-kw> <json-path…>]`. Stores are read once and cached.
+   Descriptors that need a key but can't resolve one are dropped (with a warning);
+   `:codex` (OAuth file) needs no key. Returns a vector, or nil when unconfigured."
+  [run-cfg]
+  (when-let [descs (seq (:llm/credentials run-cfg))]
+    (let [sources (:llm/credential-sources run-cfg)
+          store   (memoize (fn [src-kw]
+                             (some-> (get sources src-kw) read-json-store)))]
+      (->> descs
+        (keep
+          (fn [{:keys [provider api-key key-from] :as d}]
+            (let [k (or api-key
+                      (when key-from
+                        (let [[src-kw & path] key-from]
+                          (get-in (store src-kw) (vec path)))))
+                  base (-> d
+                         (dissoc :key-from)
+                         (cond-> k (assoc :api-key k)))]
+              (cond
+                (= :codex provider) base          ; OAuth file; no key needed
+                (str/blank? k)
+                (do (binding [*out* *err*]
+                      (println (str "[cli] WARN :llm/credentials — no API key resolved for "
+                                    provider " (from " (pr-str key-from) "); skipping")))
+                    nil)
+                :else base))))
+        vec
+        seq))))
 
 (defn- make-backend
   "Construct an LLM backend.
@@ -661,19 +711,6 @@
         _                      (.mkdirs (io/file session-dir))
         initial-data           (let [base (when-let [p (:input opts)] (read-edn-file p))]
                                  (merge-params base (:param opts)))
-        _                      (when (needs-llm? opts)
-                                 (die! (str "Error: no LLM backend configured.\n"
-                                            "Options:\n"
-                                            "  1. Set ANTHROPIC_API_KEY (Anthropic API)\n"
-                                            "  2. Set ZAI_API_KEY (z.ai Anthropic-compatible endpoint)\n"
-                                            "  3. Set OLLAMA_API_KEY (Ollama Cloud)\n"
-                                            "  4. Set OPENCODE_GO_API_KEY (OpenCode Go)\n"
-                                            "  5. Pass --backend codex  (ChatGPT Plus/Pro subscription; run 'escapement login codex' first)\n"
-                                            "See: escapement info   (or:  Guide.adoc, \"LLM backends\")")
-                                       1))
-        backend-info           (make-backend opts)
-        backend                (:backend backend-info)
-        backend-default-models (:default-models backend-info)
         ;; Resolve the subjective ratings table + fail-closed flag ONCE
         ;; from the merged `.escapement.edn` at startup, then inject them
         ;; as explicit values into the invocation context (same code path
@@ -692,6 +729,28 @@
         eligibility-strict?    (boolean
                                 (or (:llm/eligibility-strict? run-cfg)
                                     (get-in run-cfg [:llm :eligibility-strict?])))
+        ;; Config-declared credentials (`.escapement.edn :llm/credentials`) →
+        ;; a hermetic multi-dispatch backend, the SAME path the embeddable lib
+        ;; uses. Active only when no explicit `--backend` flag is given. Keys
+        ;; are resolved from external stores so no secrets live in the config.
+        config-creds           (when-not (:backend opts)
+                                 (resolve-config-credentials run-cfg))
+        _                      (when (and (empty? config-creds) (needs-llm? opts))
+                                 (die! (str "Error: no LLM backend configured.\n"
+                                            "Options:\n"
+                                            "  1. Declare :llm/credentials in .escapement.edn (see .escapement.edn.example)\n"
+                                            "  2. Set ANTHROPIC_API_KEY / ZAI_API_KEY / OPENAI_API_KEY / OLLAMA_API_KEY / OPENCODE_GO_API_KEY\n"
+                                            "  3. Pass --backend codex  (ChatGPT Plus/Pro subscription; run 'escapement login codex' first)\n"
+                                            "See: escapement info   (or:  Guide.adoc, \"LLM backends\")")
+                                       1))
+        backend-info           (if (seq config-creds)
+                                 {:backend        (providers/build-injected-credentials-backend
+                                                    config-creds
+                                                    (preferences/flatten-targets llm-preferences llm-aliases))
+                                  :default-models (preferences/model-order llm-preferences llm-aliases)}
+                                 (make-backend opts))
+        backend                (:backend backend-info)
+        backend-default-models (:default-models backend-info)
         ;; Load the chart FIRST. Its require-graph may include namespaces
         ;; whose top-level forms call
         ;; `(tp/register! escapement.tools.builtin/default-registry ...)`.
