@@ -106,19 +106,23 @@
        (let [a (first args)]
          (cond
            (str/starts-with? a "--")
-           (let [k (keyword (subs a 2))]
+           ;; Support both `--flag value` (space) and `--flag=value` (inline) forms.
+           (let [eq      (.indexOf ^String a (int \=))
+                 inline? (>= eq 0)
+                 k       (keyword (subs a 2 (if inline? eq (count a))))
+                 inline-v (when inline? (subs a (inc eq)))]
              (cond
                (contains? bool-flags k)
                (recur (rest args) pos (assoc opts k true))
 
                (contains? multi-flags k)
-               (if-let [v (second args)]
-                 (recur (drop 2 args) pos (update opts k (fnil conj []) v))
+               (if-let [v (or inline-v (second args))]
+                 (recur (if inline? (rest args) (drop 2 args)) pos (update opts k (fnil conj []) v))
                  (die! (str "Flag " a " requires a value")))
 
                :else
-               (if-let [v (second args)]
-                 (recur (drop 2 args) pos (assoc opts k v))
+               (if-let [v (or inline-v (second args))]
+                 (recur (if inline? (rest args) (drop 2 args)) pos (assoc opts k v))
                  (die! (str "Flag " a " requires a value")))))
            :else
            (recur (rest args) (conj pos a) opts)))))))
@@ -447,20 +451,40 @@
   (System/exit 0))
 
 (defn- decide-tui
-  "Resolve TUI on/off from flags + chart metadata + tty.
+  "Resolve the TUI mode from flags + chart metadata + tty.
 
-   --no-tui wins outright. --debug forces on (and errors with no
-   TTY). Otherwise `^{:interactive? true}` on the chart var defaults to on;
-   else off. `--debug` and `--no-tui` together is rejected."
+   Returns one of: `:jline` (the default in-process JLine TUI), `:opentui`
+   (the OpenTUI Bun sidecar), or `false` (headless / no UI).
+
+   Rules:
+   * `--no-tui` wins outright → `false`.
+   * `--tui=opentui` selects the sidecar (requires a real TTY). `--tui=jline`
+     (or `--tui` absent) selects the JLine path. `--debug --tui=opentui`
+     runs the sidecar WITH a debug controller (live pause/step/continue/arm
+     over the WS back-channel + a PAUSED banner) — parity with `--debug` on
+     the web path. `--debug` alone still forces the JLine TUI.
+   * `--debug` forces a TUI on (JLine by default, the sidecar with
+     `--tui=opentui`) and errors with no TTY.
+   * else `^{:interactive? true}` on the chart var defaults to JLine; else off.
+   * `--debug` + `--no-tui` is rejected.
+
+   Both UI modes require an interactive terminal; a non-TTY with a UI requested
+   errors (the JLine message is reused — it covers the headless stdin advice)."
   [opts chart-meta]
   (let [no-tui?      (boolean (:no-tui opts))
         debug?       (boolean (:debug opts))
+        tui-flag     (some-> (:tui opts) str/lower-case str/trim)
         _            (when (and no-tui? debug?)
                        (die! "--debug requires the TUI; do not combine with --no-tui."))
+        _            (when (and tui-flag (not (#{"jline" "opentui"} tui-flag)))
+                       (die! (str "--tui must be jline or opentui (got: " (:tui opts) ")")))
+        opentui?     (and (= tui-flag "opentui") (not no-tui?))
         interactive? (boolean (:interactive? chart-meta))
         want?        (cond
                        no-tui? false
+                       opentui? true
                        debug? true
+                       (= tui-flag "jline") true
                        :else interactive?)]
     (cond
       no-tui?
@@ -472,7 +496,11 @@
                  ":human-input invocations will read from stdin).")
             1)
 
-      :else want?)))
+      (and want? opentui?) :opentui
+
+      want? :jline
+
+      :else false)))
 
 (defn parse-source-paths [s] (when s (remove str/blank? (str/split s #":"))))
 
@@ -561,7 +589,7 @@
 
 (defn- cmd-run [args]
   (let [{:keys [positional opts]}
-        (parse-args args #{:resume :trace :no-tui :debug :dump-d2} #{:param :tools-ns})
+        (parse-args args #{:resume :trace :no-tui :debug :dump-d2 :no-spawn} #{:param :tools-ns})
         _                      (let [[tag v] (resolve-log-level opts)]
                                  (if (= tag :error)
                                    (die! v 2)
@@ -651,13 +679,26 @@
         ;; Those side-effects mutate the singleton registry atom and are then
         ;; visible to `runner/run!` below.
         [chart chart-meta] (runner/load-chart-with-meta chart-sym)
-        use-tui?               (decide-tui opts chart-meta)
-        ;; When the TUI is active it owns the terminal (alt-screen ANSI on
-        ;; *err*). The interactive logging default is DEBUG, which would
-        ;; otherwise scribble over the modal/scrollback ("flicker + messages").
-        ;; Redirect those logs to a file so the screen stays clean but the
-        ;; verbose trail is still captured for debugging.
-        log-file               (when use-tui?
+        tui-mode               (decide-tui opts chart-meta)
+        jline?                 (= tui-mode :jline)
+        opentui?               (= tui-mode :opentui)
+        ;; --tui=opentui: resolve the Bun sidecar entry up-front so we fail fast
+        ;; (before any session machinery) if the opentui/ workspace is missing.
+        ;; Reached only via requiring-resolve (architecture boundary).
+        sidecar-entry          (when opentui?
+                                 (let [e (try ((requiring-resolve 'escapement.ui.opentui-sidecar/sidecar-entry))
+                                              (catch Throwable _ nil))]
+                                   (when-not e
+                                     (die! (str "--tui=opentui could not find the OpenTUI sidecar entry "
+                                                "(opentui/src/main.tsx). Run from the escapement repo, set "
+                                                "OPENTUI_DIR=<path-to-opentui>, and `bun install` in opentui/.")
+                                           1))
+                                   e))
+        ;; When ANY TUI is active it owns the terminal. For JLine the alt-screen
+        ;; ANSI is in-process; for OpenTUI the sidecar owns the tty and the agent
+        ;; runs headless — in BOTH cases verbose logs must NOT reach the terminal,
+        ;; so route them to a file.
+        log-file               (when tui-mode
                                  (route-logs-to-file! (str session-dir "/escapement.log")))
         debug?                 (boolean (:debug opts))
         debug-cfg              (when debug? (config/load-config))
@@ -668,20 +709,12 @@
                                                             [:debug :auto-pause?]
                                                             true))}))
         session-short          (apply str (take 8 session))
-        tui-handle             (when use-tui?
+        tui-handle             (when jline?
                                  (tui/start! (cond-> {:chart-sym     chart-sym
                                                       :session-short session-short}
                                                debug? (assoc :debug? true
                                                              :debug-controller debug-controller
                                                              :debug-config debug-cfg))))
-        human-renderer         (cond
-                                 tui-handle (tui/->renderer tui-handle)
-                                 (:interactive? chart-meta) (human-input/stdin-renderer)
-                                 ;; Charts that don't declare :interactive? still get
-                                 ;; a stdin renderer for any human-input states they
-                                 ;; happen to invoke — fail-soft rather than silently
-                                 ;; hang on a missing renderer.
-                                 :else (human-input/stdin-renderer))
         tool-registry          (when backend
                                  (require 'escapement.tools.builtin)
                                  (let [reg-var (resolve 'escapement.tools.builtin/default-registry)
@@ -700,16 +733,71 @@
                                    (when-let [base-dir (or (:base-dir opts) session-dir)]
                                      (alter-meta! reg assoc :escapement/base-dir base-dir))
                                    reg))
-        api-server-port        (when-let [s (:api-server opts)]
+        explicit-api-port      (when-let [s (:api-server opts)]
                                  (let [n (try (Long/parseLong s) (catch Throwable _ nil))]
                                    (when-not (and n (pos? n))
                                      (die! (str "--api-server must be a positive port (got: " s ")") 2))
                                    n))
+        ;; --tui=opentui REQUIRES the api-server + WS push (the sidecar's transport).
+        ;; Reuse an explicit --api-server port if given, else auto-pick a free one.
+        api-server-port        (cond
+                                 explicit-api-port explicit-api-port
+                                 opentui? ((requiring-resolve 'escapement.ui.opentui-sidecar/free-port))
+                                 :else nil)
         ;; Shared control handle: created here (before the env exists) and given
         ;; to BOTH the api-server ctx and `run!`'s on-env-ready (which fills it
         ;; with the live env/queue/controller). This is the seam by which the
         ;; server's live resolvers/mutations reach the running chart under bb.
         control-handle         (when api-server-port (ctrl-handle/new-handle))
+        ;; Live WS push fan-out hub. Created here so it can be BOTH handed to the api-server
+        ;; (powers `GET /ws`) and tee'd into the runner's transcript-tap below — a non-blocking
+        ;; mirror of every transcript event to connected sidecar/browser clients. Lazy-required so a
+        ;; normal run never loads the add-on; nil unless the api-server is up.
+        ws-hub                 (when api-server-port
+                                 (try ((requiring-resolve 'escapement.ui.ws-push/new-hub))
+                                      (catch Throwable _ nil)))
+        ws-publish!            (when ws-hub
+                                 (let [pub (requiring-resolve 'escapement.ui.ws-push/publish!)]
+                                   (fn [ev] (pub ws-hub ev))))
+        ;; OpenTUI human-input renderer: prompts are published to the sidecar over
+        ;; the WS hub (raw `prompt`/`progress` frames via `ws-push/broadcast!`),
+        ;; the worker parks on a promise, and the WS `answer` back-channel resolves
+        ;; it. Constructed here so it can serve as the run's HumanRenderer.
+        remote-renderer        (when (and opentui? ws-hub)
+                                 (let [broadcast! (requiring-resolve 'escapement.ui.ws-push/broadcast!)
+                                       ->rndr     (requiring-resolve 'escapement.ui.remote-renderer/->renderer)]
+                                   (->rndr {:publish-fn (fn [msg] (broadcast! ws-hub msg))})))
+        human-renderer         (cond
+                                 tui-handle (tui/->renderer tui-handle)
+                                 remote-renderer remote-renderer
+                                 (:interactive? chart-meta) (human-input/stdin-renderer)
+                                 ;; Charts that don't declare :interactive? still get
+                                 ;; a stdin renderer for any human-input states they
+                                 ;; happen to invoke — fail-soft rather than silently
+                                 ;; hang on a missing renderer.
+                                 :else (human-input/stdin-renderer))
+        ;; OpenTUI WS back-channel seam: inbound `control`/`answer` frames are
+        ;; dispatched here (control → debug controller / runner :ui.interrupt|:ui.quit,
+        ;; answer → remote-renderer delivery registry). `on-quit` triggers teardown.
+        sidecar-proc           (atom nil)
+        ;; Push the live debugger snapshot (paused?/step-budget/config) to the
+        ;; sidecar so its PAUSED banner + Debugger view stay current without
+        ;; polling. nil unless both a debug controller and the WS hub exist.
+        publish-debug!         (when (and debug-controller ws-hub)
+                                 (let [pub (requiring-resolve 'escapement.ui.ws-push/publish-debug!)]
+                                   (fn [snap] (pub ws-hub snap))))
+        ws-handlers            (when opentui?
+                                 ((requiring-resolve 'escapement.ui.opentui-sidecar/make-ws-handlers)
+                                  {:control-handle control-handle
+                                   :controller     debug-controller
+                                   :publish-debug! publish-debug!
+                                   :on-answered    (when ws-hub
+                                                     (let [clear! (requiring-resolve 'escapement.ui.ws-push/clear-pending-prompt!)]
+                                                       (fn [] (clear! ws-hub))))
+                                   :on-quit        (fn []
+                                                     (when-let [p @sidecar-proc]
+                                                       (try ((requiring-resolve 'escapement.ui.opentui-sidecar/destroy!) p)
+                                                            (catch Throwable _ nil))))}))
         ;; Read-only EQL API over the work-dir, scoped to this run's session,
         ;; PLUS a live control plane (pause/step/continue) when a debug
         ;; controller is active. Lazy-required so a normal run never loads Pathom.
@@ -723,18 +811,62 @@
                                                              "library consumers must add those deps. Cause: "
                                                              (.getMessage t))
                                                         2)))]
-                                   (binding [*out* *err*]
-                                     (println (str "[cli] EQL API on http://localhost:" api-server-port "/api"))
-                                     (println (str "[cli] UI     on http://localhost:" api-server-port "/")))
+                                   (when-not opentui?
+                                     (binding [*out* *err*]
+                                       (println (str "[cli] EQL API on http://localhost:" api-server-port "/api"))
+                                       (println (str "[cli] UI     on http://localhost:" api-server-port "/"))))
                                    (start! {:port              api-server-port
                                             :work-dir          work-dir
                                             :active-session-id session
                                             :chart             chart
                                             :controller        debug-controller
-                                            :live              control-handle})))
+                                            :live              control-handle
+                                            :ws-push           ws-hub
+                                            :ws-handlers       ws-handlers})))
+        ;; --tui=opentui supervisor teardown: stop the api-server, cancel any
+        ;; parked prompts, restore the terminal (the sidecar owned raw mode), and
+        ;; exit. Used both when the sidecar dies abnormally (watcher thread) and
+        ;; in the run's finally. Idempotent via a one-shot flag.
+        torn-down?             (atom false)
+        teardown-opentui!      (fn [code]
+                                 (when (compare-and-set! torn-down? false true)
+                                   (try ((requiring-resolve 'escapement.ui.remote-renderer/cancel-all!))
+                                        (catch Throwable _ nil))
+                                   (when api-handle
+                                     (try ((requiring-resolve 'escapement.ui.server/stop!) api-handle)
+                                          (catch Throwable _ nil)))
+                                   (when-let [p @sidecar-proc]
+                                     (try ((requiring-resolve 'escapement.ui.opentui-sidecar/destroy!) p)
+                                          (catch Throwable _ nil)))
+                                   (try ((requiring-resolve 'escapement.ui.opentui-sidecar/restore-terminal!))
+                                        (catch Throwable _ nil))
+                                   (when code (System/exit code))))
         exit-code
         (try
           (let [session-kw         (keyword "session" session)
+                ;; OpenTUI: spawn + supervise the Bun sidecar. It connects back to
+                ;; the just-started api-server's WS and owns the tty; the agent runs
+                ;; headless below. A watcher thread tears the run down if the sidecar
+                ;; dies abnormally (restoring the terminal). --no-spawn skips the
+                ;; spawn so an externally-launched UI can attach (debug aid).
+                _                  (when (and opentui? (not (:no-spawn opts)))
+                                     (let [spawn!  (requiring-resolve 'escapement.ui.opentui-sidecar/spawn!)
+                                           proc    (spawn! {:entry       sidecar-entry
+                                                            :port        api-server-port
+                                                            :session-id  session
+                                                            :session-dir session-dir})]
+                                       (reset! sidecar-proc proc)
+                                       (doto (Thread.
+                                              (fn []
+                                                (let [code (try (.waitFor proc) (catch Throwable _ -1))]
+                                                  ;; sidecar gone → end the run + restore the tty
+                                                  (teardown-opentui! (if (zero? code) 0 130)))))
+                                         (.setDaemon true)
+                                         (.start))))
+                _                  (when (and opentui? (:no-spawn opts))
+                                     (binding [*out* *err*]
+                                       (println (str "[cli] --tui=opentui --no-spawn: connect a sidecar to "
+                                                     "ws://127.0.0.1:" api-server-port "/ws"))))
                 parse-pos-int      (fn [k]
                                      (when-let [s (get opts k)]
                                        (let [n (try (Long/parseLong s) (catch Throwable _ nil))]
@@ -744,7 +876,19 @@
                                          n)))
                 max-frozen-cycles  (parse-pos-int :max-frozen-cycles)
                 quiescent-sleep-ms (parse-pos-int :quiescent-sleep-ms)
-                summary            (runner/run!
+                ;; OpenTUI: the sidecar owns the terminal, so any chart `*out*`/`*err*`
+                ;; prints must NOT reach it. Redirect them to the session log so they
+                ;; are captured but never corrupt the UI. (JLine already routes via
+                ;; route-logs-to-file! + its own alt-screen ownership.)
+                ot-log-writer      (when opentui?
+                                     (io/writer (io/file (str session-dir "/escapement.log")) :append true))
+                run-headless       (fn [thunk]
+                                     (if ot-log-writer
+                                       (binding [*out* ot-log-writer *err* ot-log-writer]
+                                         (try (thunk) (finally (try (.flush ot-log-writer) (catch Throwable _ nil)))))
+                                       (thunk)))
+                summary            (run-headless
+                                    (fn [] (runner/run!
                                     (cond-> {:chart                  chart
                                              :session-id             session-kw
                                              :transcript-path        transcript
@@ -763,11 +907,22 @@
                                              :trace?                 (boolean (:trace opts))
                                              :multi-session?         (boolean (:multi-session? chart-meta))
                                              :prelude-events         prelude-events
-                                             :transcript-tap         (when tui-handle
-                                                                       (fn [ev] (tui/event! tui-handle ev)))
+                                             ;; Tee the transcript event stream to the JLine TUI
+                                             ;; (when present) AND the live WS push hub (when the
+                                             ;; api-server is up). Both are non-blocking; failures
+                                             ;; in one must not disturb the other or the writer.
+                                             :transcript-tap         (when (or tui-handle ws-publish!)
+                                                                       (fn [ev]
+                                                                         (when tui-handle
+                                                                           (try (tui/event! tui-handle ev) (catch Throwable _ nil)))
+                                                                         (when ws-publish!
+                                                                           (try (ws-publish! ev) (catch Throwable _ nil)))))
                                              :debug-controller       debug-controller
-                                             :human-input-active?    (when tui-handle
-                                                                       (fn [] (tui/human-input-active? tui-handle)))
+                                             :human-input-active?    (cond
+                                                                       tui-handle
+                                                                       (fn [] (tui/human-input-active? tui-handle))
+                                                                       opentui?
+                                                                       (requiring-resolve 'escapement.ui.remote-renderer/human-input-active?))
                                              :on-env-ready           (when (or tui-handle control-handle)
                                                                        (fn [env]
                                                                          (when tui-handle
@@ -778,15 +933,23 @@
                                                                            (tui/attach-env! tui-handle env chart))
                                                                           ;; Fill the shared control handle so the
                                                                           ;; api-server's live resolvers/mutations
-                                                                          ;; can reach the running env + queue.
+                                                                          ;; (and the OpenTUI WS back-channel) can
+                                                                          ;; reach the running env + queue.
                                                                          (when control-handle
                                                                            (ctrl-handle/fill! control-handle
                                                                                               {:env        env
                                                                                                :session-id session-kw
                                                                                                :queue      (::sc/event-queue env)
-                                                                                               :controller debug-controller}))))}
+                                                                                               :controller debug-controller}))
+                                                                         ;; Publish the initial debugger snapshot so a
+                                                                         ;; sidecar started with --debug (auto-paused)
+                                                                         ;; shows the PAUSED banner immediately.
+                                                                         (when publish-debug!
+                                                                           (publish-debug!
+                                                                            {:paused      (dbg/paused? debug-controller)
+                                                                             :step-budget (long (or (:step-budget @debug-controller) 0))}))))}
                                       max-frozen-cycles (assoc :max-frozen-cycles max-frozen-cycles)
-                                      quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)))]
+                                      quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)))))]
             ;; Hold the TUI open after the chart finishes so the user can keep
             ;; browsing the inspector (transcripts, artifacts, history, viz)
             ;; instead of the process exiting out from under them. Ctrl-C from
@@ -794,18 +957,35 @@
             (when tui-handle
               (tui/await-quit! tui-handle))
             (when tui-handle (tui/stop! tui-handle))
-            (println "session         " session)
-            (println "transcript      " transcript)
-            (println "checkpoint-dir  " checkpoint-dir)
-            (when log-file (println "log             " log-file))
-            (println "final-config    " (:final-config summary))
+            ;; OpenTUI: the agent finished first → signal the sidecar to exit and
+            ;; restore the terminal. (Its watcher thread also fires on its own exit;
+            ;; teardown is idempotent.) The summary lines go to the log, not the
+            ;; sidecar-owned terminal.
+            (if opentui?
+              (do
+                (when log-file
+                  (try
+                    (spit log-file
+                          (str "session " session "\ntranscript " transcript
+                               "\nfinal-config " (pr-str (:final-config summary)) "\n")
+                          :append true)
+                    (catch Throwable _ nil)))
+                (teardown-opentui! nil))
+              (do
+                (println "session         " session)
+                (println "transcript      " transcript)
+                (println "checkpoint-dir  " checkpoint-dir)
+                (when log-file (println "log             " log-file))
+                (println "final-config    " (:final-config summary))))
             0)
           (catch Throwable t
             (when tui-handle (tui/stop! tui-handle))
+            (when opentui? (teardown-opentui! nil))
             (binding [*out* *err*]
               (println "[cli] chart run failed:" (.getMessage t)))
             1)
           (finally
+            (when opentui? (teardown-opentui! nil))
             (when api-handle
               (try ((requiring-resolve 'escapement.ui.server/stop!) api-handle)
                    (catch Throwable _ nil)))))]
@@ -865,6 +1045,13 @@ Common `run` flags:
   --quiescent-sleep-ms <ms>     Override the runner's idle-sleep (default
                                 50ms). Increases per-cycle wall-clock so
                                 --max-frozen-cycles N covers more time.
+  --tui (jline|opentui)         Select the terminal UI. jline (default) is the
+                                in-process JLine TUI; opentui spawns the OpenTUI
+                                Bun sidecar (requires a TTY + bun + opentui/ built;
+                                starts the api-server+WS, runs the agent headless).
+  --no-spawn                    With --tui=opentui: do NOT spawn the sidecar; start
+                                the server+WS and print the ws:// URL so an
+                                externally-launched UI can attach (debug aid).
   --no-tui                      Force-disable the TUI (overrides ^:interactive?).
   --dump-d2                     Print the chart's d2 diagram source and exit
                                 (no run, no backend). Pipe to `d2 -` to render.

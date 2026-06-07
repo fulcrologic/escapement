@@ -260,6 +260,7 @@
                          :invocations "Invocations"
                          :chart       "Chart"
                          :status      "Status"
+                         :artifacts   "Artifacts"
                          "Inspector")
         pending-suffix (if (:pending-modal s) " · 1 prompt waiting" "")
         draw!          (fn [title body-lines scroll]
@@ -301,7 +302,25 @@
             wrapped (if transcript?
                       (:colored-lines pager)
                       (into [] (mapcat #(wrap-line interior-w %)) (:lines pager)))
-            offset  (min (max 0 (or (:offset pager) 0)) (max 0 (dec (count wrapped))))
+            ;; Auto-follow: a transcript pager pins to the bottom (so streamed
+            ;; tokens stay in view) UNTIL the user scrolls up (`:follow?` set
+            ;; false by the pager keys). `G`/End re-arm follow. The bottom offset
+            ;; is `count - interior-h` so the last interior-h lines show.
+            follow? (and transcript? (not (false? (:follow? pager))))
+            offset  (if follow?
+                      (max 0 (- (count wrapped) interior-h))
+                      (min (max 0 (or (:offset pager) 0)) (max 0 (dec (count wrapped)))))
+            bottom  (max 0 (- (count wrapped) interior-h))
+            ;; While following, keep state's `:offset` synced to the visible
+            ;; bottom so the first PgUp/k detaches from where the eye is (not 0).
+            ;; When a detached pager is scrolled back down to the bottom, re-arm
+            ;; follow so new tokens track again.
+            _       (when (:state h)
+                      (cond
+                        (and follow? (not= offset (:offset pager)))
+                        (swap! (:state h) assoc-in [:debug-overlay :pager :offset] offset)
+                        (and transcript? (not follow?) (>= offset bottom))
+                        (swap! (:state h) assoc-in [:debug-overlay :pager :follow?] true)))
             {:keys [start total pos]} (scroll-window (count wrapped) interior-h offset)
             slice   (subvec wrapped start (min (count wrapped) (+ start interior-h)))]
         (draw! (str (:title pager) pending-suffix)
@@ -405,6 +424,37 @@
                              (line "artifacts-dir:"  (when abs (str abs "/artifacts/")))]
                  :hl-offset nil :selectable? false})
 
+              :artifacts
+              (let [adir   (util/artifacts-dir sdir)
+                    abs    (when adir (try (.getAbsolutePath adir)
+                                           (catch Throwable _ (str adir))))
+                    arts   (util/list-all-artifacts sdir)
+                    total  (reduce + 0 (map :size arts))
+                    copied (:copied ov)
+                    label  (fn [k] (theme/paint theme :timestamp k))
+                    metric (fn [v] (theme/paint theme :metric (str v)))
+                    header (cond-> [(str " " (label "dir:  ") (metric (or abs "—")))
+                                    (str " " (label "size: ")
+                                      (metric (str (util/human-size total)
+                                                "  (" (count arts) " files)")))
+                                    (str " " (theme/paint theme :session-id
+                                               "── j/k select · Enter/o open · y copy path · Y copy dir · Esc close ──"))]
+                             copied (conj (str " " (theme/paint theme :status/done
+                                                     (str "✓ copied: " copied)))))]
+                (if (seq arts)
+                  {:rows        (into header
+                                  (mapv (fn [{:keys [name size]}]
+                                          (str "  "
+                                            (theme/paint theme :metric
+                                              (format "%-40s" (cmp/truncate name 40)))
+                                            "  "
+                                            (theme/paint theme :timestamp (util/human-size size))))
+                                    arts))
+                   :hl-offset   (count header)
+                   :selectable? true}
+                  {:rows      (conj header "  (no artifacts in this session)")
+                   :hl-offset nil :selectable? false}))
+
               {:rows [" (unknown view)"] :hl-offset nil :selectable? false})
             rows     (vec rows)
             hl-row   (when (and selectable? hl-offset)
@@ -449,7 +499,22 @@
       (case (:view ov)
         :invocations (count (:invocations ov))
         :chart (count (current-event-rows (:events ov)))
+        :artifacts (count (util/list-all-artifacts (util/session-dir-from-env env)))
         0))))
+
+(defn artifacts-selection
+  "For the session-wide `:artifacts` view, return
+   `{:dir abs-artifacts-dir :path selected-abs-path :name selected-name}` for the
+   row at the current cursor. `:path`/`:name` are nil when the list is empty."
+  [h s]
+  (let [env  (some-> (:env h) deref)
+        sdir (util/session-dir-from-env env)
+        adir (util/artifacts-dir sdir)
+        arts (vec (util/list-all-artifacts sdir))
+        sel  (nth arts (get-in s [:debug-overlay :cursor] 0) nil)]
+    {:dir  (when adir (try (.getAbsolutePath adir) (catch Throwable _ (str adir))))
+     :path (:path sel)
+     :name (:name sel)}))
 
 (defn open-artifact-file!
   "Open `path` using `(:viewers cfg)`. Falls back to the internal pager when
@@ -498,6 +563,14 @@
       (open-artifact-file! state (:debug-config h)
         (str sdir "/artifacts/" name)
         name))))
+
+(defn open-selected-artifact-info!
+  "Open the artifact selected in the session-wide `:artifacts` view (via the
+   configured viewer, or the internal pager)."
+  [h state]
+  (let [{:keys [path name]} (artifacts-selection h @state)]
+    (when path
+      (open-artifact-file! state (:debug-config h) path name))))
 
 (defn open-event-detail!
   "Drill-in for a chart event row: pretty-print the event into the pager."

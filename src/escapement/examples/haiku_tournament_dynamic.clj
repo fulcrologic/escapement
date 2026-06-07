@@ -806,6 +806,16 @@
            :allowed-events []
            :max-turns      2
            :budget-ms      120000
+           ;; Output-token ceiling for the host's prose: cap each turn at 6k
+           ;; tokens and, on truncation (`stop-reason :max_tokens`), rerun the
+           ;; same turn twice instead of stitching an unbounded continuation.
+           ;; The slight per-rerun temperature bump lets a deterministic host
+           ;; model break out of a re-truncating loop. Retries spent ⇒ accept
+           ;; the truncated turn (`:on-exhausted :truncate`, the default).
+           :resilience     {:overrun {:max-output-tokens 6000
+                                      :max-retries       2
+                                      :temperature-bump  0.1
+                                      :temperature-max   1.0}}
            :message        (fn [_env data] (host-user-message data))})
         (transition {:event :llm.idle
                      :cond  (fn [_env data] (= "host" (from-id data)))

@@ -1,0 +1,35 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`Transcript — themed SENT/REPLY render snapshots (no model) planner transcript: SENT/REPLY blocks, hairline, meta, body wrap 1`] = `
+" ▸ SENT   02:20:49 · system · 80 chars
+  You are the dispatcher for a haiku tournament. Read the
+  user input and reply on…
+
+────────────────────────────────────────────────────────────
+ ◂ REPLY  02:20:49 · assistant · end_turn · in:224 out:29 · 68.1 t/s
+  Line 1: the word START
+  Line 2: 2
+  Line 3: 1
+  Line 4: first snow"
+`;
+
+exports[`Transcript — themed SENT/REPLY render snapshots (no model) transcriptPage head summary (iid · models · N replies) 1`] = `
+" planner · gemma3:1b  ·  1 replies
+
+ ▸ SENT   02:20:49 · system · 80 chars
+  You are the dispatcher for a haiku tournament. Read the
+  user input and reply on…
+
+────────────────────────────────────────────────────────────
+ ◂ REPLY  02:20:49 · assistant · end_turn · in:224 out:29 · 68.1 t/s
+  Line 1: the word START
+  Line 2: 2
+  Line 3: 1
+  Line 4: first snow"
+`;
+
+exports[`Transcript — themed SENT/REPLY render snapshots (no model) in-flight streaming block carries the ▏ cursor + streaming meta 1`] = `
+"────────────────────────────────────────────────────────────
+ ◂ REPLY  06:20:50 · assistant · ◂ streaming · out:7 · 12.3 t/s
+  partial haiku line▏"
+`;

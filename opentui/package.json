@@ -1,0 +1,25 @@
+{
+  "name": "escapement-opentui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenTUI sidecar UI for Escapement (Bun + SolidJS + OpenTUI).",
+  "module": "src/main.tsx",
+  "scripts": {
+    "dev": "bun --preload @opentui/solid/preload src/main.tsx",
+    "replay": "OPENTUI_REPLAY=test/fixtures/haiku-sample.jsonl bun --preload @opentui/solid/preload src/main.tsx",
+    "smoke": "bun run scripts/replay-smoke.ts",
+    "domain-smoke": "bun run scripts/domain-smoke.ts",
+    "typecheck": "bun x tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opentui/core": "0.3.2",
+    "@opentui/solid": "0.3.2",
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "5.9.3"
+  }
+}

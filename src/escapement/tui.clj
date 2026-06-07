@@ -510,7 +510,7 @@
       (if maximized?
         (str " · Esc restore split · Tab → " other)
         (str " · m maximize · Tab → " other))
-      " · ? inspector"
+      " · ? inspector · a artifacts"
       ctrl viz
       (when-not maximized? " · Esc interrupt")
       " · Ctrl-C quit")))
@@ -729,6 +729,27 @@
       (.append buf clear-eol-s))
     buf))
 
+(defn- render-overlay-fullscreen!
+  "Render the inspector/transcript overlay FULLSCREEN beneath the mission-control
+   header strip. Keeps the framed header (breadcrumb + run status + LLMs/act/t/s)
+   so the user still sees the whole run's state, but the LIVE/LOG panes are
+   hidden — the overlay owns the entire body region from just below the header
+   down to the modal row. Mirrors the header geometry of
+   `render-mission-control!` so the strip lines up identically."
+  [^StringBuilder buf h s theme term-w term-h]
+  (let [lay    (layout {:term-w term-w :term-h term-h
+                        :focus (:focus s :log) :maximized? (:maximized? s)})
+        hrect  (:header lay)
+        hiw    (- (:w hrect) 2)
+        hlines (header-lines h s theme hiw)]
+    (draw-box buf {:row (:row hrect) :col (:col hrect)
+                   :w (:w hrect) :h (:h hrect)
+                   :theme theme :body-lines hlines})
+    (let [r0 (+ (:row hrect) (:h hrect))   ;; first row below the header strip
+          r1 (- term-h 2)]                 ;; leave the modal row (term-h-1) free
+      (render-overlay! buf h s r0 r1 term-w))
+    buf))
+
 (defn- live-active?
   "True when any live session is mid-flight (:streaming/:waiting). Used by the
    render ticker to keep the shimmer animating while work is in progress."
@@ -813,8 +834,17 @@
       ;;  * mission-control (mc?): framed header strip + LIVE/LOG panes + footer.
       ;;  * legacy full-screen: header/status/live/scrollback (also the overlay
       ;;    and PAUSED-banner host — they need the whole body region).
-      (if mc?
+      (cond
+        mc?
         (render-mission-control! buf h s theme term-w term-h)
+
+        ;; Inspector/transcript overlay → fullscreen below the framed header
+        ;; strip (LIVE/LOG hidden). Paused host (overlay-open? is false then)
+        ;; still uses the legacy path below.
+        overlay-open?
+        (render-overlay-fullscreen! buf h s theme term-w term-h)
+
+        :else
         (do
           (.append buf (move-to-s 1 1))
           (.append buf (truncate header term-w))
@@ -1212,6 +1242,15 @@
                 (catch Throwable t
                   (vlog! (str "threw: " (.getMessage t)) :error? true))))))))))
 
+(defn- copy-to-clipboard!
+  "Copy `text` to the terminal clipboard via OSC 52 (emitted on the same output
+   stream as every other escape) and flash a `✓ copied` confirmation in the
+   Artifacts view."
+  [h text]
+  (when (seq (str text))
+    (emit! (util/osc52-seq text))
+    (swap! (:state h) assoc-in [:debug-overlay :copied] (str text))))
+
 (defn- handle-debug-key!
   "Dispatch a key while the debug overlay is open. Pager keys take precedence
    when the pager is up."
@@ -1221,26 +1260,33 @@
         ov    (:debug-overlay s)
         pager (:pager ov)]
     (if pager
-      (case k
-        :esc (close-pager! state)
-        :pgdn (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
-        :space (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
-        :pgup (swap! state update-in [:debug-overlay :pager :offset]
-                #(max 0 (- (or % 0) 10)))
-        :down (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
-        :up (swap! state update-in [:debug-overlay :pager :offset]
-              #(max 0 (dec (or % 0))))
-        (cond
-          (= k [:char \b]) (swap! state update-in [:debug-overlay :pager :offset]
-                             #(max 0 (- (or % 0) 10)))
-          (= k [:char \j]) (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
-          (= k [:char \k]) (swap! state update-in [:debug-overlay :pager :offset]
-                             #(max 0 (dec (or % 0))))
-          (= k [:char \g]) (swap! state assoc-in [:debug-overlay :pager :offset] 0)
-          (= k [:char \G]) (let [n (count (get-in @state [:debug-overlay :pager :lines]))]
-                             (swap! state assoc-in [:debug-overlay :pager :offset]
-                               (max 0 (dec n))))
-          :else nil))
+      ;; Pager scroll keys. Any UPWARD scroll detaches auto-follow (`:follow?
+      ;; false`) so the user can read back through a streaming transcript; `G`/End
+      ;; re-arm follow (snap to bottom + track new tokens). DOWNWARD scroll just
+      ;; moves the offset — render re-arms follow once the offset reaches bottom.
+      (let [detach! (fn [f] (swap! state update :debug-overlay
+                              (fn [ov] (-> ov
+                                         (update-in [:pager :offset] f)
+                                         (assoc-in [:pager :follow?] false)))))
+            up10  #(max 0 (- (or % 0) 10))
+            up1   #(max 0 (dec (or % 0)))]
+        (case k
+          :esc (close-pager! state)
+          :pgdn (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
+          :space (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
+          :pgup (detach! up10)
+          :down (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
+          :up (detach! up1)
+          (cond
+            (= k [:char \b]) (detach! up10)
+            (= k [:char \j]) (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
+            (= k [:char \k]) (detach! up1)
+            (= k [:char \g]) (detach! (constantly 0))
+            (= k [:char \G]) (swap! state update :debug-overlay
+                               #(-> % (assoc-in [:pager :follow?] true)
+                                  (assoc-in [:pager :offset]
+                                    (max 0 (dec (count (get-in % [:pager :lines])))))))
+            :else nil)))
       (cond
         (= k :esc)
         (cond
@@ -1264,6 +1310,17 @@
                            merge {:view :chart :cursor 0 :focus nil})
         (= k [:char \3]) (swap! state update :debug-overlay
                            merge {:view :status :cursor 0 :focus nil})
+        (or (= k [:char \4]) (= k [:char \a]))
+        (swap! state update :debug-overlay
+          merge {:view :artifacts :cursor 0 :focus nil :copied nil})
+
+        ;; Artifacts view: copy the selected file's path (y) / the dir path (Y).
+        (and (= :artifacts (:view ov)) (= k [:char \y]))
+        (when-let [p (:path (inspector/artifacts-selection h s))]
+          (copy-to-clipboard! h p))
+        (and (= :artifacts (:view ov)) (= k [:char \Y]))
+        (when-let [d (:dir (inspector/artifacts-selection h s))]
+          (copy-to-clipboard! h d))
 
         ;; In invocations drilldown, `h` or Backspace pops back to the list.
         (and (= :invocations (:view ov)) (:focus ov)
@@ -1292,14 +1349,18 @@
             ;; Enter on the list → show that invocation's full transcript.
             (open-invocation-transcript! h state (:cursor ov 0)))
           :chart (open-event-detail! h state (:cursor ov 0))
+          :artifacts (inspector/open-selected-artifact-info! h state)
           nil)
 
         (= k [:char \o])
-        (when (= :invocations (:view ov))
+        (case (:view ov)
+          :invocations
           (if (:focus ov)
             (open-focused-artifact! h state)
             ;; o on the list → drill into the artifact list for this invocation.
-            (focus-invocation! state (:invocations ov) (:cursor ov 0))))
+            (focus-invocation! state (:invocations ov) (:cursor ov 0)))
+          :artifacts (inspector/open-selected-artifact-info! h state)
+          nil)
 
         ;; Controller keys also work while overlay is open
         (and (:debug-controller h) (= k [:char \s]))
@@ -1414,6 +1475,13 @@
                 ;; Inspector top-level key (always active when no modal).
                 (and (:inspector? h) (= k [:char \?]))
                 (do (swap! state update-in [:debug-overlay :open?] not)
+                    (render-frame! h) (recur))
+
+                ;; `a` opens the inspector straight to the session-wide Artifacts
+                ;; view (dir + sizes + select/open/copy).
+                (and (:inspector? h) (= k [:char \a]))
+                (do (swap! state update :debug-overlay merge
+                      {:open? true :view :artifacts :cursor 0 :focus nil :copied nil})
                     (render-frame! h) (recur))
 
                 (and (:debug? h) (:debug-controller h)
@@ -1682,7 +1750,15 @@
         :llm/response
         (assoc-in live p (-> (or (get-in live p) {:session sid})
                            (assoc :status :done :text "" :last-ts ts
-                                  :reason (:stop-reason data))))
+                                  :reason (:stop-reason data))
+                           ;; the LLM's TRUE generation rate (output tokens over
+                           ;; the turn's wall-clock), computed in
+                           ;; llm_conversation; prefer it over the TUI's
+                           ;; delta-arrival estimate which gets stretched by
+                           ;; concurrency/queueing.
+                           (cond->
+                             (:output-tps data) (assoc :real-tps (:output-tps data))
+                             (:elapsed-ms data)  (assoc :elapsed-ms (:elapsed-ms data)))))
 
         (:llm/error :llm/model-down)
         (assoc-in live p (-> (or (get-in live p) {:session sid})
@@ -1806,8 +1882,14 @@
               ;; events (deltas are folded on the fast path in `event!`).
               (#{:llm/start :llm/response :llm/error :llm/model-down :llm/worker-exit}
                 (:event ev))
-              (update :live fold-live-event ev)))))
-      (render-frame! h)))
+              (update :live fold-live-event ev)))))))
+  ;; NOTE: no synchronous `render-frame!` here. This runs INLINE on the
+  ;; runner-loop / LLM-worker threads (the transcript tap is called on the
+  ;; emitting thread — see runner.clj), so painting here serializes the
+  ;; statechart behind a locked full-screen repaint + flushed stderr write
+  ;; for every event. Instead the caller (`event!`) marks the UI dirty via
+  ;; `request-render!` and the 30fps render ticker coalesces the repaint off
+  ;; the agent's critical path — same fast-path treatment as `:llm/delta`.
   nil)
 
 (defn await-quit!

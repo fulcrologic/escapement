@@ -47,3 +47,45 @@
                        (.list d)))))
         []))
     (catch Throwable _ [])))
+
+(defn artifacts-dir
+  "The `<session-dir>/artifacts` File for `session-dir`, or nil when session-dir
+   is nil."
+  [session-dir]
+  (when session-dir (io/file (str session-dir "/artifacts"))))
+
+(defn list-all-artifacts
+  "Every regular file in `<session-dir>/artifacts`, sorted by name, as a vector of
+   `{:name :path :size}` (path is absolute, size in bytes). [] when the directory
+   is absent/unreadable."
+  [session-dir]
+  (try
+    (let [d (artifacts-dir session-dir)]
+      (if (and d (.exists d) (.isDirectory d))
+        (->> (.listFiles d)
+          (filter #(.isFile ^java.io.File %))
+          (sort-by #(.getName ^java.io.File %))
+          (mapv (fn [^java.io.File f]
+                  {:name (.getName f)
+                   :path (.getAbsolutePath f)
+                   :size (.length f)})))
+        []))
+    (catch Throwable _ [])))
+
+(defn human-size
+  "Format a byte count as a short human-readable string (B/KB/MB/GB)."
+  [bytes]
+  (let [b (long (or bytes 0))]
+    (cond
+      (< b 1024)             (str b " B")
+      (< b (* 1024 1024))    (format "%.1f KB" (/ b 1024.0))
+      (< b (* 1024 1024 1024)) (format "%.1f MB" (/ b (* 1024.0 1024)))
+      :else                  (format "%.1f GB" (/ b (* 1024.0 1024 1024))))))
+
+(defn osc52-seq
+  "The OSC 52 escape sequence that sets the terminal clipboard (`c` selection) to
+   `text`. Pure; the caller writes it to the terminal output stream."
+  [text]
+  (let [b64 (.encodeToString (java.util.Base64/getEncoder)
+              (.getBytes (str text) "UTF-8"))]
+    (str (char 27) "]52;c;" b64 (char 27) "\\")))

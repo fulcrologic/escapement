@@ -49,10 +49,16 @@
   (or (:tokens v) (:chunks v) 0))
 
 (defn live-tps
-  "Tokens/sec for a live entry from first→last delta wall-clock."
+  "Tokens/sec for a live entry. Prefers the LLM's TRUE generation rate
+   (`:real-tps`, output tokens over the turn's wall-clock, set on finalize from
+   the `:llm/response` event). Falls back to a first→last delta-arrival estimate
+   while a session is still streaming (no final rate yet). The delta estimate is
+   stretched low by concurrency/queueing, so the real rate is strongly
+   preferred once known."
   [v]
-  (let [secs (/ (max 1 (- (or (:last-ts v) 0) (or (:first-ts v) 0))) 1000.0)]
-    (if (pos? secs) (/ (live-count v) secs) 0.0)))
+  (or (:real-tps v)
+    (let [secs (/ (max 1 (- (or (:last-ts v) 0) (or (:first-ts v) 0))) 1000.0)]
+      (if (pos? secs) (/ (live-count v) secs) 0.0))))
 
 (defn live-status
   "Per-status [rank glyph label] for the live panel. Lower rank sorts first so
@@ -80,14 +86,22 @@
    active/total counts, latest activity, a representative model, and the
    in-flight partial text of the most active session."
   [sessions]
-  (let [vs   (vals sessions)
-        best (->> vs (sort-by #(get status-rank (:status %) 3)) first)]
-    {:tokens   (reduce + 0 (map live-count vs))
+  (let [vs      (vals sessions)
+        best    (->> vs (sort-by #(get status-rank (:status %) 3)) first)
+        tokens  (reduce + 0 (map live-count vs))
+        last-ts (reduce max 0 (map #(or (:last-ts %) 0) vs))
+        ;; aggregate throughput = sum of the children's real per-session rates
+        ;; (the LLM-reported generation speed each session actually ran at), so
+        ;; the header reflects the combined token-generation rate rather than a
+        ;; wall-clock figure deflated by sequential queueing.
+        tps     (reduce + 0.0 (map live-tps vs))]
+    {:tokens   tokens
+     :tps      tps
      :status   (:status best)
      :n        (count vs)
      :n-active (count (filter #(#{:streaming :waiting} (:status %)) vs))
      :n-done   (count (filter #(= :done (:status %)) vs))
-     :last-ts  (reduce max 0 (map #(or (:last-ts %) 0) vs))
+     :last-ts  last-ts
      :model    (some :model vs)
      :text     (:text best)}))
 
@@ -303,7 +317,8 @@
 
    Layout per group (sorted so in-flight stays on top):
    * group header (role with >1 session): role name (role hue) · ◇ status ·
-     `done/total done` · completion bar (`done/total`) · tokens. Children render
+     `done/total done` · completion bar (`done/total`) · tokens (no t/s — the
+     summed per-session rate is misleading). Children render
      indented `├`/`└` rows: session · glyph status · tok · t/s · NO bar, capped
      with a `…+N more` roll-up.
    * single-session role (host / lone planner): NO bar — a streaming shimmer
@@ -318,6 +333,27 @@
    (let [iw     (max 1 interior-w)
          metric (fn [body] (theme/paint theme :metric body))
          fit    (fn [line] (cmp/truncate-display line iw))
+         ;; uniform right-hand metric tail (tok + t/s) so those columns line up
+         ;; across header / single / child rows. `left-fit` pads each row's
+         ;; left block to a fixed display width; the tail then starts at the
+         ;; same column everywhere.
+         ;; model column: shown on each INDIVIDUAL session row (single + child),
+         ;; since concurrent children can run different models. The group header
+         ;; reserves a BLANK column (it aggregates rows whose models may differ),
+         ;; keeping the tok/t-s columns aligned across header / single / child.
+         ;; Responsive: dropped entirely on narrow panes so the role name /
+         ;; completion bar never get crowded out (model-w 0 ⇒ no column).
+         model-w  (cond (>= iw 84) 16 (>= iw 72) 12 :else 0)
+         tail-w   (+ 22 (if (pos? model-w) (+ model-w 2) 0))
+         lw       (max 1 (- iw tail-w))
+         left-fit (fn [body] (cmp/truncate-display body lw))
+         modelcol (fn [m]
+                    (if (pos? model-w)
+                      (metric (format (str "  %-" model-w "s")
+                                (cmp/truncate (or m "") model-w)))
+                      ""))
+         mtail    (fn [tok tps]
+                    (metric (format "  %5d tok  %5.1f t/s" (long tok) (double tps))))
          ;; selection cursor: highlight the row at `:cursor` when LIVE focused
          hl?     (boolean (:focus? opts))
          cursor  (when hl? (:cursor opts))
@@ -340,21 +376,27 @@
                      prog     (if (= :streaming st)
                                 (shimmer theme bw (live-tick s g))
                                 (theme/sgr-wrap (theme/status-color theme st) label))
-                     line     (str " " (theme/sgr-wrap rcode (format "%-12s" name))
-                                " " gl " " prog
-                                (metric (format "  %5d tok  %5.1f t/s"
-                                          (long (live-count v)) (double (live-tps v)))))]
+                     left     (str " " (theme/sgr-wrap rcode (format "%-12s" name))
+                                " " gl " " prog)
+                     line     (str (left-fit left) (modelcol (:model v))
+                                (mtail (live-count v) (live-tps v)))]
                  [(fit line)])
                ;; multiple concurrent sessions → group header + bar + kids
                (let [done     (:n-done g)
                      bw       (live-bar-width-for iw)
                      bar      (completion-bar theme done n bw)
                      gl       (theme/sgr-wrap (theme/status-color theme status) "◇")
-                     head     (str " " (theme/sgr-wrap rcode (format "%-12s" name))
-                                " " gl " "
-                                (metric (format "%d/%d done " done n))
-                                bar
-                                (metric (format "  %5d tok" (long (:tokens g)))))
+                     ;; bold the parent/aggregate row so it visually separates
+                     ;; from its indented children (bold + the role hue).
+                     bcode    (if (str/blank? rcode) "1" (str "1;" rcode))
+                     head-left (str " " (theme/sgr-wrap bcode (format "%-12s" name))
+                                 " " gl " "
+                                 (theme/sgr-wrap bcode (format "%d/%d done " done n))
+                                 bar)
+                     head     (str (left-fit head-left)
+                                (modelcol nil)
+                                (theme/sgr-wrap bcode
+                                  (format "  %5d tok" (long (:tokens g)))))
                      kids     (->> (vals sessions)
                                 (sort-by (fn [v] [(get status-rank (:status v) 3)
                                                   (- (or (:last-ts v) 0))]))
@@ -368,18 +410,19 @@
                                [_ glyph label] (live-status v)
                                tee   (theme/sgr-wrap rcode (if last? "└" "├"))
                                kgl   (theme/sgr-wrap (theme/status-color theme st) (str glyph))]
-                           (fit (str "  " tee " "
-                                  (theme/sgr-wrap rcode (format "%-13s" (short-session (:session v))))
-                                  " " kgl " "
-                                  (theme/paint theme (case st
-                                                 :streaming :status/streaming
-                                                 :done :status/done
-                                                 :waiting :status/waiting
-                                                 :error :status/error
-                                                 :status/idle)
-                                    (format "%-9s" label))
-                                  (metric (format "  %5d tok  %5.1f t/s"
-                                            (long (live-count v)) (double (live-tps v))))))))
+                           (fit (str (left-fit
+                                       (str "  " tee " "
+                                         (theme/sgr-wrap rcode (format "%-13s" (short-session (:session v))))
+                                         " " kgl " "
+                                         (theme/paint theme (case st
+                                                        :streaming :status/streaming
+                                                        :done :status/done
+                                                        :waiting :status/waiting
+                                                        :error :status/error
+                                                        :status/idle)
+                                           (format "%-9s" label))))
+                                  (modelcol (:model v))
+                                  (mtail (live-count v) (live-tps v))))))
                        kids)]
                  (concat [(fit head)] kid-lines
                    (when (pos? more)

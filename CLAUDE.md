@@ -65,8 +65,18 @@ reverse), and that boundary is **enforced by a test**:
   *is* the full tool (its `--api-server` runs the Pathom surface under bb). The
   only namespace that requires Pathom is `escapement.ui.resolvers` (via
   `server.clj`); it is server-side only and is NOT in the browser build graph.
-- **Terminal-UI add-on** — `escapement.tui` (+ JLine). Used by the CLI
-  front-end only; the embeddable library (`escapement.lib`) never pulls it.
+- **Terminal-UI add-ons** — there are two, both used by the CLI front-end only; the
+  embeddable library (`escapement.lib`) never pulls either:
+  1. **JLine TUI** (default) — `escapement.tui` (+ JLine), in-process.
+  2. **OpenTUI sidecar** (opt-in via `--tui=opentui`) — an out-of-process Bun + SolidJS UI under
+     `opentui/` (outside `src/`, so the boundary scanner never sees it). Its agent-side glue lives in
+     the `escapement.ui.*` add-on (`ws_push`, `remote_renderer`, `opentui_sidecar`, the
+     `escapement.human/answer` mutation in `resolvers.cljc`) and is reached from `cli.clj` only via
+     `requiring-resolve` (like `--api-server`). The agent runs headless and pushes its transcript
+     event stream to the sidecar over a WebSocket on the api-server; the sidecar owns the TTY. `bb
+     test` covers the agent side (incl. `test/escapement/ui/opentui_push_test.clj`); the TypeScript UI
+     is tested under `bun test` (`bb opentui-test`) — a separate test path. See
+     [`docs/opentui-ui.md`](docs/opentui-ui.md).
 
 `test/escapement/architecture_boundary_test.clj` scans every `ns` form under
 `src/escapement` and fails if a core namespace statically requires the
@@ -122,6 +132,9 @@ adopted alongside as appropriate.
 bb test               # engine + queue + control-plane suite (bb, guardrails 1.2.16)
 bb ui-test            # RAD/TUI explorer tests (JVM, guardrails 1.3.2) — render-target-isolated JVMs; see "Web UI"
 bb sanity             # engine smoke
+bb opentui-test       # OpenTUI sidecar UI tests (bun test in opentui/: unit + snapshot) — see "OpenTUI sidecar UI"
+bb opentui-build      # OpenTUI sidecar typecheck (bun x tsc --noEmit in opentui/)
+bb haiku-opentui      # haiku tournament via the OpenTUI sidecar (--tui=opentui); needs a real TTY + bun + ollama gemma3:1b
 bb -m escapement.cli run escapement.examples.hello/agent   # run a chart
 bbin install .        # install the CLI
 bb build-ui           # release-compile the browser SPA + refresh resources/escapement-ui.edn
@@ -171,6 +184,19 @@ engine + api-server stay bb (1.2.16); only the RAD/TUI render code is 1.3.2.
 > CLJC gotcha: `::fully.qualified.ns/kw` (double-colon + full ns) resolves in CLJS but is an INVALID
 > TOKEN in CLJ — a `.cljc` file using it compiles under shadow yet fails to load under `:ui-test`
 > (JVM). Use the single-colon `:fully.qualified.ns/kw` (or a real `::alias/kw`) in cljc.
+
+## OpenTUI sidecar UI (opt-in terminal UI)
+
+`--tui=opentui` renders the session through an out-of-process **Bun + SolidJS + OpenTUI** sidecar
+(under `opentui/`) instead of the in-process JLine TUI (which stays the default). The bb agent runs
+**headless** and streams its transcript events to the sidecar over a **WebSocket** on the api-server
+(`escapement.ui.ws_push`); human-input/control flow back over the same WS; the sidecar owns the TTY.
+Agent-side glue is in `escapement.ui.*` (`ws_push`, `remote_renderer`, `opentui_sidecar`) reached via
+`requiring-resolve`; the `opentui/` TS tree is outside `src/`. `bb test` covers the agent half;
+`bb opentui-test` (= `bun test` in `opentui/`) covers the TS UI. **Read
+[`docs/opentui-ui.md`](docs/opentui-ui.md)** (architecture, run, develop, test, known limits) and
+[`docs/opentui-wire.md`](docs/opentui-wire.md) (the JSON wire contract) before touching the sidecar.
+Snapshot updates: `cd opentui && bun test test/snapshot/ -u`, review the diff, commit.
 
 ## Model registry
 

@@ -20,7 +20,20 @@ PROMPT="${2:-Run a tournament with 6 poets and 5 judges. Theme: newly wed}"
 SHOT_SECS="${SHOT_SECS:-12}"      # how long to let it stream before the screenshot
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
-CMD="OLLAMA_NUM_PARALLEL=4 bb haiku '${PROMPT//\'/\'\\\'\'}'"
+# RUN_CMD lets a caller swap the launch command (e.g. the OpenTUI sidecar via
+# `bb haiku-opentui`) while keeping the same capture machinery. {PROMPT} in
+# RUN_CMD is replaced with the shell-escaped prompt; if absent the prompt is
+# appended. Default = the in-process JLine `bb haiku`.
+ESC_PROMPT="${PROMPT//\'/\'\\\'\'}"
+if [ -n "${RUN_CMD:-}" ]; then
+  if [[ "$RUN_CMD" == *"{PROMPT}"* ]]; then
+    CMD="${RUN_CMD//\{PROMPT\}/'$ESC_PROMPT'}"
+  else
+    CMD="$RUN_CMD '$ESC_PROMPT'"
+  fi
+else
+  CMD="OLLAMA_NUM_PARALLEL=4 bb haiku '$ESC_PROMPT'"
+fi
 OUT=/tmp/haiku-tui.png
 cd "$REPO"
 

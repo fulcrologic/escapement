@@ -33,6 +33,7 @@
     [clojure.string :as str]
     [escapement.tui.compositor :as cmp]
     [escapement.tui.live :as live]
+    [escapement.tui.markdown :as markdown]
     [escapement.tui.theme :as theme]
     [escapement.tui.util :as util]))
 
@@ -289,6 +290,30 @@
 (def ^:private cursor-glyph "▏")
 (def ^:private body-indent "  ")
 
+;; Markdown rendering is ~0.25ms/line — cheap once, but the inspector rebuilds a
+;; live transcript's lines EVERY render frame (~30fps) while streaming. A
+;; finalized turn's body never changes, so re-rendering all prior turns each
+;; frame is pure waste (and stalls input — the "can't page while streaming" lag).
+;; Cache rendered body-lines per [interior-width theme-marker body]; only the
+;; growing streaming tail misses each frame. Bounded (clear-on-overflow).
+(def ^:private body-cache-max 4096)
+(def ^:private body-cache (atom {}))
+
+(defn- render-body-md
+  "Markdown-render `body` to a vector of body-lines (already indented + emitted
+   to `iw` columns), memoized by [iw theme-marker body]. `emit` is the per-line
+   themed truncate-pad fn so the cached value is render-ready."
+  [theme iw body emit]
+  (let [k [iw (get theme :border-dim) body]
+        c @body-cache]
+    (if-let [hit (find c k)]
+      (val hit)
+      (let [md    (markdown/render (str body) theme (- iw (cmp/display-width body-indent)))
+            lines (mapv (fn [l] (emit (str body-indent l))) md)]
+        (swap! body-cache
+          (fn [m] (assoc (if (> (count m) body-cache-max) {} m) k lines)))
+        lines))))
+
 (defn- fmt-reply-meta
   "Build the trailing meta segment for a REPLY header:
    `· <stop> · in:N out:M · <t/s>`  or streaming `· ◂ streaming · out:N · <t/s>`."
@@ -365,27 +390,23 @@
         hairline (emit-line theme :border-dim iw (apply str (repeat iw "─")))
         blank    (cmp/truncate-display "" iw)
         _        expanded?                                  ;; legacy flag; bodies are ALWAYS full now
+        emit     (fn [s] (emit-line theme nil iw s))
         body-of  (fn [block]
-                   (let [{:keys [dir sublabel meta body]} block
-                         sent? (= dir :sent)
-                         ;; Transcripts are ALWAYS complete — every block (system
-                         ;; included) renders its FULL body, wrapped across as many
-                         ;; lines as needed. No preview/truncation (the char count
-                         ;; stays in the header as info).
-                         raw   body
-                         ;; tool_use accent line has empty body; sublabel carries it
-                         lines (wrap-display (- iw (cmp/display-width body-indent))
-                                 body-indent raw)
-                         ;; streaming cursor on the last body line
-                         lines (if (and (:streaming? meta) (seq lines))
-                                 (let [n (dec (count lines))]
-                                   (update lines n str cursor-glyph))
-                                 lines)
-                         ;; body color: SENT dim, thinking dim, REPLY normal
-                         k     (cond sent?                :timestamp
-                                     (= sublabel "thinking") :timestamp
-                                     :else                nil)]
-                     (mapv #(emit-line theme k iw %) lines)))]
+                   (let [{:keys [meta body]} block]
+                     (if (:streaming? meta)
+                       ;; Live streaming block: body grows each frame, so render
+                       ;; fresh (NO cache — caching would fill with dead keys) and
+                       ;; append the `▏` cursor to the last line BEFORE padding.
+                       (let [md    (markdown/render (str body) theme
+                                     (- iw (cmp/display-width body-indent)))
+                             md    (if (seq md)
+                                     (update (vec md) (dec (count md)) str cursor-glyph)
+                                     md)]
+                         (mapv #(emit (str body-indent %)) md))
+                       ;; Finalized turn — bodies never change, so memoize the
+                       ;; rendered lines (the "can't page while streaming" lag was
+                       ;; re-rendering every prior turn each frame).
+                       (render-body-md theme iw (str body) emit))))]
     (->> blocks
       (map-indexed
         (fn [i block]

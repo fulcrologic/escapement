@@ -401,7 +401,24 @@
        {::pc/sym    'escapement.control/arm-pause-on-next-external
         ::pc/output [:debug/paused? :debug/step-budget]}
        (when-let [c (controller env)] (dbg/arm-pause-on-next-external! c))
-       (controller-state (controller env)))))
+       (controller-state (controller env)))
+
+     ;; Deliver a human-input answer to a parked RemoteUiRenderer prompt (the
+     ;; secondary/fallback transport for the WS `answer` frame; see
+     ;; docs/opentui-wire.md §5.2). Params: {:prompt-id <s> :value <v>} or
+     ;; {:prompt-id <s> :cancelled true}. Resolved via `requiring-resolve` so
+     ;; this cljc ns keeps no static dep on the renderer add-on. Returns whether
+     ;; a pending prompt was matched.
+     (pc/defmutation human-answer-mutation [env _]
+       {::pc/sym    'escapement.human/answer
+        ::pc/output [:human/delivered?]}
+       (let [{:keys [prompt-id value cancelled]} (params env)
+             ns-sym 'escapement.ui.remote-renderer
+             ok?    (when prompt-id
+                      (if cancelled
+                        ((requiring-resolve (symbol (name ns-sym) "cancel-answer!")) prompt-id)
+                        ((requiring-resolve (symbol (name ns-sym) "deliver-answer!")) prompt-id value)))]
+         {:human/delivered? (boolean ok?)}))))
 
 (def read-resolvers
   [active-session-resolver all-sessions-resolver session-resolver transcript-resolver
@@ -414,7 +431,7 @@
   #?(:clj  [session-paused-resolver session-step-budget-resolver
             session-live-configuration-resolver session-pending-events-resolver
             pause-mutation step-mutation continue-mutation
-            arm-pause-on-next-external-mutation]
+            arm-pause-on-next-external-mutation human-answer-mutation]
      :cljs []))
 
 (def all-resolvers

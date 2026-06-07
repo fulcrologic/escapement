@@ -1,0 +1,38 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`Modals — render snapshots (text-only frame) text renders prompt + affordances 1`] = `
+"╭──────────────────────────────────────────────────────────────╮
+│ ▸ What's your name?                                          │
+│   █                                                          │
+╰──────────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`Modals — render snapshots (text-only frame) confirm renders prompt + affordances 1`] = `
+"╭──────────────────────────────────────────────────────────────╮
+│ ▸ Proceed?                                                   │
+│   [Y/n] █                                                    │
+╰──────────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`Modals — render snapshots (text-only frame) select renders prompt + affordances 1`] = `
+"╭──────────────────────────────────────────────────────────────╮
+│ ▸ Which haiku wins?                                          │
+│   ▸ poet1                                                    │
+│     poet2                                                    │
+│   ↑/↓ move · Enter select · Esc cancel                       │
+╰──────────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`Modals — render snapshots (text-only frame) multi renders prompt + affordances 1`] = `
+"╭──────────────────────────────────────────────────────────────╮
+│ ▸ Pick colors                                                │
+│   ▸ [ ] Blue                                                 │
+│     [ ] Green                                                │
+│     [ ] Red                                                  │
+│   Space toggle · Enter submit · Esc cancel                   │
+╰──────────────────────────────────────────────────────────────╯
+"
+`;

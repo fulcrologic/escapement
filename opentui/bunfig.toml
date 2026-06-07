@@ -1,0 +1,6 @@
+# Solid JSX is compiled by the @opentui/solid preload (babel-preset-solid).
+# Without this, .tsx files using the OpenTUI/Solid JSX runtime won't transform.
+preload = ["@opentui/solid/preload"]
+
+[test]
+preload = ["@opentui/solid/preload"]

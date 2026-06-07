@@ -123,7 +123,25 @@
    :bar-empty        "38;5;238"                              ;; very dim grey
    ;; transcript direction tags — bold fg + colored bg so SENT vs REPLY pop
    :sent-tag         "1;38;5;231;48;5;24"                    ;; bold white on steel-blue bg
-   :reply-tag        "1;38;5;231;48;5;65"})                  ;; bold white on muted-green bg
+   :reply-tag        "1;38;5;231;48;5;65"                    ;; bold white on muted-green bg
+   ;; --- markdown body rendering (transcript) ---
+   :md-h1            "1;38;5;39"                              ;; bold bright blue
+   :md-h2            "1;38;5;75"                              ;; bold sky
+   :md-h3            "1;38;5;111"                             ;; bold steel
+   :md-bold          "1;38;5;231"                             ;; bold near-white
+   :md-italic        "3;38;5;253"                             ;; italic light grey
+   :md-code          "38;5;215;48;5;236"                      ;; orange on dim bg (inline code)
+   :md-quote         "3;38;5;108"                             ;; italic dim green
+   :md-rule          "38;5;240"                               ;; slate grey
+   :md-bullet        "38;5;39"                                ;; blue bullet
+   :md-link          "4;38;5;75"                              ;; underline sky
+   ;; --- fenced-code syntax highlight ---
+   :code-fence       "38;5;240"                               ;; dim gutter/fence markers
+   :code-plain       "38;5;252"                               ;; near-white code text
+   :code-comment     "38;5;245"                               ;; grey
+   :code-string      "38;5;150"                               ;; soft green
+   :code-number      "38;5;215"                               ;; orange
+   :code-keyword     "38;5;176"})                             ;; mauve
 
 ;; 16-color fallback — standard/bright SGR foreground codes only.
 (def theme-16
@@ -146,7 +164,25 @@
    :bar-empty        "90"                                    ;; grey
    ;; transcript direction tags — bold white fg on a colored bg
    :sent-tag         "1;97;44"                               ;; bold white on blue bg
-   :reply-tag        "1;97;42"})                             ;; bold white on green bg
+   :reply-tag        "1;97;42"                               ;; bold white on green bg
+   ;; --- markdown body rendering (transcript) ---
+   :md-h1            "1;94"                                   ;; bold bright blue
+   :md-h2            "1;96"                                   ;; bold bright cyan
+   :md-h3            "1;36"                                   ;; bold cyan
+   :md-bold          "1;97"                                   ;; bold bright white
+   :md-italic        "3;37"                                   ;; italic grey
+   :md-code          "33"                                     ;; yellow (inline code)
+   :md-quote         "3;32"                                   ;; italic green
+   :md-rule          "90"                                     ;; grey
+   :md-bullet        "94"                                     ;; blue
+   :md-link          "4;36"                                   ;; underline cyan
+   ;; --- fenced-code syntax highlight ---
+   :code-fence       "90"                                     ;; grey gutter
+   :code-plain       "37"                                     ;; grey-white
+   :code-comment     "90"                                     ;; grey
+   :code-string      "32"                                     ;; green
+   :code-number      "33"                                     ;; yellow
+   :code-keyword     "35"})                                   ;; magenta
 
 (def theme-keys
   "Every semantic key a theme must define."
