@@ -10,19 +10,18 @@
  *     `◂ streaming · out:N · …` while in-flight);
  *   - a dim hairline rule immediately before each REPLY header;
  *   - one blank line between turns;
- *   - the FULL body, 2-space indented and width-wrapped via `wrapDisplay`
- *     (never truncated);
+ *   - the FULL body, 2-space indented and Markdown-rendered via `domain/markdown`
+ *     (headings/bold/italic/code/lists/quotes/rules + width-wrapping; never
+ *     truncated) — parity with the JLine TUI's `render-body-md`;
  *   - an in-flight `▏` cursor appended to the streaming reply's last body line.
  *
  * This is a PURE builder: `transcriptLines(blocks, theme, width)` → StyledLine[].
- * The Pager renders the result. (Bodies are rendered as plain text — the JLine
- * markdown/code highlighting is a documented "optional upgrade"; parity of the
- * lanes/headers/wrapping/cursor comes first per the task.)
+ * The Pager renders the result.
  */
 
 import type { TranscriptBlock } from "../domain/types";
 import type { StyleSpec, Theme } from "../domain/theme";
-import { wrapDisplay } from "../domain/wrap";
+import { render as renderMarkdown, renderCached as renderMarkdownCached } from "../domain/markdown";
 import { fgSpan, plain, styled, type StyledLine, type StyledSpan } from "./styled";
 
 const SENT_GLYPH = "▸";
@@ -89,11 +88,24 @@ function headerLine(theme: Theme, block: TranscriptBlock): StyledLine {
   return line;
 }
 
-/** Wrap a body string into 2-space-indented styled lines (plain fg). */
-function bodyLines(body: string, width: number): StyledLine[] {
+/**
+ * Render a body string into 2-space-indented, themed styled lines. The body is
+ * Markdown-rendered (headings/bold/italic/code/lists/quotes/rules) — parity with
+ * the JLine TUI's `render-body-md` — then each line is prefixed with the body
+ * indent. Width is the interior column budget minus the indent.
+ *
+ * Finalized bodies go through the memoizing {@link renderMarkdownCached} (their
+ * lines never change, so prior turns aren't re-rendered every frame); the
+ * `streaming` block grows each frame and renders fresh to avoid polluting the
+ * cache with dead growing-tail keys.
+ */
+function bodyLines(theme: Theme, body: string, width: number, streaming: boolean): StyledLine[] {
   const iw = Math.max(1, width);
-  const wrapped = wrapDisplay(iw - BODY_INDENT.length, "", body);
-  return wrapped.map((l) => [plain(BODY_INDENT + l)] as StyledLine);
+  const interiorW = iw - BODY_INDENT.length;
+  const md = streaming
+    ? renderMarkdown(body, theme, interiorW)
+    : renderMarkdownCached(body, theme, interiorW);
+  return md.map((l) => [plain(BODY_INDENT), ...l] as StyledLine);
 }
 
 /**
@@ -117,8 +129,9 @@ export function transcriptLines(
     if (reply) out.push(hairline);
     out.push(headerLine(theme, block));
 
-    const bls = bodyLines(block.body, iw);
-    if (block.meta["streaming?"] && bls.length > 0) {
+    const streaming = Boolean(block.meta["streaming?"]);
+    const bls = bodyLines(theme, block.body, iw, streaming);
+    if (streaming && bls.length > 0) {
       // append the in-flight cursor to the last body line.
       const last = bls[bls.length - 1]!;
       bls[bls.length - 1] = [...last, fgSpan(CURSOR_GLYPH, theme.statusColor("streaming"))];

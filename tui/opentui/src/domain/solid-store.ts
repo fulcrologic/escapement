@@ -10,6 +10,7 @@
  * read-only store plus a `dispose()` that unsubscribes + stops the source.
  */
 
+import { batch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { EventSource } from "../transport/event-source";
 import type { ForwardFrame } from "../transport/wire";
@@ -58,22 +59,69 @@ export function liveGroups(live: LiveMap): LiveGroup[] {
   return groups;
 }
 
-/** Create the reactive domain store wired to a transport EventSource. */
-export function createDomainStore(source: EventSource): DomainStore {
+/**
+ * Live frames are COALESCED before being committed to the Solid store. Each
+ * `reconcile()` diffs the whole DomainState tree (scrollback ≤2000, the live
+ * map, the event ring); doing that per frame at a streaming rate of hundreds of
+ * `llm/delta`s per second saturates the single JS thread, starving keystrokes
+ * and the render loop (the symptom: laggy LIVE selection + a LOG pane that
+ * trails the stream). Instead we fold all frames that arrive within one window
+ * through the pure reducer and `reconcile()` ONCE per window — so the store
+ * commits at ~`FLUSH_MS` cadence regardless of token rate, and many same-session
+ * deltas collapse into a single tree diff. (The agent-side WS already coalesces
+ * consecutive deltas per client; this is the matching coalesce on the UI side.)
+ */
+const FLUSH_MS = 16;
+
+/**
+ * Create the reactive domain store wired to a transport EventSource.
+ * `flushMs` is the live-coalesce window (see {@link FLUSH_MS}); pass `0` to
+ * commit synchronously per frame (used by deterministic tests).
+ */
+export function createDomainStore(
+  source: EventSource,
+  flushMs: number = FLUSH_MS,
+): DomainStore {
   let current: DomainState = initialDomainState();
   const [state, setState] = createStore<DomainState>(current);
 
-  const apply = (next: DomainState) => {
+  const commit = (next: DomainState) => {
     current = next;
     setState(reconcile(next, { merge: true }));
   };
 
-  const push = (frame: ForwardFrame) => apply(reduceFrame(current, frame));
+  // `push` stays synchronous: replay drivers / tests fold a frame and read the
+  // store immediately. The live source path (below) batches instead.
+  const push = (frame: ForwardFrame) => commit(reduceFrame(current, frame));
 
-  const off = source.onFrame(push);
+  // Coalescing buffer for the live source. Frames accumulate here and are folded
+  // + committed in one pass per flush window.
+  let pending: ForwardFrame[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const flush = () => {
+    timer = null;
+    if (pending.length === 0) return;
+    const frames = pending;
+    pending = [];
+    let next = current;
+    for (const f of frames) next = reduceFrame(next, f);
+    batch(() => commit(next));
+  };
+  const onFrame = (frame: ForwardFrame) => {
+    if (flushMs <= 0) {
+      push(frame);
+      return;
+    }
+    pending.push(frame);
+    if (timer === null) timer = setTimeout(flush, flushMs);
+  };
+
+  const off = source.onFrame(onFrame);
 
   const dispose = () => {
     off();
+    if (timer !== null) clearTimeout(timer);
+    flush(); // drain any buffered frames so the final state is committed
     source.stop();
   };
 
