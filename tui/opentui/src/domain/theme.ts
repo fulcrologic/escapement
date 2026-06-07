@@ -223,6 +223,7 @@ export function decodeSgr(code: string | null | undefined): StyleSpec {
 export type ThemeKey =
   | "border-dim"
   | "border-focus"
+  | "selection-bg"
   | "title"
   | "chart-name"
   | "session-id"
@@ -263,6 +264,10 @@ type SgrMap = Record<ThemeKey, string>;
 const THEME_256: SgrMap = {
   "border-dim": "38;5;240",
   "border-focus": "38;5;111",
+  // Dark selection bar behind the LIVE drill-in cursor row (reverse-video
+  // analogue). Must stay dark so the row's bright/colored fgs keep contrast —
+  // the light `border-focus` accent does not.
+  "selection-bg": "48;5;24",
   title: "1;38;5;231",
   "chart-name": "1;38;5;231",
   "session-id": "38;5;244",
@@ -302,6 +307,7 @@ const THEME_256: SgrMap = {
 const THEME_16: SgrMap = {
   "border-dim": "90",
   "border-focus": "94",
+  "selection-bg": "44",
   title: "1;97",
   "chart-name": "1;97",
   "session-id": "90",
