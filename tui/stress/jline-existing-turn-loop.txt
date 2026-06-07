@@ -1,0 +1,50 @@
+OLLAMA_API_KEY=dummy OLLAMA_NUM_PARALLEL=4 bb -m escapement.cli run escapement.examples.turn-loop/agent --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-tokens 2048 --
+overrun-retries 2 --overrun-temp-bump 0.3
+➜  escapement OLLAMA_API_KEY=dummy OLLAMA_NUM_PARALLEL=4 bb -m escapement.cli run escapement.examples.turn-loop/agent --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-
+tokens 2048 --overrun-retries 2 --overrun-temp-bump 0.3
+2026-06-07T14:31:50.944Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:31:50.947Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:31:50.948Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:31:50.948Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:31:50.948Z omarflow DEBUG [clojure.core:218] - (get-effective-target-states env t) => #{:run}
+2026-06-07T14:31:50.948Z omarflow DEBUG [clojure.core:219] - (chart/nearest-ancestor-state statechart t) => :initial32848
+2026-06-07T14:31:50.948Z omarflow DEBUG [clojure.core:226] - (:id (chart/find-least-common-compound-ancestor statechart (into (if tsource [tsource] []) tstates))) => :ROOT
+2026-06-07T14:31:50.949Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:31:50.949Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:31:50.949Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:31:50.949Z omarflow DEBUG [clojure.core:495] - entry set => [#{:run :converse} #{:run} {}]
+2026-06-07T14:31:50.949Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :run
+2026-06-07T14:31:50.949Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32849, :target [:converse], :type :external, :node-type :transi
+tion, :parent :initial32850}
+2026-06-07T14:31:50.949Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:31:50.949Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :converse
+2026-06-07T14:31:50.949Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:31:50.949Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :converse}
+2026-06-07T14:31:50.949Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:31:50.949Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:662] - Starting invocation id = coder, type = :llm-conversation, src = , params = {:system "You are compl
+eting a tiny file task by chaining tools in ONE turn. The scratch file is at \".escapement/scratch/turn-loop.txt\". Do exactly this, in order:\n1. Briefly state your plan in one sentence.\n2. Call `fs
+_read` with {\"path\":\".escapement/scratch/turn-loop.txt\"} to read the current contents. If the file does not exist yet, that is expected — treat it as empty and continue.\n3. Call `fs_write` with {
+\"path\":\".escapement/scratch/turn-loop.txt\",\"content\":\"turn-loop ok\\n\"} to write the file.\n4. Call `fs_read` again with {\"path\":\".escapement/scratch/turn-loop.txt\"} to confirm the new con
+tents.\n5. Call `event__turn_done` exactly once with {\"summary\":\"<one short sentence confirming the write>\"} and end your turn.\nUse only these tools. Keep all text terse. Do not repeat steps.", :
+real-tools [:fs/read :fs/write], :allowed-events [{:event :turn/done, :description "Signal the turn-loop task is complete.", :data-schema [:map [:summary :string]]}], :max-turns 8, :initial-user-messa
+ge "Run the scratch-file turn-loop task now: plan, read, write, re-read, then call event__turn_done.", :max-conversation-duration-ms 120000}
+2026-06-07T14:31:51.051Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:31:51.051Z omarflow DEBUG [clojure.core:930] - external-event => {:type :com.fulcrologic.statecharts/chart, :name :error.llm.invalid-request, :target :session/e39547e5-2eb9-4cdf-be33-9ca
+e1b7d1cdb, :data {:message "OpenAI API error: HTTP 400", :class "clojure.lang.ExceptionInfo", :category :invalid-request, :attempts [{:model "gemma3:1b", :error {:message "OpenAI API error: HTTP 400",
+ :class "clojure.lang.ExceptionInfo"}}], :reason :invalid-request}, :com.fulcrologic.statecharts/source-session-id :session/e39547e5-2eb9-4cdf-be33-9cae1b7d1cdb, :origin :session/e39547e5-2eb9-4cdf-be
+33-9cae1b7d1cdb, :origintype :com.fulcrologic.statecharts/chart, :com.fulcrologic.statecharts/event-name :error.llm.invalid-request}
+2026-06-07T14:31:51.052Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:31:51.052Z omarflow DEBUG [clojure.core:615] - enabled transitions => #{}
+2026-06-07T14:31:51.052Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:31:51.052Z omarflow DEBUG [clojure.core:495] - entry set => [#{} #{} {}]
+2026-06-07T14:31:51.052Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :converse}
+2026-06-07T14:31:51.052Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+session          e39547e5-2eb9-4cdf-be33-9cae1b7d1cdb
+transcript       .escapement/e39547e5-2eb9-4cdf-be33-9cae1b7d1cdb/transcript.jsonl
+checkpoint-dir   .escapement/e39547e5-2eb9-4cdf-be33-9cae1b7d1cdb/checkpoints
+final-config     [:run :converse]
+➜  escapement git:(feat/live-token-tui) ✗
+
+
+
+

@@ -1,0 +1,14 @@
+# Bun-installed dependencies (re-created by `bun install`).
+node_modules/
+
+# Bun / TS build & cache artifacts (the sidecar runs from source — no committed build output).
+dist/
+build/
+*.tsbuildinfo
+.bun/
+
+# Runtime / capture scratch
+*.log
+/tmp-*
+
+# The committed test/visual/*.png frames (E2E evidence) are intentionally tracked — do NOT ignore them.

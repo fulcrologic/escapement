@@ -1,0 +1,50 @@
+OLLAMA_API_KEY=dummy OLLAMA_NUM_PARALLEL=4 bb -m escapement.cli run escapement.examples.scan/agent --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-tokens 2048 --overr
+un-retries 2 --overrun-temp-bump 0.3
+➜  escapement OLLAMA_API_KEY=dummy OLLAMA_NUM_PARALLEL=4 bb -m escapement.cli run escapement.examples.scan/agent --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-token
+s 2048 --overrun-retries 2 --overrun-temp-bump 0.3
+2026-06-07T14:33:18.767Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:33:18.769Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:33:18.770Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:33:18.770Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:33:18.770Z omarflow DEBUG [clojure.core:218] - (get-effective-target-states env t) => #{:run}
+2026-06-07T14:33:18.771Z omarflow DEBUG [clojure.core:219] - (chart/nearest-ancestor-state statechart t) => :initial32863
+2026-06-07T14:33:18.771Z omarflow DEBUG [clojure.core:226] - (:id (chart/find-least-common-compound-ancestor statechart (into (if tsource [tsource] []) tstates))) => :ROOT
+2026-06-07T14:33:18.771Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:33:18.771Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:33:18.771Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:33:18.771Z omarflow DEBUG [clojure.core:495] - entry set => [#{:run :scanning} #{:run} {}]
+2026-06-07T14:33:18.771Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :run
+2026-06-07T14:33:18.771Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32864, :target [:scanning], :type :external, :node-type :transi
+tion, :parent :initial32865}
+2026-06-07T14:33:18.771Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:33:18.771Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :scanning
+2026-06-07T14:33:18.771Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:33:18.771Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :scanning}
+2026-06-07T14:33:18.771Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:33:18.772Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:662] - Starting invocation id = scanner, type = :llm-conversation, src = , params = {:system "You are sca
+nning a small repository for notable issues or interesting findings. Read AT MOST TWO files with `fs_read`, then STOP reading and report. Read exactly these two, in order: \"<repo-root>/deps.edn\" the
+n \"<repo-root>/README.md\" (append each to the ABSOLUTE repo root you are given). Do NOT guess any other paths — if a read fails, do not retry or try alternatives; just proceed to reporting from what
+ you have. After at most two reads, report 2-3 plausible findings. For EACH finding, call `event__scan_found_bug` with `{file, line, summary}` (all keys plain — file is a string path, line is an integ
+er, summary is a short string). Then call `event__scan_complete` with `{total_findings: <int>}` and end your turn. Keep summaries short (one line). Do not call any tools after `event__scan_complete`."
+, :real-tools [:fs/read], :max-turns 8, :allowed-events [{:event :scan/found-bug, :data-schema [:map [:file :string] [:line :int] [:summary :string]]} {:event :scan/complete, :data-schema [:map [:tota
+l_findings :int]]}], :initial-user-message "Scan the repo rooted at the absolute path: /home/naomarik/github/escapement (build file paths by appending to it, e.g. \"/home/naomarik/github/escapement/de
+ps.edn\"). Read at most TWO files, then report up to 3 findings.", :max-conversation-duration-ms 120000}
+2026-06-07T14:33:18.924Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:33:18.925Z omarflow DEBUG [clojure.core:930] - external-event => {:type :com.fulcrologic.statecharts/chart, :name :error.llm.invalid-request, :target :session/5004e272-d8dc-4d31-b593-ea8
+c5b9661d1, :data {:message "OpenAI API error: HTTP 400", :class "clojure.lang.ExceptionInfo", :category :invalid-request, :attempts [{:model "gemma3:1b", :error {:message "OpenAI API error: HTTP 400",
+ :class "clojure.lang.ExceptionInfo"}}], :reason :invalid-request}, :com.fulcrologic.statecharts/source-session-id :session/5004e272-d8dc-4d31-b593-ea8c5b9661d1, :origin :session/5004e272-d8dc-4d31-b5
+93-ea8c5b9661d1, :origintype :com.fulcrologic.statecharts/chart, :com.fulcrologic.statecharts/event-name :error.llm.invalid-request}
+2026-06-07T14:33:18.925Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:33:18.925Z omarflow DEBUG [clojure.core:615] - enabled transitions => #{}
+2026-06-07T14:33:18.925Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:33:18.925Z omarflow DEBUG [clojure.core:495] - entry set => [#{} #{} {}]
+2026-06-07T14:33:18.925Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :scanning}
+2026-06-07T14:33:18.925Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+session          5004e272-d8dc-4d31-b593-ea8c5b9661d1
+transcript       .escapement/5004e272-d8dc-4d31-b593-ea8c5b9661d1/transcript.jsonl
+checkpoint-dir   .escapement/5004e272-d8dc-4d31-b593-ea8c5b9661d1/checkpoints
+final-config     [:run :scanning]
+➜  escapement git:(feat/live-token-tui) ✗
+
+
+

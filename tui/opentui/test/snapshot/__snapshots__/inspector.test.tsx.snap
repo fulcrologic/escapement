@@ -1,0 +1,25 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`Inspector — list-view render snapshots (no model) invocations list: glyph/status/tokens/model columns, cursor on row 0 1`] = `
+" poet2          ✗ error       2 tok  gemma3:1b
+ poet1          · done        2 tok  gemma3:1b
+ planner        ✗ stop       28 tok  gemma3:1b"
+`;
+
+exports[`Inspector — list-view render snapshots (no model) chart view: active-states header + newest-first event rows 1`] = `
+" active states ["run" "done"]
+── recent events (newest first) ──
+  02:20:55.010  winner.picked           ["run" "judging"]  →  ["run" "done"]
+  02:20:49.610  plan/abort              ["run" "route-planner"]  →  ["run" "aborted"]
+  02:20:49.608  llm.idle                ["run" "planning"]  →  ["run" "route-planner"]"
+`;
+
+exports[`Inspector — list-view render snapshots (no model) status view: active states / mode / step-budget / dirs 1`] = `
+" active states:  ["run" "done"]
+ mode:           paused
+ step-budget:    3
+ pause-on-ext?:  true
+ buffered events:3
+ session-dir:    /tmp/sess-FIXED
+ artifacts-dir:  /tmp/sess-FIXED/artifacts/"
+`;

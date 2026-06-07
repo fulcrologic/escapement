@@ -1,0 +1,25 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`LogPane — render-tree text snapshots (no model) tail window (offset 0): newest entries at bottom, glyphs + tags + summaries 1`] = `
+"02:20:50 poet1 ↩ save_haiku  wrote nodes/poet1/haiku.txt (62 bytes)
+02:20:50 error ⚠ llm error connection reset by peer (ollama)
+02:20:50 error ⚠ model-down gemma3:1b — connection reset by peer
+02:20:50 poet2 · invocation exit reason=error
+02:20:50 human ? prompt kind=select : Which haiku wins?
+02:20:55 human ! answer kind=select = "poet1"
+02:20:55 chart · winner.picked  ["run" "judging"] → ["run" "done"]
+02:20:55 debug · done final=["run" "done"]
+"
+`;
+
+exports[`LogPane — render-tree text snapshots (no model) scrolled up (offset 6): older window revealed 1`] = `
+"02:20:49 debug · done final=["run" "aborted"]
+02:20:50 poet1 · invocation start session=session/889d14f8-poet1
+02:20:50 poet2 · invocation start session=session/889d14f8-poet2
+02:20:50 poet1 ◂ First snow falls lanterns dim on the still pond wint…
+02:20:50 poet1 ✓ resp stop=end_turn model=gemma3:1b tokens=in:210/out…
+02:20:50 poet1 · invocation exit reason=done
+02:20:50 poet1 ↩ save_haiku  wrote nodes/poet1/haiku.txt (62 bytes)
+02:20:50 error ⚠ llm error connection reset by peer (ollama)
+"
+`;

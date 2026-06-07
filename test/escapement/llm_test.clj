@@ -24,6 +24,14 @@
    :usage       {:input-tokens 1 :output-tokens 1}
    :model       "mock"})
 
+(defn- truncated
+  "A `:max_tokens` Response — the API forcibly cut the model off at the cap."
+  [text]
+  {:stop-reason :max_tokens
+   :content     [{:type :text :text text}]
+   :usage       {:input-tokens 1 :output-tokens 99}
+   :model       "mock"})
+
 (defrecord RecordingBackend [log responder]
   proto/LLMBackend
   (send-turn [_ request]
@@ -216,3 +224,98 @@
         (<= @peak 3) => true
         "and real parallelism occurred (more than one call overlapped)"
         (>= @peak 2) => true))))
+
+;; ===========================================================================
+;; Overrun primitive: rerun-on-truncation (:resilience :overrun)
+;; ===========================================================================
+
+(specification "overrun: rerun a turn truncated at the token cap"
+  (component "off by default — a :max_tokens turn is accepted as :ok, no rerun"
+    (let [b (backend (fn [_] (truncated "cut off")))
+          r (llm/ask* (ctx b) {:prompt "q" :model :fast})]
+      (assertions
+        "the truncated turn is returned verbatim (legacy behavior preserved)"
+        (:status r) => :ok
+        (:stop-reason (:response r)) => :max_tokens
+        "exactly one call — no rerun without an :overrun policy"
+        (count @(:log b)) => 1)))
+
+  (component "recovers when a later attempt finishes within the cap"
+    ;; First call truncates, second call (identical context) finishes cleanly —
+    ;; the sampling-variance case the rerun is designed for.
+    (let [calls (atom 0)
+          b     (backend (fn [_]
+                           (if (= 1 (swap! calls inc))
+                             (truncated "half a hai")
+                             (end-turn "a full haiku"))))
+          r     (llm/ask (ctx b) {:prompt "q" :model :fast
+                                  :resilience {:overrun {:max-retries 2}}})]
+      (assertions
+        "the second (un-truncated) turn wins"
+        (:status r) => :ok
+        (:response r) => "a full haiku"
+        "exactly two calls — one rerun"
+        (count @(:log b)) => 2
+        "every attempt saw the IDENTICAL request context"
+        (apply = (map :messages @(:log b))) => true)))
+
+  (component "bounded — a deterministic runaway re-truncates up to :max-retries"
+    (let [b (backend (fn [_] (truncated "runaway")))
+          r (llm/ask* (ctx b) {:prompt "q" :model :fast
+                               :resilience {:overrun {:max-retries 3}}})]
+      (assertions
+        ":on-exhausted defaults to :truncate → the truncated turn is :ok"
+        (:status r) => :ok
+        (:stop-reason (:response r)) => :max_tokens
+        "the original attempt plus exactly :max-retries reruns were issued"
+        (count @(:log b)) => 4)))
+
+  (component ":on-exhausted :fail surfaces an :overrun failure envelope"
+    (let [b (backend (fn [_] (truncated "runaway")))
+          r (llm/ask* (ctx b) {:prompt "q" :model :fast
+                               :resilience {:overrun {:max-retries 1
+                                                      :on-exhausted :fail}}})]
+      (assertions
+        "the status is :overrun (not :ok), with no response"
+        (:status r) => :overrun
+        (:response r) => nil
+        "the error is categorized :overrun"
+        (get-in r [:error :category]) => :overrun
+        "original attempt + 1 rerun"
+        (count @(:log b)) => 2)))
+
+  (component ":temperature-bump raises temperature on each rerun (breaks a deterministic loop)"
+    ;; A deterministic model re-truncates forever on an identical rerun; the
+    ;; bump forces sampling variance. Here all attempts still truncate so we can
+    ;; read the full temperature ladder off the wire log.
+    (let [b (backend (fn [_] (truncated "runaway")))
+          _ (llm/ask* (ctx b) {:prompt "q" :model :fast :temperature 0.0
+                               :resilience {:overrun {:max-retries 3
+                                                      :temperature-bump 0.3}}})]
+      (assertions
+        "attempt 0 uses the base temperature; each rerun adds the bump"
+        (mapv :temperature @(:log b)) => [0.0 0.3 0.6 0.9])))
+
+  (component ":temperature-max clamps the bumped temperature"
+    (let [b (backend (fn [_] (truncated "runaway")))
+          _ (llm/ask* (ctx b) {:prompt "q" :model :fast :temperature 0.5
+                               :resilience {:overrun {:max-retries 3
+                                                      :temperature-bump 0.4
+                                                      :temperature-max 1.0}}})]
+      (assertions
+        "0.5 → 0.9 → clamped at 1.0 → 1.0"
+        (mapv :temperature @(:log b)) => [0.5 0.9 1.0 1.0])))
+
+  (component ":max-output-tokens is sent as the request cap when the catalog is silent"
+    ;; A model the catalog doesn't know → `effective-max-tokens` is nil, so the
+    ;; overrun cap is the only source of :max-tokens on the wire. (An explicit
+    ;; cap / a known catalog model still take precedence over this fallback.)
+    (let [b       (backend (fn [_] (end-turn "ok")))
+          ctx-unk {:backend b
+                   :aliases {:local [{:provider :ollama :model "gemma3:1b"}]}
+                   :preferences [:local]}
+          _       (llm/ask ctx-unk {:prompt "q" :model :local
+                                    :resilience {:overrun {:max-output-tokens 256}}})]
+      (assertions
+        "the wire request carried max-tokens 256 from the overrun policy"
+        (:max-tokens (first @(:log b))) => 256))))

@@ -37,10 +37,13 @@
       threaded to the llm-conversation processor for keyword-`:model` resolution.
     * `:llm-preferences` (optional) - `:llm/preferences` vector of alias keywords;
       the default candidate set flattened when a node names no model. Defaults to
-      the built-in `preferences/default-preferences` in the processor."
+      the built-in `preferences/default-preferences` in the processor.
+    * `:llm-resilience` (optional) - a partial `escapement.llm/default-resilience`
+      map (the overrun output-cap + rerun-on-truncation primitive) injected
+      run-wide under each node's own `:resilience`. Defaults to `{}`."
   [{:keys [checkpoint-dir invocation-processors registry queue store
            llm-backend llm-default-models llm-catalog-ratings llm-eligibility-strict?
-           llm-aliases llm-preferences
+           llm-aliases llm-preferences llm-resilience
            tool-registry transcript-fn human-renderer
            session-dir artifact-store]
     :or   {invocation-processors []}}]
@@ -57,7 +60,8 @@
                                               :catalog-ratings     llm-catalog-ratings
                                               :eligibility-strict? llm-eligibility-strict?
                                               :aliases             llm-aliases
-                                              :preferences         llm-preferences})]
+                                              :preferences         llm-preferences
+                                              :resilience          llm-resilience})]
                     [])
         hi-procs  (if human-renderer
                     [(human-input/new-processor {:renderer      human-renderer

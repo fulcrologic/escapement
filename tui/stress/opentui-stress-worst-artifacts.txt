@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│escapement · session ·                                                                                                                                                                          ◷ 0:09│
+│▶ —                                                                                                                                                                             0 LLMs · 0 act · 0 t/s│
+│states: [run finished]                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+┏━inspector · Artifacts━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ dir:  /home/naomarik/github/escapement/.escapement/8cb1b182-b2b2-4905-9d83-490354270419/artifacts                                                                                                   █┃
+┃ size: 2.6 MB  (72 files)                                                                                                                                                                             ┃
+┃ ── j/k select · Enter/o open · y copy path · Y copy dir · Esc close ──                                                                                                                               ┃
+┃  worker-00-art-00.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-00-art-01.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-00-art-02.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-00-art-03.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-00-art-04.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-00-art-05.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-01-art-00.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-01-art-01.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-01-art-02.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-01-art-03.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-01-art-04.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-01-art-05.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-02-art-00.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-02-art-01.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-02-art-02.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-02-art-03.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-02-art-04.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-02-art-05.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-03-art-00.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-03-art-01.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-03-art-02.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-03-art-03.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-03-art-04.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-03-art-05.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-04-art-00.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-04-art-01.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-04-art-02.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-04-art-03.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-04-art-04.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-04-art-05.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-05-art-00.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-05-art-01.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-05-art-02.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-05-art-03.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-05-art-04.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-05-art-05.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-06-art-00.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-06-art-01.md                       36.9 KB                                                                                                                                                   ┃
+┃  worker-06-art-02.md                       36.9 KB                                                                                                                                                   ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ LOG · ⇅ scroll · Enter transcript · m maximize · Tab → LIVE · ? inspector · a artifacts · Esc interrupt · Ctrl-C quit

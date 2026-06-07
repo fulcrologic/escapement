@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│escapement · escapement.examples.stress.worst/agent · f148d483                                                                                                                                  ◷ 0:00│
+│▶ run › finished                                                                                                                                                                0 LLMs · 0 act · 0 t/s│
+│spawn · ◉ finished                                                                                                                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ LIVE ────────────────────────────────────────────────────────────────────────────────────────────╮▛ LOG ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀ ⇅ 114/114 ▜
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.workers, :session-id ":multiplex.workers…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.3", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.3", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.3", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.3", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.3", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.3", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.0, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.1, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.2, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.3, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.4, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.5, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.workers, :session-id ":multiplex.workers…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.4", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.4", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.4", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.4", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.4", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.4", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.0, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.1, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.2, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.3, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.4, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.5, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.workers, :session-id ":multiplex.workers…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.5", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.5", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.5", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.5", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.5", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :worker/result, :session-id ":multiplex.workers.5", :…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.0, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.1, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.2, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.3, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.4, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.multiplex.workers.5, :session-id ":multi…▐
+│                                                                                                  │▌18:56:30 chart · event-dropped {:event-name :done.invoke.workers, :session-id ":multiplex.workers…▐
+│                                                                                                  │▌18:56:30 debug · done final=[:run :finished]                                                      ▐
+│                                                                                                  │▌18:56:30 debug · Chart finished. Inspector still live — press Ctrl-C to quit.                     ▐
+
+ LOG · ⇅ scroll · Enter transcript · m maximize · Tab → LIVE · ? inspector · a artifacts · Esc interrupt · Ctrl-C quit

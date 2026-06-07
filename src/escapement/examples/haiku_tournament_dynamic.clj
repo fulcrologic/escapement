@@ -190,15 +190,25 @@
     "report should:\n"
     "  1. Open with the theme and the size of the field (N poets, M "
     "judges).\n"
-    "  2. Announce the WINNER (or declare the tie) up front, with the "
-    "winning haiku rendered in a fenced block.\n"
-    "  3. Give a one-paragraph reading of why the winner won, drawing on "
-    "the round-2 judges' actual reasons.\n"
-    "  4. A `## Finalists` section listing each finalist with its haiku, "
+    "  2. Announce the WINNER (or declare the tie) up front and crown that "
+    "poet **The Muse** — state the poet number explicitly (e.g. \"Poet 3 — "
+    "The Muse\") with the winning haiku rendered in a fenced block.\n"
+    "  3. Give a one-paragraph reading of why the Muse won, drawing on the "
+    "round-2 judges' actual reasons.\n"
+    "  4. A `## The Critique` section: name the SINGLE poet who fared worst "
+    "— the one with the fewest votes across both rounds (break ties by who "
+    "drew the least round-1 support; a poet who never reached the finals "
+    "counts as worst). State that poet's number explicitly (e.g. \"Poet 5 — "
+    "The Critique\"), render their best haiku in a fenced block, and give a "
+    "frank one-paragraph critique grounded in the judges' silence or their "
+    "stated reasons for preferring others. Be specific and fair, not cruel.\n"
+    "  5. A `## Finalists` section listing each finalist with its haiku, "
     "its poet, and a brief note on the round-1 consensus that lifted it.\n"
-    "  5. A `## All entries` section listing every poet's three haiku.\n"
-    "  6. A `## Notes from the judges` section quoting one or two of the "
+    "  6. A `## All entries` section listing every poet's three haiku.\n"
+    "  7. A `## Notes from the judges` section quoting one or two of the "
     "most interesting round-2 reasons verbatim, attributed by persona.\n"
+    "It must be unambiguous from the report exactly which poet earned the "
+    "Muse and which earned the Critique.\n"
     "Reply with ONLY the Markdown — no preamble, no closing remarks, no "
     "code fences around the document itself. End your turn after the "
     "report."))
@@ -209,7 +219,13 @@
         picks    (:judge1-picks data)
         finals   (:finalists data)
         votes    (:judge2-votes data)
-        result   (:result data)]
+        result   (:result data)
+        ;; Round-1 support per poet = how many judges picked any of that poet's
+        ;; haiku. Spelled out so the MC can name The Critique (fewest votes)
+        ;; without having to tally by hand.
+        r1-support (let [tally (frequencies (map :poet_idx (mapcat val picks)))]
+                     (into (sorted-map)
+                       (for [p (sort (keys haikus))] [p (get tally p 0)])))]
     (str "THEME: " theme "\n"
       "POETS: " (count haikus) ", JUDGES: " (count votes) "\n\n"
       "## All haiku (by poet)\n"
@@ -229,9 +245,14 @@
         (for [[j {:keys [finalist_idx reason]}] (sort votes)
               :let [persona (persona-for j)]]
           (str "Judge " j " (" persona ") → finalist " finalist_idx ": " reason))) "\n\n"
+      "## Round-1 support (judges who picked each poet — lowest = The Critique)\n"
+      (str/join "\n"
+        (for [[p n] r1-support]
+          (str "  - poet " p ": " n " vote" (when (not= 1 n) "s")))) "\n\n"
       "## Tally\n"
       (pr-str result) "\n\n"
-      "Now write `tournament-summary.md`.")))
+      "Now write `tournament-summary.md`. Remember: explicitly crown The Muse "
+      "(the winner) AND name The Critique (the poet with the fewest votes).")))
 
 (defn- format-haikus [haikus]
   (str/join "\n\n"
@@ -275,6 +296,7 @@
       (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms}))
       (h/llm-conversation
         {:id             invk
+         :stream?        true
          :system         (fn [_env data] (poet-system (:idx data)))
          :real-tools     []
          :allowed-events []
@@ -335,6 +357,7 @@
       (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms}))
       (h/llm-conversation
         {:id             "judge1"
+         :stream?        true
          :system         (fn [_env data]
                            (judge1-system (:idx data) (:persona data)
                              (:poet-idx data)))
@@ -394,6 +417,7 @@
       (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms}))
       (h/llm-conversation
         {:id             "judge2"
+         :stream?        true
          :system         (fn [_env data]
                            (judge2-system (:idx data) (:persona data)
                              (count (:finalists data))))
@@ -475,6 +499,54 @@
       {:winner-idx (first leaders) :votes top :standings (vec counts)}
       {:tie leaders :votes top :standings (vec counts)})))
 
+(defn- r1-support
+  "Round-1 support per poet: how many judge picks landed on that poet's haiku.
+  Returns a sorted-map poet-idx → count (poets with zero picks included)."
+  [haikus judge1-picks]
+  (let [tally (frequencies (map :poet_idx (mapcat val judge1-picks)))]
+    (into (sorted-map) (for [p (sort (keys haikus))] [p (get tally p 0)]))))
+
+(defn- muse-entry
+  "The winning per-poet champion (`compute-finalists` entry) — The Muse.
+  On a tie, the first leader. nil if there are no finalists."
+  [finalists result]
+  (let [idx (or (:winner-idx result) (first (:tie result)))]
+    (when idx (nth finalists idx nil))))
+
+(defn- critique-entry
+  "The poet who fared worst — The Critique — by fewest round-1 votes (ties
+  broken by lowest poet index), excluding the Muse. Returns that poet's best
+  haiku as a `compute-finalists`-shaped entry."
+  [haikus judge1-picks finalists muse-poet-idx]
+  (let [worst (->> (r1-support haikus judge1-picks)
+                (remove (fn [[p _]] (= p muse-poet-idx)))
+                (sort-by (fn [[p n]] [n p]))
+                ffirst)]
+    (when worst
+      (or (first (filter #(= worst (:poet-idx %)) finalists))
+        {:poet-idx worst :haiku-idx 0 :haiku (get-in haikus [worst 0]) :votes 0}))))
+
+(defn- verdict-markdown
+  "Deterministic, model-independent verdict block prepended to the summary so
+  the report ALWAYS states exactly which poet earned The Muse (the winner) and
+  which earned The Critique (fewest votes), each with its haiku."
+  [data]
+  (let [{:keys [theme haikus judge1-picks finalists judge2-votes result]} data
+        muse  (muse-entry finalists result)
+        crit  (critique-entry haikus judge1-picks finalists (:poet-idx muse))
+        fence (fn [h] (str "```\n" (str/trim (str h)) "\n```"))]
+    (str "# Haiku Tournament — " theme "\n\n"
+      "**Field:** " (count haikus) " poets · " (count judge2-votes) " judges"
+      (when (:tie result) "  ·  _round-2 tie_") "\n\n"
+      "## 🏆 The Muse — Poet " (:poet-idx muse)
+      "  (" (:votes muse 0) " round-1 votes)\n\n"
+      (fence (:haiku muse)) "\n\n"
+      "## 🥀 The Critique — Poet " (:poet-idx crit)
+      "  (" (get (r1-support haikus judge1-picks) (:poet-idx crit) 0)
+      " round-1 votes — the least loved)\n\n"
+      (fence (:haiku crit)) "\n\n"
+      "---\n\n")))
+
 ;; ---------------------------------------------------------------------------
 ;; Child chart registry keys
 ;; ---------------------------------------------------------------------------
@@ -497,6 +569,17 @@
 ;; judge1s, then M judge2s, then host writes the summary.
 ;; ---------------------------------------------------------------------------
 
+(defn- strip-label
+  "Strip instruction-echo prefixes that small models prepend to each line, e.g.
+  `Line 1: the word START` → `START`, `Line 2: 3` → `3`. Tolerant of `:`/`.`/`-`
+  separators. Belt-and-suspenders so a weak instruction-follower (gemma3:1b)
+  still parses; strong models emit the bare value and are unaffected."
+  [s]
+  (-> (or s "")
+    (str/replace #"(?i)^\s*line\s*\d+\s*[:.)\-]\s*" "")
+    (str/replace #"(?i)^\s*the\s+word\s+" "")
+    str/trim))
+
 (defn- parse-planner
   "Parse planner output. Returns one of:
      {:verb :start :poets P :audience M :theme T}
@@ -504,22 +587,29 @@
      {:verb :error :raw text}"
   [text]
   (if-let [text (some-> text str/trim not-empty)]
-    (let [lines (->> (str/split-lines text)
-                     (map str/trim)
-                     (remove str/blank?)
-                     vec)
-          v0    (str/upper-case (or (first lines) ""))]
+    (let [lines    (->> (str/split-lines text)
+                        (map strip-label)
+                        (remove str/blank?)
+                        vec)
+          v0       (str/upper-case (or (first lines) ""))
+          abort?   (str/starts-with? v0 "ABORT")
+          ;; Data-driven extraction so a tiny model that picks the WRONG verb
+          ;; keyword (gemma3:1b emits "ABORT" with full counts+theme filled in)
+          ;; still runs: the two in-range integers (in order) are the poet and
+          ;; judge counts, and the first remaining non-numeric line is the theme.
+          body     (if (str/starts-with? v0 "START") (rest lines)
+                       (if abort? (rest lines) lines))
+          ints     (->> body (keep #(some-> (re-find #"\d+" %) Long/parseLong))
+                        (filter #(<= 3 % 30)) vec)
+          [poets audience] ints
+          theme    (->> body (remove #(re-matches #"\s*\d+\s*" %))
+                        (map str/trim) (remove str/blank?) first)]
       (cond
-        (str/starts-with? v0 "START")
-        (let [poets    (some-> (get lines 1) (->> (re-find #"\d+")) Long/parseLong)
-              audience (some-> (get lines 2) (->> (re-find #"\d+")) Long/parseLong)
-              theme    (some-> (get lines 3) str/trim not-empty)]
-          (if (and poets audience theme
-                (<= 3 poets 30) (<= 3 audience 30))
-            {:verb :start :poets poets :audience audience :theme theme}
-            {:verb :error :raw text}))
+        ;; Enough structured data → START regardless of the verb keyword.
+        (and poets audience theme)
+        {:verb :start :poets poets :audience audience :theme theme}
 
-        (str/starts-with? v0 "ABORT")
+        abort?
         {:verb :abort :reason (or (->> (rest lines) (str/join " ") str/trim not-empty)
                                 "unspecified")}
 
@@ -527,7 +617,7 @@
         {:verb :error :raw text}))
     {:verb :error :raw ""}))
 
-(def ^{:multi-session? true} agent
+(def ^{:multi-session? true :interactive? true} agent
   (chart/statechart
     {:initial :run
      :name    "haiku-tournament-dynamic"}
@@ -542,6 +632,7 @@
       (state {:id :planning}
         (h/llm-conversation
           {:id             "planner"
+           :stream?        true
            :system         planner-prompt
            :real-tools     []
            :allowed-events []
@@ -592,6 +683,13 @@
       (state {:id :composing}
         (multiplex
           {:id             :poets
+           ;; Children only mux/reply UP to the parent; they never read events
+           ;; forwarded DOWN. Leaving autoforward on (the library default) makes
+           ;; the parent re-broadcast every result into all N children as silent
+           ;; no-ops — N×N event-processed churn. Off = linear fan-in.
+           ;; (This is unrelated to parallelism — children still run on their
+           ;; own worker threads; ollama's OLLAMA_NUM_PARALLEL gates concurrency.)
+           :autoforward    false
            mo/child-type   ::sc/chart
            mo/count        (fn [_env data] (:poet-count data))
            mo/child-params (fn [_env data idx]
@@ -619,6 +717,7 @@
       (state {:id :judging-r1}
         (multiplex
           {:id             :judges-r1
+           :autoforward    false                            ;; see :poets — children reply-only
            mo/child-type   ::sc/chart
            mo/count        (fn [_env data]
                              (* (long (:audience-count data))
@@ -665,6 +764,7 @@
       (state {:id :judging-r2}
         (multiplex
           {:id             :judges-r2
+           :autoforward    false                            ;; see :poets — children reply-only
            mo/child-type   ::sc/chart
            mo/count        (fn [_env data] (:audience-count data))
            mo/child-params (fn [_env data idx]
@@ -700,16 +800,42 @@
       (state {:id :summarizing}
         (h/llm-conversation
           {:id             "host"
+           :stream?        true
            :system         host-system
            :real-tools     []
            :allowed-events []
            :max-turns      2
            :budget-ms      120000
+           ;; Output-token ceiling for the host's prose: cap each turn at 6k
+           ;; tokens and, on truncation (`stop-reason :max_tokens`), rerun the
+           ;; same turn twice instead of stitching an unbounded continuation.
+           ;; The slight per-rerun temperature bump lets a deterministic host
+           ;; model break out of a re-truncating loop. Retries spent ⇒ accept
+           ;; the truncated turn (`:on-exhausted :truncate`, the default).
+           :resilience     {:overrun {:max-output-tokens 6000
+                                      :max-retries       2
+                                      :temperature-bump  0.1
+                                      :temperature-max   1.0}}
            :message        (fn [_env data] (host-user-message data))})
         (transition {:event :llm.idle
                      :cond  (fn [_env data] (= "host" (from-id data)))
                      :target :finished}
-          (h/capture-llm-output {:as "tournament-summary.md"}))
+          ;; First write the host LLM's prose, then prepend the deterministic
+          ;; verdict so the report ALWAYS names The Muse and The Critique
+          ;; exactly — independent of how capable the host model is.
+          (h/capture-llm-output {:as "tournament-summary.md"})
+          (script {:expr
+                   (fn [env data]
+                     (let [sdir  (:escapement/session-dir env)
+                           path  (str sdir "/artifacts/tournament-summary.md")
+                           prose (try (str/trim (slurp path)) (catch Throwable _ ""))
+                           md    (str (verdict-markdown data)
+                                   "## Master of Ceremonies' reading\n\n"
+                                   (if (str/blank? prose)
+                                     "_(the host model produced no prose)_" prose)
+                                   "\n")]
+                       (spit path md))
+                     nil)}))
         (transition {:event :error.llm :target :finished}
           (script {:expr (fn [_env data]
                            [(ops/assign :host-error

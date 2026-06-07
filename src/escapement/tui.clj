@@ -18,13 +18,19 @@
     no-ops so the calling code path stays uniform; the renderer falls through
     to stdin behavior in that case."
   (:require
-    [clojure.java.io :as io]
-    [clojure.pprint :as pp]
     [clojure.string :as str]
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.config :as ecfg]
     [escapement.debug.controller :as dbg]
     [escapement.invocation.human-input :as hi]
+    [escapement.tui.theme :as theme]
+    [escapement.tui.compositor :as cmp]
+    [escapement.tui.util :as util]
+    [escapement.tui.live :as live]
+    [escapement.tui.log :as log]
+    [escapement.tui.phase :as phase]
+    [escapement.tui.transcript :as transcript]
+    [escapement.tui.inspector :as inspector]
     [com.fulcrologic.statecharts.promise :as p])
   (:import
     (java.io Reader)
@@ -59,10 +65,14 @@
 ;; ANSI primitives — written to *err*, no colors.
 ;; ---------------------------------------------------------------------------
 
-(def ^:private CSI "\033[")
-(defn- esc [s] (str CSI s))
+;; ANSI SGR/positioning primitives — extracted to escapement.tui.theme +
+;; escapement.tui.compositor. Re-aliased here so the rest of this facade (and
+;; tests referencing private vars like `#'escapement.tui/move-to-s`) keep working.
+(def ^:private CSI theme/CSI)
+(def ^:private ESC-CHAR theme/ESC-CHAR)                     ;; \e — SCI rejects \033 char literals
+(def ^:private esc theme/esc)
 (def ^:private clear-screen-s (str (esc "2J") (esc "H")))
-(def ^:private clear-eol-s (esc "K"))
+(def ^:private clear-eol-s cmp/clear-eol-s)
 ;; Alternate screen buffer — full-screen TUI convention. Entering switches the
 ;; terminal to a fresh blank screen; leaving restores the prior contents (so
 ;; the user's shell scrollback isn't polluted with our paint).
@@ -82,9 +92,9 @@
 ;; code is harmless on terminals that don't recognise it, so we always
 ;; send the union, exactly like terminfo would.
 (def ^:private show-cursor-s (str (esc "34h") (esc "?25h")))
-(def ^:private reverse-on-s (esc "7m"))
-(def ^:private reset-attrs-s (esc "0m"))
-(defn- move-to-s [row col] (esc (str row ";" col "H")))
+(def ^:private reverse-on-s cmp/reverse-on-s)
+(def ^:private reset-attrs-s theme/reset-attrs-s)
+(def ^:private move-to-s cmp/move-to-s)
 
 (defn- emit! [s]
   (binding [*out* *err*]
@@ -95,45 +105,72 @@
 ;; Event → one-line summary
 ;; ---------------------------------------------------------------------------
 
-(defn- truncate [s n]
-  (let [s (str s)]
-    (if (<= (count s) n) s (str (subs s 0 (max 0 (- n 1))) "…"))))
+;; Whitespace/truncation helpers extracted to escapement.tui.compositor;
+;; re-exported here (collapse-ws is public — tests use `tui/collapse-ws`).
+(def collapse-ws cmp/collapse-ws)
+(def ^:private truncate cmp/truncate)
 
-(defn- short-invokeid
-  "Strip a namespace-style prefix from `id` and cap at ~10 chars for the
-   `[<invokeid>]` source tag."
-  [id]
-  (when id
-    (let [s (str id)
-          s (or (last (str/split s #"[/.]")) s)]
-      (truncate s 10))))
+(def ^:private short-invokeid util/short-invokeid)
+(def ^:private ts->hms util/ts->hms)
 
-(defn- ts->hms
-  "Format a unix-ms timestamp as HH:MM:SS in the local timezone."
-  [ts]
-  (let [ts  (or ts (System/currentTimeMillis))
-        fmt (java.text.SimpleDateFormat. "HH:mm:ss")]
-    (.format fmt (java.util.Date. ^long ts))))
+;; Per-role palette + fixed role colors extracted to escapement.tui.theme.
+(def ^:private invokeid-palette theme/invokeid-palette)
+(def ^:private chart-color theme/chart-color)              ;; bright black / dim grey
+(def ^:private human-color theme/human-color)              ;; bright white
+(def ^:private error-color theme/error-color)              ;; red
+(def ^:private debug-color theme/debug-color)              ;; dim
 
-;; ANSI palette for invokeid color allocation. Round-robin in this order.
-;; SGR codes — start with `(esc "...m")` and reset with reset-attrs-s.
-(def ^:private invokeid-palette
-  ["36"                                                     ;; cyan
-   "35"                                                     ;; magenta
-   "33"                                                     ;; yellow
-   "32"                                                     ;; green
-   "34"                                                     ;; blue
-   "91"                                                     ;; bright red
-   "96"                                                     ;; bright cyan
-   "95"                                                     ;; bright magenta
-   "93"                                                     ;; bright yellow
-   "92"                                                     ;; bright green
-   ])
+;; ---------------------------------------------------------------------------
+;; Semantic color theme — capability-aware (256 → 16 → none)
+;;
+;; All color in the redesign routes through this one switch so NO_COLOR /
+;; non-tty / dumb terminals degrade in a single place. A theme is a map of
+;; semantic keys → SGR code strings (the digits between `\e[` and `m`, e.g.
+;; "38;5;110" or "36"; "" means "no color"). `paint` wraps a body in the SGR
+;; + reset, or returns it unchanged when the code is empty.
+;; ---------------------------------------------------------------------------
 
-(def ^:private chart-color "90")                            ;; bright black / dim grey
-(def ^:private human-color "97")                            ;; bright white
-(def ^:private error-color "31")                            ;; red
-(def ^:private debug-color "90")                            ;; dim
+;; The semantic theme (capability detection, theme maps, paint/status-color,
+;; role-hue allocation) lives in escapement.tui.theme. Re-exported here so
+;; external call sites (`escapement.tui/paint`, `tui/theme-for`, examples,
+;; human-input) and the rest of this facade keep their existing names.
+(def color-capability theme/color-capability)
+(def ^:private theme-256 theme/theme-256)
+(def ^:private theme-16 theme/theme-16)
+(def ^:private theme-keys theme/theme-keys)
+(def ^:private theme-none theme/theme-none)
+(def theme-for theme/theme-for)
+(def sgr-wrap theme/sgr-wrap)
+(def paint theme/paint)
+(def theme-color? theme/theme-color?)
+(def status-color theme/status-color)
+
+;; ---------------------------------------------------------------------------
+;; Pane / box compositor + responsive layout (task 002)
+;;
+;; Draws bordered panes into the frame StringBuilder at arbitrary
+;; (row, col, w, h) rectangles. The content renderers (LIVE / LOG / phase
+;; tracker) and the frame integrator build on these primitives. Nothing here
+;; touches `render-frame!`.
+;;
+;; The #1 alignment risk is wide-glyph width: box-drawing, shimmer, and CJK
+;; glyphs occupy two terminal columns. `display-width` counts true columns
+;; (SGR escapes are zero-width); `truncate-display` pads/clips to an exact
+;; column count without ever splitting an escape sequence.
+;; ---------------------------------------------------------------------------
+
+;; The pane/box compositor + responsive layout lives in
+;; escapement.tui.compositor. Re-exported here so external call sites
+;; (tui/display-width, tui/layout) and the rest of this facade keep their
+;; existing names; the private draw-box var deref in tests still works.
+(def display-width cmp/display-width)
+(def truncate-display cmp/truncate-display)
+(def ^:private draw-box cmp/draw-box)
+(def ^:private header-h cmp/header-h)
+(def ^:private footer-h cmp/footer-h)
+(def ^:private narrow-threshold cmp/narrow-threshold)
+(def ^:private live-min-w cmp/live-min-w)
+(def layout cmp/layout)
 
 (defn- entries-for
   "Return a vector of scrollback entries (one per logical line) for transcript
@@ -292,7 +329,7 @@
                   :else (str src))]
         (str "[" tag "] " (:summary e))))))
 
-(declare chart-from-env stop!)
+(declare chart-from-env stop! color-for role-sgr role-sgr-themed event!* live-agg request-render!)
 
 ;; ---------------------------------------------------------------------------
 ;; Internal state
@@ -336,243 +373,26 @@
       (dbg/paused? (:debug-controller h))) "P"
     :else "R"))
 
-(defn- list-artifacts
-  "Returns a vector of artifact filenames in `session-dir`'s artifacts/ that
-   match `<invokeid>.*`. Returns [] if the directory doesn't exist."
-  [session-dir invokeid]
-  (try
-    (let [d (io/file (str session-dir "/artifacts"))]
-      (if (and (.exists d) (.isDirectory d))
-        (let [prefix (str invokeid)]
-          (vec (sort (filter #(or (= % prefix)
-                                (str/starts-with? % (str prefix ".")))
-                       (.list d)))))
-        []))
-    (catch Throwable _ [])))
-
-(defn- session-dir-from-env [env]
-  (get env :escapement/session-dir))
-
-(defn- pretty
-  "Pretty-print `x` to a string."
-  [x]
-  (try (with-out-str (pp/pprint x))
-       (catch Throwable _ (pr-str x))))
-
-(defn- pager-lines [s] (or (get-in s [:debug-overlay :pager :lines]) []))
-
-(defn- open-pager!
-  "Push a pager (title + lines) onto the overlay state."
-  [state title text]
-  (let [lines (vec (str/split-lines (str text)))]
-    (swap! state assoc-in [:debug-overlay :pager]
-      {:title title :lines lines :offset 0})))
-
-(defn- close-pager! [state]
-  (swap! state assoc-in [:debug-overlay :pager] nil))
-
-(defn- fmt-hms
-  "Formats a unix-ms timestamp as `HH:mm:ss.mmm` in the local timezone.
-   Returns `\"--:--:--.---\"` when ts is nil."
-  [ts]
-  (if ts
-    (let [fmt (java.text.SimpleDateFormat. "HH:mm:ss.SSS")]
-      (.format fmt (java.util.Date. ^long ts)))
-    "--:--:--.---"))
-
-(defn- current-event-rows
-  "Most-recent-first vector of {:ts :event-name :config-before :config-after :ev}."
-  [events]
-  (vec (reverse
-         (mapv (fn [ev]
-                 {:ts            (:ts ev)
-                  :event-name    (get-in ev [:data :event-name] (:event ev))
-                  :config-before (get-in ev [:data :config-before])
-                  :config-after  (get-in ev [:data :config-after])
-                  :ev            ev})
-           events))))
-
-(defn- render-pager-lines
-  "Render lines for the pager into `buf` between rows `r0` and `r1`."
-  [^StringBuilder buf {:keys [title lines offset]} r0 r1 term-w]
-  (.append buf (move-to-s r0 1))
-  (.append buf (truncate (str " ── " title " ── (PgUp/PgDn, Esc=close)") term-w))
-  (.append buf clear-eol-s)
-  (let [room  (max 1 (- r1 r0))
-        start (min (max 0 (or offset 0)) (max 0 (- (count lines) 1)))
-        slice (subvec lines start (min (count lines) (+ start room)))]
-    (doseq [[i ln] (map-indexed vector slice)]
-      (.append buf (move-to-s (+ r0 1 i) 1))
-      (.append buf (truncate ln term-w))
-      (.append buf clear-eol-s))
-    (doseq [row (range (+ r0 1 (count slice)) (inc r1))]
-      (.append buf (move-to-s row 1))
-      (.append buf clear-eol-s))))
-
-(defn- entry-pager-text
-  "Build full-text pager content for a scrollback entry `e` (with embedded
-   `:ev`). Used when the user hits Enter on the main scrollback cursor."
-  [{:keys [ev] :as _e}]
-  (let [{:keys [event data]} ev
-        hdr (str (ts->hms (:ts ev)) "  " (name (or event :?)))]
-    (case event
-      :llm/response
-      ;; If the entry has a specific :block, render just that block.
-      (let [b (:block _e)]
-        (if b
-          (case (:type b)
-            :text (str hdr "  (text)\n\n" (:text b))
-            :thinking (str hdr "  (thinking)\n\n" (:thinking b))
-            :tool_use (str hdr "  (tool_use " (:name b) ")\n\nINPUT:\n"
-                        (pretty (:input b)))
-            (str hdr "\n\n" (pretty b)))
-          (str hdr "\n\n" (pretty data))))
-
-      :llm/tool-result
-      (str hdr "  tool=" (:tool data)
-        (when (:is-error data) "  (ERROR)")
-        "\n\n" (or (:content-preview data) ""))
-
-      :llm/user-message
-      (str hdr "\n\n" (or (:text data) ""))
-
-      :llm/request
-      (str hdr "\n\n" (pretty data))
-
-      :human-input/start
-      (str hdr "  kind=" (pr-str (:kind data))
-        (when-let [p (:prompt data)] (str "\n\n" p)))
-
-      :human-input/answer
-      (str hdr "  kind=" (pr-str (:kind data))
-        "\n\n" (pretty (:answer data)))
-
-      ;; default — pretty the whole event
-      (str hdr "\n\n" (pretty ev)))))
-
-(defn- render-overlay!
-  "Renders the inspector overlay into the scrollback region. Row range
-   `[r0..r1]` is inclusive."
-  [^StringBuilder buf h s r0 r1 term-w]
-  (let [ov             (:debug-overlay s)
-        view           (:view ov)
-        cursor         (:cursor ov 0)
-        env            (some-> (:env h) deref)
-        events         (:events ov)
-        tabs           "[1]Invocations [2]Chart [3]Status"
-        pending-suffix (if (:pending-modal s)
-                         "  Esc=back (1 prompt waiting)"
-                         "")
-        title          (str " ── inspector "
-                         (case view
-                           :invocations tabs
-                           :chart tabs
-                           :status tabs
-                           "")
-                         "  (j/k g/G Enter=drill o=open Esc/h=back  s/c/p/P=ctrl v=viz)"
-                         pending-suffix
-                         " ── ")]
-    (.append buf (move-to-s r0 1))
-    (.append buf (truncate title term-w))
-    (.append buf clear-eol-s)
-    (if-let [pager (:pager ov)]
-      (render-pager-lines buf pager (inc r0) r1 term-w)
-      ;; Each view returns {:rows [strings] :hl-offset N} where hl-offset is
-      ;; the index into :rows corresponding to cursor=0. That keeps decorative
-      ;; header lines from throwing off the selection highlight.
-      (let [body-r0  (inc r0)
-            sdir     (session-dir-from-env env)
-            fmt-time (fn [ms]
-                       (when ms
-                         (let [age (- (System/currentTimeMillis) ms)
-                               s   (quot age 1000)]
-                           (cond (< s 60) (str s "s")
-                                 (< s 3600) (str (quot s 60) "m" (mod s 60) "s")
-                                 :else (str (quot s 3600) "h" (mod (quot s 60) 60) "m")))))
-            {:keys [rows hl-offset selectable?]}
-            (case view
-              :invocations
-              (cond
-                ;; Drilldown: focus on one invocation's artifacts.
-                (:focus ov)
-                (let [{:keys [invokeid]} (:focus ov)
-                      arts   (list-artifacts sdir invokeid)
-                      header [(str " " invokeid "  ── (Esc/h to go back, Enter/o to view) ──")]]
-                  (if (seq arts)
-                    {:rows        (into header
-                                    (mapv (fn [name]
-                                            (let [f (io/file (str sdir "/artifacts/" name))]
-                                              (format "  %-30s  %sB"
-                                                (str/join (take 30 name))
-                                                (.length f))))
-                                      arts))
-                     :hl-offset   (count header)
-                     :selectable? true}
-                    {:rows      (conj header "  (no artifacts captured for this invocation)")
-                     :hl-offset nil :selectable? false}))
-
-                ;; List view: invocation history (newest first).
-                :else
-                (let [hist (:invocations ov)]
-                  (if (seq hist)
-                    {:rows        (mapv (fn [{:keys [invokeid started-ms ended-ms reason]}]
-                                          (let [arts-n (count (list-artifacts sdir invokeid))
-                                                status (cond
-                                                         (nil? ended-ms) "live "
-                                                         (= reason :stopped) "done "
-                                                         (= reason :interrupted) "stop "
-                                                         reason (str (name reason) " ")
-                                                         :else "done ")
-                                                age    (or (fmt-time started-ms) "?")]
-                                            (format " %-5s  %s ago  %s  artifacts=%d"
-                                              status age invokeid arts-n)))
-                                    hist)
-                     :hl-offset   0
-                     :selectable? true}
-                    {:rows      [" (no LLM invocations yet)"]
-                     :hl-offset nil :selectable? false})))
-
-              :chart
-              (let [active (or (:config s) (get-in (last events) [:data :config-after]))
-                    erows  (current-event-rows events)
-                    header [(str " active config: " (pr-str active))
-                            " ── recent events (newest first) ── time         event              before → after"]]
-                {:rows        (into header
-                                (mapv (fn [{:keys [ts event-name config-before config-after]}]
-                                        (format "  %s  %-22s  %s  →  %s"
-                                          (fmt-hms ts)
-                                          (str event-name)
-                                          (pr-str config-before)
-                                          (pr-str config-after)))
-                                  erows))
-                 :hl-offset   (count header)
-                 :selectable? (seq erows)})
-
-              :status
-              (let [c  (:debug-controller h)
-                    cs (when c @c)]
-                {:rows      [(str " mode:           " (or (:mode cs) "n/a"))
-                             (str " step-budget:    " (or (:step-budget cs) 0))
-                             (str " pause-on-ext?:  " (boolean (:pause-on-next-external? cs)))
-                             (str " buffered events: " (count events))
-                             (str " session-dir:    " (session-dir-from-env env))]
-                 :hl-offset nil :selectable? false})
-
-              {:rows [" (unknown view)"] :hl-offset nil :selectable? false})
-            room     (max 1 (- r1 body-r0 -1))
-            hl-row   (when (and selectable? hl-offset)
-                       (+ hl-offset cursor))]
-        (doseq [[i ln] (map-indexed vector (take room rows))]
-          (let [row (+ body-r0 i)
-                hl? (and hl-row (= i hl-row))]
-            (.append buf (move-to-s row 1))
-            (when hl? (.append buf reverse-on-s))
-            (.append buf (truncate ln term-w))
-            (when hl? (.append buf reset-attrs-s))
-            (.append buf clear-eol-s)))
-        (doseq [row (range (+ body-r0 (min room (count rows))) (inc r1))]
-          (.append buf (move-to-s row 1))
-          (.append buf clear-eol-s))))))
+;; Inspector overlay views + transcript builders now live in
+;; escapement.tui.inspector / escapement.tui.transcript; tiny shared helpers
+;; (session-dir/list-artifacts/pretty) live in escapement.tui.util. Re-exported
+;; here so the facade body / external call sites / tests keep resolving the
+;; `escapement.tui/…` names.
+(def ^:private list-artifacts util/list-artifacts)
+(def ^:private session-dir-from-env util/session-dir-from-env)
+(def ^:private pretty util/pretty)
+(def ^:private open-pager! inspector/open-pager!)
+(def ^:private close-pager! inspector/close-pager!)
+(def ^:private current-event-rows inspector/current-event-rows)
+(def ^:private render-overlay! inspector/render-overlay!)
+(def ^:private view-row-count inspector/view-row-count)
+(def ^:private open-artifact-file! inspector/open-artifact-file!)
+(def ^:private focus-invocation! inspector/focus-invocation!)
+(def ^:private open-focused-artifact! inspector/open-focused-artifact!)
+(def ^:private open-event-detail! inspector/open-event-detail!)
+(def ^:private open-invocation-transcript! inspector/open-invocation-transcript!)
+(def ^:private invocation-transcript-text transcript/invocation-transcript-text)
+(def ^:private fmt-transcript-event transcript/fmt-transcript-event)
 
 ;; ---------------------------------------------------------------------------
 ;; Rendering
@@ -590,33 +410,400 @@
     {:slice (subvec scrollback start end)
      :start start}))
 
+;; ---------------------------------------------------------------------------
+;; Live streaming-token region
+;; ---------------------------------------------------------------------------
+
+;; LIVE pane renderers + live-aggregation primitives now live in
+;; escapement.tui.live; re-exported here so the facade body / external call
+;; sites / tests keep resolving the `escapement.tui/…` names.
+(def ^:private live-max-groups live/live-max-groups)
+(def ^:private live-group-children live/live-group-children)
+(def ^:private status-rank live/status-rank)
+(def ^:private live-count live/live-count)
+(def ^:private live-tps live/live-tps)
+(def ^:private live-status live/live-status)
+(def ^:private short-session live/short-session)
+(def ^:private live-agg live/live-agg)
+(def ^:private live-display-lines live/live-display-lines)
+(def completion-bar live/completion-bar)
+(def shimmer live/shimmer)
+(def live-pane-lines live/live-pane-lines)
+
+
+;; ---------------------------------------------------------------------------
+;; LOG pane renderer (task 004)
+;;
+;; Renders the event scrollback as `:body-lines` for the LOG pane: role-colored
+;; log lines (the role token wears the SAME hue the LIVE pane uses, via
+;; `role-sgr`), plus a `{:pos :total}` scroll indicator for the pane title.
+;; Pure-ish over the TUI state map + an explicit interior height and the LOG
+;; pane's OWN scroll offset (separate from the inspector pager and the LIVE
+;; pane). Does NOT draw the box (002's `draw-box`) and does NOT touch
+;; `render-frame!` (006 wires this in via `draw-box` with the returned `:scroll`
+;; as the title indicator).
+;; ---------------------------------------------------------------------------
+
+(def log-pane-lines log/log-pane-lines) ;; renderer moved to escapement.tui.log
+
+;; ===========================================================================
+;; Phase tracker + header strip (task 005)
+;; ---------------------------------------------------------------------------
+;; Pure, defensive walk over the statechart value stashed by `attach-env!`
+;; (see `chart-from-env`). The chart is a plain map produced by
+;; `com.fulcrologic.statecharts.chart/statechart`; we read its data shape
+;; directly (no static require of the statechart ns — keeps this add-on
+;; dependency-light and SCI-safe):
+;;
+;;   chart                                  ;; a map
+;;   ├ :com.fulcrologic.statecharts/elements-by-id  → {id → element}
+;;   ├ :com.fulcrologic.statecharts/ids-in-document-order → [id …]
+;;   └ each element: {:id :node-type :children [child-id…] :parent id}
+;;       :node-type ∈ #{:statechart :state :parallel :final
+;;                      :initial :transition :on-entry …}  (root id = :ROOT)
+;;
+;; `:children` mixes real state children with synthetic :initial/:transition
+;; nodes — always filter to state node-types. The active configuration is
+;; `(:config s)`: a vector of active state ids (leaves + their compound
+;; ancestors, as recorded by the runner).
+;; ===========================================================================
+
+;; Phase tracker + header strip + chart-walk helpers moved to
+;; escapement.tui.phase; re-exported here for the facade body / tests.
+(def chart-from-env phase/chart-from-env)
+(def phase-model phase/phase-model)
+(def sibling-strip phase/sibling-strip)
+(def header-lines phase/header-lines)
+;; private header helper re-exported via its var so existing specs that deref
+;; `#'escapement.tui/session-tps-sum` keep resolving it.
+(def ^:private session-tps-sum @#'phase/session-tps-sum)
+
+;; ---------------------------------------------------------------------------
+;; Focus / maximize / footer composition (task 006)
+;; ---------------------------------------------------------------------------
+
+(defn cycle-focus
+  "Cycle the focused pane keyword (:live ↔ :log)."
+  [focus]
+  (if (= focus :live) :log :live))
+
+(defn clamp-scroll
+  "Clamp a scroll offset into `[0, (max 0 (- total visible))]`. `nil`/negative
+   ⇒ 0. Used by the focused-pane scroll keys so neither pane scrolls past either
+   end."
+  [offset total visible]
+  (let [hi (max 0 (- (or total 0) (or visible 0)))]
+    (-> (or offset 0) (max 0) (min hi))))
+
+(defn footer-text
+  "Contextual footer string for the current focus / maximized / debug / narrow
+   state. `focus` ∈ {:live :log}; the rest are booleans."
+  [{:keys [focus maximized? debug? narrow?]}]
+  (let [pane (if (= focus :live) "LIVE" "LOG")
+        other (if (= focus :live) "LOG" "LIVE")
+        live? (= focus :live)
+        ctrl  (when debug? " · s/c/p/P ctrl")
+        viz   (when debug? " · v viz")]
+    (str " " pane (when maximized? " (max)")
+      (if live? " · j/k select" " · ⇅ scroll")
+      " · Enter transcript"
+      (if maximized?
+        (str " · Esc restore split · Tab → " other)
+        (str " · m maximize · Tab → " other))
+      " · ? inspector · a artifacts"
+      ctrl viz
+      (when-not maximized? " · Esc interrupt")
+      " · Ctrl-C quit")))
+
+(defn dispatch-key
+  "Pure key-dispatch helper for the dashboard (no overlay, no modal). Given the
+   logical key `k` (`:enter`, `:tab`, `:esc`, `:m`, `:j`/`:k`/`:g`/`:G` as
+   `[:char \\c]`, `:up`/`:down`/etc.) and the relevant context map, returns the
+   ACTION keyword the input loop should perform. Context:
+     `{:focus :live|:log  :maximized? bool  :overlay-open? bool}`
+   Actions:
+     :open-transcript  — Enter: drill into the selected row's transcript.
+     :maximize         — m: toggle maximize of the focused pane.
+     :live-cursor-down/:live-cursor-up/:live-cursor-top/:live-cursor-bottom
+                       — j/k/g/G while LIVE focused (move the selection cursor).
+     :scroll-down/:scroll-up/:scroll-top/:scroll-bottom
+                       — j/k/g/G while LOG focused (scroll the pane).
+     :focus-cycle      — Tab.
+     :restore-split    — Esc while maximized.
+     :interrupt        — Esc otherwise.
+     nil               — not handled here."
+  [k {:keys [focus maximized?]}]
+  (let [live? (= focus :live)]
+    (cond
+      (= k :enter)        :open-transcript
+      (= k :tab)          :focus-cycle
+      (= k [:char \m])    :maximize
+      (= k :esc)          (if maximized? :restore-split :interrupt)
+      (or (= k :down) (= k [:char \j])) (if live? :live-cursor-down :scroll-down)
+      (or (= k :up)   (= k [:char \k])) (if live? :live-cursor-up   :scroll-up)
+      (= k [:char \g])    (if live? :live-cursor-top :scroll-top)
+      (= k [:char \G])    (if live? :live-cursor-bottom :scroll-bottom)
+      :else nil)))
+
+(defn clamp-live-cursor
+  "Clamp a LIVE selection cursor into `[0, (max 0 (dec n))]` where `n` is the
+   visible-row count. `nil`/negative ⇒ 0; empty pane ⇒ 0."
+  [cursor n]
+  (let [n (max 0 (or n 0))]
+    (if (zero? n) 0 (-> (or cursor 0) (max 0) (min (dec n))))))
+
+(defn paused-banner
+  "Pure: the themed PAUSED status banner shown on the legacy host's status row
+   while the debug controller has the chart paused. `theme` is a `theme-for`
+   map; `ind` is the leading `[P] ` status-indicator prefix (may be \"\").
+
+   Renders an amber (`:status/waiting`) accent `PAUSED` label followed by dim
+   key hints (`s=step  c=continue  p=pause  P=arm  ?=inspector`). Honors
+   `:none`/NO_COLOR — when the theme has no color, `paint` is a no-op and the
+   result is plain text with zero escapes."
+  [theme ind]
+  (str " " (or ind "")
+    (theme/paint theme :status/waiting "PAUSED")
+    "  "
+    (theme/paint theme :border-dim
+      "s=step  c=continue  p=pause  P=arm  ?=inspector")))
+
+(defn viz-entry
+  "Pure: build a scrollback ENTRY map for a viz launcher message. Carries a
+   `:source :viz` (so the themed LOG pane role-colors the line + status glyph)
+   and a `:summary` for the LOG pane, plus a PLAIN `:line` for the legacy raw
+   host (whose `truncate`/`collapse-ws` would strip embedded SGR — so the legacy
+   line stays plain, escape-free text). `:glyph` marks the kind: `◆` info / `✗`
+   error. The themed launcher line (LOG pane) is built by `log-entry->line` from
+   `:source`/`:glyph`/`:summary`; this entry contributes ZERO escapes itself, so
+   NO_COLOR is honored automatically."
+  [_theme msg & {:keys [error?]}]
+  {:source  :viz
+   :glyph   (if error? \✗ \◆)
+   :summary (str msg)
+   :line    (str "[viz] " msg)
+   :ev      nil})
+
+(defn- focused-pane-metrics
+  "Returns `[scroll-key total visible]` for the currently focused pane, used to
+   clamp scroll keys. `total` = scrollable line/entry count; `visible` = pane
+   interior height."
+  [h s]
+  (let [term-w (:term-w s 80)
+        term-h (:term-h s 24)
+        focus  (:focus s :log)
+        lay    (layout {:term-w term-w :term-h term-h
+                       :focus focus :maximized? (:maximized? s)})
+        rect   (or (:body lay) (get lay focus))
+        ih     (max 1 (- (:h rect 3) 2))]
+    (if (= focus :live)
+      [:live-scroll (count (live-pane-lines s theme-none (- (:w rect 42) 2) 0)) ih]
+      [:log-scroll (count (:scrollback s)) ih])))
+
+(defn- scroll-focused!
+  "Mutate the focused pane's scroll offset by a logical direction, clamped.
+   `dir` ∈ {:up :down :page-up :page-down :top :bottom}. LIVE and LOG use
+   opposite offset conventions (LIVE offset 0 = top, LOG offset 0 = bottom/tail);
+   this normalizes so :up always reveals older/earlier content in both."
+  [state h dir]
+  (swap! state
+    (fn [s]
+      (let [[k total visible] (focused-pane-metrics h s)
+            log?  (= k :log-scroll)
+            page  (max 1 (dec visible))
+            cur   (get s k 0)
+            ;; logical step in the OFFSET space: for LOG, :up = +N; for LIVE,
+            ;; :up = -N (scroll toward the top of the list).
+            step  (fn [n] (if log? (+ cur n) (- cur n)))
+            nxt   (case dir
+                    :up        (step 1)
+                    :down      (step -1)
+                    :page-up   (step page)
+                    :page-down (step (- page))
+                    :top       (if log? (max 0 (- total visible)) 0)
+                    :bottom    (if log? 0 (max 0 (- total visible))))]
+        (assoc s k (clamp-scroll nxt total visible))))))
+
+(defn- live-row-count
+  "Visible LIVE-row count = length of the live-row index for the current state."
+  [s]
+  (count (live/live-row-index s)))
+
+(defn- move-live-cursor!
+  "Move the LIVE selection cursor by a logical direction, clamped to the visible
+   row count. `dir` ∈ {:up :down :top :bottom}."
+  [state dir]
+  (swap! state
+    (fn [s]
+      (let [n   (live-row-count s)
+            cur (clamp-live-cursor (:live-cursor s) n)
+            nxt (case dir
+                  :down   (inc cur)
+                  :up     (dec cur)
+                  :top    0
+                  :bottom (dec n))]
+        (assoc s :live-cursor (clamp-live-cursor nxt n))))))
+
+(defn- open-live-transcript!
+  "Enter on the selected LIVE row: resolve its invokeid via `live/live-row-index`
+   and open that invocation's live-updating transcript overlay. No-op if there's
+   no selectable row."
+  [h state]
+  (let [s   @state
+        idx (live/live-row-index s)
+        cur (clamp-live-cursor (:live-cursor s) (count idx))]
+    (when-let [iid (:invokeid (nth idx cur nil))]
+      (inspector/open-transcript-overlay! h state iid))))
+
+(defn- open-log-transcript!
+  "Enter on the LOG pane: open the transcript for the selected scrollback line's
+   invocation when attributable; otherwise no-op. Attribution is via the
+   selected entry's `:invokeid` (falling back to the tail entry)."
+  [h state]
+  (let [s     @state
+        sb    (:scrollback s)
+        idx   (or (:cursor-idx s) (dec (count sb)))
+        entry (nth (vec sb) idx nil)
+        iid   (some-> (get-in entry [:ev :data :invokeid]) str)]
+    (when iid
+      (inspector/open-transcript-overlay! h state iid))))
+
+(defn- render-mission-control!
+  "New framed two-pane mission-control body: header strip + LIVE/LOG panes (or
+   one maximized / narrow pane) + contextual footer. Assumes no inspector
+   overlay is open (the legacy full-screen path handles that). Modals still
+   render on their own row by the caller."
+  [^StringBuilder buf h s theme term-w term-h]
+  (let [focus      (:focus s :log)
+        maximized? (:maximized? s)
+        lay        (layout {:term-w term-w :term-h term-h
+                            :focus focus :maximized? maximized?})
+        narrow?    (= :narrow (:mode lay))
+        ;; --- header strip ---
+        hrect      (:header lay)
+        hiw        (- (:w hrect) 2)
+        hlines     (header-lines h s theme hiw)
+        _          (draw-box buf {:row (:row hrect) :col (:col hrect)
+                                  :w (:w hrect) :h (:h hrect)
+                                  :theme theme :body-lines hlines})
+        draw-pane  (fn [pane rect]
+                     (when rect
+                       (let [iw     (- (:w rect) 2)
+                             ih     (- (:h rect) 2)
+                             focus? (= pane focus)]
+                         (if (= pane :live)
+                           (let [all   (live-pane-lines s theme iw 0
+                                         {:focus? focus? :cursor (:live-cursor s)})
+                                 total (count all)
+                                 off   (clamp-scroll (:live-scroll s) total ih)
+                                 lines (take ih (drop off all))
+                                 pos   (min total (+ off ih))]
+                             (draw-box buf {:row (:row rect) :col (:col rect)
+                                            :w (:w rect) :h (:h rect)
+                                            :title "LIVE" :theme theme
+                                            :focus? focus?
+                                            :scroll (when focus? {:pos pos :total total})
+                                            :body-lines lines}))
+                           (let [{:keys [lines scroll]}
+                                 (log-pane-lines s theme iw ih (:log-scroll s)
+                                   (:cursor-idx s))]
+                             (draw-box buf {:row (:row rect) :col (:col rect)
+                                            :w (:w rect) :h (:h rect)
+                                            :title "LOG" :theme theme
+                                            :focus? focus?
+                                            :scroll scroll
+                                            :body-lines lines})))))) ]
+    ;; --- body panes ---
+    (cond
+      (or maximized? narrow?)
+      (draw-pane focus (:body lay))
+      :else
+      (do (draw-pane :live (:live lay))
+          (draw-pane :log (:log lay))))
+    ;; --- footer ---
+    (let [frect (:footer lay)
+          ftxt  (footer-text {:focus focus :maximized? maximized?
+                              :debug? (:debug? h) :narrow? narrow?})]
+      (.append buf (move-to-s (:row frect) 1))
+      (.append buf (sgr-wrap (get theme :timestamp) (truncate-display ftxt term-w)))
+      (.append buf clear-eol-s))
+    buf))
+
+(defn- render-overlay-fullscreen!
+  "Render the inspector/transcript overlay FULLSCREEN beneath the mission-control
+   header strip. Keeps the framed header (breadcrumb + run status + LLMs/act/t/s)
+   so the user still sees the whole run's state, but the LIVE/LOG panes are
+   hidden — the overlay owns the entire body region from just below the header
+   down to the modal row. Mirrors the header geometry of
+   `render-mission-control!` so the strip lines up identically."
+  [^StringBuilder buf h s theme term-w term-h]
+  (let [lay    (layout {:term-w term-w :term-h term-h
+                        :focus (:focus s :log) :maximized? (:maximized? s)})
+        hrect  (:header lay)
+        hiw    (- (:w hrect) 2)
+        hlines (header-lines h s theme hiw)]
+    (draw-box buf {:row (:row hrect) :col (:col hrect)
+                   :w (:w hrect) :h (:h hrect)
+                   :theme theme :body-lines hlines})
+    (let [r0 (+ (:row hrect) (:h hrect))   ;; first row below the header strip
+          r1 (- term-h 2)]                 ;; leave the modal row (term-h-1) free
+      (render-overlay! buf h s r0 r1 term-w))
+    buf))
+
+(defn- live-active?
+  "True when any live session is mid-flight (:streaming/:waiting). Used by the
+   render ticker to keep the shimmer animating while work is in progress."
+  [s]
+  (boolean
+    (some (fn [g] (some #(#{:streaming :waiting} (:status %)) (vals (:sessions g))))
+      (vals (:live s)))))
+
 (defn- render-frame!
   [{:keys [state lock terminal] :as h}]
   (locking lock
     (let [term-h        (if terminal (.getHeight ^Terminal terminal) 24)
           term-w        (if terminal (.getWidth ^Terminal terminal) 80)
           ;; Restore an auto-suspended overlay once the modal has cleared.
+          ;; Also bump :tick per frame so the LIVE-pane shimmer animates (003).
           _             (swap! state
                           (fn [s]
                             (let [ov (:debug-overlay s)]
-                              (cond-> (assoc s :term-h term-h :term-w term-w)
+                              (cond-> (-> (assoc s :term-h term-h :term-w term-w
+                                            ;; This frame consumes any pending repaint
+                                            ;; request — see `request-render!` / the
+                                            ;; render ticker started in `start!`.
+                                            :render-dirty false)
+                                        (update :tick (fnil inc 0)))
                                 (and (nil? (:modal s)) (:suspended? ov))
                                 (assoc :debug-overlay
                                        (assoc ov :open? true :suspended? false))))))
           s             @state
+          theme         (theme-for (color-capability (interactive-terminal?)))
           ind           (when (:inspector? h) (str "[" (status-indicator h s) "] "))
           paused?       (and (:debug? h) (:debug-controller h)
                           (dbg/paused? (:debug-controller h))
                           (nil? (:modal s))
                           (not (get-in s [:debug-overlay :open?])))
           header        (str " escapement · " (:chart-sym h) " · " (:session-short h))
-          status        (if paused?
-                          (str " " ind "PAUSED — s=step c=continue ?=inspector")
+          ;; The raw `states: […]` host line is dropped while the inspector
+          ;; overlay is open — that config info now lives inside the themed
+          ;; Chart/Status views. Keep it on the non-overlay legacy/paused host.
+          status        (cond
+                          paused?
+                          (paused-banner theme ind)
+                          (get-in s [:debug-overlay :open?])
+                          ""
+                          :else
                           (str " " (or ind "") "states: " (pr-str (:config s []))))
           ;; Inspector overlay opens OVER a live modal — user can drill into
           ;; scrollback, hit Esc to close, and then answer the modal.
           overlay-open? (and (:inspector? h) (get-in s [:debug-overlay :open?]))
-          vis           (when-not overlay-open? (visible-scrollback s term-h))
+          ;; Live streaming-token rows sit between the status line and the
+          ;; scrollback; they steal height from the scrollback region only
+          ;; while something is actually streaming.
+          live-lines    (live-display-lines s term-w)
+          live-n        (count live-lines)
+          vis           (when-not overlay-open? (visible-scrollback s (- term-h live-n)))
           lines         (:slice vis)
           slice-start   (:start vis 0)
           cursor-idx    (:cursor-idx s)
@@ -628,6 +815,10 @@
                           " Esc=interrupt  Ctrl-C=quit  ?=inspector  PgUp/PgDn=scroll"
                           :else
                           " Esc=interrupt   Ctrl-C=quit   PgUp/PgDn=scroll")
+          ;; Mission-control body only when the inspector overlay is closed AND
+          ;; not paused (both want the full-screen legacy host). The modal row
+          ;; (term-h-1) is shared by both paths.
+          mc?           (and (not overlay-open?) (not paused?))
           buf           (StringBuilder.)]
       ;; No full-screen clear per frame — that's the source of the flicker.
       ;; Each row is rewritten with clear-eol, and we explicitly blank any
@@ -639,35 +830,60 @@
         (when (not= want-cursor? shown?)
           (.append buf (if want-cursor? show-cursor-s hide-cursor-s))
           (reset! (:cursor-shown? h) want-cursor?)))
-      (.append buf (move-to-s 1 1))
-      (.append buf (truncate header term-w))
-      (.append buf clear-eol-s)
-      (.append buf (move-to-s 2 1))
-      (.append buf (truncate status term-w))
-      (.append buf clear-eol-s)
-      ;; scrollback region: rows 3 .. (term-h - 2)
-      (let [first-row 3
-            last-row  (- term-h 2)]
-        (if overlay-open?
-          (render-overlay! buf h s first-row last-row term-w)
-          (let [written (count lines)]
-            (doseq [[i entry] (map-indexed vector lines)]
-              (let [row     (+ first-row i)
-                    abs-idx (+ slice-start i)
-                    sel?    (and cursor-idx (= abs-idx cursor-idx))
-                    line    (if (map? entry) (:line entry) (str entry))]
-                (when (<= row last-row)
+      ;; Two body-rendering paths share the modal row + atomic flush below:
+      ;;  * mission-control (mc?): framed header strip + LIVE/LOG panes + footer.
+      ;;  * legacy full-screen: header/status/live/scrollback (also the overlay
+      ;;    and PAUSED-banner host — they need the whole body region).
+      (cond
+        mc?
+        (render-mission-control! buf h s theme term-w term-h)
+
+        ;; Inspector/transcript overlay → fullscreen below the framed header
+        ;; strip (LIVE/LOG hidden). Paused host (overlay-open? is false then)
+        ;; still uses the legacy path below.
+        overlay-open?
+        (render-overlay-fullscreen! buf h s theme term-w term-h)
+
+        :else
+        (do
+          (.append buf (move-to-s 1 1))
+          (.append buf (truncate header term-w))
+          (.append buf clear-eol-s)
+          (.append buf (move-to-s 2 1))
+          ;; The paused banner carries SGR escapes (themed accent + dim hints);
+          ;; `truncate`/`collapse-ws` would strip ESC bytes, so emit it raw
+          ;; (it's short + single-line by construction). All other status lines
+          ;; are plain text and safe to truncate to term-w.
+          (.append buf (if paused? status (truncate status term-w)))
+          (.append buf clear-eol-s)
+          ;; live region: rows 3 .. (2 + live-n), drawn only while streaming.
+          (doseq [[i ln] (map-indexed vector live-lines)]
+            (.append buf (move-to-s (+ 3 i) 1))
+            (.append buf ln)                                ;; pre-truncated + colored
+            (.append buf clear-eol-s))
+          ;; scrollback region: rows (3 + live-n) .. (term-h - 2)
+          (let [first-row (+ 3 live-n)
+                last-row  (- term-h 2)]
+            (if overlay-open?
+              (render-overlay! buf h s first-row last-row term-w)
+              (let [written (count lines)]
+                (doseq [[i entry] (map-indexed vector lines)]
+                  (let [row     (+ first-row i)
+                        abs-idx (+ slice-start i)
+                        sel?    (and cursor-idx (= abs-idx cursor-idx))
+                        line    (if (map? entry) (:line entry) (str entry))]
+                    (when (<= row last-row)
+                      (.append buf (move-to-s row 1))
+                      (when sel? (.append buf reverse-on-s))
+                      (.append buf (truncate line term-w))
+                      (when sel? (.append buf reset-attrs-s))
+                      (.append buf clear-eol-s))))
+                ;; Blank the rest of the scrollback region so stale content from a
+                ;; previous frame doesn't linger when scrollback shrinks (e.g.
+                ;; after dedup collapse, after resize, or on initial render).
+                (doseq [row (range (+ first-row written) (inc last-row))]
                   (.append buf (move-to-s row 1))
-                  (when sel? (.append buf reverse-on-s))
-                  (.append buf (truncate line term-w))
-                  (when sel? (.append buf reset-attrs-s))
-                  (.append buf clear-eol-s))))
-            ;; Blank the rest of the scrollback region so stale content from a
-            ;; previous frame doesn't linger when scrollback shrinks (e.g. after
-            ;; dedup collapse, after terminal resize, or on initial render).
-            (doseq [row (range (+ first-row written) (inc last-row))]
-              (.append buf (move-to-s row 1))
-              (.append buf clear-eol-s)))))
+                  (.append buf clear-eol-s)))))))
       ;; modal area: row (term-h - 1)
       (let [modal-row (max 1 (dec term-h))]
         (.append buf (move-to-s modal-row 1))
@@ -717,10 +933,11 @@
           :else
           (do (.append buf (truncate (str " ▸ " (pr-str modal)) term-w))
               (.append buf clear-eol-s))))
-      ;; help: last row
-      (.append buf (move-to-s term-h 1))
-      (.append buf (truncate help term-w))
-      (.append buf clear-eol-s)
+      ;; help: last row (mission-control draws its own contextual footer there).
+      (when-not mc?
+        (.append buf (move-to-s term-h 1))
+        (.append buf (truncate help term-w))
+        (.append buf clear-eol-s))
       ;; If the terminal supports Mode 2026, wrap the whole frame in BSU/ESU
       ;; so the writes apply atomically — true per-frame double-buffering.
       (if @(:sync-output? h)
@@ -941,27 +1158,10 @@
             (when (>= c 0) (.append sb (char c)))
             (recur))))
       (let [s (.toString sb)]
-        (if-let [[_ n] (re-find #"\[\?2026;(\d+)\$y" s)]
+        (if-let [[_ n] (re-find #"\x1b\[\?2026;(\d+)\$y" s)]
           (boolean (#{"1" "2" "3" "4"} n))
           false)))
     (catch Throwable _ false)))
-
-(defn- view-row-count
-  "How many selectable rows the current overlay view has."
-  [h s]
-  (let [ov  (:debug-overlay s)
-        env (some-> (:env h) deref)]
-    (cond
-      ;; Drilled into a single invocation — selectable rows are its artifacts.
-      (and (= :invocations (:view ov)) (:focus ov))
-      (count (list-artifacts (session-dir-from-env env)
-               (get-in ov [:focus :invokeid])))
-
-      :else
-      (case (:view ov)
-        :invocations (count (:invocations ov))
-        :chart (count (current-event-rows (:events ov)))
-        0))))
 
 (defn- append-scrollback!
   "Append a single status line to the TUI scrollback. Trimmed at 2000 lines.
@@ -981,25 +1181,30 @@
    it again. Server lifetime is tied to the TUI state atom under `:viz-server`
    and torn down by `stop!`."
   [h]
-  (let [state (:state h)
-        s     @state]
+  (let [state  (:state h)
+        s      @state
+        theme  (theme-for (color-capability (interactive-terminal?)))
+        ;; Themed viz logger: paints the `[viz]` tag + dim body, sources the
+        ;; entry as `:viz` so the LOG pane role-colors it too. NO_COLOR-safe.
+        vlog!  (fn [msg & {:keys [error?]}]
+                 (append-scrollback! state (viz-entry theme msg :error? error?)))]
     (if-let [server (:viz-server s)]
-      (append-scrollback! state (str "[viz] already running: " (:url server)))
+      (vlog! (str "already running: " (:url server)))
       (let [env   (some-> (:env h) deref)
             chart (chart-from-env env)
             sdir  (session-dir-from-env env)]
         (cond
           (nil? chart)
-          (append-scrollback! state "[viz] no chart attached to TUI handle (debug bug)")
+          (vlog! "no chart attached to TUI handle (debug bug)" :error? true)
 
           (nil? sdir)
-          (append-scrollback! state "[viz] no session-dir on env — cannot write chart.svg")
+          (vlog! "no session-dir on env — cannot write chart.svg" :error? true)
 
           :else
           (let [start! (try (requiring-resolve 'escapement.debug.viz-server/start!)
                             (catch Throwable t
-                              (append-scrollback!
-                                state (str "[viz] cannot load viz-server ns: " (.getMessage t)))
+                              (vlog! (str "cannot load viz-server ns: " (.getMessage t))
+                                :error? true)
                               nil))]
             (when start!
               (try
@@ -1011,90 +1216,40 @@
                                                 " · " (:session-short h))})]
                   (cond
                     (:error r)
-                    (append-scrollback!
-                      state (str "[viz] failed: " (:error r)
-                              " (d2 source still at " sdir "/chart.d2)"))
+                    (vlog! (str "failed: " (:error r)
+                             " (d2 source still at " sdir "/chart.d2)")
+                      :error? true)
 
                     (:url r)
                     (do (swap! state assoc :viz-server r)
-                        (append-scrollback!
-                          state (str "[viz] live: " (:url r)
-                                  " (SVG also at " (:svg-path r) ")"))
+                        (vlog! (str "live: " (:url r)
+                                 " (SVG also at " (:svg-path r) ")"))
                         (let [viewer (ecfg/viewer-for-url (:debug-config h))]
                           (when (string? viewer)
                             (try
                               (let [cmd (ecfg/expand-command viewer (:url r))]
                                 (.exec (Runtime/getRuntime) ^"[Ljava.lang.String;"
                                   (into-array String ["sh" "-c" cmd]))
-                                (append-scrollback!
-                                  state (str "[viz] launched: " cmd)))
+                                (vlog! (str "launched: " cmd)))
                               (catch Throwable t
-                                (append-scrollback!
-                                  state (str "[viz] auto-open failed: "
-                                          (.getMessage t)
-                                          " — open " (:url r) " manually")))))))
+                                (vlog! (str "auto-open failed: "
+                                         (.getMessage t)
+                                         " — open " (:url r) " manually")
+                                  :error? true))))))
 
                     :else
-                    (append-scrollback! state (str "[viz] result: " (pr-str r)))))
+                    (vlog! (str "result: " (pr-str r)))))
                 (catch Throwable t
-                  (append-scrollback!
-                    state (str "[viz] threw: " (.getMessage t))))))))))))
+                  (vlog! (str "threw: " (.getMessage t)) :error? true))))))))))
 
-(defn- open-artifact-file!
-  "Open `path` using `(:viewers cfg)`. Falls back to the internal pager when
-   the viewer is `:internal`, the viewer command is missing, or the external
-   launch errors. `display-name` is used as the pager title."
-  [state cfg path display-name]
-  (let [path-abs (.getAbsolutePath (io/file path))
-        viewer   (ecfg/viewer-for cfg path-abs)]
-    (cond
-      (= :internal viewer)
-      (try (open-pager! state display-name (slurp path-abs))
-           (catch Throwable t
-             (open-pager! state display-name (str "Failed to read: " (.getMessage t)))))
-
-      (string? viewer)
-      (try
-        (let [cmd (ecfg/expand-command viewer path-abs)]
-          (.exec (Runtime/getRuntime) ^"[Ljava.lang.String;"
-            (into-array String ["sh" "-c" cmd])))
-        (catch Throwable t
-          (open-pager! state display-name
-            (str "Could not launch viewer: " (.getMessage t)
-              "\n\nFalling back to internal view:\n\n"
-              (try (slurp path-abs) (catch Throwable _ "")))))))))
-
-(defn- focus-invocation!
-  "Drill into the invocation at `cursor` in the history list (newest first).
-   Sets `:focus {:invokeid ...}` and resets cursor for the artifact list."
-  [state hist cursor]
-  (when-let [row (nth hist cursor nil)]
-    (swap! state update :debug-overlay
-      merge {:focus  {:invokeid (:invokeid row)}
-             :cursor 0})))
-
-(defn- open-focused-artifact!
-  "When drilled into an invocation, open the artifact at `cursor`."
-  [h state]
-  (let [s        @state
-        ov       (:debug-overlay s)
-        env      (some-> (:env h) deref)
-        sdir     (session-dir-from-env env)
-        invokeid (get-in ov [:focus :invokeid])
-        arts     (list-artifacts sdir invokeid)
-        idx      (:cursor ov 0)]
-    (when-let [name (nth arts idx nil)]
-      (open-artifact-file! state (:debug-config h)
-        (str sdir "/artifacts/" name)
-        name))))
-
-(defn- open-event-detail!
-  "Drill-in for a chart event row: pretty-print the event into the pager."
-  [h state cursor]
-  (let [s    @state
-        rows (current-event-rows (get-in s [:debug-overlay :events]))]
-    (when-let [{:keys [ev event-name]} (nth rows cursor nil)]
-      (open-pager! state (str "event " event-name) (pretty ev)))))
+(defn- copy-to-clipboard!
+  "Copy `text` to the terminal clipboard via OSC 52 (emitted on the same output
+   stream as every other escape) and flash a `✓ copied` confirmation in the
+   Artifacts view."
+  [h text]
+  (when (seq (str text))
+    (emit! (util/osc52-seq text))
+    (swap! (:state h) assoc-in [:debug-overlay :copied] (str text))))
 
 (defn- handle-debug-key!
   "Dispatch a key while the debug overlay is open. Pager keys take precedence
@@ -1105,26 +1260,33 @@
         ov    (:debug-overlay s)
         pager (:pager ov)]
     (if pager
-      (case k
-        :esc (close-pager! state)
-        :pgdn (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
-        :space (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
-        :pgup (swap! state update-in [:debug-overlay :pager :offset]
-                #(max 0 (- (or % 0) 10)))
-        :down (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
-        :up (swap! state update-in [:debug-overlay :pager :offset]
-              #(max 0 (dec (or % 0))))
-        (cond
-          (= k [:char \b]) (swap! state update-in [:debug-overlay :pager :offset]
-                             #(max 0 (- (or % 0) 10)))
-          (= k [:char \j]) (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
-          (= k [:char \k]) (swap! state update-in [:debug-overlay :pager :offset]
-                             #(max 0 (dec (or % 0))))
-          (= k [:char \g]) (swap! state assoc-in [:debug-overlay :pager :offset] 0)
-          (= k [:char \G]) (let [n (count (get-in @state [:debug-overlay :pager :lines]))]
-                             (swap! state assoc-in [:debug-overlay :pager :offset]
-                               (max 0 (dec n))))
-          :else nil))
+      ;; Pager scroll keys. Any UPWARD scroll detaches auto-follow (`:follow?
+      ;; false`) so the user can read back through a streaming transcript; `G`/End
+      ;; re-arm follow (snap to bottom + track new tokens). DOWNWARD scroll just
+      ;; moves the offset — render re-arms follow once the offset reaches bottom.
+      (let [detach! (fn [f] (swap! state update :debug-overlay
+                              (fn [ov] (-> ov
+                                         (update-in [:pager :offset] f)
+                                         (assoc-in [:pager :follow?] false)))))
+            up10  #(max 0 (- (or % 0) 10))
+            up1   #(max 0 (dec (or % 0)))]
+        (case k
+          :esc (close-pager! state)
+          :pgdn (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
+          :space (swap! state update-in [:debug-overlay :pager :offset] (fnil + 0) 10)
+          :pgup (detach! up10)
+          :down (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
+          :up (detach! up1)
+          (cond
+            (= k [:char \b]) (detach! up10)
+            (= k [:char \j]) (swap! state update-in [:debug-overlay :pager :offset] (fnil inc 0))
+            (= k [:char \k]) (detach! up1)
+            (= k [:char \g]) (detach! (constantly 0))
+            (= k [:char \G]) (swap! state update :debug-overlay
+                               #(-> % (assoc-in [:pager :follow?] true)
+                                  (assoc-in [:pager :offset]
+                                    (max 0 (dec (count (get-in % [:pager :lines])))))))
+            :else nil)))
       (cond
         (= k :esc)
         (cond
@@ -1148,6 +1310,17 @@
                            merge {:view :chart :cursor 0 :focus nil})
         (= k [:char \3]) (swap! state update :debug-overlay
                            merge {:view :status :cursor 0 :focus nil})
+        (or (= k [:char \4]) (= k [:char \a]))
+        (swap! state update :debug-overlay
+          merge {:view :artifacts :cursor 0 :focus nil :copied nil})
+
+        ;; Artifacts view: copy the selected file's path (y) / the dir path (Y).
+        (and (= :artifacts (:view ov)) (= k [:char \y]))
+        (when-let [p (:path (inspector/artifacts-selection h s))]
+          (copy-to-clipboard! h p))
+        (and (= :artifacts (:view ov)) (= k [:char \Y]))
+        (when-let [d (:dir (inspector/artifacts-selection h s))]
+          (copy-to-clipboard! h d))
 
         ;; In invocations drilldown, `h` or Backspace pops back to the list.
         (and (= :invocations (:view ov)) (:focus ov)
@@ -1173,13 +1346,21 @@
           :invocations
           (if (:focus ov)
             (open-focused-artifact! h state)
-            (focus-invocation! state (:invocations ov) (:cursor ov 0)))
+            ;; Enter on the list → show that invocation's full transcript.
+            (open-invocation-transcript! h state (:cursor ov 0)))
           :chart (open-event-detail! h state (:cursor ov 0))
+          :artifacts (inspector/open-selected-artifact-info! h state)
           nil)
 
         (= k [:char \o])
-        (when (and (= :invocations (:view ov)) (:focus ov))
-          (open-focused-artifact! h state))
+        (case (:view ov)
+          :invocations
+          (if (:focus ov)
+            (open-focused-artifact! h state)
+            ;; o on the list → drill into the artifact list for this invocation.
+            (focus-invocation! state (:invocations ov) (:cursor ov 0)))
+          :artifacts (inspector/open-selected-artifact-info! h state)
+          nil)
 
         ;; Controller keys also work while overlay is open
         (and (:debug-controller h) (= k [:char \s]))
@@ -1250,73 +1431,57 @@
               (get-in @state [:debug-overlay :open?]))
             (do (handle-debug-key! h k) (render-frame! h) (recur))
 
-            ;; No modal: chart-level keybindings.
+            ;; No modal: chart-level keybindings (mission-control focus model).
             :else
             (case k
-              :esc (do (send-ui-event! h :ui.interrupt) (recur))
-              :pgup (do (swap! state update :scroll-offset (fnil + 0) 10)
-                        (render-frame! h)
-                        (recur))
-              :pgdn (do (swap! state update :scroll-offset
-                          #(max 0 (- (or % 0) 10)))
-                        (render-frame! h)
-                        (recur))
-              :home (do (swap! state assoc :scroll-offset
-                          (max 0 (- (count (:scrollback @state))
-                                   (max 5 (- (:term-h @state 24) 4)))))
-                        (render-frame! h)
-                        (recur))
-              :end (do (swap! state assoc :scroll-offset 0
-                         :cursor-idx nil)
-                       (render-frame! h)
-                       (recur))
-              :up (do (swap! state
-                        (fn [s]
-                          (let [n   (count (:scrollback s))
-                                cur (or (:cursor-idx s) n)]
-                            (assoc s :cursor-idx (max 0 (dec cur))))))
-                      (render-frame! h) (recur))
-              :down (do (swap! state
-                          (fn [s]
-                            (let [n   (count (:scrollback s))
-                                  cur (or (:cursor-idx s) (dec n))]
-                              (assoc s :cursor-idx (min (dec n) (inc cur))))))
-                        (render-frame! h) (recur))
-              :enter (do
-                       (let [s     @state
-                             idx   (:cursor-idx s)
-                             entry (when idx (nth (:scrollback s) idx nil))]
-                         (when (and entry (:ev entry))
-                           (swap! state assoc-in [:debug-overlay :open?] true)
-                           (open-pager! state
-                             (str (name (or (:event (:ev entry)) :event)))
-                             (entry-pager-text entry))))
-                       (render-frame! h) (recur))
-              (cond
-                (= k [:char \j])
-                (do (swap! state
-                      (fn [s]
-                        (let [n   (count (:scrollback s))
-                              cur (or (:cursor-idx s) (dec n))]
-                          (assoc s :cursor-idx (min (dec n) (inc cur))))))
-                    (render-frame! h) (recur))
-                (= k [:char \k])
-                (do (swap! state
-                      (fn [s]
-                        (let [n   (count (:scrollback s))
-                              cur (or (:cursor-idx s) n)]
-                          (assoc s :cursor-idx (max 0 (dec cur))))))
-                    (render-frame! h) (recur))
-                (= k [:char \g])
-                (do (swap! state assoc :cursor-idx 0) (render-frame! h) (recur))
-                (= k [:char \G])
-                (do (swap! state
-                      (fn [s] (assoc s :cursor-idx
-                                       (max 0 (dec (count (:scrollback s)))))))
-                    (render-frame! h) (recur))
+              ;; Page/arrow scroll the FOCUSED pane (j/k/g/G handled below via
+              ;; dispatch-key so LIVE moves the selection cursor instead).
+              :pgup (do (scroll-focused! state h :page-up) (render-frame! h) (recur))
+              :pgdn (do (scroll-focused! state h :page-down) (render-frame! h) (recur))
+              :home (do (scroll-focused! state h :top) (render-frame! h) (recur))
+              :end  (do (scroll-focused! state h :bottom) (render-frame! h) (recur))
+              (let [s   @state
+                    act (dispatch-key k {:focus (:focus s :log)
+                                         :maximized? (:maximized? s)})]
+                (case act
+                  :focus-cycle   (do (swap! state update :focus cycle-focus)
+                                     (render-frame! h) (recur))
+                  ;; Enter opens the selected row's transcript (LIVE) / line's
+                  ;; invocation (LOG) — it NO LONGER maximizes.
+                  :open-transcript (do (if (= :live (:focus s :log))
+                                         (open-live-transcript! h state)
+                                         (open-log-transcript! h state))
+                                       (render-frame! h) (recur))
+                  ;; m maximizes the focused pane (the binding Enter used to have).
+                  :maximize      (do (swap! state update :maximized? not)
+                                     (render-frame! h) (recur))
+                  :restore-split (do (swap! state assoc :maximized? false)
+                                     (render-frame! h) (recur))
+                  :interrupt     (do (send-ui-event! h :ui.interrupt) (recur))
+                  ;; Cursor moves during a live stream must NOT take the render
+                  ;; lock synchronously — that contends with the per-token delta
+                  ;; flood (each token marks dirty) and made keypresses lag ~2s.
+                  ;; Just swap the cursor + mark dirty; the ticker repaints.
+                  :live-cursor-down   (do (move-live-cursor! state :down) (request-render! h) (recur))
+                  :live-cursor-up     (do (move-live-cursor! state :up) (request-render! h) (recur))
+                  :live-cursor-top    (do (move-live-cursor! state :top) (request-render! h) (recur))
+                  :live-cursor-bottom (do (move-live-cursor! state :bottom) (request-render! h) (recur))
+                  :scroll-down   (do (scroll-focused! state h :down) (render-frame! h) (recur))
+                  :scroll-up     (do (scroll-focused! state h :up) (render-frame! h) (recur))
+                  :scroll-top    (do (scroll-focused! state h :top) (render-frame! h) (recur))
+                  :scroll-bottom (do (scroll-focused! state h :bottom) (render-frame! h) (recur))
+                  ;; not handled by dispatch-key — fall through to misc keys.
+                  (cond
                 ;; Inspector top-level key (always active when no modal).
                 (and (:inspector? h) (= k [:char \?]))
                 (do (swap! state update-in [:debug-overlay :open?] not)
+                    (render-frame! h) (recur))
+
+                ;; `a` opens the inspector straight to the session-wide Artifacts
+                ;; view (dir + sizes + select/open/copy).
+                (and (:inspector? h) (= k [:char \a]))
+                (do (swap! state update :debug-overlay merge
+                      {:open? true :view :artifacts :cursor 0 :focus nil :copied nil})
                     (render-frame! h) (recur))
 
                 (and (:debug? h) (:debug-controller h)
@@ -1339,7 +1504,7 @@
                 (and (:debug? h) (= k [:char \v]))
                 (do (do-visualize! h) (render-frame! h) (recur))
 
-                :else (recur)))))))
+                :else (recur)))))))))
     (catch InterruptedException _ nil)
     (catch Throwable _ nil)))
 
@@ -1364,9 +1529,18 @@
                      (.system true)
                      (.build))
           state    (atom {:config          []
+                          :start-ts        (System/currentTimeMillis)  ;; session-start stamp for the header clock
                           :scrollback      []
                           :scroll-offset   0
                           :cursor-idx      nil              ;; nil = no selection; index into scrollback
+                          :focus           :log             ;; mission-control: focused pane (:live | :log)
+                          :maximized?      false            ;; focused pane fills the body
+                          :live-scroll     0                ;; LIVE pane scroll offset (lines)
+                          :live-cursor     0                ;; LIVE pane selection cursor (index into visible rows)
+                          :log-scroll      0                ;; LOG pane scroll offset (entries up from tail)
+                          :tick            0                ;; per-frame counter for the shimmer
+                          :render-dirty    false            ;; coalesced-repaint flag — see request-render! / render ticker
+                          :live            {}               ;; invokeid → live streaming token counter
                           :invokeid-colors {}               ;; invokeid → SGR code string
                           :next-color-idx  0
                           :modal           nil
@@ -1390,13 +1564,35 @@
                      (atom nil) (atom false))
           t        (Thread. ^Runnable (fn [] (input-loop! h)) "tui-input")
           _        (.setDaemon t true)
-          h        (assoc h :input-thread t)]
+          h        (assoc h :input-thread t)
+          ;; Render ticker: the ONLY thread that repaints during streaming.
+          ;; Producer threads (per-token :llm/delta) just mark state dirty via
+          ;; request-render!; this loop coalesces those into bounded ~30fps
+          ;; frames. While work is in flight it also repaints unconditionally so
+          ;; the shimmer animates even between tokens. Decoupling rendering from
+          ;; token arrival is what keeps streaming throughput at the model's true
+          ;; rate instead of the render rate.
+          ticker   (Thread. ^Runnable
+                     (fn []
+                       (loop []
+                         (when-not @(:stopped? h)
+                           (try
+                             (Thread/sleep 33)
+                             (let [s @state]
+                               (when (or (:render-dirty s) (live-active? s))
+                                 (render-frame! h)))
+                             (catch InterruptedException _ nil)
+                             (catch Throwable _ nil))
+                           (recur))))
+                     "tui-render")
+          _        (.setDaemon ticker true)]
       ;; Enter alt screen buffer; user's prior terminal contents are preserved
       ;; and restored on stop!. Clear once and hide cursor (cursor stays hidden
       ;; unless a text/confirm modal is open).
       (emit! (str alt-screen-on-s clear-screen-s hide-cursor-s))
       (render-frame! h)
       (.start t)
+      (.start ticker)
       ;; JLine installs its own SIGINT handler on system terminals, which
       ;; swallows the signal — JVM shutdown hooks are NOT invoked on Ctrl-C
       ;; otherwise. Install our own handler via sun.misc.Signal (the
@@ -1445,10 +1641,8 @@
                         chart (vary-meta assoc ::chart chart))))
    h))
 
-(defn- chart-from-env
-  "Returns the chart value stashed by `attach-env!` (or nil if not stashed)."
-  [env]
-  (some-> env meta ::chart))
+;; chart-from-env now lives in escapement.tui.phase (re-exported above);
+;; `attach-env!` writes the same `:escapement.tui/chart` env-meta key.
 
 (defn- debug-event-of-interest?
   "True for events the inspector should keep in its ring buffer."
@@ -1490,43 +1684,107 @@
 
       :else history)))
 
+(defn- fold-live-event
+  "Fold one transcript event into the `:live` map (invokeid → live counter).
+   Returns the updated map. Tracks streaming progress per invocation:
+
+     :llm/start         — register the invocation (shows as `0 tok` while the
+                          model is thinking before the first token).
+     :llm/delta         — accumulate chunk/char counts, running token usage
+                          (if the provider streamed it), kind (text/thinking),
+                          first/last timestamps for the t/s rate.
+     :llm/response,
+     :llm/worker-exit   — the turn/worker finished; drop it from the live panel.
+
+   Keyed by invokeid so parallel + multiplexed child sessions (which all share
+   the env's single transcript-fn) each get their own row."
+  [live {:keys [event data ts]}]
+  (let [;; The in-flight partial `:text` feeds ONLY the live transcript overlay's
+        ;; streaming tail (real scrollback replaces it on :llm/response). Naively
+        ;; appending every delta is O(N^2) string copying as tokens flood in —
+        ;; the dominant cost behind cursor lag during a stream. Cap it to a
+        ;; bounded tail so each append is O(1)-ish; the overlay only shows the
+        ;; most recent slice anyway.
+        cap-text live/cap-tail
+        iid (some-> (:invokeid data) str)
+        ;; Parallel multiplex children share one invokeid (every judge1 child is
+        ;; "judge1"); the session-id disambiguates them. Nested as
+        ;; invokeid → {:sessions {session-id → counter}} so the panel can show a
+        ;; per-role group with its concurrent sessions indented beneath.
+        sid (or (some-> (:session-id data) str) iid)
+        ts  (or ts (System/currentTimeMillis))
+        p   [iid :sessions sid]]
+    (if (nil? iid)
+      live
+      (case event
+        :llm/start
+        (assoc-in live p {:chunks 0 :chars 0 :first-ts ts :last-ts ts
+                          :status :waiting :text "" :model (:model data) :session sid})
+
+        :llm/delta
+        (let [cur    (or (get-in live p) {:chunks 0 :chars 0 :first-ts ts :text "" :session sid})
+              toks   (get-in data [:usage :output-tokens])
+              ;; t/s must measure generation (first→last delta), NOT request
+              ;; latency. The :llm/start handler stamps :first-ts at dispatch
+              ;; (status :waiting), which folds time-to-first-token (model load,
+              ;; prompt eval, any queue wait) into the rate. Re-anchor :first-ts
+              ;; to the FIRST delta so live-tps reflects true token throughput.
+              first? (zero? (long (or (:chunks cur) 0)))]
+          (assoc-in live p
+            (cond-> (-> cur
+                      (update :chunks inc)
+                      (update :chars + (count (or (:text data) "")))
+                      (update :text (fn [t] (cap-text (str t (or (:text data) "")))))
+                      (assoc :last-ts ts
+                             :status  :streaming
+                             :model   (:model data)
+                             :session sid
+                             :kind    (if (= :thinking-delta (:type data))
+                                        :thinking :text)))
+              first? (assoc :first-ts ts)
+              toks   (assoc :tokens toks))))
+
+        ;; Turn finalized → it is now in the scrollback transcript; keep the row
+        ;; visible as `done` but clear the in-flight partial so it isn't shown
+        ;; twice. A subsequent turn's deltas flip it back to `streaming`.
+        :llm/response
+        (assoc-in live p (-> (or (get-in live p) {:session sid})
+                           (assoc :status :done :text "" :last-ts ts
+                                  :reason (:stop-reason data))
+                           ;; the LLM's TRUE generation rate (output tokens over
+                           ;; the turn's wall-clock), computed in
+                           ;; llm_conversation; prefer it over the TUI's
+                           ;; delta-arrival estimate which gets stretched by
+                           ;; concurrency/queueing.
+                           (cond->
+                             (:output-tps data) (assoc :real-tps (:output-tps data))
+                             (:elapsed-ms data)  (assoc :elapsed-ms (:elapsed-ms data)))))
+
+        (:llm/error :llm/model-down)
+        (assoc-in live p (-> (or (get-in live p) {:session sid})
+                           (assoc :status :error :last-ts ts
+                                  :reason (or (:message data) (:model data)))))
+
+        :llm/worker-exit
+        (assoc-in live p (-> (or (get-in live p) {:session sid})
+                           (assoc :status (if (= :error (:status (get-in live p))) :error :done)
+                                  :reason (or (:reason data) (:reason (get-in live p)))
+                                  :text "" :last-ts ts)))
+
+        live))))
+
 ;; ---------------------------------------------------------------------------
 ;; Color allocator + entry → rendered line
 ;; ---------------------------------------------------------------------------
 
-(defn- ansi-supported?
-  "Cheap guard so colored output degrades on dumb terminals."
-  []
-  (let [t (System/getenv "TERM")]
-    (not (or (nil? t) (= "dumb" t) (= "" t)))))
-
-(defn- allocate-color
-  "Returns updated state with a color (SGR code string) allocated for
-   `invokeid`. Round-robin from the palette. Repeat calls return the existing
-   allocation. Returns the (possibly-unchanged) state."
-  [s invokeid]
-  (if (or (nil? invokeid) (get-in s [:invokeid-colors invokeid]))
-    s
-    (let [idx  (:next-color-idx s 0)
-          code (nth invokeid-palette (mod idx (count invokeid-palette)))]
-      (-> s
-        (assoc-in [:invokeid-colors invokeid] code)
-        (assoc :next-color-idx (inc idx))))))
-
-(defn- color-for
-  "Looks up the SGR code (digits, e.g. `\"36\"`) for the given source. For
-   invokeid string sources this reads from the allocator; for the well-known
-   keyword sources, returns a fixed code. Returns nil when colors are not
-   supported (caller will skip the wrap)."
-  [s source]
-  (when (ansi-supported?)
-    (cond
-      (string? source) (get-in s [:invokeid-colors source])
-      (= :chart source) chart-color
-      (= :human source) human-color
-      (= :error source) error-color
-      (= :debug source) debug-color
-      :else nil)))
+;; The per-role hue allocator (ansi-supported?/allocate-color/color-for/
+;; role-sgr/role-sgr-themed) lives in escapement.tui.theme. Re-exported here so
+;; the facade body and external call sites keep their existing names.
+(def ^:private ansi-supported? theme/ansi-supported?)
+(def ^:private allocate-color theme/allocate-color)
+(def ^:private color-for theme/color-for)
+(def role-sgr theme/role-sgr)
+(def role-sgr-themed theme/role-sgr-themed)
 
 (defn- entry->rendered-line
   "Build the displayable line for a scrollback entry, with timestamp, source
@@ -1543,9 +1801,40 @@
       (str (esc (str code "m")) body reset-attrs-s)
       body)))
 
+(defn- request-render!
+  "Mark the UI dirty so the next render-ticker frame repaints. Cheap and
+   non-blocking — callers on hot/producer threads (e.g. per-token :llm/delta)
+   must use this instead of `render-frame!`, which takes the render lock and
+   does a full repaint. Coalescing repaints onto the ticker keeps token
+   delivery off the render critical path."
+  [h]
+  (swap! (:state h) assoc :render-dirty true)
+  nil)
+
 (defn event!
   "Transcript-fn subscriber. Folds the event into the scrollback and updates
    the status line when the event carries a new chart configuration."
+  [h ev]
+  (when (:enabled? h)
+    ;; Streaming deltas are high-frequency and must NEVER hit the scrollback
+    ;; (entries-for has no case for them → they'd spam the default branch).
+    ;; Fold them into the live panel and mark dirty — the render ticker repaints
+    ;; at a bounded rate. Rendering synchronously here (the old behavior) put a
+    ;; full-screen repaint + render-lock on EVERY token of EVERY concurrent
+    ;; stream, serializing producers on the terminal and throttling throughput
+    ;; to the render rate (~2 t/s under contention) instead of the model's true
+    ;; ~120 t/s. Coalescing decouples token delivery from rendering.
+    (if (= :llm/delta (:event ev))
+      (do (swap! (:state h)
+            (fn [s] (-> s (update :live fold-live-event ev) (assoc :render-dirty true))))
+          nil)
+      (do (event!* h ev)
+          (request-render! h))))
+  nil)
+
+(defn- event!*
+  "Non-delta transcript-event handling: scrollback + inspector + live-panel
+   lifecycle. Split out of `event!` so the hot `:llm/delta` path stays tiny."
   [h ev]
   (when (:enabled? h)
     (let [entries   (entries-for ev)
@@ -1587,8 +1876,20 @@
                     (if (> n 1000) (subvec v' (- n 1000)) v'))))
               (#{:llm/start :llm/worker-exit} (:event ev))
               (update-in [:debug-overlay :invocations]
-                update-invocation-history ev)))))
-      (render-frame! h)))
+                update-invocation-history ev)
+
+              ;; Keep the live status panel current for the non-delta lifecycle
+              ;; events (deltas are folded on the fast path in `event!`).
+              (#{:llm/start :llm/response :llm/error :llm/model-down :llm/worker-exit}
+                (:event ev))
+              (update :live fold-live-event ev)))))))
+  ;; NOTE: no synchronous `render-frame!` here. This runs INLINE on the
+  ;; runner-loop / LLM-worker threads (the transcript tap is called on the
+  ;; emitting thread — see runner.clj), so painting here serializes the
+  ;; statechart behind a locked full-screen repaint + flushed stderr write
+  ;; for every event. Instead the caller (`event!`) marks the UI dirty via
+  ;; `request-render!` and the 30fps render ticker coalesces the repaint off
+  ;; the agent's critical path — same fast-path treatment as `:llm/delta`.
   nil)
 
 (defn await-quit!

@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│escapement · session ·                                                                                                                                                                          ◷ 0:15│
+│▶ —                                                                                                                                                                             1 LLMs · 0 act · 0 t/s│
+│states: [convo run work counting serving probe]                                                                                                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─LIVE─────────────────────────────────────────────────────────────────────────────────────────────╮┏━LOG━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│ subject      ✗ error                      0 tok    0.0 t/s                                       │┃18:48:32 chart · cli/config-loaded {:path "/home/naomarik/github/escapement/.escapement.edn", :ke…┃
+│                                                                                                  │┃18:48:32 debug · runner started session=:session/4f2bf900-5992-49e0-a6f5-41e0e6e43509 chart=:esca…┃
+│                                                                                                  │┃18:48:32 subject · invocation start session=session/4f2bf900-5992-49e0-a6f5-41e0e6e43509          ┃
+│                                                                                                  │┃18:48:32 subject · req model=gemma3:1b n-messages=1                                               ┃
+│                                                                                                  │┃18:48:32 debug · start config=["convo" "run" "work" "counting" "serving" "probe"]                 ┃
+│                                                                                                  │┃18:48:32 error ⚠ model-down gemma3:1b — OpenAI API error: HTTP 400                                ┃
+│                                                                                                  │┃18:48:32 error ⚠ llm error OpenAI API error: HTTP 400                                             ┃
+│                                                                                                  │┃18:48:32 subject · invocation exit reason=stopped                                                 ┃
+│                                                                                                  │┃18:48:32 chart · error.llm.invalid-request  ["convo" "run" "work" "counting" "serving" "probe"] →…┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+│                                                                                                  │┃                                                                                                  ┃
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━⇅ 9/9━┛
+ LOG · ⇅ scroll · Enter transcript · m maximize · Tab → LIVE · ? inspector · a artifacts · Esc interrupt · Ctrl-C quit

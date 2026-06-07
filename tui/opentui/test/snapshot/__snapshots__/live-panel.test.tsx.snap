@@ -1,0 +1,23 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`LivePanel — render-tree text snapshots (fixed tick, no model) single-session + multi-session group (haiku fixture) 1`] = `
+" poet2        ◇ 0/2 done░░░░░░░░░░                     2 tok
+  ├ session/889d1 ✗ error      gemma3:1b           2 tok   1
+  └ poet2         ✗ error                          0 tok
+ poet1        ✓ done  gemma3:1b           2 tok   61.4 t/s
+ planner      ✓ done  gemma3:1b          28 tok   68.1 t/s
+"
+`;
+
+exports[`LivePanel — render-tree text snapshots (fixed tick, no model) streaming multi-session group: 6 children + …+N more + shimmer single 1`] = `
+" poets        ◇ 2/7 done██░░░░░░░░                     7 tok
+  ├ session/poet- ◂ streaming  gemma3:1b           1 tok  1▏
+  ├ session/poet- ◂ streaming  gemma3:1b           1 tok  1▏
+  ├ session/poet- ◂ streaming  gemma3:1b           1 tok  1▏
+  ├ session/poet- ◂ streaming  gemma3:1b           1 tok  1▏
+  ├ session/poet- ◂ streaming  gemma3:1b           1 tok  1▏
+  ├ session/poet- ✓ done       gemma3:1b           1 tok  10
+  └ …+1 more sessions
+ host         ▱▱▱▰▱▱▱▱▱▱ gpt-4o              1 tok  1000.0 ▏
+"
+`;

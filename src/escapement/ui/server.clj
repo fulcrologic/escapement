@@ -33,6 +33,7 @@
     [cognitect.transit :as transit]
     [escapement.storage.disk-read :as disk-read]
     [escapement.ui.resolvers :as resolvers]
+    [escapement.ui.ws-push :as ws-push]
     [org.httpkit.server :as http])
   (:import
     (java.io ByteArrayInputStream ByteArrayOutputStream InputStream)
@@ -206,12 +207,18 @@
    is 404. A malformed query / resolver error is returned as a transit `{:error …}` with status 500
    rather than dropping the connection."
   [ctx]
-  (fn [{:keys [request-method uri body]}]
-    (cond
-      (= :options request-method)
-      {:status 200 :headers cors-headers :body ""}
+  (let [ws-route (when-let [hub (:escapement/ws-push ctx)]
+                   (ws-push/ws-handler hub (:escapement/ws-handlers ctx)))]
+    (fn [{:keys [request-method uri] :as req}]
+      (let [{:keys [body]} req]
+        (cond
+          (and ws-route (= :get request-method) (= "/ws" uri))
+          (ws-route req)
 
-      (and (= :post request-method) (= "/api" uri))
+          (= :options request-method)
+          {:status 200 :headers cors-headers :body ""}
+
+          (and (= :post request-method) (= "/api" uri))
       (try
         (transit-response 200 (resolvers/process ctx (read-transit body)))
         (catch Throwable t
@@ -228,8 +235,8 @@
         :else
         (or (static-response uri) {:status 404 :headers cors-headers :body "Not found."}))
 
-      :else
-      {:status 404 :headers cors-headers :body "Not found. POST an EQL transit query to /api."})))
+          :else
+          {:status 404 :headers cors-headers :body "Not found. POST an EQL transit query to /api."})))))
 
 (defn start!
   "Start the read-only EQL API server. Options:
@@ -241,16 +248,25 @@
      * `:controller`        — optional live debug controller (pause/step/continue mutations).
      * `:live`              — optional control handle (atom filled by `run!`'s on-env-ready) the live
                               resolvers deref to reach the running env/queue. Nil-tolerant.
+     * `:ws-push`           — optional fan-out hub (from `escapement.ui.ws-push/new-hub`) that powers
+                              the live `GET /ws` push endpoint. When present, the runner's
+                              transcript-tap should call `ws-push/publish!` on this same hub (the CLI
+                              composes it into `:transcript-tap`). Nil → no `/ws` route.
+     * `:ws-handlers`       — optional back-channel seam map `{:control fn :answer fn}` dispatched for
+                              inbound UI frames (see `ws-push/dispatch-inbound!`). `:answer` is the
+                              human-input delivery hook (task 003).
 
-   Returns a handle `{:stop <fn> :port <port>}`; call `stop!` on it (or invoke `:stop`) to shut down."
-  [{:keys [port work-dir active-session-id chart controller live]}]
+   Returns a handle `{:stop <fn> :port <port> :ws-push <hub>}`; call `stop!` (or invoke `:stop`)."
+  [{:keys [port work-dir active-session-id chart controller live ws-push ws-handlers]}]
   (let [ctx     {:escapement/store              (disk-read/new-store work-dir)
                  :escapement/active-session-id  active-session-id
                  :escapement/chart              chart
                  :escapement/controller         controller
-                 :escapement/live               live}
+                 :escapement/live               live
+                 :escapement/ws-push            ws-push
+                 :escapement/ws-handlers        ws-handlers}
         stop-fn (http/run-server (make-handler ctx) {:port port})]
-    {:stop stop-fn :port port}))
+    {:stop stop-fn :port port :ws-push ws-push}))
 
 (defn stop!
   "Stop a server `handle` returned by `start!`."

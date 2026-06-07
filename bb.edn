@@ -1,4 +1,4 @@
-{:paths    ["src" "bb_test" "demos" "resources"]
+{:paths    ["src" "bb_test" "demos" "tui" "resources"]
  :deps     {com.fulcrologic/statecharts {:mvn/version "1.4.0-RC18"}
             com.fulcrologic/guardrails  {:mvn/version "1.2.16"}
             metosin/malli               {:mvn/version "0.16.4"}
@@ -17,6 +17,41 @@
                                           (deref (promise)))}
             sanity {:doc  "Run the bb sanity script for the engine."
                     :task (shell "bb bb_test/sanity.clj")}
+            haiku
+            {:doc  "Run the dynamic haiku tournament on a fast LOCAL model (ollama gemma3:1b) with the interactive TUI + live streaming-token panel. Needs `ollama serve` running and `ollama pull gemma3:1b`. For poets/judges to STREAM CONCURRENTLY (not one at a time) start the server with parallelism — `OLLAMA_NUM_PARALLEL=4 ollama serve` — it defaults to 1 (sequential). Override the field/theme via the first arg, e.g. `bb haiku 'Run a tournament with 6 poets and 5 judges. Theme: first snow.'`. Guarded against gemma3:1b runaways via the overrun primitive: --max-tokens 2048 caps each turn and --overrun-retries 2 reruns a truncated turn (identical context) before accepting the truncation."
+             :task (let [prompt (or (first *command-line-args*)
+                                  "Run a tournament with 4 poets and 4 judges. Theme: lanterns over the river.")]
+                     (shell {:extra-env {"OLLAMA_API_KEY" "dummy"}}
+                       "bb" "-m" "escapement.cli" "run"
+                       "escapement.examples.haiku-tournament-dynamic/agent"
+                       "--backend" "ollama"
+                       "--api-base-url" "http://localhost:11434/v1"
+                       "--model" "gemma3:1b"
+                       "--max-tokens" "2048"
+                       "--overrun-retries" "2"
+                       "--overrun-temp-bump" "0.3"
+                       "--param" (str "user-input=" (pr-str prompt))))}
+            haiku-opentui
+            {:doc  "Like `bb haiku`, but renders through the OpenTUI Bun sidecar (--tui=opentui) instead of the in-process JLine TUI. Spawns the api-server+WS, runs the agent headless, and launches `bun run tui/opentui/src/main.tsx` which owns the terminal. Prereqs: a real TTY, `bun` on PATH (or BUN_BIN), `bun install` already run in tui/opentui/, plus the same ollama gemma3:1b setup as `bb haiku`. (Full vision-verified E2E is task 018; this is the runnable entry point.)"
+             :task (let [prompt (or (first *command-line-args*)
+                                  "Run a tournament with 4 poets and 4 judges. Theme: lanterns over the river.")]
+                     (shell {:extra-env {"OLLAMA_API_KEY" "dummy"}}
+                       "bb" "-m" "escapement.cli" "run"
+                       "escapement.examples.haiku-tournament-dynamic/agent"
+                       "--tui=opentui"
+                       "--backend" "ollama"
+                       "--api-base-url" "http://localhost:11434/v1"
+                       "--model" "gemma3:1b"
+                       "--max-tokens" "2048"
+                       "--overrun-retries" "2"
+                       "--overrun-temp-bump" "0.3"
+                       "--param" (str "user-input=" (pr-str prompt))))}
+            opentui-test
+            {:doc  "Run the OpenTUI sidecar UI test suite (unit + snapshot) via `bun test` in tui/opentui/. Needs `bun` on PATH and `bun install` already run in tui/opentui/. (The agent-side WS-push/RemoteUiRenderer tests run under `bb test`; this is the TypeScript half.)"
+             :task (shell {:dir "tui/opentui"} "bun" "test")}
+            opentui-build
+            {:doc  "Typecheck the OpenTUI sidecar (`bun x tsc --noEmit`) in tui/opentui/. There is no compiled artifact — the sidecar runs from source under Bun; this is the build/typecheck gate."
+             :task (shell {:dir "tui/opentui"} "bun" "x" "tsc" "--noEmit")}
             ui-test
             {:doc  "Run the JVM RAD/TUI UI tests (clojure -M:ui-test), grouped by render target into ISOLATED JVMs. The TUI, Semantic-UI, and headless RAD render plugins each register the SAME global fr/render-field / render-element multimethods, so only one render target may load per JVM (last defmethod wins). In production each target is its own process; here we run one subprocess per group so the whole UI suite is green together."
              :task (let [groups [["tui"           ["escapement.ui.tui-render-test"

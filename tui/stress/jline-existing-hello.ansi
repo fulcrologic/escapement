@@ -1,0 +1,50 @@
+OLLAMA_API_KEY=dummy bb -m escapement.cli run escapement.examples.hello/agent --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-tokens 2048 --overrun-retries 2 --overru
+n-temp-bump 0.3
+[1m[32m➜  [36mescapement[0m OLLAMA_API_KEY=dummy bb -m escapement.cli run escapement.examples.hello/agent --backend ollama --api-base-url http://localhost:11434/v1 --model gemma3:1b --max-tokens 2048 --overrun-retr
+ies 2 --overrun-temp-bump 0.3
+2026-06-07T14:26:19.091Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:26:19.094Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:26:19.095Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:26:19.095Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:26:19.095Z omarflow DEBUG [clojure.core:218] - (get-effective-target-states env t) => #{:run}
+2026-06-07T14:26:19.096Z omarflow DEBUG [clojure.core:219] - (chart/nearest-ancestor-state statechart t) => :initial32847
+2026-06-07T14:26:19.096Z omarflow DEBUG [clojure.core:226] - (:id (chart/find-least-common-compound-ancestor statechart (into (if tsource [tsource] []) tstates))) => :ROOT
+2026-06-07T14:26:19.096Z omarflow DEBUG [clojure.core:212] - target(s) => [:run]
+2026-06-07T14:26:19.096Z omarflow DEBUG [clojure.core:197] - target => :run
+2026-06-07T14:26:19.096Z omarflow DEBUG [clojure.core:199] - target-element => :run
+2026-06-07T14:26:19.096Z omarflow DEBUG [clojure.core:495] - entry set => [#{:run :greeting} #{:run} {}]
+2026-06-07T14:26:19.096Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :run
+2026-06-07T14:26:19.096Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32848, :target [:greeting], :type :external, :node-type :transi
+tion, :parent :initial32849}
+2026-06-07T14:26:19.096Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:26:19.096Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :greeting
+2026-06-07T14:26:19.096Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:26:19.096Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :greeting}
+2026-06-07T14:26:19.096Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:26:19.096Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:662] - Starting invocation id = hello, type = :llm-conversation, src = , params = {:system "When asked, c
+all the `event__hello_done` tool exactly once with `{\"greeting\":\"<a short hello in any language>\"}`. Keep the greeting under 30 characters. After the tool call, end your turn. Do not call any othe
+r tools.", :real-tools [], :allowed-events [{:event :hello/done, :data-schema [:map [:greeting :string]]}], :initial-user-message "Say hello."}
+2026-06-07T14:26:19.198Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:26:19.198Z omarflow DEBUG [clojure.core:930] - external-event => {:type :com.fulcrologic.statecharts/chart, :name :error.llm.invalid-request, :target :session/fefa1969-99c2-4fdd-8331-6cc
+75eac19a3, :data {:message "OpenAI API error: HTTP 400", :class "clojure.lang.ExceptionInfo", :category :invalid-request, :attempts [{:model "gemma3:1b", :error {:message "OpenAI API error: HTTP 400",
+ :class "clojure.lang.ExceptionInfo"}}], :reason :invalid-request}, :com.fulcrologic.statecharts/source-session-id :session/fefa1969-99c2-4fdd-8331-6cc75eac19a3, :origin :session/fefa1969-99c2-4fdd-83
+31-6cc75eac19a3, :origintype :com.fulcrologic.statecharts/chart, :com.fulcrologic.statecharts/event-name :error.llm.invalid-request}
+2026-06-07T14:26:19.198Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:26:19.198Z omarflow DEBUG [clojure.core:615] - enabled transitions => #{}
+2026-06-07T14:26:19.198Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:26:19.199Z omarflow DEBUG [clojure.core:495] - entry set => [#{} #{} {}]
+2026-06-07T14:26:19.199Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :greeting}
+2026-06-07T14:26:19.199Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+session          fefa1969-99c2-4fdd-8331-6cc75eac19a3
+transcript       .escapement/fefa1969-99c2-4fdd-8331-6cc75eac19a3/transcript.jsonl
+checkpoint-dir   .escapement/fefa1969-99c2-4fdd-8331-6cc75eac19a3/checkpoints
+final-config     [:run :greeting]
+[1m[32m➜  [36mescapement[0m [1m[34mgit:([31mfeat/live-token-tui[34m) [33m✗[0m
+
+
+
+
+
+
+
+

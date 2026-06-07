@@ -1,0 +1,50 @@
+2026-06-07T14:28:49.127Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:28:49.127Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :translator
+2026-06-07T14:28:49.127Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32863, :target [:translating], :type :external, :node-type :tra
+nsition, :parent :initial32864}
+2026-06-07T14:28:49.127Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:28:49.127Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :translating
+2026-06-07T14:28:49.127Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:28:49.127Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :summarizer
+2026-06-07T14:28:49.127Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:459] - Execute content of {:id :transition32865, :target [:summarizing], :type :external, :node-type :tra
+nsition, :parent :initial32866}
+2026-06-07T14:28:49.127Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:28:49.127Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:499] - Enter :summarizing
+2026-06-07T14:28:49.127Z omarflow DEBUG [clojure.core:516] - (chart/final-state? statechart s) => false
+2026-06-07T14:28:49.127Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :translating :work :summarizing :summarizer :translator}
+2026-06-07T14:28:49.127Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:28:49.127Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:662] - Starting invocation id = translator, type = :llm-conversation, src = , params = {:system "Reply by
+ calling the `event__parallel_translated` tool exactly once with `{\"text\":\"<the French translation>\"}`. Keep it short. Then end your turn.", :allowed-events [{:event :parallel/translated, :data-sc
+hema [:map [:text :string]]}], :initial-user-message "Translate to French: \"Hello, world.\""}
+2026-06-07T14:28:49.129Z omarflow DEBUG [com.fulcrologic.statecharts.algorithms.v20150901-impl:662] - Starting invocation id = summarizer, type = :llm-conversation, src = , params = {:system "Reply by
+ calling the `event__parallel_summarized` tool exactly once with `{\"text\":\"<a one-sentence summary>\"}`. Keep it under 20 words. Then end your turn.", :allowed-events [{:event :parallel/summarized,
+ :data-schema [:map [:text :string]]}], :initial-user-message "Summarize this passage: \"Once upon a time there was a cat.\""}
+2026-06-07T14:28:49.301Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:28:49.302Z omarflow DEBUG [clojure.core:930] - external-event => {:type :com.fulcrologic.statecharts/chart, :name :error.llm.invalid-request, :target :session/8a32c8ff-6c89-4c76-9217-bb2
+6cc089b32, :data {:message "OpenAI API error: HTTP 400", :class "clojure.lang.ExceptionInfo", :category :invalid-request, :attempts [{:model "gemma3:1b", :error {:message "OpenAI API error: HTTP 400",
+ :class "clojure.lang.ExceptionInfo"}}], :reason :invalid-request}, :com.fulcrologic.statecharts/source-session-id :session/8a32c8ff-6c89-4c76-9217-bb26cc089b32, :origin :session/8a32c8ff-6c89-4c76-92
+17-bb26cc089b32, :origintype :com.fulcrologic.statecharts/chart, :com.fulcrologic.statecharts/event-name :error.llm.invalid-request}
+2026-06-07T14:28:49.302Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:28:49.302Z omarflow DEBUG [clojure.core:615] - enabled transitions => #{}
+2026-06-07T14:28:49.302Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:28:49.302Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:28:49.302Z omarflow DEBUG [clojure.core:495] - entry set => [#{} #{} {}]
+2026-06-07T14:28:49.302Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :translating :work :summarizing :summarizer :translator}
+2026-06-07T14:28:49.302Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:28:49.303Z omarflow DEBUG [clojure.core:910] - Processing event on statechart => :escapement.runner/chart
+2026-06-07T14:28:49.303Z omarflow DEBUG [clojure.core:930] - external-event => {:type :com.fulcrologic.statecharts/chart, :name :error.llm.invalid-request, :target :session/8a32c8ff-6c89-4c76-9217-bb2
+6cc089b32, :data {:message "OpenAI API error: HTTP 400", :class "clojure.lang.ExceptionInfo", :category :invalid-request, :attempts [{:model "gemma3:1b", :error {:message "OpenAI API error: HTTP 400",
+ :class "clojure.lang.ExceptionInfo"}}], :reason :invalid-request}, :com.fulcrologic.statecharts/source-session-id :session/8a32c8ff-6c89-4c76-9217-bb26cc089b32, :origin :session/8a32c8ff-6c89-4c76-92
+17-bb26cc089b32, :origintype :com.fulcrologic.statecharts/chart, :com.fulcrologic.statecharts/event-name :error.llm.invalid-request}
+2026-06-07T14:28:49.303Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+2026-06-07T14:28:49.303Z omarflow DEBUG [clojure.core:615] - enabled transitions => #{}
+2026-06-07T14:28:49.303Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:28:49.303Z omarflow DEBUG [clojure.core:893] - event from invocation? => false
+2026-06-07T14:28:49.303Z omarflow DEBUG [clojure.core:495] - entry set => [#{} #{} {}]
+2026-06-07T14:28:49.303Z omarflow DEBUG [clojure.core:534] - after enter states:  => #{:run :translating :work :summarizing :summarizer :translator}
+2026-06-07T14:28:49.303Z omarflow DEBUG [clojure.core:564] - conflicting? => #{}
+session          8a32c8ff-6c89-4c76-9217-bb26cc089b32
+transcript       .escapement/8a32c8ff-6c89-4c76-9217-bb26cc089b32/transcript.jsonl
+checkpoint-dir   .escapement/8a32c8ff-6c89-4c76-9217-bb26cc089b32/checkpoints
+final-config     [:run :translating :work :summarizing :summarizer :translator]
+[1m[32m➜  [36mescapement[0m [1m[34mgit:([31mfeat/live-token-tui[34m) [33m✗[0m

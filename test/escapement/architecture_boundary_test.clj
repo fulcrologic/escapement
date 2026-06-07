@@ -38,11 +38,17 @@
    "com.cognitect.transit"])  ; the /api transit wire format
 
 (def tui-prefix
-  "The terminal-UI add-on. Forbidden in the embeddable library; allowed in `cli.clj`."
+  "The terminal-UI add-on. Forbidden in the embeddable library; allowed in `cli.clj`.
+   The facade (`escapement.tui`) AND every module under `src/escapement/tui/`
+   (`escapement.tui.theme`, `.compositor`, …) make up this add-on tree; the tree
+   may require within itself, but no library-core namespace may require any of it."
   "escapement.tui")
 
 (def cli-file "src/escapement/cli.clj")
 (def tui-file "src/escapement/tui.clj")
+(def tui-dir
+  "Directory holding the TUI sub-namespaces (the rest of the add-on tree)."
+  "/escapement/tui/")
 
 (defn source-files
   "Returns the sorted paths of every .clj/.cljc file under `src/escapement`."
@@ -90,16 +96,21 @@
 
 (defn library-core-file?
   "True for source files that belong to the embeddable runtime/library core —
-   i.e. everything except the `escapement.ui.*` web layer, `cli.clj`, and
-   `tui.clj` (the front-end app and the terminal-UI add-on respectively)."
+   i.e. everything except the `escapement.ui.*` web layer, `cli.clj`, and the
+   terminal-UI add-on tree (`tui.clj` plus every file under
+   `src/escapement/tui/`). The add-on tree is allowed to require within itself
+   (facade → modules, module → module), so it is excluded from the core scan."
   [path]
   (and (not (str/includes? path "/escapement/ui/"))
+    (not (str/includes? path tui-dir))
     (not= path cli-file)
     (not= path tui-file)))
 
 (specification "Engine/library-core dependency boundary"
   (let [files    (source-files)
         core     (filterv library-core-file? files)
+        tui-tree (filterv (fn [p] (or (= p tui-file) (str/includes? p tui-dir)))
+                   files)
         ;; map of offending-path -> [forbidden-ns ...]; TUI is forbidden in core.
         core-bad (into (sorted-map)
                    (keep (fn [p] (let [v (violations p [tui-prefix])]
@@ -108,8 +119,13 @@
     (assertions
       "the source tree is actually scanned (guards against a vacuous pass)"
       (> (count core) 25) => true
+      "the engine/runner core stays in the scan and is NOT mistaken for the add-on"
+      (and (some #(str/ends-with? % "/escapement/runner.clj") core)
+        (some #(str/includes? % "/escapement/engine/") core)) => true
       "no library-core namespace statically requires the web/Pathom/RAD UI or the terminal UI"
       core-bad => {}
+      "the terminal-UI add-on tree (facade + tui/ modules) is excluded from core"
+      (every? (complement library-core-file?) tui-tree) => true
       "the CLI front-end (cli.clj) does not statically require the web/Pathom/RAD UI"
       (violations cli-file []) => []
       "the CLI front-end (cli.clj) IS permitted to require the terminal UI directly"

@@ -1,0 +1,50 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│escapement · session ·                                                                                                                                                                          ◷ 0:06│
+│▶ —                                                                                                                                                                             0 LLMs · 0 act · 0 t/s│
+│states: [run finished]                                                                                                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─LIVE─────────────────────────────────────────────────────────────────────────────────────────────╮┏━LOG━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│  (no live activity yet)                                                                          │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.11", :session-i…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.workers", :session-id :multiplex.…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.0", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.1", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.2", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.3", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.4", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.5", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.6", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.7", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.8", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.9", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.10", :session-i…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.11", :session-i…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.workers", :session-id :multiplex.…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.0", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.1", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.2", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.3", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.4", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.5", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.6", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.7", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.8", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.9", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.10", :session-i…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.11", :session-i…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.workers", :session-id :multiplex.…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.0", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.1", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.2", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.3", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.4", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.5", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.6", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.7", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.8", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.9", :session-id…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.10", :session-i…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.multiplex.workers.11", :session-i…┃
+│                                                                                                  │┃19:20:04 chart · runner/event-dropped {:event-name "done.invoke.workers", :session-id :multiplex.…┃
+│                                                                                                  │┃19:20:04 debug · done final=["run" "finished"]                                                    ┃
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━⇅ 413/413━┛
+ LOG · ⇅ scroll · Enter transcript · m maximize · Tab → LIVE · ? inspector · a artifacts · Esc interrupt · Ctrl-C quit
