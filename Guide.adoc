@@ -74,6 +74,26 @@ Or, equivalently, before `bbin install`:
 bb -m escapement.cli run escapement.examples.hello/agent
 ----
 
+[[credentials]]
+==== Credentials and local key management
+
+Two ways to supply credentials (no shell `source` needed either way):
+
+* **Env vars** — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ZAI_API_KEY`, `OLLAMA_API_KEY`, `OPENCODE_GO_API_KEY`. Auto-detected when no `--backend` flag is given.
+* **`:llm/credentials` in `.escapement.edn`** — escapement reads it at startup and assembles the backend (same hermetic path the embeddable lib uses). To keep secrets out of the file, declare external JSON key stores under `:llm/credential-sources` and pull each key with `:key-from [<source> <path…>]`:
+
+[source,clojure]
+----
+{:llm/credential-sources {:opencode "~/.local/share/opencode/auth.json"}
+ :llm/credentials
+ [{:provider :z-ai-plan   :key-from [:opencode "zai-coding-plan" "key"]}
+  {:provider :ollama      :key-from [:opencode "ollama-cloud" "key"]}
+  {:provider :opencode-go :key-from [:opencode "opencode-go" "key"]}
+  {:provider :codex}]}   ; ChatGPT OAuth file; no key
+----
+
+`.escapement.edn` is gitignored; copy `.escapement.edn.example` to start. ChatGPT/codex uses an OAuth file (`~/.escapement/openai-auth.json` via `escapement login codex`). `escapement info` shows what's detected.
+
 ==== Multi-backend auto-fallback
 
 When more than one credential is configured, Escapement wires a multi-dispatch backend AND derives a preference-ordered candidate set of targets.
@@ -3400,6 +3420,13 @@ Schema (validated with Malli on load; unknown keys are rejected):
  ;; ^ ordered vector of ALIAS KEYWORDS — the default candidate set when a
  ;;   node names no model. Each must be present in :llm/aliases (a dangling
  ;;   keyword, or an old {:provider :model} pair, is rejected at load).
+ :llm/credential-sources {:opencode "~/.local/share/opencode/auth.json"}
+ ;; ^ named external JSON key stores (`~` expanded); referenced by :key-from.
+ :llm/credentials [{:provider :z-ai-plan :key-from [:opencode "zai-coding-plan" "key"]}
+                   {:provider :codex}]
+ ;; ^ ordered provider descriptors → multi-dispatch backend when no --backend.
+ ;;   Each key comes inline via :api-key (discouraged) or :key-from a store
+ ;;   above; :codex uses the OAuth file. See <<credentials>>.
  :llm/ratings   {:opus {:intelligence 10 :clojure 10}}}
  ;; ^ subjective opinion overlay, KEYED BY ALIAS KEYWORD; there is no
  ;;   built-in opinion. Any inner key becomes filterable via a node's :needs

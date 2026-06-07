@@ -1,5 +1,44 @@
 # Changelog
 
+## [unreleased] — feat/llm-credentials-config — 2026-06-07
+
+Escapement can now load LLM provider credentials declaratively from
+`.escapement.edn` instead of env vars or shell `source`, with the local config
+untracked and a committed example template.
+
+### Added
+
+- **`:llm/credentials` in `.escapement.edn`.** When no `--backend` flag is
+  given and credentials are present, the CLI assembles a multi-dispatch LLM
+  backend at startup from an ordered vector of provider descriptors — the same
+  hermetic injected-credentials path the embeddable lib uses. No env vars and
+  no shell `source` required.
+- **`:llm/credential-sources` + `:key-from`.** Keys stay out of the config
+  file: declare external JSON key stores (e.g. OpenCode's `auth.json`) under
+  `:llm/credential-sources`, then pull each credential's key with
+  `:key-from [<source> <json-path…>]`. JSON stores are read and cached once per
+  run. `:codex` uses the ChatGPT OAuth file and needs no key.
+- **`.escapement.edn.example`** — a committed, provider-generic template;
+  `cp .escapement.edn.example .escapement.edn` to start.
+- **`docs/catalog.md`** — documents the `models-api.json` refresh procedure
+  (curl the live models.dev API, minify with `jq -c`, verify with `bb test`).
+- Malli `project-schema` now validates `:llm/credential-sources` and
+  `:llm/credentials` on config load.
+
+### Changed
+
+- `.escapement.edn` is now gitignored and untracked (it points at a personal
+  credential store); the tracked file is the new `.escapement.edn.example`.
+- `src/escapement/llm/models-api.json` refreshed from the live models.dev API
+  (140 providers) and kept minified.
+
+### Notes
+
+- Env-var auto-detect (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) remains the
+  fallback when no `:llm/credentials` are configured.
+- The end-to-end config-only credential path depends on local external key
+  stores; verified live with a config-only run (see Gate 1).
+
 ## [unreleased] — feat/live-token-tui — 2026-06-07
 
 A TUI overhaul (live streaming-token panel + themed inspector/transcript,

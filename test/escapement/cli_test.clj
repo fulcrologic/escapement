@@ -238,3 +238,43 @@
       (finally
         ;; restore timbre to its pre-test config so other specs are unaffected
         (set-cfg! orig)))))
+
+(specification "read-json-store"
+  (let [f (str (tmp-dir) "/store.json")]
+    (spit f "{\"a\":{\"k\":\"v\"}}")
+    (assertions
+      "parses a JSON file to a string-keyed map"
+      (get-in (#'cli/read-json-store f) ["a" "k"]) => "v"
+      "a missing file yields nil (not an error)"
+      (#'cli/read-json-store (str (tmp-dir) "/nope.json")) => nil)))
+
+(specification "resolve-config-credentials"
+  (let [store (str (tmp-dir) "/auth.json")
+        _     (spit store "{\"zai-coding-plan\":{\"key\":\"K-ZAI\"},\"ollama-cloud\":{\"key\":\"K-OLL\"}}")
+        cfg   {:llm/credential-sources {:opencode store}
+               :llm/credentials
+               [{:provider :z-ai-plan   :key-from [:opencode "zai-coding-plan" "key"]}
+                {:provider :ollama      :key-from [:opencode "ollama-cloud" "key"]}
+                {:provider :codex}
+                {:provider :opencode-go :key-from [:opencode "absent" "key"]}]}
+        ;; the unresolved descriptor logs a WARN to *err*; mute it for clean output
+        out   (binding [*err* (java.io.StringWriter.)]
+                (#'cli/resolve-config-credentials cfg))
+        by-p  (fn [p] (first (filter #(= p (:provider %)) out)))]
+    (assertions
+      "resolves each :key-from against the store and attaches :api-key"
+      (:api-key (by-p :z-ai-plan)) => "K-ZAI"
+      (:api-key (by-p :ollama)) => "K-OLL"
+      ":key-from is stripped from the resolved descriptor"
+      (contains? (by-p :z-ai-plan) :key-from) => false
+      ":codex passes through with no key (OAuth file)"
+      (by-p :codex) => {:provider :codex}
+      "a descriptor whose key cannot be resolved is dropped"
+      (by-p :opencode-go) => nil
+      "an inline :api-key is honored without a store"
+      (:api-key (first (binding [*err* (java.io.StringWriter.)]
+                         (#'cli/resolve-config-credentials
+                           {:llm/credentials [{:provider :anthropic :api-key "K-INLINE"}]}))))
+      => "K-INLINE"
+      "returns nil when :llm/credentials is absent"
+      (#'cli/resolve-config-credentials {}) => nil)))
