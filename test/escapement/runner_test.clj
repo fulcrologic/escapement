@@ -327,9 +327,9 @@
   (custom-render [_ _ _ _] nil))
 
 (def frozen-chart
-  ;; Enters :ask, invokes :human-input, then waits for :human.answer that
-  ;; never arrives (the renderer blocks). The chart configuration is frozen
-  ;; while a live invocation exists.
+  ;; Enters :ask, invokes :human-input, then waits for :human.answer. The
+  ;; renderer blocks until the test opens its latch, so the invocation stays
+  ;; LIVE (worker-state :running) — a chart legitimately working, not a wedge.
   (chart/statechart
     {:initial :run}
     (state {:id :run :initial :ask}
@@ -342,7 +342,14 @@
         (transition {:event :human.answer :target :done}))
       (final {:id :done}))))
 
-(specification "runner detects a frozen-config wedge and exits cleanly (R2)"
+(specification "runner does NOT trip frozen-config while an invocation is live (slow/blocked turn ≠ wedge)"
+  ;; Regression for e934ac8. A chart parked in a LIVE invocation — here a
+  ;; human-input whose renderer blocks until the human finally answers — must
+  ;; NOT be aborted as a frozen-config wedge. A human taking their time (or a
+  ;; slow model on a long turn) looks identical to a wedge but is legitimately
+  ;; WORKING, so the runner waits UNBOUNDEDLY for live work and only completes
+  ;; once the answer arrives. The genuine wedge (live = 0, deliverable > 0) is
+  ;; covered by the multiplex single-session test below.
   (let [dir        (tmp-dir "runner-frozen")
         transcript (str dir "/run.jsonl")
         chk        (str dir "/chk")
@@ -367,29 +374,29 @@
                            (deliver result-p {:error e})))))]
     (.setDaemon t true)
     (.start t)
-    ;; If frozen-config detection is broken the runner hangs
-    ;; forever; bound the wait so the test fails fast instead.
-    (.join t 5000)
-    (.countDown latch)                                      ;; release the blocked renderer thread
-    (let [summary (deref result-p 100 ::timeout)]
+    ;; Wait far longer than the OLD frozen guard would have needed to trip
+    ;; (max-frozen-cycles 5 * quiescent-sleep-ms 5 = 25ms). With the
+    ;; live-invocation carve-out the run must STILL be parked on the human.
+    (.join t 1000)
+    (assertions
+      "the run is still alive — a live invocation is not aborted as frozen"
+      (realized? result-p) => false)
+    (.countDown latch)                                      ;; the human finally answers ("never")
+    (let [summary (deref result-p 2000 ::timeout)]
       (assertions
-        "run! returned (did not hang)"
+        "once the answer arrives, run! returns (did not hang)"
         (not= ::timeout summary) => true
         "run! did not throw"
         (:error summary) => nil
-        "run! returned a normal summary map"
-        (contains? summary :final-config) => true))
+        "and reaches the normal :done status"
+        (:status summary) => :done))
     (let [rows (read-jsonl transcript)
-          err  (first (filter #(= "runner/error" (:event %)) rows))
           evs  (set (map :event rows))]
       (assertions
-        "emitted :runner/error"
-        (some? err) => true
-        "with :reason :frozen-config"
-        (get-in err [:data :reason]) => "frozen-config"
-        "reporting the live invocation count"
-        (get-in err [:data :live-invocations]) => 1
-        "still reached the normal :runner/done path"
+        "never emitted a :frozen-config error for the live invocation"
+        (some #(and (= "runner/error" (:event %))
+                    (= "frozen-config" (get-in % [:data :reason]))) rows) => nil
+        "and still reached the normal :runner/done path"
         (contains? evs "runner/done") => true))))
 
 ;; -- multi-session multiplex drain + single-session wedge detection ----------

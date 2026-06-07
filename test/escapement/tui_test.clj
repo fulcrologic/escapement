@@ -525,10 +525,15 @@
 
 (specification "pressing ? while a modal is up opens the inspector without resolving the modal"
   (let [h    (mk-handle {:inspector? true :debug? false})
-        ask! (resolve 'escapement.tui/ask!)]
+        ask! (resolve 'escapement.tui/ask!)
+        ;; `ask!` paints real frames via `render-frame!` → `emit!`, which writes
+        ;; ANSI to *err*. Sink that to a throwaway writer (on the worker thread,
+        ;; where the painting happens) so the test suite output stays clean.
+        sink (java.io.StringWriter.)]
     ;; Raise a modal on a worker thread so we can observe it.
-    (let [worker (future (try (ask! h {:kind :text :prompt "y/n"})
-                              (catch Throwable t t)))]
+    (let [worker (future (binding [*out* sink *err* sink]
+                           (try (ask! h {:kind :text :prompt "y/n"})
+                                (catch Throwable t t))))]
       (Thread/sleep 50)
       (assertions
         "modal is up"
