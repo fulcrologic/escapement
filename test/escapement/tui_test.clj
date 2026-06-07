@@ -4,6 +4,7 @@
     [com.fulcrologic.statecharts.chart :as sc.chart]
     [com.fulcrologic.statecharts.elements :as sc.e]
     [escapement.tui :as tui]
+    [escapement.tui.theme :as theme]
     [fulcro-spec.core :refer [=> assertions component specification]]))
 
 (def ^:private key-from-bytes #'escapement.tui/key-from-bytes)
@@ -551,7 +552,12 @@
         (deref worker 1000 :timeout) => "ok"))))
 
 (specification "role-sgr — per-role hue obtainable as an SGR code"
-  (let [h (mk-handle {})]
+  ;; Force the color-capability gate ON so the test is deterministic regardless
+  ;; of the ambient terminal (CI has no TTY / TERM, so `ansi-supported?` would
+  ;; otherwise be false and every SGR code would degrade to ""). The hue→SGR
+  ;; mapping under test has nothing to do with the ambient TTY.
+  (with-redefs [theme/ansi-supported? (constantly true)]
+   (let [h (mk-handle {})]
     (tui/event! h {:event :llm/start :ts 1 :data {:invokeid "writer"}})
     (let [s    @(:state h)
           code (tui/role-sgr s "writer")]
@@ -563,7 +569,7 @@
         "an unknown source yields \"\" (composes as a no-op)"
         (tui/role-sgr s "nope") => ""
         "the code is usable directly by sgr-wrap to color a log line"
-        (.contains ^String (tui/sgr-wrap code "04:35 writer ◂ hi") "writer") => true))))
+        (.contains ^String (tui/sgr-wrap code "04:35 writer ◂ hi") "writer") => true)))))
 
 ;; ---------------------------------------------------------------------------
 ;; LIVE pane renderer (task 003)
@@ -720,7 +726,11 @@
     => {:lines [] :scroll {:pos 0 :total 0}}))
 
 (specification "log-pane-lines — role coloring + cursor highlight"
-  (let [h  (mk-handle {})]
+  ;; Force color-capability ON (see role-sgr spec) so role hues are emitted
+  ;; deterministically in CI's TTY-less env. The cursor-highlight ([7m) and
+  ;; the :none-theme "no color" assertions are independent of this gate.
+  (with-redefs [theme/ansi-supported? (constantly true)]
+   (let [h  (mk-handle {})]
     ;; allocate a real per-role hue via the live event path
     (tui/event! h {:event :llm/start :ts 1 :data {:invokeid "judge1" :session-id "j"}})
     (let [s    @(:state h)
@@ -745,7 +755,7 @@
         "cursor-idx outside the window adds no reverse-video"
         (some #(str/includes? % "[7m")
           (:lines (tui/log-pane-lines {:scrollback (mk-scrollback 20)} none 60 4 0 0)))
-        => nil))))
+        => nil)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Phase tracker + header strip (task 005)
