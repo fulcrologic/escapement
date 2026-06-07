@@ -1,41 +1,49 @@
 ---
 name: run-tui
-description: Launch and observe Escapement's interactive TUI (the live streaming-token panel + inspector). Default to headless (tmux + text capture; cross-platform, for agents/CI) — it ALSO emits a real PNG screenshot rendered offscreen, so you rarely need headful. Only use headful (a visible window) when the user explicitly wants to watch it live on their desktop. Use when asked to run, drive, or screenshot the TUI (e.g. `bb haiku '…'`, `bb -m escapement.cli run …`), or to confirm a UI change renders.
+description: Launch and observe Escapement's interactive TUI (the live streaming-token panel + inspector). Three modes — headless (tmux text capture, cross-platform, default for driving/verifying), shot (pixel-accurate PNG rendered OFFSCREEN with no window, via cage), and headful (PNG in a visible window). For a screenshot prefer `shot`; only use headful when the user wants to watch it live on their desktop. Use when asked to run, drive, or screenshot the TUI (e.g. `bb haiku '…'`, `bb -m escapement.cli run …`), or to confirm a UI change renders.
 ---
 
 # Running & screenshotting the Escapement TUI
 
 The TUI **requires a real TTY**, so you can never `| tee` / capture stdout
 directly (that strips the TTY and the app aborts with
-`Interactive chart requires a TTY for the TUI`). Use the helper, which gives you
-the rendered screen either way:
+`Interactive chart requires a TTY for the TUI`). Use the helper:
 
 ```bash
-.claude/skills/run-tui/driver.sh headless ["PROMPT"]   # tmux → text  (default, cross-platform)
-.claude/skills/run-tui/driver.sh headful  ["PROMPT"]   # real window → /tmp/haiku-tui.png
+.claude/skills/run-tui/driver.sh headless ["PROMPT"]   # tmux → TEXT (+ /tmp/haiku.ansi). Default. Cross-platform.
+.claude/skills/run-tui/driver.sh shot     ["PROMPT"]   # accurate PNG, NO window → /tmp/haiku-tui.png
+.claude/skills/run-tui/driver.sh headful  ["PROMPT"]   # accurate PNG in a VISIBLE window → /tmp/haiku-tui.png
 ```
 
-**Default to headless** for essentially everything — runs, verification,
-iteration, *and* screenshots. It needs only `tmux` and works on macOS and Linux,
-and it produces **all three** of: live text on stdout, a colored
-`/tmp/haiku.ansi`, and a real **`/tmp/haiku-tui.png`** rendered offscreen (no
-window). **Only use headful** when the user *explicitly* wants to watch the TUI
-live in a real window on their own desktop ("open a window", "let me watch it").
-A plain "take a screenshot / show me the UI" → still headless (you get the PNG).
+Pick by what you need:
 
-| Mode | How you "see" it | Platform |
-|---|---|---|
-| **Headless** (default) | text on stdout · color `/tmp/haiku.ansi` · **PNG `/tmp/haiku-tui.png`** (offscreen, no window) | macOS + Linux |
-| **Headful** | a *visible* terminal window + screenshot → `/tmp/haiku-tui.png` | Linux: alacritty + `grim` (Wayland/Hyprland) · macOS: Terminal.app + `screencapture` |
+- **Driving / verifying behavior / fast iteration / CI** → **headless**. Only
+  needs `tmux`; works on macOS + Linux. Returns the screen as text and writes a
+  colored `/tmp/haiku.ansi`. **It is NOT a faithful image** — do not screenshot
+  the text capture (re-typesetting it misaligns box-drawing/half-block borders).
+- **A real screenshot** → **shot**. Renders the *actual* terminal into a
+  **headless** Wayland output (no window appears) and captures it with `grim` —
+  pixel-identical to headful. This is the right default for "take a screenshot /
+  show me the UI."
+- **Watch it live on the user's own desktop** → **headful**. A real window pops
+  up; use only when the user explicitly wants to see it happen.
 
-The headless PNG is produced by [`charmbracelet/freeze`](https://github.com/charmbracelet/freeze)
-(ANSI → PNG). The helper **auto-downloads** the right freeze binary for the OS/arch
-on first use into `.claude/skills/run-tui/bin/freeze` (see `ensure-freeze.sh`) —
-no manual install. Needs `curl`/`wget` + `tar` once; offline with no cached
-binary, the PNG is skipped (text + `.ansi` still produced).
+| Mode | Output | Faithful image? | Platform |
+|---|---|---|---|
+| **headless** (default) | text on stdout + color `/tmp/haiku.ansi` | ❌ text only | macOS + Linux (`tmux`) |
+| **shot** | `/tmp/haiku-tui.png`, **no window** | ✅ real terminal render | Linux (cage+grim); macOS → falls back to headful |
+| **headful** | `/tmp/haiku-tui.png`, visible window | ✅ real terminal render | Linux: alacritty+`grim` (Wayland/Hyprland) · macOS: Terminal.app+`screencapture` |
 
-After either run, Read `/tmp/haiku-tui.png` yourself (vision), then open it for
-the user (`xdg-open` on Linux, `open` on macOS).
+`shot` uses [`cage`](https://github.com/cage-kiosk/cage) (a tiny headless
+wlroots compositor) to draw a real alacritty into an offscreen output, optionally
+sized up by `wlr-randr` for the full 200-col layout. The helper **auto-installs**
+`cage` (+ `wlr-randr`) via the system package manager on first use (see
+`ensure-cage.sh`); if it can't, `shot` falls back to **headful**. macOS has no
+offscreen terminal path, so `shot` there is just headful (a window appears).
+Override the pre-screenshot stream delay with `SHOT_SECS=20 driver.sh shot …`.
+
+After a `shot`/`headful` run, Read `/tmp/haiku-tui.png` yourself (vision), then
+open it for the user (`xdg-open` on Linux, `open` on macOS).
 
 ## Prerequisites
 
@@ -60,20 +68,31 @@ tmux send-keys -t haiku C-c        # quit
 tmux kill-session  -t haiku 2>/dev/null || true
 ```
 
-For more frames in headful, just re-run `driver.sh headful` (or re-shoot the
-window directly). To drive a headful window, run headless to *drive* and headful
-only to *capture* — simpler than sending keys to a floating window.
+`shot`/`headful` capture a single frame and exit; re-run for more frames. To
+*drive* the TUI (keys), use headless (talk to the tmux session); `shot`/`headful`
+are for *capturing* a faithful image, not interaction.
 
 ### Gotchas
 - **Never pipe the launch command** — kills the TTY (same abort as a non-terminal).
+- **Don't screenshot the headless text.** The tmux text/ANSI capture is for
+  reading, not imaging — re-rendering it (freeze/aha/etc.) misaligns the
+  box-drawing and half-block (`▌▐▀`) borders. For an image use `shot`.
 - **Headless:** the helper sets `remain-on-exit on`; without it a fast crash
   closes the only session and tmux reports `no server running` — the app died
   (usually ollama/TTY), tmux isn't broken. Width matters: it uses `-x 200`; the
   live panel hides columns when narrow.
+- **shot (Linux):** needs `cage` + `grim` (+ optional `wlr-randr` for the full
+  200-col grid; without it you get cage's 1280×720 default → narrower responsive
+  layout). The helper auto-installs via the system package manager (needs sudo
+  once); if install fails it falls back to headful. Works even on a pure
+  SSH/headless box (no `$WAYLAND_DISPLAY` needed — cage makes its own). Tune the
+  stream-before-capture delay with `SHOT_SECS=…`.
+- **shot (macOS):** no offscreen path — it transparently becomes headful (a
+  window appears).
 - **Headful Linux:** needs a Wayland session (`$WAYLAND_DISPLAY` set) plus
   `alacritty`, `grim`, `hyprctl`, `python3`. Hyprland-specific; on other Wayland
   compositors get geometry differently (e.g. `swaymsg -t get_tree`). On a pure
-  SSH/headless box, headful is unavailable — use headless.
+  SSH/headless box, prefer `shot`.
 - **Headful macOS:** uses built-in `osascript` + `screencapture` and Terminal.app
   (no extra installs). May prompt once for Screen Recording / Automation
   permission. Other compositors/terminals aren't handled — only Terminal.app.
