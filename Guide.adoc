@@ -1563,12 +1563,24 @@ Use `cache_control` markers on `system` and stable message prefixes to drive tha
 `stop_reason="max_tokens"` is handled by the worker, not the chart: the partial assistant content becomes prefill for an immediate continuation request, repeated until a real terminal stop, then the segments are stitched (text merged across the truncation boundary, usage summed) into a single Response that the rest of the pipeline — tool dispatch, event firing, `:on-end-turn-event` — sees as one ordinary turn.
 Nothing acts on a half-finished message.
 
-This is intentionally **unbounded** — it is just "finish reading the message" — and there is no continuation knob (it is not part of
-`:resilience`).
+This is **unbounded by default** — it is just "finish reading the message".
 The sole stop condition besides a terminal
 `stop_reason` is *no forward progress*: if a continuation segment adds no new content, the worker stops and fires `:error.llm.unexpected-stop`
 (`:detail :no-forward-progress`) rather than loop and drain quota.
 Each continuation emits a `:llm/continuation` transcript event (`{:segment N :blocks K :usage {…}}`) for observability.
+
+The one knob that changes this is the **`:overrun` resilience primitive**
+(opt-in, OFF by default). When `:resilience {:overrun {:max-retries N …}}`
+is set with `N > 0`, a `:max_tokens` stop is treated as a truncation trip
+wire rather than an invitation to continue: instead of stitching an unbounded
+continuation, the worker re-runs the **same** turn with identical context up
+to `:max-retries` times. `:on-exhausted` then decides — `:truncate` (default)
+accepts the truncated turn as an ordinary `:ok`, or `:fail` surfaces an
+`:error.llm.unexpected-stop` (`:detail :overrun-retries-exhausted`).
+`:temperature-bump` optionally raises temperature on each rerun so a
+deterministic model does not simply re-truncate identically. Use this to cap
+runaway output on small-ceiling local models; leave it off for ordinary cloud
+models, where the automatic continuation above is the right behavior.
 
 [[web-tools]]
 == Web tools: `:web/search` and `:web/fetch`
@@ -1779,7 +1791,9 @@ states they happen to invoke (fail-soft default), but the TUI itself stays off u
 
 === The TUI
 
-`src/escapement/tui.clj`.
+`escapement.tui` (a thin facade over focused modules under
+`src/escapement/tui/` — `live`, `inspector`, `transcript`, `compositor`,
+`theme`, `phase`, `markdown`, `log`, `util`).
 JLine-backed persistent display, on a single input thread, with a modal-state machine and an in-memory line buffer.
 Layout:
 
@@ -1813,6 +1827,24 @@ are suppressed from scrollback (still in JSONL).
 With a modal open, `Esc` cancels just the modal.
 * `Ctrl-C` posts `:ui.quit` and tears down the TUI.
 
+==== Live streaming-token panel and inspector
+
+The display includes a live "mission-control" pane that shows each concurrent
+`:llm-conversation` invocation **as it streams** — per-invocation status,
+running output-token count, and tokens/sec — rather than only at turn end.
+Concurrent invocations are grouped by role (invokeid); past a cap, extra
+sibling sessions collapse into a `└ …+N more` summary. Streaming deltas append
+in real time, so you watch tokens arrive.
+
+A themed inspector overlay + transcript pager lets you drill in: focus an
+invocation, open its full transcript, inspect an individual event's detail,
+and open captured artifacts — all styled through a shared semantic theme
+(`escapement.tui.theme`). These overlays render into the scrollback region and
+dismiss with `Esc`.
+
+For a second, opt-in renderer that shows the same panels through an
+out-of-process Bun + SolidJS sidecar, see <<opentui>>.
+
 Atomic frames are used when the terminal advertises Mode 2026 (Synchronized Output) — detected at startup via DECRQM. iTerm2 (recent), kitty, wezterm, foot, ghostty, and contour qualify; Apple Terminal does not and falls back to per-frame writes (still flicker-light, just not guaranteed atomic).
 On exit the alt-screen buffer is left, restoring your shell scrollback exactly as it was before.
 
@@ -1841,6 +1873,26 @@ Plain scroll-wheel pans.
 * The server shuts down with the TUI; SSE clients reconnect automatically on browser reload while the run is live.
 
 Requires the `d2` binary on `$PATH` (or pinned via `:d2 :command`); on failure, the scrollback explains and the `chart.d2` source is left on disk so you can render it manually.
+
+[[opentui]]
+=== OpenTUI sidecar (`--tui=opentui`)
+
+`--tui=opentui` renders the session through an out-of-process **Bun + SolidJS
++ OpenTUI** sidecar (under `tui/opentui/`) instead of the in-process JLine TUI
+(which stays the default). The agent runs **headless** and streams its
+transcript event stream to the sidecar over a **WebSocket** on the api-server;
+human-input and control flow back over the same socket, and the sidecar owns
+the TTY. It renders the same surfaces as the JLine TUI — header, live
+streaming-token panel, transcript, inspector, log pane, and modals — plus, with
+`--debug --tui=opentui`, live pause/step/continue from the sidecar.
+
+The api-server is required (it is the sidecar's transport); the CLI reuses an
+explicit `--api-server <port>` or auto-picks a free one. Prerequisites: a real
+TTY, `bun` on `$PATH` (or `BUN_BIN`), and `bun install` already run in
+`tui/opentui/`. If the sidecar workspace is missing the flag fails fast with a
+clear message. `bb haiku-opentui` is the runnable entry point; the sidecar's
+own UI tests run via `bb opentui-test` (the agent-side WS-push glue is covered
+by `bb test`). See `docs/opentui-ui.md` and `docs/opentui-wire.md`.
 
 [[multi-agent]]
 == Multi-agent / team patterns
@@ -3224,6 +3276,8 @@ This is the canonical way to watch a non-interactive chart's conversation traffi
 Pause-on-start is gated by `:debug {:auto-pause? true}` in `.escapement.edn` (default true).
 When combined with `--api-server`, the same pause/step controller is also reachable from the browser Debugger (see <<api-server>>), so you can drive the run from either the TUI keys or the web UI.
 * `--no-tui` forces the TUI off (useful in CI, or to fall back to stdin prompts for `:human-input` invocations).
+* `--tui=opentui` renders through the out-of-process OpenTUI Bun sidecar instead of the default in-process JLine TUI (`--tui=jline`, or omitting the flag, keeps JLine).
+It requires a real TTY and auto-starts the api-server as its transport; see <<opentui>>. `--debug` alone still forces the JLine TUI; `--debug --tui=opentui` runs the sidecar with the pause/step controller; `--debug --no-tui` is rejected.
 * Charts marked `^{:interactive? true}` auto-open the TUI when a TTY is available.
 Other charts stay headless unless `--debug` is passed.
 * The main scrollback is a **unified, interleaved feed** of LLM conversations and chart state-transitions.

@@ -1,5 +1,83 @@
 # Changelog
 
+## [unreleased] — feat/live-token-tui — 2026-06-07
+
+A TUI overhaul (live streaming-token panel + themed inspector/transcript,
+split into modules), a new opt-in out-of-process OpenTUI (Bun + SolidJS)
+sidecar renderer, and an LLM "overrun" resilience primitive that re-runs a
+turn truncated at the output-token cap instead of stitching an unbounded
+continuation.
+
+### Added
+
+- **Live streaming-token TUI panel.** The default JLine TUI now renders a
+  live "mission-control" pane showing each concurrent LLM invocation as it
+  streams — per-invocation status, running output token counts, and
+  tokens/sec, with concurrent invocations grouped by role and collapsed past
+  a cap. Streaming tokens appear in real time rather than only at turn end.
+- **Themed inspector / transcript.** The TUI gained a themed inspector
+  overlay and transcript pager with drill-in: focus an invocation, open its
+  transcript, inspect an individual event's detail, and open captured
+  artifacts — all styled through a shared semantic theme.
+- **OpenTUI sidecar renderer (`--tui=opentui`).** An opt-in, out-of-process
+  Bun + SolidJS terminal UI under `tui/opentui/`. The agent runs headless and
+  the sidecar owns the TTY; it renders the same header, live panel,
+  transcript, inspector, log pane, and modals. `--debug --tui=opentui` drives
+  live pause/step/continue from the sidecar over the back-channel. Requires a
+  real TTY, `bun`, and `bun install` in `tui/opentui/`.
+- **WebSocket transcript push.** The headless agent streams its transcript
+  event stream to the sidecar over a WebSocket on the api-server
+  (`escapement.ui.ws_push` + `remote_renderer`); human-input and control flow
+  back over the same socket. The api-server port is auto-picked when not given
+  explicitly.
+- **LLM `:overrun` resilience primitive.** A new `:resilience :overrun` block
+  treats a `stop-reason :max_tokens` truncation as a trip wire: rather than
+  stitching an unbounded continuation, it re-runs the SAME turn with identical
+  context up to `:max-retries` times. `:on-exhausted` selects `:truncate`
+  (accept the truncated turn, the default) or `:fail` (surface an `:overrun`
+  failure envelope); an optional `:temperature-bump` nudges a deterministic
+  model off an identical re-truncation. Off by default.
+- **CLI `--flag=value` inline form.** Flags now accept both `--flag value` and
+  `--flag=value`.
+- **New bb tasks.** `haiku` (dynamic haiku tournament on a fast local ollama
+  `gemma3:1b` model with the live-token TUI), `haiku-opentui` (same via the
+  OpenTUI sidecar), `opentui-test` (the sidecar's `bun test` unit + snapshot
+  suite), and `opentui-build` (sidecar `tsc --noEmit` typecheck).
+- **Repo-local `.escapement.edn`.** A committed local-first config pins
+  alias resolution so a no-model CLI run in this repo resolves to the local
+  `gemma3:1b` first (avoiding the prior slow cloud-alias failover), while
+  keeping the cloud aliases available for charts that name them explicitly.
+- **Docs.** `docs/opentui-ui.md` (sidecar architecture/run/develop/test),
+  `docs/opentui-wire.md` (the JSON wire contract), and
+  `docs/opentui-port-analysis.md`. Plus the `run-tui` skill for launching and
+  screenshotting the TUI, and a `tui/README.md`.
+
+### Changed
+
+- **`escapement.tui` split into modules.** The monolithic `tui.clj` is now a
+  thin facade over focused namespaces under `src/escapement/tui/`
+  (`live`, `inspector`, `transcript`, `compositor`, `theme`, `phase`,
+  `markdown`, `log`, `util`). Behavior is preserved; the architecture-boundary
+  test still permits the TUI only in `cli.clj`.
+- **Transcript events now carry `:invokeid` + `:session-id`** on more LLM
+  worker/turn/error events, so the live panel and sidecar can attribute
+  streaming output to the right concurrent invocation.
+
+### Notes
+
+- **Dead CLI flags (tech debt).** The `bb haiku` / `bb haiku-opentui` tasks
+  pass `--max-tokens 2048 --overrun-retries 2 --overrun-temp-bump 0.3`, but
+  `cli.clj` does NOT register or thread these flags — they are silently
+  discarded. The overrun primitive is therefore exercised in those tasks only
+  via the example chart's own hardcoded node-level `:resilience`, not via the
+  CLI flags. Wiring `--max-tokens` / `--overrun-*` through `cli.clj` into the
+  conversation resilience map is follow-up work.
+- **Subjective / eyeball-only.** TUI rendering (live panel, themed inspector),
+  the OpenTUI sidecar visuals, and live-LLM streaming behavior are visual/UX
+  surfaces verified by snapshot tests and committed reference PNGs under
+  `tui/stress/`, not by headless assertions — a reviewer should run
+  `bb haiku` / `bb haiku-opentui` to confirm the live feel.
+
 ## [unreleased] — feat/multitenant-logging-vthreads — 2026-06-04
 
 Addresses two scaling concerns for multi-tenant hosting (issue #11): a
