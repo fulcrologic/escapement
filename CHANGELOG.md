@@ -1,5 +1,37 @@
 # Changelog
 
+## [unreleased] — feat/llm-latency-failover — 2026-06-08
+
+Opt-in time-to-first-token (TTFT) latency cap for LLM turns, plus supporting
+doc touch-ups.
+
+### Added
+
+- **`:resilience {:latency {:first-token-ms N :fallback [...]}}` TTFT cap.**
+  OFF by default. When set per node, a backend that emits no first token within
+  `:first-token-ms` is abandoned and the turn fails over to the next candidate
+  (or the inline `:fallback` chain). The slow model is NOT marked `:down` —
+  slowness is treated as transient, so it stays in rotation for later turns. The
+  cap measures time-to-first-token only (model load + queue + prompt eval); once
+  the first token arrives the turn rides to completion. With nowhere left to
+  switch (sole/last candidate), the turn rides out the slow model — a slow
+  answer beats no answer. `:fallback` is an optional ordered vector of
+  `{:provider :model …}` targets appended to the resolved candidate list,
+  honored only when `:first-token-ms` is set.
+- **`:llm/latency-switch` transcript event.** Fired when a TTFT-cap breach
+  abandons a model and fails over. `:data` is `{:model :provider
+  :first-token-ms :remaining :invokeid :session-id}`.
+
+### Changed
+
+- `params->resilience` defaults now carry `:latency {:first-token-ms nil
+  :fallback nil}` (disabled), alongside the existing `:overrun` defaults.
+- `haiku_tournament_dynamic.clj` demo rewritten to exercise the
+  latency-failover path.
+- README built-in tool list corrected to list web fetch/search; the
+  design-history pointer now points to `Guide.adoc` + `CHANGELOG.md` instead of
+  `plan.md`; added an "OpenTUI sidecar" subsection.
+
 ## [unreleased] — feat/llm-credentials-config — 2026-06-07
 
 Escapement can now load LLM provider credentials declaratively from

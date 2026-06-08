@@ -396,8 +396,28 @@
    A plain rerun only helps when sampling already varies the output
    (temperature > 0); pair `:temperature-bump` with a deterministic model so a
    runaway can actually break out instead of re-truncating until
-   `:max-retries` is hit and `:on-exhausted` decides."
+   `:max-retries` is hit and `:on-exhausted` decides.
+
+   `:latency` is the TIME-TO-FIRST-TOKEN cap primitive — fail over to a faster
+   provider when a backend is slow to START responding. OFF by default
+   (`:first-token-ms nil`); opt in per node. Keys:
+
+     * `:first-token-ms` — abandon the in-flight turn and fail over to the next
+       candidate if no first token arrives within this many ms. Measures TTFT
+       (model load + queue + prompt eval), NOT total generation: once the first
+       token lands the cap is moot and the turn runs to completion. A breach is
+       NOT a fault — the slow model is NOT marked `:down`, so it stays in
+       rotation for later turns. With no streaming delta sink (no token signal)
+       the cap degrades to a total-response cap. nil ⇒ disabled.
+     * `:fallback` — optional ordered vector of `{:provider :model …}` targets
+       (same shape as an `:llm/aliases` target) APPENDED to the resolved
+       candidate list, so a breach (or a hard error) on the primary descends
+       this chain. Inline convenience; a multi-target alias works too. Only
+       honored when `:first-token-ms` is set. The cap applies to each candidate;
+       if the LAST candidate is slow with nowhere left to switch, the turn rides
+       it out (a slow answer beats no answer)."
   {:max-retries 3 :backoff-ms 500
+   :latency     {:first-token-ms nil :fallback nil}
    :overrun     {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
                  :temperature-bump nil :temperature-max 1.0}})
 
@@ -434,6 +454,52 @@
           (Thread/sleep (long (min 100 left)))
           (recur))))))
 
+(defn- await-turn!
+  "Issue a backend turn via the `send` THUNK (it calls `send-turn*` and returns
+   the turn promise), optionally enforcing a time-to-first-token cap.
+
+   CRITICAL — why `send` is a thunk and not a promise: the CLJ/bb backends stream
+   SYNCHRONOUSLY. Their `stream-turn` runs inline under `p/do!` and blocks in
+   `p/await!` until the SSE stream ends (`openai.clj`/`api.clj`). If we evaluated
+   `send-turn*` on THIS thread and merely wrapped the resulting promise, the whole
+   turn would already have blocked here before the timeout could fire — the cap
+   would be a no-op (it was, until this was fixed). With a cap set we therefore
+   invoke `send` ON the side future, so the main thread can race the first-token
+   deadline against a still-in-flight stream. Deltas land via `on-delta` from the
+   transport's OWN thread, stamping `first-tok` concurrently.
+
+   With `cap-ms` nil this is a plain blocking `p/await!` on the calling thread —
+   zero added threads, the latency feature is off. With `cap-ms` set:
+
+     * resolves within the cap                   → return the Response
+     * cap elapses but a first token has arrived → ride it out (a real
+       generation is underway; the backend's own HTTP timeout backstops a hang)
+     * cap elapses, no first token, fallback?    → flip `abandoned` (so the
+       delta sink drops late stragglers from this now-orphaned stream) and
+       return the `::too-slow` sentinel so the caller fails over WITHOUT marking
+       the slow model `:down`
+     * cap elapses, no first token, no fallback  → ride it out (a slow answer
+       beats no answer when there is nowhere to switch)
+
+   A side-future deref wraps a thrown rejection in `ExecutionException`; we
+   unwrap so the caller sees the SAME throwable a plain `p/await!` would raise
+   (preserving error categorization + interrupt detection). NOTE: an abandoned
+   turn's future + HTTP connection live until the backend timeout — negligible
+   for the one-turn-at-a-time worker, but a `map-prompt` fan-out that breaches
+   many candidates can pile up parked threads until they drain."
+  [send cap-ms first-tok abandoned fallback?]
+  (if-not cap-ms
+    (p/await! (send))
+    (let [f      (future (p/await! (send)))
+          unwrap (fn [e] (throw (or (ex-cause e) e)))
+          v      (try (deref f cap-ms ::pending)
+                      (catch java.util.concurrent.ExecutionException e (unwrap e)))]
+      (cond
+        (not (identical? v ::pending)) v
+        @first-tok (try @f (catch java.util.concurrent.ExecutionException e (unwrap e)))
+        fallback?  (do (reset! abandoned true) ::too-slow)
+        :else      (try @f (catch java.util.concurrent.ExecutionException e (unwrap e)))))))
+
 ;; ===========================================================================
 ;; run-turn: one assistant turn, retry transient errors + fail over candidates
 ;; ===========================================================================
@@ -444,6 +510,7 @@
    :on-retry       (fn [_] nil)
    :on-model-down  (fn [_] nil)
    :on-policy-empty (fn [_] nil)
+   :on-latency-switch (fn [_] nil)
    :alive?         (fn [] true)})
 
 (defn run-turn
@@ -469,6 +536,8 @@
          - `:on-retry`      (fn [{:keys [model category attempt max-retries]}])
          - `:on-model-down` (fn [{:keys [model category remaining throwable]}])
          - `:on-policy-empty` (fn [{:keys [policy strict?]}])
+         - `:on-latency-switch` (fn [{:keys [model provider first-token-ms
+            remaining]}]) — fired when a TTFT-cap breach abandons `model`
          - `:alive?`        (fn [] boolean) — false ⇒ stop retrying / treat an
                             in-flight throw as an interrupt
      * `:pinned` — a single candidate map `{:provider :model :params}` that
@@ -480,9 +549,12 @@
   [{:keys [backend aliases preferences catalog-ratings eligibility-strict?
            model-status hooks pinned]} params messages tools]
   (let [model-status (or model-status (atom {}))
-        {:keys [before-send delta-sink on-retry on-model-down on-policy-empty alive?]}
+        {:keys [before-send delta-sink on-retry on-model-down on-policy-empty
+                on-latency-switch alive?]}
         (merge no-op-hooks hooks)
-        {:keys [max-retries backoff-ms overrun]} (params->resilience params)
+        {:keys [max-retries backoff-ms latency overrun]} (params->resilience params)
+        ttft-cap-ms  (let [c (:first-token-ms latency)]
+                       (when (and (number? c) (pos? c)) (long c)))
         overrun-max  (long (or (:max-retries overrun) 0))
         overrun-fail? (= :fail (:on-exhausted overrun))
         policy     (params->policy params)
@@ -510,7 +582,9 @@
                                       :known (:known resolution)}}
 
       :else
-      (let [candidates (:candidates resolution)]
+      (let [latency-fallbacks (when (and ttft-cap-ms (not pinned) (seq (:fallback latency)))
+                                (mapv alias-target->candidate (:fallback latency)))
+            candidates (into (vec (:candidates resolution)) latency-fallbacks)]
         (loop [[cand & more] candidates
                attempts      []]
           (let [m        (:model cand)
@@ -582,13 +656,23 @@
                                  ;; estimate misses non-streamed turns. Atom is
                                  ;; inside the loop body so it resets per attempt.
                                  first-tok (atom nil)
+                                 abandoned (atom false)
                                  on-delta* (when on-delta
                                              (fn [& args]
                                                (when (nil? @first-tok) (reset! first-tok (now-ms)))
-                                               (apply on-delta args)))
-                                 r   (try (let [resp (p/await! (proto/send-turn* backend req on-delta*))]
-                                            (cond-> (assoc resp :elapsed-ms (- (now-ms) t0))
-                                              @first-tok (assoc :wait-ms (- (long @first-tok) (long t0)))))
+                                               ;; Drop stragglers from a stream
+                                               ;; abandoned on a TTFT breach so
+                                               ;; they never interleave with the
+                                               ;; fallback candidate's output.
+                                               (when-not @abandoned (apply on-delta args))))
+                                 r   (try (let [resp (await-turn!
+                                                       (fn [] (proto/send-turn* backend req on-delta*))
+                                                       ttft-cap-ms first-tok abandoned
+                                                       (boolean (seq more)))]
+                                            (if (identical? resp ::too-slow)
+                                              {:_too-slow {:first-token-ms ttft-cap-ms}}
+                                              (cond-> (assoc resp :elapsed-ms (- (now-ms) t0))
+                                                @first-tok (assoc :wait-ms (- (long @first-tok) (long t0))))))
                                           (catch Throwable t {:_throw t}))
                                  t   (:_throw r)
                                  cat (when t (proto/error-category t))]
@@ -617,6 +701,25 @@
 
                                :else r)))]
             (cond
+              ;; TTFT-cap breach: fail over to the next candidate WITHOUT marking
+              ;; the slow model `:down` (slowness is transient, not a fault) and
+              ;; WITHOUT the `on-model-down` "broken" signal. Only reached when a
+              ;; fallback existed (the inner loop rides out a sole/last candidate).
+              (:_too-slow response)
+              (let [cap       (:first-token-ms (:_too-slow response))
+                    attempts' (conj attempts
+                                {:model m
+                                 :error {:category :too-slow
+                                         :message  (str "no first token within " cap "ms")}})]
+                (on-latency-switch {:model m :provider (:provider cand)
+                                    :first-token-ms cap :remaining (vec more)})
+                (if (and (seq more) (alive?))
+                  (recur more attempts')
+                  {:status :exhausted
+                   :error  {:category :too-slow
+                            :message  (str "no first token within " cap "ms")
+                            :attempts attempts'}}))
+
               (and (:_throw response)
                 (or (instance? InterruptedException (:_throw response))
                   (instance? InterruptedException (ex-cause (:_throw response)))

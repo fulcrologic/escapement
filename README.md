@@ -119,6 +119,14 @@ mutations (`escapement.control/{pause,step,continue,arm-pause-on-next-external}`
 (`:session/{paused?,step-budget,live-configuration,pending-events}`) on the same `/api` surface. The
 Chart screen highlights the live configuration over the embedded statechart visualizer as you step.
 
+### OpenTUI sidecar (opt-in terminal UI)
+
+`--tui=opentui` renders the session through an out-of-process **Bun + SolidJS + OpenTUI** sidecar
+(under `tui/opentui/`) instead of the default in-process JLine TUI. The agent runs headless and streams
+its transcript events to the sidecar over a WebSocket on the api-server; human-input/control flow back
+over the same socket and the sidecar owns the TTY. See [`docs/opentui-ui.md`](docs/opentui-ui.md) for
+architecture, run/develop/test, and known limits.
+
 ## Embedding Escapement as a library
 
 Escapement has **three usage modes**:
@@ -258,7 +266,7 @@ The guide covers:
   artifact helpers (`capture-llm-output` / `render-template` / `forward-llm-output`)
 - **LLM backends** — Anthropic + z.ai + OpenAI/OpenRouter configuration, the caching wrapper
 - **File-based prompts** — `escapement.prompts` and the `{{VAR}}` substitution model (distinct from artifact templates)
-- **Tools** — `Tool` protocol, the eight built-ins (fs read/write/edit/multi-edit/glob/grep + shell + repl), how to
+- **Tools** — `Tool` protocol, the built-ins (fs read/write/edit/multi-edit/glob/grep + shell + web fetch/search), how to
   register a custom tool
 - **Transcript, runner, CLI** — event vocabulary, `jq` recipes, `--resume` / `--param` / `--debug` / `--no-tui`,
   work-dir layout
@@ -337,6 +345,6 @@ End-to-end demo under `demos/`:
   coordination event. Tested end-to-end against [`fulcrologic/fulcro`](https://github.com/fulcrologic/fulcro): generated
   and sealed a 52-assertion test file for `resolve-tempids`.
 
-See [`plan.md`](plan.md) for design history.
+See [`Guide.adoc`](Guide.adoc) and [`CHANGELOG.md`](CHANGELOG.md) for design history.
 
 Status: prototype.

@@ -76,13 +76,26 @@
 
 (def poet-judge-model-pool
   "Alias keywords (defined in `.escapement.edn :llm/aliases`) that poets and
-  judges draw from at random. Spans local ollama + cloud (z.ai GLM). The HOST
-  is NOT in this pool — it is pinned to gpt-5.5 (`:host-gpt`) below. Each child
-  is assigned ONE random model by the parent's multiplex `child-params`, so a
-  given poet/judge uses a single model across all its turns."
-  [:p-gemma1b :p-gemma270m :p-glm47 :p-glm-turbo])
+  judges draw from at random. Spans all three pool providers: local ollama
+  (gemma), z.ai (GLM), and the opencode-go gateway (qwen/kimi). The HOST is NOT
+  in this pool — it is pinned to gpt-5.5 (`:host-gpt`) below. Each child is
+  assigned ONE random model by the parent's multiplex `child-params`, so a given
+  poet/judge uses a single model across all its turns."
+  [:p-gemma1b :p-gemma270m :p-glm47 :p-glm-turbo :p-oc-qwen :p-oc-kimi])
 
 (def ^:private host-model :host-gpt)
+
+(def ^:private pool-latency
+  "TTFT failover for POOL-MODEL turns (poets / judges / revise). The opencode-go
+  `qwen3.5-plus` gateway can stall ~30s — or hang outright — before its first
+  token, which blocks the whole multiplex phase on a single child. Cap time-to-
+  first-token and fail a stalled draw over to fast local gemma so the bracket
+  never stalls on one slow provider. 10s clears the legitimately slower cloud
+  models (opencode-go kimi + z.ai GLM peak ~8s ttft here) while still catching
+  the 30s+ qwen stall. The HOST steps (muse / critique, pinned to gpt-5.5) are
+  deliberately NOT capped — gpt-5.5 legitimately takes 4-8s to first token."
+  {:latency {:first-token-ms 10000
+             :fallback [{:provider :ollama :model "gemma3:1b"}]}})
 
 (defn- rand-pool-model []
   (rand-nth poet-judge-model-pool))
@@ -201,52 +214,36 @@
     "No preamble, no labels, no extra lines."))
 
 (def host-system
-  (str "You are the Master of Ceremonies of a haiku tournament. You will be "
-    "given the full record of the contest — theme, every poet's three "
-    "haiku, each judge's round-1 picks with reasons, the finalists, and "
-    "each judge's round-2 vote with reasons — and you must produce ONE "
-    "well-formatted Markdown report named `tournament-summary.md`.\n\n"
-    "Use the poet numbers EXACTLY as they appear in the input — do not shift "
-    "them. Not every poet number need appear: a poet that produced no usable "
-    "haiku is simply absent from the record, and you must say so rather than "
-    "invent an entry or treat its number as a different poet.\n\n"
-    "The report should:\n"
-    "  1. Open with the theme and the size of the field (N poets, M "
-    "judges).\n"
-    "  2. Announce the WINNER (or declare the tie) up front and crown that "
-    "poet **The Laureate** — state the poet number explicitly (e.g. \"Poet 3 "
-    "— The Laureate\") with the winning haiku rendered in a fenced block.\n"
-    "  3. Give a one-paragraph reading of why the Laureate won, drawing on the "
-    "round-2 judges' actual reasons.\n"
-    "  4. A `## The Overlooked` section: name the SINGLE poet who fared worst "
-    "— the one with the fewest votes across both rounds (break ties by who "
-    "drew the least round-1 support; a poet who never reached the finals "
-    "counts as worst). State that poet's number explicitly (e.g. \"Poet 5 — "
-    "The Overlooked\"), render their best haiku in a fenced block, and give a "
-    "frank one-paragraph note grounded in the judges' silence or their "
-    "stated reasons for preferring others. Be specific and fair, not cruel.\n"
-    "  5. A `## Finalists` section listing each finalist with its haiku, "
-    "its poet, and a brief note on the round-1 consensus that lifted it.\n"
-    "  6. A `## All entries` section listing every poet's three haiku.\n"
-    "  7. A `## Notes from the judges` section quoting one or two of the "
-    "most interesting round-2 reasons verbatim, attributed by persona.\n"
-    "  8. A `## Experiment` section. TWO poets were SECRETLY helped (the judges "
-    "were NOT told; they only saw haiku text by index):\n"
-    "       • the MUSE poet got a gpt-5.5 inspiration pass BEFORE composing "
-    "(its whispered fragments were woven into all three drafts);\n"
-    "       • the CRITIQUE poet drafted three haiku, then a gpt-5.5 editor "
-    "critiqued them and the poet REVISED all three (the revised set is what "
-    "the judges saw).\n"
-    "     Both poets are named in the input, along with EXACTLY what each was "
-    "given (the muse's whisper; the editor's feedback) and how each fared "
-    "(round-1 support and round-2 votes). For EACH of the two, state: which "
-    "poet (by number), what it was given (quote or summarize the "
-    "actual text), and how it did in both rounds. Then say plainly whether "
-    "the hidden help appears to have moved the judging — staying honest if it "
-    "didn't, and noting if a helped poet produced no usable haiku.\n"
-    "It must be unambiguous from the report exactly which poet earned the "
-    "Laureate, which was The Overlooked, and which two were the Muse and the "
-    "Critique.\n"
+  (str "You are the Master of Ceremonies of a haiku tournament. From the full "
+    "contest record you must produce ONE tight Markdown report named "
+    "`tournament-summary.md`. Be CONCISE. Use the poet numbers EXACTLY as they "
+    "appear in the input; a poet absent from the record produced no usable "
+    "haiku — say so, never invent an entry.\n\n"
+    "TWO poets were SECRETLY helped by an LLM (the judges were not told; they "
+    "saw only haiku text): the MUSE poet got an inspiration pass woven into "
+    "its drafts BEFORE composing; the CRITIQUE poet drafted three, then an "
+    "editor critiqued them and the poet revised all three. The input names "
+    "both poets, the helper model, exactly what each was given, and their "
+    "vote tallies.\n\n"
+    "Structure the report EXACTLY like this:\n"
+    "  1. `# <Theme>` — one line.\n"
+    "  2. `## The Experiment` FIRST — a compact two-row table with columns "
+    "`Role | Poet | Helper model | Round-1 | Round-2`, one row for the MUSE "
+    "and one for the CRITIQUE, filled from the input (round-1 support count "
+    "and round-2 vote count; the helper model verbatim from the input). "
+    "Immediately below the table, render each of the two poets' winning/best "
+    "haiku in a fenced block, labelled `Muse — Poet N` and `Critique — "
+    "Poet N`.\n"
+    "  3. `## The Laureate` — crown the WINNER (or declare the tie): \"Poet N "
+    "— The Laureate\". Below that, a one-row Markdown table with columns "
+    "`Poet | Role | Round-1 | Round-2` giving the winner's vote counts (Role "
+    "is `Muse`, `Critique`, or `—` if unaided). Then the winning haiku in a "
+    "fenced block.\n"
+    "  4. Then AT MOST TWO short paragraphs of prose covering everything else "
+    "— why the Laureate won (grounded in round-2 reasons), who was The "
+    "Overlooked (fewest votes), and whether the hidden help appears to have "
+    "moved the judging (stay honest if it didn't). No more sections, no "
+    "per-poet entry dump.\n\n"
     "Reply with ONLY the Markdown — no preamble, no closing remarks, no "
     "code fences around the document itself. End your turn after the "
     "report."))
@@ -285,13 +282,13 @@
       "POETS: " (count haikus) ", JUDGES: " (count votes) "\n\n"
       "## SECRET ROLES — host eyes only (the judges were NOT told)\n"
       "Two poets were secretly helped; every other poet worked unaided.\n\n"
-      "MUSE poet: Poet " (inc muse) "\n"
+      "MUSE poet: Poet " (inc muse) " (helper model: gpt-5.5)\n"
       "  • what it was given (gpt-5.5 inspiration, woven into all 3 drafts):\n"
       (if-let [m (:muse-text data)]
         (str "      " (str/replace (str/trim m) "\n" "\n      ") "\n")
         "      (the muse pass produced nothing / failed)\n")
       "  • how it fared: " (poet-scoreline data muse) "\n\n"
-      "CRITIQUE poet: Poet " (inc critique) "\n"
+      "CRITIQUE poet: Poet " (inc critique) " (helper model: gpt-5.5)\n"
       "  • what it was given (gpt-5.5 editor feedback; the poet then revised all 3):\n"
       (if-let [c (:critique-text data)]
         (str "      " (str/replace (str/trim c) "\n" "\n      ") "\n")
@@ -325,10 +322,10 @@
           (str "  - poet " (inc p) ": " n " vote" (when (not= 1 n) "s")))) "\n\n"
       "## Tally\n"
       (pr-str result) "\n\n"
-      "Now write `tournament-summary.md`. "
-      "Explicitly crown The Laureate (winner), name The Overlooked (fewest "
-      "votes), and write the `## Experiment` section covering BOTH the Muse "
-      "poet and the Critique poet — what each was given and how each fared.")))
+      "Now write `tournament-summary.md`, concise and in the exact structure "
+      "from your instructions: `## The Experiment` table + the Muse and "
+      "Critique haiku first, then `## The Laureate` with the winning haiku, "
+      "then at most two short paragraphs for everything else.")))
 
 (defn- format-haikus [haikus]
   (str/join "\n\n"
@@ -457,6 +454,7 @@
         {:id             invk
          :stream?        true
          :model          (fn [_env data] (:model data))
+         :resilience     pool-latency
          :system         (fn [_env data] (poet-system (:idx data)))
          :real-tools     []
          :allowed-events []
@@ -558,6 +556,7 @@
       {:id             "revise"
        :stream?        true
        :model          (fn [_env data] (:model data))   ;; poet's own model
+       :resilience     pool-latency
        :system         (fn [_env data] (poet-system (:idx data)))
        :real-tools     []
        :allowed-events []
@@ -633,6 +632,7 @@
         {:id             "judge1"
          :stream?        true
          :model          (fn [_env data] (:model data))
+         :resilience     pool-latency
          :system         (fn [_env data]
                            (judge1-system (:idx data) (:persona data)
                              (:poet-idx data)))
@@ -694,6 +694,7 @@
         {:id             "judge2"
          :stream?        true
          :model          (fn [_env data] (:model data))
+         :resilience     pool-latency
          :system         (fn [_env data]
                            (judge2-system (:idx data) (:persona data)
                              (count (:finalists data))))
