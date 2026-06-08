@@ -678,6 +678,26 @@ Shape:
   Note: `:max_tokens` truncation is *not* governed by `:resilience` — it
   is always continued (see <<tokens-and-turns>>); there is intentionally
   no continuation knob.
++
+  *Two opt-in sub-keys extend `:resilience` (both OFF by default):* the
+  `:overrun` output-token primitive (see <<continuation>>) and the `:latency`
+  time-to-first-token cap below.
++
+  `:resilience {:latency {:first-token-ms N :fallback [{:provider :model …} …]}}`
+  caps *time-to-first-token* and fails over to a faster candidate when a backend
+  is slow to START responding (defaults `{:first-token-ms nil :fallback nil}` —
+  disabled). With `:first-token-ms` set, a backend that emits no first token
+  within that many ms is abandoned and the turn fails over to the next candidate
+  (or the inline `:fallback` chain). The cap measures only TTFT (model load +
+  queue + prompt eval), NOT total generation — once the first token lands the
+  cap is moot and the turn runs to completion. A breach is *not* a fault: the
+  slow model is **not** marked `:down`, so it stays in rotation for later turns,
+  and no `:on-model-down` signal fires. `:fallback` is an optional ordered
+  vector of targets (same shape as an `:llm/aliases` target) appended to the
+  resolved candidate list; it is honored only when `:first-token-ms` is set, and
+  is ignored when the node `:pinned`s a single candidate. If the LAST candidate
+  is slow with nowhere left to switch, the turn rides it out — a slow answer
+  beats no answer. Each breach emits a `:llm/latency-switch` transcript event.
 
 `:temperature`::
 Optional number in `(0, 1]`.
@@ -1601,6 +1621,28 @@ accepts the truncated turn as an ordinary `:ok`, or `:fail` surfaces an
 deterministic model does not simply re-truncate identically. Use this to cap
 runaway output on small-ceiling local models; leave it off for ordinary cloud
 models, where the automatic continuation above is the right behavior.
+
+[[latency-cap]]
+==== Time-to-first-token failover (`:latency`)
+
+The sibling opt-in resilience primitive (also OFF by default) is the
+**`:latency` time-to-first-token cap**. When
+`:resilience {:latency {:first-token-ms N}}` is set, a backend that emits no
+first token within `N` ms is abandoned mid-turn and the turn fails over to the
+next candidate (or the inline `:fallback` chain — an ordered vector of
+`{:provider :model …}` targets appended to the resolved candidate list, honored
+only when `:first-token-ms` is set and ignored under `:pinned`). The cap governs
+only time-to-first-token — model load, queue, and prompt eval — *not* total
+generation: once the first token arrives the cap is moot and the turn rides to
+completion.
+
+A breach is treated as transient slowness, not a fault: the slow model is **not**
+marked `:down` and stays in rotation for later turns, and no `:on-model-down`
+signal fires. If the last candidate is slow with nowhere left to switch, the
+turn rides it out (a slow answer beats no answer; the backend's own HTTP timeout
+backstops a true hang). Each breach emits a `:llm/latency-switch` transcript
+event. Use this to route around a cold/queued provider (e.g. a just-loaded local
+model) onto a faster one without penalizing the slow model permanently.
 
 [[web-tools]]
 == Web tools: `:web/search` and `:web/fetch`
@@ -3054,6 +3096,11 @@ Relay these off the transcript tap for live UI output; the final `:llm/response`
 Fired before each backoff sleep.
 * `:llm/continuation` — a `:max_tokens`-truncated turn is being continued. `:data` is `{:segment N :blocks K :usage {…} :invokeid …}`.
 The final stitched turn still arrives as one ordinary `:llm/response`.
+* `:llm/latency-switch` — a time-to-first-token cap (`:resilience {:latency
+{:first-token-ms N}}`) breached and the turn failed over to another candidate.
+`:data` is `{:model … :provider … :first-token-ms N :remaining [<candidates>]
+:invokeid … :session-id …}`.
+The abandoned model is *not* marked `:down`; see <<latency-cap>>.
 * `:human-input/start`, `:human-input/answer`, `:human-input/cancelled`,
 `:human-input/error`, `:human-input/interrupted`,
 `:human-input/validation-failed`

@@ -1618,10 +1618,12 @@
     "params->resilience: defaults, per-key override keeps the rest"
     (#'llmc/params->resilience nil)
     => {:max-retries 3 :backoff-ms 500
+        :latency {:first-token-ms nil :fallback nil}
         :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
                   :temperature-bump nil :temperature-max 1.0}}
     (#'llmc/params->resilience {:resilience {:max-retries 0}})
     => {:max-retries 0 :backoff-ms 500
+        :latency {:first-token-ms nil :fallback nil}
         :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
                   :temperature-bump nil :temperature-max 1.0}}
     "merge-segment-content stitches text across a truncation boundary"

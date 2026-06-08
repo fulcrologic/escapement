@@ -748,6 +748,16 @@
                     (transcript! transcript-fn
                       {:event :llm/model-policy-empty :ts (now-ms)
                        :data  {:policy policy :strict? strict?}}))
+                  :on-latency-switch
+                  (fn [{:keys [model provider first-token-ms remaining]}]
+                    (transcript! transcript-fn
+                      {:event :llm/latency-switch :ts (now-ms)
+                       :data  {:model          model
+                               :provider       provider
+                               :first-token-ms first-token-ms
+                               :remaining      remaining
+                               :invokeid       invokeid
+                               :session-id     (:parent-session-id parent-ctx)}}))
                   :alive? (fn [] (not= :dying @worker-state))}
         env      (ellm/run-turn
                    {:backend             backend
