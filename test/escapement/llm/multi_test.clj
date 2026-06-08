@@ -188,16 +188,42 @@
         "true when every selectable sub-backend streams"
         (proto/streaming? stream-multi) => true
 
-        "false when selected sub-backend does not stream"
+        "false only when NO selectable sub-backend streams"
         (proto/streaming? plain-multi) => false
 
-        "false (conservative) when a selectable sub-backend is non-streaming"
-        (proto/streaming? mixed-multi) => false
+        "true when ANY selectable sub-backend streams (mixed routes stream the
+         streaming providers and fall back to send-turn for the rest, so one
+         non-streaming sub-backend must not disable streaming wholesale)"
+        (proto/streaming? mixed-multi) => true
 
         "default-backend participates in capability detection"
         (proto/streaming?
           (multi/new-backend {:routes          []
                               :default-backend streamer})) => true)))
+
+  (component "mixed multi: streams the streamer, falls back for the non-streamer"
+    (let [b    (multi/new-backend
+                 {:routes [[#"^stream-" streamer]
+                           [#"^claude-" anth]]})
+          seen (atom [])
+          ;; streaming route → deltas forwarded
+          _    (p/await! (proto/stream-turn
+                           b {:model "stream-x" :messages []}
+                           #(swap! seen conj %)))
+          n-streamed (count @seen)
+          ;; non-streaming route → no deltas, still returns a Response
+          resp (p/await! (proto/stream-turn
+                           b {:model "claude-3" :messages []}
+                           #(swap! seen conj %)))]
+      (assertions
+        "the streaming sub-backend forwarded deltas"
+        (pos? n-streamed) => true
+
+        "the non-streaming route added no further deltas (graceful fallback)"
+        (count @seen) => n-streamed
+
+        "and still produced the sub-backend's Response"
+        (:stop-reason resp) => :end_turn)))
 
   (component "stream-turn yields deltas then a final Response"
     (let [b    (multi/new-backend

@@ -25,7 +25,7 @@ function shell(termWidth: number, theme = makeTheme("none")) {
       chartName="escapement.runner/chart"
       sessionShort="889d14f8"
       elapsedMs={1351}
-      livePane={(c) => <LivePanel ctx={c} tick={0} />}
+      livePane={(c) => <LivePanel ctx={c} tick={0} height={24} />}
       logPane={(c) => (
         <LogPane
           entries={c.state.scrollback}

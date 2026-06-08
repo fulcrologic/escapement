@@ -41,7 +41,8 @@
    transport may still complete its work. Callers must tolerate this."
   (:require
     [com.fulcrologic.statecharts.promise :as p]
-    #?@(:clj [[babashka.http-client :as http]])
+    #?@(:clj [[babashka.http-client :as http]
+              [taoensso.timbre :as log]])
     [clojure.string :as str])
   #?(:clj
      (:import
@@ -95,10 +96,17 @@
                (let [line (.readLine reader)]
                  (when (some? line)
                    (try (on-line line)
+                        ;; Must go through timbre (NOT a raw println/`*err*`
+                        ;; write): in a TUI run the OpenTUI sidecar / JLine
+                        ;; alt-screen owns the terminal, so a stray stderr write
+                        ;; paints over the rendered frame. `route-logs-to-file!`
+                        ;; sends this to the session log instead. Error semantics
+                        ;; are unchanged: the per-line handler failure is
+                        ;; non-fatal here (the SSE error itself surfaces through
+                        ;; the llm-error/transcript path).
                         (catch Throwable e
-                          (binding [*out* *err*]
-                            (println "[http-transport] on-line threw:"
-                              (ex-message e)))))
+                          (log/warn "[http-transport] on-line threw:"
+                            (ex-message e))))
                    (recur)))))
            {:status status :headers headers})
          {:status  status

@@ -310,7 +310,7 @@ export function Modals(props: ModalsProps): import("solid-js").JSX.Element {
                       <span
                         style={
                           i() === cursor()
-                            ? { fg: fg("phase-current"), reverse: true }
+                            ? { fg: fg("phase-current"), inverse: true }
                             : { fg: fg("phase-upcoming") }
                         }
                       >
@@ -334,7 +334,7 @@ export function Modals(props: ModalsProps): import("solid-js").JSX.Element {
                       <span
                         style={
                           i() === cursor()
-                            ? { fg: fg("phase-current"), reverse: true }
+                            ? { fg: fg("phase-current"), inverse: true }
                             : { fg: fg("phase-upcoming") }
                         }
                       >

@@ -39,6 +39,11 @@ function chartNameFromEnv(): string {
   return process.env["OPENTUI_CHART"] ?? "session";
 }
 
+/** Short session id from the env (the sidecar parent sets it, task 004). */
+function sessionShortFromEnv(): string {
+  return process.env["OPENTUI_SESSION_SHORT"] ?? "";
+}
+
 /** Shared session-dir (set by the bb sidecar parent, task 004) for artifacts.
  *  The sidecar exports `ESCAPEMENT_SESSION_DIR` (see opentui_sidecar.clj);
  *  `OPENTUI_SESSION_DIR` is accepted as a dev/replay fallback. */
@@ -243,7 +248,15 @@ const App = () => {
     },
     quit: () => {
       source.stop();
+      // The sidecar OWNS its terminal restore: destroy() pops the kitty keyboard
+      // protocol, leaves the alt-screen, and shows the cursor. We then exit under
+      // our own control so the process is gone before the agent's back-channel
+      // teardown can SIGTERM us mid-destroy() — a race that would leave the kitty
+      // keyboard protocol enabled and break keyboard handling desktop-wide (e.g.
+      // Hyprland window switching) until the user runs `reset`. queueMicrotask
+      // lets destroy()'s synchronous restore bytes flush to the TTY first.
       renderer.destroy();
+      queueMicrotask(() => process.exit(0));
     },
     // Human-input modal tier (task 013). `isOpen()` gates on the open prompt so
     // a dismissed/answered prompt no longer captures keys; while open (and the
@@ -263,7 +276,7 @@ const App = () => {
       termWidth={dims().width}
       termHeight={dims().height}
       chartName={chartNameFromEnv()}
-      sessionShort={""}
+      sessionShort={sessionShortFromEnv()}
       elapsedMs={elapsedMs()}
       ref={(c) => (controls = c)}
       logScroll={logScrollIndicator}
@@ -301,7 +314,7 @@ const App = () => {
         </>
       )}
       livePane={(ctx) => (
-        <LivePanel ctx={ctx} tick={tick()} cursorRow={liveCursorRow()} />
+        <LivePanel ctx={ctx} tick={tick()} cursorRow={liveCursorRow()} height={logHeight()} />
       )}
       logPane={(ctx) => (
         <LogPane

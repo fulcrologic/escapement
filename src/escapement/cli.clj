@@ -202,6 +202,50 @@
    {:appenders {:println {:enabled? true}
                 :file    {:enabled? false}}}))
 
+;; ---------------------------------------------------------------------------
+;; OpenTUI ONLY: global stdout/stderr capture.
+;;
+;; Under `--tui=opentui` the Bun sidecar is the CHILD and inherited the real
+;; TTY fds at spawn (ProcessBuilder .inheritIO). The agent is the PARENT, and
+;; its own *out*/*err* + System/out/System/err still point at that same TTY, so
+;; ANY stray `println`/`print`/`.printStackTrace`/uncaught-thread print —
+;; including ones emitted from background `future`s (e.g. the LLM http-transport
+;; SSE worker) — paints directly over the sidecar's rendered frame.
+;;
+;; `route-logs-to-file!` only reroutes TIMBRE. Thread-local `binding` only
+;; covers the current thread. So here we globally redirect BOTH the Clojure
+;; dynamic vars (alter-var-root) AND the Java System streams to a file writer,
+;; capturing prints from every thread. This is installed AFTER the sidecar is
+;; spawned, which is safe: the child already holds its own copies of the TTY
+;; fds, so re-pointing the parent's streams cannot affect the child's rendering.
+;;
+;; JLine must NEVER use this — it renders its alt-screen on *err* in-process.
+(defn- install-opentui-stream-capture!
+  "Globally redirect the agent's *out*/*err* and System/out/System/err to
+   `path` (append). Returns a restore-fn (0-arity) that flushes and restores the
+   original streams. SCI/bb-safe (java.io.PrintStream / FileOutputStream /
+   OutputStreamWriter only)."
+  [path]
+  (io/make-parents (io/file path))
+  (let [fos        (java.io.FileOutputStream. (io/file path) true) ; append
+        ps         (java.io.PrintStream. fos true "UTF-8")          ; autoflush
+        writer     (java.io.OutputStreamWriter. fos "UTF-8")
+        orig-out   *out*
+        orig-err   *err*
+        sys-out    System/out
+        sys-err    System/err]
+    (System/setOut ps)
+    (System/setErr ps)
+    (alter-var-root #'*out* (constantly writer))
+    (alter-var-root #'*err* (constantly writer))
+    (fn restore! []
+      (try (.flush writer) (catch Throwable _ nil))
+      (try (.flush ps)     (catch Throwable _ nil))
+      (alter-var-root #'*out* (constantly orig-out))
+      (alter-var-root #'*err* (constantly orig-err))
+      (System/setOut sys-out)
+      (System/setErr sys-err))))
+
 (defn- read-edn-file [path]
   (with-open [r (java.io.PushbackReader. (io/reader path))]
     (edn/read r)))
@@ -793,6 +837,16 @@
         ;; so route them to a file.
         log-file               (when tui-mode
                                  (route-logs-to-file! (str session-dir "/escapement.log")))
+        ;; OpenTUI ONLY: globally capture the PARENT agent's stdout/stderr (incl.
+        ;; cross-thread `future`s like the LLM SSE worker) to the session log so
+        ;; no stray print bleeds over the sidecar-owned TTY. Installed AFTER the
+        ;; sidecar spawn point below would be ideal, but the streams are inert
+        ;; until something prints; the sidecar inherited its TTY fds at spawn, so
+        ;; redirecting the parent here is safe regardless of ordering. Restored on
+        ;; teardown (BEFORE any post-run summary). nil (no capture) for jline.
+        restore-streams!       (when opentui?
+                                 (install-opentui-stream-capture!
+                                  (str session-dir "/escapement.log")))
         debug?                 (boolean (:debug opts))
         debug-cfg              (when debug? (config/load-config))
         debug-controller       (when debug?
@@ -847,7 +901,8 @@
         ;; mirror of every transcript event to connected sidecar/browser clients. Lazy-required so a
         ;; normal run never loads the add-on; nil unless the api-server is up.
         ws-hub                 (when api-server-port
-                                 (try ((requiring-resolve 'escapement.ui.ws-push/new-hub))
+                                 (try ((requiring-resolve 'escapement.ui.ws-push/new-hub)
+                                       {:chart chart})
                                       (catch Throwable _ nil)))
         ws-publish!            (when ws-hub
                                  (let [pub (requiring-resolve 'escapement.ui.ws-push/publish!)]
@@ -888,9 +943,22 @@
                                                      (let [clear! (requiring-resolve 'escapement.ui.ws-push/clear-pending-prompt!)]
                                                        (fn [] (clear! ws-hub))))
                                    :on-quit        (fn []
+                                                     ;; On a UI quit the sidecar restores its own terminal
+                                                     ;; (graceful renderer.destroy() + process.exit) and the
+                                                     ;; watcher thread tears the run down when it exits. Give
+                                                     ;; it a moment to do that and only force-kill as a
+                                                     ;; fallback if it's still alive — an immediate SIGTERM
+                                                     ;; here races the sidecar's restore and can leave the
+                                                     ;; kitty keyboard protocol / alt-screen enabled.
                                                      (when-let [p @sidecar-proc]
-                                                       (try ((requiring-resolve 'opentui.sidecar/destroy!) p)
-                                                            (catch Throwable _ nil))))}))
+                                                       (doto (Thread.
+                                                              (fn []
+                                                                (try (Thread/sleep 1500) (catch InterruptedException _ nil))
+                                                                (when (.isAlive p)
+                                                                  (try ((requiring-resolve 'opentui.sidecar/destroy!) p)
+                                                                       (catch Throwable _ nil)))))
+                                                         (.setDaemon true)
+                                                         (.start))))}))
         ;; Read-only EQL API over the work-dir, scoped to this run's session,
         ;; PLUS a live control plane (pause/step/continue) when a debug
         ;; controller is active. Lazy-required so a normal run never loads Pathom.
@@ -933,6 +1001,11 @@
                                           (catch Throwable _ nil)))
                                    (try ((requiring-resolve 'opentui.sidecar/restore-terminal!))
                                         (catch Throwable _ nil))
+                                   ;; Restore the parent's stdout/stderr (flushing the capture
+                                   ;; file) BEFORE re-enabling the console appender and before any
+                                   ;; post-run summary, so the user-facing summary reaches the now-
+                                   ;; restored normal screen instead of the session log.
+                                   (when restore-streams! (restore-streams!))
                                    ;; #3 parity: the sidecar owned the tty; now that it is
                                    ;; restored, re-enable the console log appender so ordinary
                                    ;; CLI errors print on the normal screen again.
@@ -948,10 +1021,12 @@
                 ;; spawn so an externally-launched UI can attach (debug aid).
                 _                  (when (and opentui? (not (:no-spawn opts)))
                                      (let [spawn!  (requiring-resolve 'opentui.sidecar/spawn!)
-                                           proc    (spawn! {:entry       sidecar-entry
-                                                            :port        api-server-port
-                                                            :session-id  session
-                                                            :session-dir session-dir})]
+                                           proc    (spawn! {:entry         sidecar-entry
+                                                            :port          api-server-port
+                                                            :session-id    session
+                                                            :session-dir   session-dir
+                                                            :chart-sym     chart-sym
+                                                            :session-short session-short})]
                                        (reset! sidecar-proc proc)
                                        (doto (Thread.
                                               (fn []

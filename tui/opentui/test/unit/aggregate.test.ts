@@ -8,6 +8,7 @@ import {
   shortSession,
   invokeidLive,
   capTail,
+  compareLiveOrder,
   LIVE_PARTIAL_TAIL_CHARS,
 } from "../../src/domain/aggregate";
 import { liveGroups } from "../../src/domain/solid-store";
@@ -92,9 +93,29 @@ describe("foldLiveEvent — per-session lifecycle", () => {
     const s = m[IID]!.sessions[SID]!;
     expect(s.status).toBe("waiting");
     expect(s["first-ts"]).toBe(1000);
+    expect(s["start-ts"]).toBe(1000); // preserved across the first-delta re-anchor
     expect(s["last-ts"]).toBe(1000);
     expect(s.model).toBe("gemma3:1b");
     expect(s.chunks).toBe(0);
+  });
+
+  test("first delta freezes wait-ms = TTFT and keeps start-ts", () => {
+    // start t=1000, first delta t=1500 ⇒ waited 500ms for the model to stream.
+    const m = fold([
+      ev("llm/start", 1000, { invokeid: IID, "session-id": SID }),
+      ev("llm/delta", 1500, { invokeid: IID, "session-id": SID, text: "ab" }),
+      ev("llm/delta", 1800, { invokeid: IID, "session-id": SID, text: "cd" }),
+    ]);
+    const s = m[IID]!.sessions[SID]!;
+    expect(s["start-ts"]).toBe(1000); // unchanged by the re-anchor
+    expect(s["wait-ms"]).toBe(500); // 1500 - 1000, frozen at the first delta
+  });
+
+  test("wait-ms is 0 when a delta has no prior start (start-ts absent)", () => {
+    const m = fold([
+      ev("llm/delta", 2000, { invokeid: IID, "session-id": SID, text: "hi" }),
+    ]);
+    expect(m[IID]!.sessions[SID]!["wait-ms"]).toBe(0);
   });
 
   test("FIRST delta re-anchors first-ts (excludes time-to-first-token)", () => {
@@ -349,6 +370,21 @@ describe("liveGroups ordering (port of live-groups)", () => {
     expect(order[0]).toBe("streaming"); // rank 0 first
     // both done (rank 3): newer last-ts first
     expect(order.slice(1)).toEqual(["doneNew", "doneOld"]);
+  });
+});
+
+describe("compareLiveOrder (THE single live comparator)", () => {
+  const u = (status: any, lastTs: number) => ({ status, "last-ts": lastTs });
+  test("in-flight (streaming/waiting) sorts above terminal (done/error)", () => {
+    expect(compareLiveOrder(u("streaming", 1), u("done", 999))).toBeLessThan(0);
+    expect(compareLiveOrder(u("done", 999), u("waiting", 1))).toBeGreaterThan(0);
+  });
+  test("within the same bucket, most-recent last-ts first (DESC)", () => {
+    expect(compareLiveOrder(u("done", 300), u("done", 100))).toBeLessThan(0);
+    expect(compareLiveOrder(u("done", 100), u("done", 300))).toBeGreaterThan(0);
+  });
+  test("missing last-ts treated as 0", () => {
+    expect(compareLiveOrder(u("done", 5), { status: "done" } as any)).toBeLessThan(0);
   });
 });
 

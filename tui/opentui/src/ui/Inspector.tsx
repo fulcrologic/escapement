@@ -34,7 +34,7 @@ import {
 } from "solid-js";
 import type { DomainState } from "../domain/store";
 import type { Theme } from "../domain/theme";
-import { liveAgg } from "../domain/aggregate";
+import { liveAgg, liveCount, shortSession } from "../domain/aggregate";
 import { shortInvokeid } from "../domain/time";
 import { transcriptBlocks } from "../domain/transcript";
 import type { EventLike, InvocationEntry } from "../domain/types";
@@ -514,15 +514,27 @@ export function invocationListLines(
   return hist.map((row, i) => {
     const [glyph, statusKw, label] = statusGlyphKw(row);
     const iid = row.invokeid ?? "?";
-    const agg = liveAgg(props.state.live[iid]?.sessions ?? {});
-    const model = agg.model ?? "";
-    const toks = Math.trunc(agg.tokens ?? 0);
+    const sid = row["session-id"] == null ? "" : String(row["session-id"]);
+    // Per-invocation tokens/model: finished rows carry their OWN frozen count
+    // (set at worker-exit); still-streaming rows fall back to their specific
+    // live session (keyed by session-id), NOT the shared role aggregate — so
+    // concurrent same-role turns no longer all show identical numbers.
+    const liveSess =
+      sid && props.state.live[iid]?.sessions[sid]
+        ? props.state.live[iid]!.sessions[sid]
+        : undefined;
+    const toks = Math.trunc(
+      row.tokens ?? (liveSess ? liveCount(liveSess) : 0),
+    );
+    const model = row.model ?? liveSess?.model ?? "";
     const roleColor = props.theme.roleColor(iid);
     const statusColor = props.theme.statusColor(statusKw as any);
     const sel = i === cursor;
     const line: StyledLine = [
       plain(" "),
       { text: pad(shortInvokeid(iid) ?? "?", 13), fg: roleColor, reverse: sel },
+      plain(" "),
+      { text: pad(sid ? shortSession(sid).slice(0, 12) : "", 12), fg: props.theme.themeColor("session-id"), reverse: sel },
       plain("  "),
       { text: `${glyph} ${pad(label, 6)}`, fg: statusColor, reverse: sel },
       plain("  "),

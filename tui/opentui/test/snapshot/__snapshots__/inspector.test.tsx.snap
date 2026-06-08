@@ -1,9 +1,9 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`Inspector — list-view render snapshots (no model) invocations list: glyph/status/tokens/model columns, cursor on row 0 1`] = `
-" poet2          ✗ error       2 tok  gemma3:1b
- poet1          · done        2 tok  gemma3:1b
- planner        ✗ stop       28 tok  gemma3:1b"
+" poet2         session/889d  ✗ error       2 tok  gemma3:1b
+ poet1         session/889d  · done       17 tok  gemma3:1b
+ planner       session/889d  ✗ stop       29 tok  gemma3:1b"
 `;
 
 exports[`Inspector — list-view render snapshots (no model) chart view: active-states header + newest-first event rows 1`] = `

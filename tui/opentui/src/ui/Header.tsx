@@ -215,6 +215,45 @@ export function Header(props: HeaderProps) {
     return `${m.nLlm} LLMs · ${m.nActive} act · ${Math.round(m.aggTps)} t/s`;
   });
 
+  // Title (line 1, left): `escapement · <chart> · <session>` — the dim session
+  // joins the bold title in the SAME <text> so the right-justified clock keeps a
+  // stable column. Built as one plain string for the no-wrap width budget below;
+  // the bold/dim split is re-applied at render via the known title prefix length.
+  const titleText = createMemo(() => {
+    const m = model();
+    return `escapement · ${m.chartName} · ${m.sessionShort}`;
+  });
+  // Number of columns occupied by the bold `escapement · <chart>` prefix (the
+  // rest — ` · <session>` — renders dim). Used to re-split the truncated title.
+  const titlePrefixW = createMemo(
+    () => `escapement · ${model().chartName}`.length,
+  );
+
+  const clockText = createMemo(() => `◷ ${elapsed()}`);
+
+  // Each header line is a single terminal row (HEADER_H = border2 + 3). OpenTUI
+  // <text> wraps by default, so a long breadcrumb/title/strip would overflow its
+  // row into the next, garbling the strip into the LIVE pane. We render every
+  // header <text> with wrapMode="none" AND hard-truncate the variable-width LEFT
+  // content to its column budget (full width minus the right-justified
+  // clock/metrics + a 1-col gap) so the two halves never collide.
+  const RIGHT_GAP = 1;
+  const leftBudget = (rightText: string) =>
+    Math.max(0, props.width - displayWidth(rightText) - RIGHT_GAP);
+
+  const titleClipped = createMemo(() =>
+    truncateDisplay(titleText(), leftBudget(clockText())),
+  );
+  const breadcrumbClipped = createMemo(() =>
+    truncateDisplay(breadcrumbText(), leftBudget(metricsText())),
+  );
+  // Re-split the clipped title into its bold prefix + dim remainder; clamp the
+  // prefix to whatever survived truncation.
+  const titleBold = createMemo(() =>
+    titleClipped().slice(0, Math.min(titlePrefixW(), titleClipped().length)),
+  );
+  const titleDim = createMemo(() => titleClipped().slice(titleBold().length));
+
   const strip = createMemo(() => {
     const m = model();
     if (!m.siblings) return null;
@@ -229,26 +268,25 @@ export function Header(props: HeaderProps) {
 
   return (
     <box flexDirection="column" width={props.width}>
-      {/* line 1: title + session ............ clock */}
-      <box flexDirection="row" justifyContent="space-between" width={props.width}>
-        <text>
-          <span style={{ fg: t().fg("chart-name"), bold: true }}>
-            escapement · {model().chartName}
-          </span>
-          <span> </span>
-          <span style={{ fg: t().fg("session-id") }}>· {model().sessionShort}</span>
+      {/* line 1: title + session ............ clock. The clipped title is
+          right-padded to its budget, so the clock lands flush-right without
+          justifyContent (which would let the title wrap). */}
+      <box flexDirection="row" width={props.width}>
+        <text wrapMode="none">
+          <span style={{ fg: t().fg("chart-name"), bold: true }}>{titleBold()}</span>
+          <span style={{ fg: t().fg("session-id") }}>{titleDim()}</span>
         </text>
-        <text>
-          <span style={{ fg: t().fg("timestamp") }}>◷ {elapsed()}</span>
+        <text wrapMode="none">
+          <span style={{ fg: t().fg("timestamp") }}>{clockText()}</span>
         </text>
       </box>
 
       {/* line 2: breadcrumb ............ metrics */}
-      <box flexDirection="row" justifyContent="space-between" width={props.width}>
-        <text>
-          <span style={{ fg: t().fg("phase-current") }}>{breadcrumbText()}</span>
+      <box flexDirection="row" width={props.width}>
+        <text wrapMode="none">
+          <span style={{ fg: t().fg("phase-current") }}>{breadcrumbClipped()}</span>
         </text>
-        <text>
+        <text wrapMode="none">
           <span style={{ fg: t().fg("metric") }}>{metricsText()}</span>
         </text>
       </box>
@@ -258,13 +296,13 @@ export function Header(props: HeaderProps) {
         <Show
           when={strip()}
           fallback={
-            <text>
+            <text wrapMode="none">
               <span style={{ fg: t().fg("phase-upcoming") }}>{fallbackLine()}</span>
             </text>
           }
         >
           {(s: () => SiblingStrip) => (
-            <text>
+            <text wrapMode="none">
               <Show when={s().leftEllipsis}>
                 <span style={{ fg: t().fg("phase-upcoming") }}>… </span>
               </Show>

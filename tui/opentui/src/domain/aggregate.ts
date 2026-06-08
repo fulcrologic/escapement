@@ -45,6 +45,46 @@ export function statusRank(status: LiveStatus | undefined): number {
 }
 
 /**
+ * Coarse ordering bucket: `0` = still in flight (streaming/waiting), `1` =
+ * terminal (done/error). The PRIMARY key of the live ordering (see
+ * {@link compareLiveOrder}): in-flight units/children sort above terminal ones.
+ */
+export function liveBucket(status: LiveStatus | undefined): number {
+  return status === "streaming" || status === "waiting" ? 0 : 1;
+}
+
+/** Anything sortable by the live ordering: a status + a last-activity ts. */
+export interface LiveOrderable {
+  status?: LiveStatus;
+  "last-ts"?: number;
+}
+
+/**
+ * THE single comparator for top-level LIVE ordering — the one source of truth
+ * shared by every sort that orders live units (the top-level interleave in
+ * `liveRows`, and `liveGroups`). Port of JLINE's `(sort-by [status-rank
+ * (- last-ts)])` (`escapement.tui.live/live-display-lines`, live.clj:132): order
+ * in-flight units above terminal ones ({@link liveBucket}), then most-recent
+ * activity first (`last-ts` DESC). So once a phase's later work finishes the
+ * long-lived `host` floats to the top, matching JLINE. Whole blocks may re-order
+ * as work completes — that is JLINE's recency behavior and is intended.
+ */
+export function compareLiveOrder(a: LiveOrderable, b: LiveOrderable): number {
+  const r = liveBucket(a.status) - liveBucket(b.status);
+  if (r !== 0) return r;
+  return (b["last-ts"] ?? 0) - (a["last-ts"] ?? 0);
+}
+
+/**
+ * Stable first-appearance key for a session: the `llm/start` timestamp, falling
+ * back to the first-delta anchor, then last activity. Monotonic per session and
+ * unaffected by later token activity, so sorting by it never reshuffles a row.
+ */
+export function sessionStartKey(v: Partial<LiveSession>): number {
+  return v["start-ts"] ?? v["first-ts"] ?? v["last-ts"] ?? 0;
+}
+
+/**
  * Best available token count: provider running output-tokens if streamed, else
  * the raw chunk count as a proxy. Port of `live-count`.
  */
@@ -170,12 +210,32 @@ export function foldLiveEvent(live: LiveMap, ev: EventLike): LiveMap {
         chunks: 0,
         chars: 0,
         "first-ts": ts,
+        "start-ts": ts,
         "last-ts": ts,
         status: "waiting",
         text: "",
         model: (data["model"] as string | null | undefined) ?? undefined,
+        provider: (data["provider"] as string | null | undefined) ?? undefined,
         session: sid,
       });
+
+    case "llm/request": {
+      // The resolved model/provider land here — emitted right after the request
+      // is dispatched, BEFORE the first delta. Stamp them onto the (still
+      // `waiting`) session so the `provider/model` column fills in during the
+      // wait for the first token, without flipping status or disturbing the
+      // recency/start keys. `llm/start` always precedes `llm/request` (with a
+      // matching session-id), so we ONLY enrich an existing session — never
+      // manufacture one (a request whose session-id we don't recognize, e.g. a
+      // pre-`:session-id` recording, must not split a session in two).
+      if (!cur) return live;
+      return put({
+        ...cur,
+        model: (data["model"] as string | null | undefined) ?? cur.model,
+        provider:
+          (data["provider"] as string | null | undefined) ?? cur.provider,
+      });
+    }
 
     case "llm/delta": {
       const base: LiveSession =
@@ -208,10 +268,18 @@ export function foldLiveEvent(live: LiveMap, ev: EventLike): LiveMap {
         "last-ts": ts,
         status: "streaming",
         model: (data["model"] as string | null | undefined) ?? undefined,
+        provider: (data["provider"] as string | null | undefined) ?? undefined,
         session: sid,
         kind,
       };
-      if (first) next["first-ts"] = ts;
+      if (first) {
+        next["first-ts"] = ts;
+        // Freeze time-to-first-token: gap between llm/start and this first delta.
+        // base.start-ts is absent only when the start event was missed; fall back
+        // to base.first-ts (the llm/delta-synthesized start) ⇒ 0 wait.
+        const startTs = base["start-ts"] ?? base["first-ts"] ?? ts;
+        next["wait-ms"] = Math.max(0, ts - startTs);
+      }
       if (toks !== undefined) next.tokens = toks;
       return put(next);
     }
@@ -224,12 +292,38 @@ export function foldLiveEvent(live: LiveMap, ev: EventLike): LiveMap {
         text: "",
         "last-ts": ts,
         reason: (data["stop-reason"] as string | undefined) ?? base.reason,
+        // A non-streaming turn emits no llm/delta, so model/provider were never
+        // stamped on the entry — the response is the first event carrying them.
+        // Apply here (keeping any already set) so the `provider/model` column is
+        // populated on done rows, not just streaming ones. Mirrors the JLine
+        // `:llm/response` handler in escapement.tui.
+        model:
+          (data["model"] as string | null | undefined) ?? base.model,
+        provider:
+          (data["provider"] as string | null | undefined) ?? base.provider,
       };
+      // A non-streaming turn emits no llm/delta, so `tokens` was never folded
+      // from a delta's usage and `chunks` stayed 0 — liveCount would read 0.
+      // The response's usage carries the authoritative output-tokens; apply it
+      // here (also for streaming turns, as the final count). Mirrors JLine.
+      const respUsage = data["usage"] as Record<string, unknown> | undefined;
+      const respToks =
+        respUsage && respUsage["output-tokens"] !== undefined
+          ? (respUsage["output-tokens"] as number)
+          : undefined;
+      if (respToks !== undefined) next.tokens = respToks;
       if (data["output-tps"] !== undefined && data["output-tps"] !== null) {
         next["real-tps"] = data["output-tps"] as number;
       }
       if (data["elapsed-ms"] !== undefined && data["elapsed-ms"] !== null) {
         next["elapsed-ms"] = data["elapsed-ms"] as number;
+      }
+      // Engine-measured time-to-first-token (llm.clj). Authoritative for BOTH
+      // streamed and non-streamed turns, unlike the client-side delta estimate
+      // (which a non-streaming turn never produces). Prefer it; keep any
+      // streaming estimate as the fallback when the engine didn't supply one.
+      if (data["wait-ms"] !== undefined && data["wait-ms"] !== null) {
+        next["wait-ms"] = data["wait-ms"] as number;
       }
       return put(next);
     }

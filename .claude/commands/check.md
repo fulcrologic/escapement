@@ -33,7 +33,13 @@ You are the **orchestrator**. Per the playbook's "Execution model":
      (no stash/checkout/reset).
    - Gate 3 (subjective review) — fresh subagent that did **not** author
      the code; a self-review is an automatic Gate 3 FAIL.
-   - Gate 2 (CHANGELOG entry) — fresh subagent, diff only.
+   - Gate 2 (CHANGELOG entry + docs sync) — fresh subagent, diff only.
+     Beyond `CHANGELOG.md`/`Guide.adoc`, if the diff touches the **authoring-
+     primitive surface** (`src/escapement/chart/helpers.cljc`, `params-fn`
+     keys, event/tool encoding, transition/region rules — see the playbook's
+     "Authoring primitives must stay in sync"), also hand it the whole
+     `.claude/skills/writing-escapement-statecharts/SKILL.md` + CLAUDE.md's
+     statecharts sections to reconcile or justify per surface.
    - Gate 4 (branch/commit/PR proposal) — may reuse the Gate 2 agent.
 4. Spawn a **collator** subagent that transcribes each concern's returned
    result verbatim into `ai/scratch/collabnotes.md` (create `ai/scratch/`),

@@ -115,13 +115,20 @@ function responseBlocks(
         meta: {},
       });
     } else if (t === "thinking") {
+      // Encrypted-reasoning providers (e.g. OpenAI) can return a thinking block
+      // whose plaintext is empty — only the encrypted signature survives. There
+      // is nothing to show, so drop it. Dropping a leading empty thinking block
+      // promotes the sibling text block to blocks[0], which then carries the
+      // turn's usage meta below.
+      const thinking = asString(b["thinking"]);
+      if (thinking.trim() === "") continue;
       blocks.push({
         dir: "reply",
         ts: hms,
         label: "assistant",
         sublabel: "thinking",
         role: invokeid,
-        body: asString(b["thinking"]),
+        body: thinking,
         meta: {},
       });
     } else {

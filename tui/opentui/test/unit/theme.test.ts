@@ -12,6 +12,7 @@ import {
   DEBUG_COLOR,
   THEME_KEYS,
   type Capability,
+  type ThemeKey,
 } from "../../src/domain/theme";
 
 describe("colorCapability — capability detection (port of color-capability)", () => {
@@ -98,13 +99,18 @@ describe("ansi256ToRgb / decodeSgr — SGR -> truecolor", () => {
   });
 });
 
+// Keys that intentionally carry only a background color (no foreground).
+const BG_ONLY_KEYS = new Set(["selection-bg"]);
+const keyColor = (t: ReturnType<typeof makeTheme>, k: ThemeKey) =>
+  BG_ONLY_KEYS.has(k) ? t.bg(k) : t.themeColor(k);
+
 describe("makeTheme — key resolution + none parity", () => {
   test("256/truecolor tiers resolve all keys to hex", () => {
     for (const cap of ["256", "truecolor"] as Capability[]) {
       const t = makeTheme(cap);
       expect(t.colored).toBe(true);
       for (const k of THEME_KEYS) {
-        expect(t.themeColor(k)).toMatch(/^#[0-9a-f]{6}$/);
+        expect(keyColor(t, k)).toMatch(/^#[0-9a-f]{6}$/);
       }
     }
   });
@@ -117,7 +123,7 @@ describe("makeTheme — key resolution + none parity", () => {
   test("16 tier resolves all keys (16-color palette)", () => {
     const t = makeTheme("16");
     expect(t.colored).toBe(true);
-    for (const k of THEME_KEYS) expect(t.themeColor(k)).toMatch(/^#[0-9a-f]{6}$/);
+    for (const k of THEME_KEYS) expect(keyColor(t, k)).toMatch(/^#[0-9a-f]{6}$/);
   });
 
   test("none tier: colored=false, every color resolver returns null/undefined", () => {

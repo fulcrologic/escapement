@@ -47,7 +47,7 @@ playbook, and its one job. It must not see another concern's reasoning.
 |---|---|---|---|
 | **Coverage & tests** (Gate 1) | fresh subagent | scope + repo + **the orchestrator's baseline result** (see below) | the coverage table, `bb test`/`bb sanity` output, baseline comparison |
 | **Code review** (Gate 3) | fresh subagent, **no authoring context** — must not be the agent that wrote the code | the raw diff only | the subjective sign-off / debt findings |
-| **Changelog + Guide sync** (Gate 2) | fresh subagent | the diff + `Guide.adoc`'s TOC and the specific sections covering changed areas (orchestrator extracts these, so the subagent does not grep the 2400-line guide blindly) | the `CHANGELOG.md` entry **and** the `Guide.adoc` edits (or a written "no guide change needed" justification) |
+| **Changelog + Docs sync** (Gate 2) | fresh subagent | the diff + `Guide.adoc`'s TOC and the specific sections covering changed areas (orchestrator extracts these, so the subagent does not grep the ~4200-line guide blindly) + **if the diff touches the authoring-primitive surface (see Gate 2), the full text of `.claude/skills/writing-escapement-statecharts/SKILL.md` and CLAUDE.md's "Statecharts caveats" section** (both small — passed whole) | the `CHANGELOG.md` entry **and** the `Guide.adoc` edits **and** any skill/CLAUDE.md edits (or a written "no doc change needed" justification per surface) |
 | **Proposal** (Gate 4) | may reuse the Gate 2 agent (same "describe the change" framing) | the diff + CHANGELOG entry | branch/commit/PR draft |
 | **Assembling `ai/scratch/collabnotes.md`** | a separate collator agent | each concern's returned result verbatim | the merged notes + Result block |
 
@@ -197,7 +197,7 @@ a key for and which then **fails** the live run is a Gate 1 **FAIL**.
 Record the table, the numeric summary, and any baseline-attribution proof
 in `ai/scratch/collabnotes.md`.
 
-## Gate 2 — Human-readable change summary → CHANGELOG.md + Guide.adoc sync
+## Gate 2 — Human-readable change summary → CHANGELOG.md + docs sync
 
 Write a summary a reviewer can read in under a minute and know exactly what
 functionality was **added / changed / removed**. No implementation
@@ -244,7 +244,7 @@ gathers context so the subagent does minimal searching:
    section(s) that document it, if any.
 3. Hand the Gate 2 subagent: the diff, that mapping, and the full text of
    only the mapped sections (plus the TOC for orientation) — not the whole
-   2400-line file.
+   ~4200-line file.
 
 The subagent then either edits those sections so the guide matches
 post-merge reality, or, if the change is genuinely invisible at the guide's
@@ -252,10 +252,44 @@ level of abstraction (internal refactor, test-only, pure infra), records a
 one-line justification: "no Guide.adoc change — <why>". Silent omission of a
 needed guide update is a Gate 2 FAIL, exactly like an absent CHANGELOG entry.
 
-**Gate 2 passes** when the CHANGELOG entry is prepended, `Guide.adoc` is
-either updated to match post-merge behavior or explicitly justified as
-needing no change, and a non-author could correctly describe the branch's
-user-visible effect from the CHANGELOG entry alone.
+### Authoring primitives must stay in sync with the skill + CLAUDE.md
+
+`Guide.adoc` is not the only living doc. Two other surfaces document the
+**statechart authoring primitives** and rot the same way when a primitive is
+added, renamed, removed, or changes its contract:
+
+- **`.claude/skills/writing-escapement-statecharts/SKILL.md`** — the
+  authoring gotchas/cheat-sheet a future agent loads before writing a chart.
+- **CLAUDE.md** — the "Statecharts caveats" and "Test conventions" sections.
+
+**Primitive surface = the diff touches any of:**
+- `src/escapement/chart/helpers.cljc` — the `h/` authoring API (`tell-llm`,
+  `tell-other-llm`, `human-input`, `with-llm-questions`, `llm-conversation`,
+  `forward-llm-output`, `render-template`, …): a new/removed/renamed public
+  fn, or a changed arglist/contract.
+- `params-fn` handling / accepted keys (`:model(s)`, `:needs`, `:auto-cache?`,
+  `:temperature`, `:thinking`, `:verdict-schema`, `:max-tokens`, …) in
+  `invocation/llm_conversation.clj`, `llm.clj`, `chart/service.cljc`.
+- event→tool encoding, reserved tool names (`submit_verdict`), or
+  `:allowed-events`/`:real-tools`/`:chart-tools` semantics.
+- transition-type / `parallel`-region / `send-after` / event-naming rules
+  the skill calls out as traps.
+
+When the diff intersects that surface, the orchestrator hands the Gate 2
+subagent the **whole** `SKILL.md` (~50 lines) and the relevant CLAUDE.md
+sections (both small — no extraction needed). The subagent edits each to
+match post-merge reality, or records a one-line per-surface justification
+("no SKILL.md change — internal helper, not part of the `h/` authoring API").
+A primitive change that lands with the skill or CLAUDE.md left describing the
+old behavior is a Gate 2 **FAIL**, identical to a stale Guide. When the diff
+does **not** touch the primitive surface, record "primitive surface
+untouched — skill/CLAUDE.md sync N/A" and move on.
+
+**Gate 2 passes** when the CHANGELOG entry is prepended; `Guide.adoc`, the
+authoring skill, and CLAUDE.md are each either updated to match post-merge
+behavior or explicitly justified as needing no change; and a non-author
+could correctly describe the branch's user-visible effect from the CHANGELOG
+entry alone.
 
 ## Gate 3 — Subjective code-review sign-off
 
@@ -301,7 +335,7 @@ the CHANGELOG entry.
 # Escapement Check — <branch> — <date>
 Goal:                 <one sentence: this branch exists to ___>
 Gate 1 (tested):      PASS / CONDITIONAL / FAIL  — bb test: <n tests, n assertions>; bb sanity: <ok>
-Gate 2 (changelog):   PASS / FAIL                — entry prepended; Guide.adoc synced/justified
+Gate 2 (changelog):   PASS / FAIL                — entry prepended; Guide.adoc + skill + CLAUDE.md synced/justified (or "primitive surface untouched")
 Gate 3 (review):      PASS / FAIL                — repo better, no new debt
 Gate 4 (proposal):    PASS / FAIL                — branch/commit/PR drafted
 OVERALL:              MERGEABLE / CONDITIONAL / BLOCKED

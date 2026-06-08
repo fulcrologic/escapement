@@ -33,6 +33,7 @@
    Everything here is SCI/bb-safe (atoms, http-kit `send!`/`on-close`, cheshire). No JVM-only deps."
   (:require
     [cheshire.core :as json]
+    [escapement.tui.phase :as phase]
     [org.httpkit.server :as http]))
 
 (def ^:private default-cap 4096)
@@ -78,12 +79,17 @@
 (defn new-hub
   "Create a new fan-out hub. `opts`:
      * `:cap`     per-client bounded queue size (default 4096 envelopes)
-     * `:debug?`  emit terse stderr logging on attach/detach/overflow"
+     * `:debug?`  emit terse stderr logging on attach/detach/overflow
+     * `:chart`   the loaded statechart value, used to derive the header phase
+                  breadcrumb/siblings (via `escapement.tui.phase/phase-model`)
+                  when a config-bearing runner event arrives (nil → header
+                  falls back to the raw `states: [...]` line UI-side)"
   ([] (new-hub {}))
-  ([{:keys [cap debug?] :or {cap default-cap debug? false}}]
+  ([{:keys [cap debug? chart] :or {cap default-cap debug? false}}]
    (atom {:seq     0
           :clients {}
           :phase   nil
+          :chart   chart
           :debug-snap nil
           :pending-prompt nil
           :recent  []
@@ -217,9 +223,23 @@
                  "runner/event-processed" (:config-after data)
                  nil)]
     (when (and config (not= config (get-in @hub [:phase :config])))
-      (let [snap {:kind   "phase"
-                  :ts     (:ts env)
-                  :config config}]
+      (let [;; Derive the JLINE-parity header data (breadcrumb + sibling strip)
+            ;; from the loaded chart, mirroring `escapement.tui` exactly. The
+            ;; pure `phase/phase-model` walks the chart's element index; the UI
+            ;; never gets the chart, so this MUST be computed agent-side. Push
+            ;; both as plain STRING lists (the wire/UI contract — PhaseEnvelope
+            ;; `breadcrumb: string[]`, `siblings: string[]`); the UI recomputes
+            ;; the `current?` flag from `config`. Omitted when no chart / not
+            ;; introspectable, so the UI falls back to the raw config line.
+            chart  (:chart @hub)
+            model  (when chart (phase/phase-model chart config))
+            snap   (cond-> {:kind   "phase"
+                            :ts     (:ts env)
+                            :config config}
+                     (and model (not (:fallback? model)) (seq (:breadcrumb model)))
+                     (assoc :breadcrumb (mapv str (:breadcrumb model)))
+                     (and model (not (:fallback? model)) (seq (:siblings model)))
+                     (assoc :siblings (mapv (comp str :id) (:siblings model))))]
         (swap! hub assoc :phase snap)
         (let [json (json/generate-string snap)]
           (doseq [[ch _c] (:clients @hub)]

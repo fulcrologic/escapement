@@ -117,6 +117,36 @@ describe("transcriptBlocks — SENT/REPLY block model", () => {
     expect(blocks[1]!.meta).toEqual({});
   });
 
+  test("empty thinking block is dropped; meta promotes to the text block", () => {
+    // Encrypted-reasoning providers (e.g. OpenAI) return a signature-only
+    // thinking block with empty plaintext — nothing to render.
+    const blocks = transcriptBlocks({
+      invokeid: IID,
+      scrollback: [
+        entry(
+          IID,
+          ev("llm/response", {
+            invokeid: IID,
+            "stop-reason": "end_turn",
+            "output-tps": 54.3,
+            usage: { "input-tokens": 2275, "output-tokens": 2156 },
+            content: [
+              { type: "thinking", thinking: "" },
+              { type: "text", text: "# tournament-summary.md" },
+            ],
+          }),
+        ),
+      ],
+      live: NO_LIVE,
+      now: () => TS,
+    });
+    expect(blocks.map((b) => [b.dir, b.label, b.sublabel])).toEqual([
+      ["reply", "assistant", null],
+    ]);
+    // usage meta lands on the surviving text block.
+    expect(blocks[0]!.meta).toMatchObject({ stop: "end_turn", in: 2275, out: 2156, tps: 54.3 });
+  });
+
   test("tool_use sublabel is collapsed to one <=60-char accent line", () => {
     const blocks = transcriptBlocks({
       invokeid: IID,

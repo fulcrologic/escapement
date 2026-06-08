@@ -1719,7 +1719,8 @@
       (case event
         :llm/start
         (assoc-in live p {:chunks 0 :chars 0 :first-ts ts :last-ts ts
-                          :status :waiting :text "" :model (:model data) :session sid})
+                          :status :waiting :text "" :model (:model data)
+                          :provider (:provider data) :session sid})
 
         :llm/delta
         (let [cur    (or (get-in live p) {:chunks 0 :chars 0 :first-ts ts :text "" :session sid})
@@ -1738,6 +1739,7 @@
                       (assoc :last-ts ts
                              :status  :streaming
                              :model   (:model data)
+                             :provider (:provider data)
                              :session sid
                              :kind    (if (= :thinking-delta (:type data))
                                         :thinking :text)))
@@ -1751,6 +1753,15 @@
         (assoc-in live p (-> (or (get-in live p) {:session sid})
                            (assoc :status :done :text "" :last-ts ts
                                   :reason (:stop-reason data))
+                           ;; A non-streaming turn emits no :llm/delta, so the
+                           ;; model/provider were never stamped on the entry —
+                           ;; the response is the first event that carries them.
+                           ;; Apply them here (keeping any already set) so the
+                           ;; LIVE `provider/model` column is populated on done
+                           ;; rows, not just streaming ones.
+                           (cond->
+                             (:model data)    (assoc :model (:model data))
+                             (:provider data) (assoc :provider (:provider data)))
                            ;; the LLM's TRUE generation rate (output tokens over
                            ;; the turn's wall-clock), computed in
                            ;; llm_conversation; prefer it over the TUI's
@@ -1758,7 +1769,16 @@
                            ;; concurrency/queueing.
                            (cond->
                              (:output-tps data) (assoc :real-tps (:output-tps data))
-                             (:elapsed-ms data)  (assoc :elapsed-ms (:elapsed-ms data)))))
+                             (:elapsed-ms data)  (assoc :elapsed-ms (:elapsed-ms data)))
+                           ;; A non-streaming turn emits no :llm/delta, so
+                           ;; :tokens was never folded from a delta's usage and
+                           ;; :chunks stayed 0 — live-count would render 0 tok.
+                           ;; The response's usage carries the authoritative
+                           ;; output-tokens; apply it here (also as the final
+                           ;; count for streaming turns).
+                           (cond->
+                             (get-in data [:usage :output-tokens])
+                             (assoc :tokens (get-in data [:usage :output-tokens])))))
 
         (:llm/error :llm/model-down)
         (assoc-in live p (-> (or (get-in live p) {:session sid})

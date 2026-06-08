@@ -19,7 +19,7 @@ import {
   initialDomainState,
   reduceFrame,
 } from "./store";
-import { liveAgg, statusRank } from "./aggregate";
+import { liveAgg, compareLiveOrder } from "./aggregate";
 import type { LiveAgg, LiveMap } from "./types";
 
 export interface DomainStore {
@@ -38,10 +38,11 @@ export interface LiveGroup extends LiveAgg {
 }
 
 /**
- * Ordered group list, one entry per invokeid/role, sorted so in-flight groups
- * stay on top (status rank asc, then most-recent activity first). Port of
- * `live-groups` in `tui/live.clj` — the panes (task 009) and the row-index map
- * build on this exact ordering.
+ * Ordered group list, one entry per invokeid/role, sorted in-flight-first then
+ * most-recent-activity-first via the shared {@link compareLiveOrder} — the SINGLE
+ * source of truth for live ordering (same comparator `liveRows` applies to the
+ * top-level interleave, so the two never diverge). Port of `live-groups` in
+ * `tui/live.clj`.
  */
 export function liveGroups(live: LiveMap): LiveGroup[] {
   const groups: LiveGroup[] = Object.entries(live).map(([iid, g]) => ({
@@ -49,13 +50,7 @@ export function liveGroups(live: LiveMap): LiveGroup[] {
     iid,
     sessions: g.sessions,
   }));
-  groups.sort((a, b) => {
-    const ra = statusRank(a.status);
-    const rb = statusRank(b.status);
-    if (ra !== rb) return ra - rb;
-    // (- last-ts): most recent first.
-    return (b["last-ts"] ?? 0) - (a["last-ts"] ?? 0);
-  });
+  groups.sort(compareLiveOrder);
   return groups;
 }
 
