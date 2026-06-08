@@ -180,18 +180,32 @@
 (defn spawn!
   "Launch the Bun sidecar. `opts`:
      * `:entry`       — absolute path to the sidecar entry (`tui/opentui/src/main.tsx`).
-     * `:port`        — api-server/WS port the sidecar connects to.
+     * `:port`        — api-server/WS port the sidecar connects to (live mode).
      * `:session-id`  — active session id (passed via env for context).
      * `:session-dir` — shared session dir (artifacts read directly off disk).
      * `:chart-sym`   — the loaded chart symbol; exported as `OPENTUI_CHART` so
                         the header strip shows the chart name (not `session`).
      * `:session-short` — short session id; exported as `OPENTUI_SESSION_SHORT`
                         for the header's `chart · <session>` line.
+     * `:replay-file` — REPLAY MODE: absolute path to a wire-envelope JSONL file
+                        (from `escapement.ui.replay-source/session-dir->wire-file`).
+                        When set, the sidecar reads frames off disk (read-only) and
+                        does NOT connect to a live WS — `OPENTUI_REPLAY` is exported
+                        and the live `OPENTUI_WS_URL`/`OPENTUI_WS_PORT` env vars are
+                        omitted (the TS transport prefers `OPENTUI_REPLAY`; see
+                        `tui/opentui/src/transport/index.ts`).
+     * `:replay-timing` — replay pacing: `instant|paced|wallclock` (default
+                        `instant`); exported as `OPENTUI_REPLAY_TIMING`. Ignored in
+                        live mode.
+     * `:replay-loop?` — when true, export `OPENTUI_REPLAY_LOOP=1` (replay only).
 
+   Live and replay modes are mutually exclusive: a `:replay-file` selects replay.
    The child inherits the real TTY (stdin/stdout/stderr) so it owns rendering +
    keys. Returns the `java.lang.Process`."
-  [{:keys [entry port session-id session-dir chart-sym session-short]}]
-  (let [bun     (find-bun)
+  [{:keys [entry port session-id session-dir chart-sym session-short
+           replay-file replay-timing replay-loop?]}]
+  (let [replay? (some? replay-file)
+        bun     (find-bun)
         pb      (ProcessBuilder. ^"[Ljava.lang.String;"
                                  (into-array String [bun "run" entry]))
         ;; Run with cwd = the tui/opentui/ project dir (entry is tui/opentui/src/main.tsx).
@@ -203,8 +217,21 @@
         env     (.environment pb)]
     (when (and ot-dir (.isDirectory ot-dir))
       (.directory pb ot-dir))
-    (.put env "OPENTUI_WS_URL" (str "ws://127.0.0.1:" port "/ws"))
-    (.put env "OPENTUI_WS_PORT" (str port))
+    (if replay?
+      ;; --- Replay mode: read frames off disk, no live WS back-channel. ---
+      (do
+        (.put env "OPENTUI_REPLAY" (str replay-file))
+        (.put env "OPENTUI_REPLAY_TIMING" (or (some-> replay-timing str) "instant"))
+        (when replay-loop? (.put env "OPENTUI_REPLAY_LOOP" "1"))
+        ;; Defensive: ensure no stale live WS env leaks into the child and makes
+        ;; the transport try to dial a non-existent endpoint. (OPENTUI_REPLAY
+        ;; already wins in index.ts, but keep the env unambiguous.)
+        (.remove env "OPENTUI_WS_URL")
+        (.remove env "OPENTUI_WS_PORT"))
+      ;; --- Live mode (unchanged default): connect to the api-server WS push. ---
+      (do
+        (.put env "OPENTUI_WS_URL" (str "ws://127.0.0.1:" port "/ws"))
+        (.put env "OPENTUI_WS_PORT" (str port))))
     (when session-id (.put env "ESCAPEMENT_SESSION_ID" (str session-id)))
     ;; Header strip parity (task 004): chart name + short session id. The sidecar
     ;; reads OPENTUI_CHART / OPENTUI_SESSION_SHORT in main.tsx (chartNameFromEnv /

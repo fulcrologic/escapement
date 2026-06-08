@@ -1200,6 +1200,68 @@
                    (catch Throwable _ nil)))))]
     (System/exit exit-code)))
 
+(def ^:private replay-timings
+  "Accepted --timing values for `open`, forwarded to the sidecar as
+   OPENTUI_REPLAY_TIMING. See tui/opentui/src/transport/replay.ts (ReplayTiming)."
+  #{"instant" "paced" "wallclock"})
+
+(defn- cmd-open
+  "Open a saved session directory in the OpenTUI sidecar in read-only replay mode.
+
+   Usage: escapement open <session-dir> [--timing instant|paced|wallclock]
+
+   Validates the dir (via escapement.ui.replay-source), transforms its
+   transcript.jsonl into a temp wire JSONL file, and spawns the Bun sidecar in
+   replay mode (OPENTUI_REPLAY=<temp>, OPENTUI_REPLAY_TIMING=<timing>,
+   ESCAPEMENT_SESSION_DIR=<original dir> so artifact/drill-in reads hit disk).
+
+   Read-only: no api-server, no WS push, no live control back-channel. The
+   sidecar/ui is reached ONLY via requiring-resolve (architecture boundary)."
+  [args]
+  (let [{:keys [positional opts]} (parse-args args #{})
+        session-dir (first positional)
+        timing      (or (:timing opts) "instant")]
+    (when-not session-dir
+      (die! "Usage: escapement open <session-dir> [--timing instant|paced|wallclock]"))
+    (when (> (count positional) 1)
+      (die! (str "open takes a single <session-dir> (got: " (str/join " " positional) ")")))
+    (when-not (contains? replay-timings timing)
+      (die! (str "--timing must be one of instant|paced|wallclock (got: " timing ")")))
+    ;; Same constraint as live --tui=opentui: the sidecar owns the TTY.
+    (when-not (tui/interactive-terminal?)
+      (die! (str "open requires an interactive terminal (TTY) for the OpenTUI sidecar.\n"
+                 "Run it directly from a terminal, not under a pipe/CI.")))
+    ;; Resolve the sidecar entry up-front so we fail fast (before doing any
+    ;; transform work) if the tui/opentui/ workspace is missing. requiring-resolve
+    ;; keeps the architecture boundary intact (no static require on ui/tui).
+    (let [entry (try ((requiring-resolve 'opentui.sidecar/sidecar-entry))
+                     (catch Throwable _ nil))]
+      (when-not entry
+        (die! (str "open could not find the OpenTUI sidecar entry "
+                   "(tui/opentui/src/main.tsx). Run from the escapement repo, set "
+                   "OPENTUI_DIR=<path-to-opentui>, and `bun install` in tui/opentui/.")
+              1))
+      ;; Validate + transform the disk transcript into a temp wire file.
+      (let [session->wire (requiring-resolve 'escapement.ui.replay-source/session-dir->wire-file)
+            result        (try (session->wire session-dir)
+                               (catch Throwable t
+                                 (die! (str "open failed to read the session: " (.getMessage t)) 1)))]
+        (when-not (:ok? result)
+          ;; :message is a human, actionable string from the task-001 validator.
+          (die! (str "open: " (:message result)) 1))
+        (let [spawn! (requiring-resolve 'opentui.sidecar/spawn!)
+              proc   (spawn! {:entry         entry
+                              ;; ORIGINAL absolute session dir — artifacts/drill-in
+                              ;; read the real dir, NOT the temp wire file.
+                              :session-dir   (:dir result)
+                              ;; Replay mode (task 003 spawn! keys):
+                              :replay-file   (:wire-file result)
+                              :replay-timing timing})
+              code   (try (.waitFor proc) (catch Throwable _ -1))]
+          ;; The sidecar owns the terminal; restore it on exit (mirrors live path).
+          (try ((requiring-resolve 'opentui.sidecar/restore-terminal!)) (catch Throwable _ nil))
+          (System/exit (if (zero? code) 0 code)))))))
+
 (defn- cmd-login [args]
   (let [[provider & _rest] args]
     (case provider
@@ -1223,6 +1285,9 @@
 
 Subcommands:
   run <chart-sym>   Load and execute a chart. See flags below.
+  open <session-dir>  View a saved session read-only in the OpenTUI sidecar
+                      (replay). Flag: --timing instant|paced|wallclock
+                      (default instant). Requires a TTY + bun + tui/opentui/ built.
   info              Print version + environment info.
   login codex       OAuth login for the codex backend.
   logout codex      Remove saved codex credentials.
@@ -1290,6 +1355,7 @@ Exit codes: 0 success, 1 chart error, 2 usage error.")
     (case sub
       "info" (cmd-info rest-args)
       "run" (cmd-run rest-args)
+      "open" (cmd-open rest-args)
       "login" (cmd-login rest-args)
       "logout" (cmd-logout rest-args)
       "help" (print-help!)

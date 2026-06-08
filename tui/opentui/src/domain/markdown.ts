@@ -190,6 +190,103 @@ function paintLine(theme: Theme, k: ThemeKey, line: StyledLine): StyledLine {
   );
 }
 
+// --- table parsing ---------------------------------------------------------
+
+type Align = "left" | "right" | "center";
+/** A table cell: its inline-styled spans plus their total display width. */
+interface Cell {
+  spans: StyledLine;
+  width: number;
+}
+const SEP_CELL_RE = /^:?-+:?$/;
+
+/**
+ * Split a GFM table row into trimmed cell strings, or `null` if the line is not
+ * pipe-delimited. Tolerates the optional leading/trailing `|`.
+ */
+function parseRow(line: string): string[] | null {
+  let s = line.trim();
+  if (!s.includes("|")) return null;
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((c) => c.trim());
+}
+
+/** Per-column alignment from a separator row's cells, or `null` if not a separator. */
+function sepAligns(cells: string[]): Align[] | null {
+  if (cells.length === 0 || !cells.every((c) => SEP_CELL_RE.test(c))) return null;
+  return cells.map((c) => {
+    const l = c.startsWith(":");
+    const r = c.endsWith(":");
+    return l && r ? "center" : r ? "right" : "left";
+  });
+}
+
+/** Inline-parse `text` into a {@link Cell} (styled spans + display width). */
+function cellSpans(theme: Theme, text: string): Cell {
+  const spans = inlineSpans(text).map((sp) => span(theme, sp.key, sp.text));
+  const width = spans.reduce((a, s) => a + displayWidth(s.text), 0);
+  return { spans, width };
+}
+
+/** Pad a cell's spans to `colw` columns per `align`; header cells render bold. */
+function padCell(theme: Theme, cell: Cell, colw: number, align: Align, header: boolean): StyledLine {
+  const spans = header ? paintLine(theme, "md-bold", cell.spans) : cell.spans;
+  const padN = Math.max(0, colw - cell.width);
+  let left = 0;
+  let right = 0;
+  if (align === "right") left = padN;
+  else if (align === "center") {
+    left = Math.floor(padN / 2);
+    right = padN - left;
+  } else right = padN;
+  const res: StyledLine = [];
+  if (left > 0) res.push(plain(" ".repeat(left)));
+  res.push(...spans);
+  if (right > 0) res.push(plain(" ".repeat(right)));
+  return res;
+}
+
+/**
+ * Render a GFM table (header row + data rows, with per-column `aligns`) into
+ * box-drawn, column-aligned styled lines. Header cells are bold; the borders
+ * use the `md-rule` theme style.
+ */
+function renderTable(theme: Theme, rows: string[][], aligns: Align[]): StyledLine[] {
+  const ncol = Math.max(aligns.length, ...rows.map((r) => r.length));
+  const al: Align[] = Array.from({ length: ncol }, (_, i) => aligns[i] ?? "left");
+  const cells = rows.map((r) => Array.from({ length: ncol }, (_, i) => cellSpans(theme, r[i] ?? "")));
+  const colw = Array.from({ length: ncol }, (_, i) =>
+    Math.max(1, ...cells.map((row) => row[i]!.width)),
+  );
+  const border = theme.style("md-rule");
+  const vbar = styled("│", border);
+  const out: StyledLine[] = [];
+
+  const rule = (left: string, mid: string, right: string) => {
+    const segs: StyledLine = [styled(left, border)];
+    colw.forEach((w, i) => {
+      segs.push(styled("─".repeat(w + 2), border));
+      segs.push(styled(i === ncol - 1 ? right : mid, border));
+    });
+    out.push(segs);
+  };
+  const dataRow = (rowCells: Cell[], header: boolean) => {
+    const lineSpans: StyledLine = [vbar];
+    rowCells.forEach((c, i) => {
+      lineSpans.push(plain(" "), ...padCell(theme, c, colw[i]!, al[i]!, header), plain(" "), vbar);
+    });
+    out.push(lineSpans);
+  };
+
+  rule("┌", "┬", "┐");
+  dataRow(cells[0]!, true);
+  rule("├", "┼", "┤");
+  for (let r = 1; r < cells.length; r++) dataRow(cells[r]!, false);
+  rule("└", "┴", "┘");
+  return out;
+}
+
 // --- block renderer --------------------------------------------------------
 
 const FENCE_RE = /^\s*```+\s*(\S+)?\s*$/;
@@ -231,7 +328,13 @@ export function render(md: string, theme: Theme, width0: number): StyledLine[] {
   const closeFence = (f: FenceState) =>
     markdownLang(f.lang) ? render(f.buf.join("\n"), theme, width) : codeBlockLines(theme, width, f.buf);
 
-  for (const line of src) {
+  let skip = 0;
+  for (let idx = 0; idx < src.length; idx++) {
+    if (skip > 0) {
+      skip--;
+      continue;
+    }
+    const line = src[idx]!;
     if (fence) {
       if (FENCE_RE.test(line)) {
         out.push(...closeFence(fence));
@@ -246,6 +349,26 @@ export function render(md: string, theme: Theme, width0: number): StyledLine[] {
     if (fm) {
       fence = { lang: fm[1] ?? null, buf: [] };
       continue;
+    }
+
+    // GFM table: a pipe row immediately followed by a separator row.
+    const headRow = parseRow(line);
+    if (headRow) {
+      const sep = idx + 1 < src.length ? parseRow(src[idx + 1]!) : null;
+      const aligns = sep ? sepAligns(sep) : null;
+      if (aligns) {
+        const rows = [headRow];
+        let j = idx + 2;
+        while (j < src.length) {
+          const r = parseRow(src[j]!);
+          if (!r) break;
+          rows.push(r);
+          j++;
+        }
+        out.push(...renderTable(theme, rows, aligns));
+        skip = j - idx - 1;
+        continue;
+      }
     }
 
     const hm = HEADING_RE.exec(line);

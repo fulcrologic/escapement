@@ -140,6 +140,45 @@ frame; Esc cancels (→ `{:reason :cancelled}` → interrupt). Verified end-to-e
 flow over the WS `control` channel to the debug controller, but driving the full pause/step UI live
 is a known follow-up (see Known limitations). `--debug` without `--tui=opentui` is unaffected.
 
+### Open a saved session (read-only replay)
+
+Re-open any persisted session directory in the sidecar to review its recorded transcript,
+artifacts, and drill-in views — no model, api-server, or WS required:
+
+```bash
+escapement open <session-dir> [--timing instant|paced|wallclock]
+# e.g.
+escapement open .escapement/049151c1-e3f6-45aa-9f82-8b9fa445261f
+```
+
+- `<session-dir>` — a saved session dir (e.g. `.escapement/<uuid>`) holding
+  `transcript.jsonl`. A trailing slash is tolerated.
+- `--timing` — replay pacing; one of `instant | paced | wallclock`. **Default `instant`**
+  (renders the whole transcript immediately). `paced`/`wallclock` re-time the stream.
+
+**How it works:** the CLI validates the dir, transforms its `transcript.jsonl` into a temp
+wire-envelope JSONL via `escapement.ui.replay-source/session-dir->wire-file`, and spawns the
+sidecar pointed at that file instead of a live WebSocket. The sidecar's offline `ReplaySource`
+(`tui/opentui/src/transport/replay.ts`) feeds the same envelopes the live WS push emits, so a
+replay renders identically to the original live run. Artifact / drill-in reads resolve against
+the original session dir on disk.
+
+**Limitations (read-only):**
+- No live agent, no api-server/WS, and no human-input back channel — `ask` prompts in the
+  recording are shown but not answerable (the session already happened).
+- The Debugger / pause-step controls are inert in replay (nothing is executing).
+- Requires a real TTY and `bun` on `PATH`, same as a live `--tui=opentui` run; a non-TTY
+  invocation prints an error and exits non-zero without spawning.
+
+**Env vars involved** (set by the CLI/sidecar — listed for debugging):
+- `OPENTUI_REPLAY` — absolute path to the temp wire JSONL the sidecar replays.
+- `OPENTUI_REPLAY_TIMING` — `instant | paced | wallclock` (the `--timing` value).
+- `ESCAPEMENT_SESSION_DIR` — the **original** session dir (not the temp file), so the sidecar
+  reads artifacts off the real session on disk.
+
+In replay mode the live `OPENTUI_WS_URL` / `OPENTUI_WS_PORT` are explicitly removed from the
+sidecar's environment, so no stale live endpoint can leak in.
+
 ---
 
 ## How to develop

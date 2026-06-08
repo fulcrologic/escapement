@@ -1956,6 +1956,10 @@ clear message. `bb haiku-opentui` is the runnable entry point; the sidecar's
 own UI tests run via `bb opentui-test` (the agent-side WS-push glue is covered
 by `bb test`). See `docs/opentui-ui.md` and `docs/opentui-wire.md`.
 
+To review a session *after* it ran, `escapement open <session-dir>` (see
+<<cli>>) re-opens a saved session dir read-only in the same sidecar — replaying
+the recorded transcript with no agent, api-server, or WebSocket.
+
 [[multi-agent]]
 == Multi-agent / team patterns
 
@@ -3282,6 +3286,10 @@ This is what lets the chart park while the LLM is thinking.
 Subcommands:
 
 * `run <chart-sym>` — execute a chart (the everyday command).
+* `open <session-dir>` — re-open a saved session directory read-only in the
+OpenTUI sidecar (replays the recorded transcript; no agent re-run, no
+api-server/WS). `--timing instant|paced|wallclock` sets replay pacing (default
+`instant`). Requires a real TTY + `bun` + a built `tui/opentui/`. See <<opentui>>.
 * `info` — print environment + the auto-detected LLM backend layout.
 * `login codex` / `logout codex` — OAuth flow for the
 `escapement.llm.openai-codex` backend; opens a browser, stores credentials in `~/.escapement/openai-auth.json` (mode 0600).

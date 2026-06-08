@@ -1,5 +1,40 @@
 # Changelog
 
+## [unreleased] — feat/opentui-markdown-tables — 2026-06-08
+
+Read-only session replay in the OpenTUI sidecar (`escapement open`) plus GFM
+markdown-table rendering in the sidecar's markdown renderer.
+
+### Added
+
+- **`escapement open <session-dir> [--timing instant|paced|wallclock]`.** Opens
+  a saved session directory read-only in the OpenTUI sidecar — replays the
+  recorded `transcript.jsonl` without re-running the agent, no api-server, no
+  WebSocket, and no live human-input back channel. The CLI validates the dir,
+  transforms its transcript into a temp wire-envelope JSONL, and spawns the
+  sidecar in replay mode (artifact / drill-in reads still resolve against the
+  original session dir on disk). `--timing` controls replay pacing and defaults
+  to `instant` (whole transcript rendered immediately); `paced`/`wallclock`
+  re-time the stream. Requires a real TTY + `bun` + a built `tui/opentui/`;
+  a non-TTY invocation exits non-zero without spawning. `ask` prompts and the
+  pause/step Debugger are inert in replay (the session already happened).
+- **`bb tui-debug <session-dir> [--timing …]`** task — convenience wrapper that
+  delegates to `escapement open`.
+- **GFM markdown tables in the OpenTUI sidecar.** Pipe tables with an alignment
+  separator row now render as box-drawn, column-aligned tables with a bold
+  header and per-column left/right/center alignment, replacing the previous raw
+  pipe text.
+
+### Notes
+
+- Gate 1 flagged that the new markdown-table TypeScript units in
+  `tui/opentui/src/domain/markdown.ts` have **no `bun test` coverage yet** — the
+  sidecar TS UI is a separate test path (`bb opentui-test`); reviewer must
+  eyeball table rendering.
+- The `open` sidecar-spawn path needs a real TTY + `bun`, so it is **verified
+  manually**, not under `bb test`. The pure disk→wire transform
+  (`escapement.ui.replay-source`) is covered by `bb test`.
+
 ## [unreleased] — feat/llm-latency-failover — 2026-06-08
 
 Opt-in time-to-first-token (TTFT) latency cap for LLM turns, plus supporting
