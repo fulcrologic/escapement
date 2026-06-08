@@ -1,5 +1,76 @@
 # Changelog
 
+## [unreleased] — opentui-time-travel-debugger — 2026-06-08
+
+Opt-in time-travel debugger in the OpenTUI sidecar (`--tui=opentui`): re-enter
+the statechart at a selected LLM conversation node and continue forward in a
+forked branch, optionally with edited LLM parameters and transcript, plus a
+breakpoint mode that steps across conversation turns.
+
+### Added
+
+- **Re-run-from-conversation (forked branch).** In the OpenTUI sidecar, press
+  `o` on a live LLM row to open a conversation menu, then **Re-run from here…**
+  to open a debug form. The user can pick a resume turn (when the conversation
+  has >1 turn), edit the system prompt and message text, choose a different
+  provider/model (or alias) from a model-catalog dropdown, and set a temperature
+  — then **Run**. The agent forks a brand-new branch session (its own session id,
+  transcript, and artifact dirs, with recorded `{:parent :branch-point}`
+  parentage), restores the deterministic prefix from the node-entry checkpoint,
+  applies the overrides and edited transcript prefix, and lets the chart run
+  **forward** through downstream states. The original run is immutable and never
+  mutated. Works for single-session charts and for multiplex charts (re-enter at
+  the multiplex parent, scope the override to one child conversation, and the
+  downstream phases re-run so the whole chart finishes and is re-judged).
+- **LLM-turn breakpoint / step-across-turns.** From the menu, **Break before
+  next LLM** runs the chart until just before the next LLM turn and parks there.
+  `n` (turn-next) / `b` (turn-back) move across captured turns; `c` (continue)
+  resumes the parked worker free-running. This is a turn-boundary gate distinct
+  from the existing per-event pause/step gate.
+- **Replay-by-match side effects on a branch.** On a forked branch, tool calls
+  that match a captured parent result (same node/turn/tool + args) are served
+  from the capture; genuinely new post-divergence side effects execute live and
+  are flagged in the event stream (`:replay/source "captured" | "live"`), with a
+  live badge in the sidecar. A destructive-tool guard is the documented
+  mitigation for unmatched writes.
+- **`:escapement/on-env-ready` chart-var metadata** — a resume-safe env-setup
+  hook a chart declares on its `agent` var (e.g. registering multiplex
+  sub-charts). It runs on **every** `run!` (fresh start AND resume), before the
+  chart starts or any invoking state is re-invoked, so multi-session/multiplex
+  charts resume and branch-rerun correctly. Must be idempotent. (The
+  `haiku_tournament_dynamic` example now declares it instead of registering its
+  sub-charts in `:run`'s `on-entry`, which does not re-fire on resume.)
+- **`docs/opentui-debugger.md`** (architecture/flow) and **`docs/opentui-wire.md`
+  §9** (the JSON wire contract for the new debugger frames and control ops).
+
+### Changed
+
+- **Resume now re-invokes active invocations.** A conversation node already
+  present in a restored configuration (mid-flight at crash, or fork-seeded for a
+  re-run) is now re-invoked on `--resume`, instead of being restored but never
+  re-called. A new `:runner/reinvoked` transcript event names the invoking states
+  re-started, making a dead branch (resumed → done, nothing ran) diagnosable.
+  This also repairs crash-resume mid-invocation generally, not just the debugger.
+- **Node-entry checkpoints** are now written post-macrostep (with the
+  conversation node *in* the configuration, so it is re-invokable on resume),
+  keyed by `{node-id, visit}`, replacing the prior pre-entry snapshot that
+  captured the wrong configuration.
+- **Session ids** are now keyed as a non-namespaced keyword (`:session-<uuid>`)
+  rather than `:session/<uuid>`. A namespaced keyword whose name begins with a
+  digit is not a valid EDN token on read-back, which corrupted checkpoint working
+  memory and crashed the branch fork; the new form round-trips cleanly. All
+  derived forms strip the leading colon, so downstream paths are unchanged.
+
+### Notes
+
+- The debugger's `:debug/overrides` and `:debug/replay-policy` are
+  debugger-internal env seams injected by the runner/control surface and scoped
+  by `{node-id, visit}`; they are **not** new chart-author `params-fn` keys.
+- The sidecar UI (conversation menu, debug form, keybindings, branch/turn
+  banners) is tested via `bb opentui-test` (a separate TS test path); reviewer
+  must eyeball the live terminal UX. The live end-to-end self-run test
+  (`debug/cli_selfrun_resume_test`) is env-gated and needs a real model + TTY.
+
 ## [unreleased] — feat/opentui-markdown-tables — 2026-06-08
 
 Read-only session replay in the OpenTUI sidecar (`escapement open`) plus GFM

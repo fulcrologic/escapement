@@ -97,6 +97,10 @@ export interface InspectorControls {
   /** Open the inspector directly to a given invocation's transcript pager
    *  (used by the LIVE pane's Enter drill-in: select row → open its transcript). */
   openTranscriptFor: (invokeid: string) => void;
+  /** The `invokeid` of the currently-selected invocation row, or null when not
+   *  in the Invocations list view / no row is selected. The seam task 012 uses
+   *  to open the ConversationMenu for the selected invocation. */
+  selectedInvokeid: () => string | null;
   /** o: open artifacts drill-in for the selected invocation. */
   openArtifacts: () => void;
   /** y: copy the selected artifact's path (Artifacts view). */
@@ -326,6 +330,13 @@ export function Inspector(props: InspectorProps): JSX.Element {
         const a = listAllArtifacts(props.sessionDir)[cursor()];
         if (a) openArtifactFile(a);
       }
+    },
+    selectedInvokeid: () => {
+      // Only the Invocations list view (not drilled into artifacts/pager) maps a
+      // cursor row to an invocation. Mirrors the `enter` drill target.
+      if (pager() || focusInvoke()) return null;
+      if (view() !== "invocations") return null;
+      return invocations()[cursor()]?.invokeid ?? null;
     },
     openTranscriptFor: (invokeid: string) => {
       setOpen(true);

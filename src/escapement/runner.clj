@@ -8,10 +8,13 @@
     [clojure.set :as set]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.chart :as sc-chart]
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.engine.env :as engine-env]
     [escapement.engine.instrumented-queue :as iq]
     [escapement.engine.queue :as engine-queue]
+    [escapement.engine.reinvoke :as reinvoke]
+    [escapement.engine.store :as estore]
     [escapement.invocation.human-input :as human-input]
     [escapement.invocation.llm-conversation :as llm-conv]
     [escapement.storage.disk :as disk]
@@ -85,6 +88,32 @@
         entered       (vec (set/difference after-set before-set))
         exited        (vec (set/difference before-set after-set))]
     (sp/save-working-memory! store env sid wmem')
+    ;; Corrected node-entry checkpoint (time-travel debugger / crash-resume).
+    ;; When this macrostep ENTERED a state that owns invocations, snapshot the
+    ;; just-saved `wmem'` — which has that node IN the configuration, so it is
+    ;; re-invokable on resume (the old in-processor snapshot captured the
+    ;; PRE-entry wmem, the wrong config). Keyed by the SAME {node-id, visit}
+    ;; the capture layer stamps: the llm-conversation processor bumps
+    ;; `:escapement/visit-counts` synchronously DURING this entry macrostep (in
+    ;; start-invocation!), so by the time process-event! has returned, the
+    ;; atom's current value for that node IS the visit to key by. Best-effort +
+    ;; guarded: only on a file-backed store, never on the normal hot path
+    ;; otherwise (the write is cheap and the entered set is usually empty).
+    (try
+      (let [wmstore (::sc/working-memory-store env)]
+        (when (:dir wmstore)
+          (let [registry   (::sc/statechart-registry env)
+                src        (::sc/statechart-src wmem')
+                statechart (when (and registry src)
+                             (try (sp/get-statechart registry src) (catch Throwable _ nil)))]
+            (when statechart
+              (let [visit-counts (:escapement/visit-counts env)]
+                (doseq [node-id entered
+                        :when   (seq (try (sc-chart/invocations statechart node-id)
+                                          (catch Throwable _ nil)))]
+                  (let [visit (or (when visit-counts (get @visit-counts node-id)) 0)]
+                    (estore/save-node-entry-checkpoint! wmstore sid node-id (long visit) wmem'))))))))
+      (catch Throwable _ nil))
     ;; `:session-id` is now unconditional so a timeline UI has a
     ;; uniform join key across single- and multi-session runs.
     ;; `:entered`/`:exited` make the per-event state-membership
@@ -224,6 +253,19 @@
                              and the summary map carries
                              `:status :aborted`. Omitting it (`nil`)
                              preserves prior behavior exactly.
+    * `:chart-env-ready` (optional) — a `(fn [env])` of CHART-DECLARED env setup
+                                      that must survive RESUME (typically
+                                      sub-chart registration). Runs on EVERY
+                                      run! (fresh start AND resume), before
+                                      start!/re-invoke. Must be idempotent. The
+                                      CLI threads it from the chart var's
+                                      `:escapement/on-env-ready` metadata. This
+                                      is the seam that lets a multi-session chart
+                                      (whose `on-entry` registration does not
+                                      re-fire on resume) be resumed/re-run
+                                      correctly. Distinct from `:on-env-ready`,
+                                      which is for CALLER-side wiring (TUI/control
+                                      handle).
     * `:initial-data` (optional) — initial chart data (passed as data-model seed)
     * `:resume?` (default false) — if true and a checkpoint exists, do not call `start!`
     * `:trace?` (default false) — write `:runner/tick` events on every loop turn
@@ -295,8 +337,9 @@
            catalog-ratings eligibility-strict? llm-aliases llm-preferences llm-resilience
            tool-registry initial-data resume? trace?
            max-iterations max-frozen-cycles quiescent-sleep-ms human-renderer
-           on-env-ready transcript-tap prelude-events store run-id cancel
-           debug-controller human-input-active? multi-session?]
+           chart-env-ready on-env-ready transcript-tap prelude-events store run-id cancel
+           debug-controller human-input-active? multi-session?
+           debug-overrides debug-replay-policy]
     :or   {chart-id           ::chart
            resume?            false
            trace?             false
@@ -340,11 +383,32 @@
                                            :llm-resilience          llm-resilience
                                            :tool-registry           tool-registry
                                            :human-renderer          human-renderer
-                                           :transcript-fn           transcript-fn})
+                                           :transcript-fn           transcript-fn
+                                           ;; Time-travel debugger seams (nil ⇒ normal run).
+                                           :debug-overrides         debug-overrides
+                                           :debug-replay-policy     debug-replay-policy})
         registry      (::sc/statechart-registry env)
         store         (::sc/working-memory-store env)
-        processor     (::sc/processor env)]
+        processor     (::sc/processor env)
+        ;; Stash the chart-declared env-setup hook in the env so a downstream
+        ;; branch resume (e.g. the debugger's root-scope rerun) can re-apply the
+        ;; SAME sub-chart registration on its fresh-env branch run.
+        env           (cond-> env chart-env-ready (assoc :escapement/chart-env-ready chart-env-ready))]
     (sp/register-statechart! registry chart-id chart)
+    ;; CHART-DECLARED env setup that must survive RESUME. A chart's own
+    ;; `on-entry` registration (e.g. registering sub-charts) does NOT re-fire on
+    ;; resume — the owning state is already in the restored configuration, so it
+    ;; is never re-entered. Anything the chart stashes in the env at entry
+    ;; (statechart-registry sub-charts, etc.) is therefore lost on resume, and a
+    ;; re-invoked multiplex/sub-chart node would then fail to resolve its child
+    ;; chart. `:chart-env-ready` (declared in the chart var's
+    ;; `:escapement/on-env-ready` metadata, threaded here by the caller) runs on
+    ;; EVERY run! — fresh start AND resume — BEFORE start!/re-invoke, so such
+    ;; setup is idempotently re-applied. Keep it idempotent (register-statechart!
+    ;; overwrites). Errors are caught so they don't take down the runner.
+    (when chart-env-ready
+      (try (chart-env-ready env)
+           (catch Throwable _ nil)))
     ;; Hook for callers (e.g. CLI's TUI) that need the queue/env at the
     ;; moment env is built but the chart hasn't started yet. Errors in
     ;; the callback are caught so they don't take down the runner.
@@ -362,8 +426,33 @@
       ;; Start or resume
       (let [existing (sp/get-working-memory store env session-id)]
         (if (and resume? existing (seq (::sc/configuration existing #{})))
-          (transcript-fn {:event :runner/resumed
-                          :data  {:config (vec (::sc/configuration existing))}})
+          (do
+            (transcript-fn {:event :runner/resumed
+                            :data  {:config (vec (::sc/configuration existing))}})
+            ;; Re-invoke-on-resume (engine foundation): the library does NOT
+            ;; re-invoke states already present in a restored configuration, so
+            ;; a conversation node that was mid-flight (or fork-seeded) would
+            ;; never re-run. Re-start the invocations of every invoking state in
+            ;; the restored config. No-op when the config has no invoking states
+            ;; (e.g. a resume awaiting a plain external event). See
+            ;; escapement.engine.reinvoke. The processor keys workers by
+            ;; [session-id invokeid] and kills any same-key worker first, so this
+            ;; cannot double-spawn.
+            (let [invoking (reinvoke/invoking-states-in-config
+                             (try (sp/get-statechart (::sc/statechart-registry env)
+                                                     (::sc/statechart-src existing))
+                                  (catch Throwable _ nil))
+                             existing)
+                  wmem'    (reinvoke/reinvoke-active-invocations! env existing)]
+              ;; Observability: name the invoking states we re-started (or note
+              ;; an empty set). A resume that finds invoking states but cannot
+              ;; resolve their (sub)chart in the registry produces the classic
+              ;; "dead branch" (resumed → done, nothing ran); surfacing the set
+              ;; makes that diagnosable instead of silent. See :chart-env-ready.
+              (transcript-fn {:event :runner/reinvoked
+                              :data  {:states (vec invoking)}})
+              (when-not (identical? wmem' existing)
+                (sp/save-working-memory! store env session-id wmem'))))
           ;; Seed the chart's data model with `:initial-data` by passing it as
           ;; `::sc/invocation-data` in the start params (per the library's
           ;; v20150901_impl/initialize!).

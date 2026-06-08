@@ -194,6 +194,67 @@
   (some-> model catalog/max-output-tokens))
 
 ;; ===========================================================================
+;; Debug override injection (time-travel debugger; see docs/opentui-debugger.md)
+;; ===========================================================================
+
+(defn apply-debug-overrides
+  "Layer a debugger `:debug/overrides` map ABOVE a conversation node's `params`
+   for a single re-entered turn assembly, returning `{:params <patched> :pinned
+   <candidate-or-nil>}`.
+
+   Overrides win over node params (which already win over alias defaults), so
+   this is one tier above the existing node-over-alias precedence. Scoping by
+   node-id/visit is the CALLER's responsibility (see
+   `escapement.invocation.llm-conversation` start-invocation!); this fn only
+   computes the patched params for the already-targeted node.
+
+   Honored override keys (all optional):
+     * `:alias`       — keyword (or name-string on the wire) naming an
+                        `:llm/aliases` entry; sets `params :model` so the
+                        existing keyword-alias resolution picks that alias's
+                        provider+model+defaults. Cleared from `:models` so the
+                        single pick wins.
+     * `:provider` + `:model` — when BOTH present (provider keyword/name-string,
+                        model plain string), short-circuits resolution by
+                        returning a `:pinned` candidate `{:provider :model
+                        :params}` for `run-turn` (no failover). Takes precedence
+                        over `:alias`.
+     * `:temperature` — number; threaded onto `params` (build-request emits it).
+     * `:system`      — string; replaces the node's `:system` prompt.
+     * `:system-append` — string; APPENDS to the node's existing `:system`
+                        prompt (after a blank-line separator) instead of
+                        replacing it — for ad-hoc injection that keeps the
+                        node's own instructions intact. Applied after `:system`
+                        (so both may be combined: replace then append).
+
+   `:messages`/`:turn`/`:resume-turn` are seeded into the worker's message
+   history by the caller, NOT here (they are not `build-request` params).
+
+   A nil/empty overrides map returns the params unchanged with `:pinned nil`."
+  [params overrides]
+  (let [as-kw    (fn [x] (cond (keyword? x) x (string? x) (keyword x) :else x))
+        provider (as-kw (:provider overrides))
+        model    (:model overrides)               ; plain string both sides
+        alias    (as-kw (:alias overrides))
+        pinned   (when (and provider model)
+                   {:provider provider
+                    :model    model
+                    :params   (select-keys overrides
+                                [:temperature :top-p :top-k :thinking :max-tokens])})
+        params'  (cond-> params
+                   ;; alias selection: a single keyword pick supersedes any
+                   ;; node :models vector so the chosen alias's targets resolve.
+                   (and alias (not pinned)) (-> (assoc :model alias) (dissoc :models))
+                   (contains? overrides :temperature) (assoc :temperature (:temperature overrides))
+                   (contains? overrides :system)      (assoc :system (:system overrides))
+                   (contains? overrides :system-append)
+                   (update :system (fn [s]
+                                     (if (seq s)
+                                       (str s "\n\n" (:system-append overrides))
+                                       (:system-append overrides)))))]
+    {:params params' :pinned pinned}))
+
+;; ===========================================================================
 ;; Model resolution (keyword aliases → ordered candidates, with :needs gate)
 ;; ===========================================================================
 

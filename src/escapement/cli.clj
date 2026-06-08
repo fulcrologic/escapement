@@ -938,6 +938,7 @@
                                  ((requiring-resolve 'opentui.sidecar/make-ws-handlers)
                                   {:control-handle control-handle
                                    :controller     debug-controller
+                                   :ws-hub         ws-hub
                                    :publish-debug! publish-debug!
                                    :on-answered    (when ws-hub
                                                      (let [clear! (requiring-resolve 'escapement.ui.ws-push/clear-pending-prompt!)]
@@ -1013,7 +1014,18 @@
                                    (when code (System/exit code))))
         exit-code
         (try
-          (let [session-kw         (keyword "session" session)
+          (let [;; NOT a namespaced keyword (`:session/<uuid>`): a UUID usually
+                ;; starts with a digit, and a *namespaced* keyword whose name
+                ;; starts with a digit is printable via `pr-str` but is an INVALID
+                ;; EDN token on read-back — so any checkpoint wmem carrying this
+                ;; value (the engine stamps `::sc/session-id` into working memory)
+                ;; could not be re-read, and the debugger's branch fork crashed
+                ;; with "Invalid token: :session/<uuid>". A *non-namespaced*
+                ;; keyword with a digit-leading name (`:session-<uuid>`) round-trips
+                ;; through EDN cleanly. All downstream forms derive from this value
+                ;; (str / safe-segment / short-session strip the leading colon),
+                ;; so they stay internally consistent.
+                session-kw         (keyword (str "session-" session))
                 ;; OpenTUI: spawn + supervise the Bun sidecar. It connects back to
                 ;; the just-started api-server's WS and owns the tty; the agent runs
                 ;; headless below. A watcher thread tears the run down if the sidecar
@@ -1078,6 +1090,13 @@
                                              :resume?                (boolean (:resume opts))
                                              :trace?                 (boolean (:trace opts))
                                              :multi-session?         (boolean (:multi-session? chart-meta))
+                                             ;; Chart-declared env setup that must survive resume
+                                             ;; (e.g. sub-chart registration). Runs on every run!
+                                             ;; (start AND resume) so a multi-session chart whose
+                                             ;; on-entry registration does not re-fire on resume
+                                             ;; still resolves its child charts. See runner/run!
+                                             ;; :chart-env-ready.
+                                             :chart-env-ready        (:escapement/on-env-ready chart-meta)
                                              :prelude-events         prelude-events
                                              ;; Tee the transcript event stream to the JLine TUI
                                              ;; (when present) AND the live WS push hub (when the

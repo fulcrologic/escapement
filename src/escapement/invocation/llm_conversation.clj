@@ -27,6 +27,9 @@
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.capture :as capture]
     [escapement.chart.service :as service]
+    [escapement.debug.controller :as dbg]
+    [escapement.debug.replay :as dreplay]
+    [escapement.storage.disk-read :as disk-read]
     [escapement.threads :as threads]
     [escapement.llm :as ellm]
     [escapement.llm.catalog :as catalog]
@@ -378,6 +381,20 @@
 (defn- text-user-message [text]
   {:role :user :content [{:type :text :text text}]})
 
+(defn- role-text-message
+  "Build a single text message for `role` (:user | :assistant) carrying `text`.
+   Used by the debugger to seed the worker history from an edited transcript
+   prefix (wire entries `{:role :user|:assistant :text \"…\"}`). A `:system`
+   entry is NOT a messages-list role on the Anthropic Messages API — it is
+   carried via the `:system` override param — so it is skipped here (returns
+   nil; the caller filters)."
+  [role text]
+  (let [role (cond (keyword? role) role (string? role) (keyword role) :else role)]
+    (case role
+      :assistant {:role :assistant :content [{:type :text :text (str text)}]}
+      :system    nil
+      {:role :user :content [{:type :text :text (str text)}]})))
+
 ;; ---------------------------------------------------------------------------
 ;; Resilience: transient-error retry + max_tokens continuation
 ;; ---------------------------------------------------------------------------
@@ -465,15 +482,18 @@
    `parent-ctx` is the worker's context (env/queue/parent-session-id/invokeid).
    `state*` holds the per-tool_use_id retry counters."
   [{:keys [tool-registry name->tool-kw name->event-entry name->region-tool
-           tool-reply-queue worker-state retry-counts transcript-fn capture turn]
+           tool-reply-queue worker-state retry-counts transcript-fn capture turn
+           replay-ctx]
     :as   ctx} parent-ctx block]
   (let [{:keys [id name input]} block
         retries (get @retry-counts id 0)
         post-tool-result!
                 (fn post-tool-result!
                   ([tool-label is-error result-content]
-                   (post-tool-result! tool-label is-error result-content nil))
+                   (post-tool-result! tool-label is-error result-content nil nil))
                   ([tool-label is-error result-content resolved-path]
+                   (post-tool-result! tool-label is-error result-content resolved-path nil))
+                  ([tool-label is-error result-content resolved-path replay-source]
                    (when transcript-fn
                      ;; Externalize the FULL tool result to a blob (it can be large — file reads,
                      ;; REPL output, and it is a replay input for node-refine); keep only an
@@ -493,12 +513,25 @@
                                           :content-preview (capture/snippet result-content)
                                           :invokeid        (:invokeid parent-ctx)}
                                    resolved-path (assoc :resolved-path resolved-path)
+                                   ;; Branch-replay provenance (wire §9.4): "captured"
+                                   ;; (served by match) | "live" (executed on the branch).
+                                   replay-source (assoc :replay/source replay-source)
                                    io-ref (assoc :io/ref (:io/ref io-ref)))})))))]
     (cond
       ;; Real tool
       (contains? name->tool-kw name)
       (let [tool-kw (get name->tool-kw name)
-            {:keys [result is-error resolved-path]} (tp/dispatch tool-registry tool-kw (or input {}))]
+            ;; On a forked branch (replay-ctx present) route through replay-aware
+            ;; dispatch: captured-by-match else guarded-live + a `:replay/source`
+            ;; tag. Off-branch this is the plain live `tp/dispatch`.
+            disp    (if replay-ctx
+                      (dreplay/replay-aware-dispatch
+                        replay-ctx
+                        {:node-id (:node-id capture) :visit (:visit capture) :turn turn}
+                        tool-kw tool-kw (or input {}))
+                      (tp/dispatch tool-registry tool-kw (or input {})))
+            {:keys [result is-error resolved-path]} disp
+            replay-source (:replay/source disp)]
         ;; `tp/dispatch` validates; treat validation failures as bad-tool-use for retry semantics.
         (if (and is-error (str/includes? (or result "") "failed validation"))
           (do
@@ -516,7 +549,7 @@
                 {:result-block {:type    :tool_result :tool_use_id id
                                 :content result :is-error true}})))
           (do
-            (post-tool-result! tool-kw is-error (or result "") resolved-path)
+            (post-tool-result! tool-kw is-error (or result "") resolved-path replay-source)
             {:result-block {:type    :tool_result :tool_use_id id
                             :content (or result "") :is-error (boolean is-error)}})))
 
@@ -684,7 +717,7 @@
    are the invocation context's once-resolved `:needs`-gate inputs."
   [{:keys [backend transcript-fn worker-state model-status
            parent-ctx catalog-ratings eligibility-strict? aliases preferences
-           capture turn-count]}
+           capture turn-count pinned]}
    params messages tools]
   (let [turn     (when turn-count (dec (long @turn-count)))
         invokeid (:invokeid parent-ctx)
@@ -709,6 +742,14 @@
                                          :system-preview (capture/snippet (:system params))
                                          :invokeid       invokeid
                                          :session-id     (:parent-session-id parent-ctx)}
+                                  ;; Carry the capture coordinates so the OpenTUI
+                                  ;; debugger can resolve invokeid -> {node-id,visit}
+                                  ;; for `request-conversation` (wire §9.1). node-id
+                                  ;; rides as `(str <kw>)` (":writer") so the agent's
+                                  ;; `capture/encode-node-id` strips the colon to the
+                                  ;; same path the turn was captured under.
+                                  (:node-id capture) (assoc :node-id (str (:node-id capture)))
+                                  (:visit capture)   (assoc :visit (:visit capture))
                                   m        (assoc :model m)
                                   provider (assoc :provider provider)
                                   io-ref   (assoc :io/ref (:io/ref io-ref)))})))
@@ -766,6 +807,11 @@
                     :catalog-ratings     (or catalog-ratings {})
                     :eligibility-strict? eligibility-strict?
                     :model-status        model-status
+                    ;; Debugger override: an explicit provider+model pin
+                    ;; short-circuits resolution for this re-entered node only
+                    ;; (see escapement.llm/apply-debug-overrides). nil ⇒ normal
+                    ;; alias/preference resolution.
+                    :pinned              pinned
                     :hooks               hooks}
                    params messages tools)]
     (case (:status env)
@@ -808,7 +854,22 @@
    from parsed content (its JSON args never parsed); such a segment yields no
    forward progress and is surfaced via `:no-progress` rather than a malformed
    tool call ever being dispatched."
-  [{:keys [transcript-fn parent-ctx] :as ctx} params base-messages tools]
+  [{:keys [transcript-fn parent-ctx debug-controller node-id visit] :as ctx} params base-messages tools]
+  ;; Debugger LLM-turn breakpoint (task 005). BEFORE issuing the turn: if the
+  ;; shared controller has armed the turn breakpoint, emit a
+  ;; `:debug/awaiting-turn` row (the turn-level analog of the queue's
+  ;; `:debug/awaiting-step`) and PARK the worker on the controller's turn-gate
+  ;; until `turn-next!` / `continue!` releases it. Gated only at the turn
+  ;; boundary — never mid-tool. No-op when no controller (normal run) or unarmed.
+  (when (and debug-controller (dbg/turn-armed? debug-controller))
+    (transcript! transcript-fn
+      {:event :debug/awaiting-turn :ts (now-ms)
+       :data  {:invokeid   (->id-str (:invokeid parent-ctx))
+               :session-id (:parent-session-id parent-ctx)
+               :node-id    (->id-str node-id)
+               :visit      visit
+               :turn-index (:turn-index @debug-controller)}})
+    (dbg/await-turn-release! debug-controller))
   ;; Overrun primitive (escapement.llm `:resilience :overrun`): when a per-turn
   ;; output ceiling with reruns is configured, a `:max_tokens` stop is the
   ;; truncation trip wire — NOT an invitation to stitch an unbounded
@@ -1227,7 +1288,8 @@
                        :retry-counts      retry-counts
                        :transcript-fn     transcript-fn
                        :capture           capture
-                       :turn              turn}
+                       :turn              turn
+                       :replay-ctx        (:replay-ctx ctx)}
                       parent-ctx b)]
                 (swap! results conj result-block)
                 (when (:posted-event? block-res) (reset! posted-event? true))
@@ -1496,6 +1558,34 @@
           _                 (when-let [old (get @workers k)]
                               (reset! (:worker-state old) :dying))
           queue             (::sc/event-queue env)
+          ;; Capture coordinates (node-id/visit) are computed UP HERE — before
+          ;; params/messages are finalized — because the debugger's
+          ;; `:debug/overrides` (task 003) is SCOPED to one re-entered node by
+          ;; {node-id, visit} and may rewrite params + seed messages below.
+          node-id           (env-ns/context-element-id env)
+          artifact-store    (:escapement/artifact-store env)
+          visit-counts      (:escapement/visit-counts env)
+          visit             (when (and artifact-store visit-counts)
+                              (get (swap! visit-counts update node-id (fnil inc -1)) node-id))
+          ;; Debugger override injection. `:debug/overrides` (env key from task
+          ;; 002) binds to exactly one conversation node; it applies ONLY when
+          ;; its `:node-id` matches this node AND (when it names a `:visit`) the
+          ;; visit matches too. Absent/non-matching ⇒ no overrides. The patched
+          ;; params (provider/model via :alias OR explicit provider+model pin,
+          ;; :temperature, :system) layer ABOVE node params; :messages seeds the
+          ;; worker history (resume-from-turn = an edited prefix). See
+          ;; escapement.llm/apply-debug-overrides + docs/opentui-debugger.md.
+          dbg-overrides     (let [o (:debug/overrides env)]
+                              (when (and (map? o)
+                                      (or (nil? (:node-id o)) (= (:node-id o) node-id))
+                                      (or (not (contains? o :visit))
+                                        (nil? (:visit o))
+                                        (= (:visit o) visit)))
+                                o))
+          {params  :params
+           pinned  :pinned} (if dbg-overrides
+                              (ellm/apply-debug-overrides params dbg-overrides)
+                              {:params params :pinned nil})
           {:keys [real-tools allowed-events chart-tools initial-messages initial-user-message]} params
           [real-defs name->tool-kw] (resolve-real-tools tool-registry real-tools)
           [event-defs name->event] (event-tool-defs (or allowed-events []))
@@ -1508,7 +1598,21 @@
                                        chart-tools
                                        region-tool-default-timeout-ms)
           tool-defs         (into [] (concat real-defs event-defs region-defs))
+          ;; Debugger: `:messages` is the EDITED transcript prefix (up to and
+          ;; including the resume turn). When present it SEEDS the worker's
+          ;; history verbatim — replacing initial-messages / captured history —
+          ;; so re-issuing starts from the edited state at `:resume-turn`/`:turn`.
+          ;; Each entry is `{:role :user|:assistant|:system :text "…"}` (wire
+          ;; contract, task 001); normalize to the worker's message shape.
+          override-msgs     (when dbg-overrides
+                              (some->> (:messages dbg-overrides)
+                                seq
+                                (keep (fn [{:keys [role text]}]
+                                        (role-text-message role text)))
+                                vec
+                                not-empty))
           initial-msgs      (cond
+                              override-msgs        override-msgs
                               (seq initial-messages) (vec initial-messages)
                               initial-user-message [(text-user-message initial-user-message)]
                               :else [])
@@ -1517,14 +1621,9 @@
           user-msg-queue    (ArrayBlockingQueue. 256)
           tool-reply-queue  (ArrayBlockingQueue. 64)
           retry-counts      (atom {})
-          ;; Capture coordinates for this node invocation (io-refactor-plan.md §0/§3). node-id is the
-          ;; chart element that holds the <invoke>; visit is its 0-based entry count this run; turn is
-          ;; owned per-turn by the worker. Absent artifact-store => capture is a no-op (e.g. tests).
-          node-id           (env-ns/context-element-id env)
-          artifact-store    (:escapement/artifact-store env)
-          visit-counts      (:escapement/visit-counts env)
-          visit             (when (and artifact-store visit-counts)
-                              (get (swap! visit-counts update node-id (fnil inc -1)) node-id))
+          ;; Capture coordinates for this node invocation (io-refactor-plan.md §0/§3). node-id/visit
+          ;; were resolved ABOVE (the debugger override scope needs them before params/messages are
+          ;; finalized); turn is owned per-turn by the worker. Absent artifact-store => no-op.
           capture           (when artifact-store
                               {:store      artifact-store
                                :session-id parent-session-id
@@ -1536,10 +1635,35 @@
                               (try (capture/capture-seed! capture
                                      {:params params :initial-messages initial-msgs})
                                    (catch Throwable _ nil)))
+          ;; Node-entry checkpoint: MOVED to the runner (escapement.runner,
+          ;; process-targeted-event!), written post-macrostep so the snapshot has
+          ;; this conversation node IN the configuration (re-invokable on resume)
+          ;; — not the PRE-entry config the old in-processor write captured here.
+          ;; The runner keys it by the same {node-id, visit} the capture layer
+          ;; stamps (the visit-counts atom is bumped synchronously above), so a
+          ;; UI conversation selection maps 1:1 to a restorable snapshot
+          ;; (`escapement.debug.branch` reads it via store/resolve-node-entry-wmem).
+          ;; Replay-aware tool dispatch (time-travel debugger, decision 3). On a
+          ;; FORKED BRANCH the env carries `:debug/replay-policy` (set by
+          ;; `escapement.ui.debug-control/rerun-from!`); build the parent's
+          ;; combined transcript+artifact store from the policy's `:work-dir`,
+          ;; index its captured tool-results once, and hand the worker a
+          ;; replay-ctx so each tool call is served from the captured result by
+          ;; match (else executed live + flagged `:replay/source "live"`). Absent
+          ;; policy (every normal run) ⇒ nil ⇒ the worker dispatches live as before.
+          replay-ctx        (when-let [policy (:debug/replay-policy env)]
+                              (try
+                                (when-let [pstore (some-> (:work-dir policy) disk-read/new-store)]
+                                  {:replay        (dreplay/make-index pstore policy)
+                                   :parent-store  pstore
+                                   :policy        policy
+                                   :tool-registry tool-registry})
+                                (catch Throwable _ nil)))
           parent-ctx        {:env               env :queue queue
                              :parent-session-id parent-session-id
                              :invokeid          invokeid}
           ctx               {:backend             backend
+                             :replay-ctx          replay-ctx
                              :tool-registry       tool-registry
                              :transcript-fn       (or transcript-fn (fn [_] nil))
                              :name->tool-kw       name->tool-kw
@@ -1562,6 +1686,17 @@
                              :capture             capture
                              :turn-count          turn-count
                              :params              params
+                             ;; Debugger explicit provider+model pin (nil ⇒
+                             ;; normal resolution). Threaded to try-models!/
+                             ;; run-turn for every turn of THIS re-entered node.
+                             :pinned              pinned
+                             ;; Debugger LLM-turn breakpoint gate (task 005).
+                             ;; The shared pause/step controller lives on the
+                             ;; instrumented queue (nil on a normal run); the
+                             ;; worker parks on its turn-gate before each turn.
+                             :debug-controller    (:controller queue)
+                             :node-id             node-id
+                             :visit               visit
                              :parent-ctx          parent-ctx}
           runnable          (fn [] (run-worker! ctx))
           ^Thread thread    (threads/unstarted-daemon

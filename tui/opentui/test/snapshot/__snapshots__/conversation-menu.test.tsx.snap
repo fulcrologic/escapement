@@ -1,0 +1,13 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`ConversationMenu — render snapshot open menu renders Transcript-first item list 1`] = `
+"╭──────────────────────────────────────────────────────────────╮
+│ ▸ conversation agent.42                                      │
+│   ▸ Transcript                                               │
+│     Re-run from here…                                        │
+│     Break before next LLM                                    │
+│     Cancel                                                   │
+│   ↑/↓ move · Enter select · Esc cancel                       │
+╰──────────────────────────────────────────────────────────────╯
+"
+`;

@@ -105,8 +105,16 @@
    `publish-debug!` (optional, nil-safe) is called after every controller op
    with the current `{:paused :step-budget :config}` snapshot so the sidecar's
    PAUSED banner / Debugger view reflect live state without polling
-   (`docs/opentui-wire.md` §6 forward push)."
-  [{:keys [control-handle controller on-quit publish-debug! on-answered]}]
+   (`docs/opentui-wire.md` §6 forward push).
+
+   `ws-hub` (optional) is the `escapement.ui.ws-push` fan-out hub. When present,
+   the time-travel debugger ops (wire §9: `arm-llm-breakpoint`/`turn-next`/
+   `turn-back`/`continue`-at-turn/`rerun-from`/`request-model-catalog`/
+   `request-conversation`) push their forward frames (`model-catalog`/
+   `conversation`/extended `debug`) back over it. The control surface itself
+   (`escapement.ui.debug-control`) is reached via `requiring-resolve`, keeping
+   the architecture boundary intact."
+  [{:keys [control-handle controller on-quit publish-debug! on-answered ws-hub]}]
   (let [push-debug! (fn []
                       (when (and controller publish-debug!)
                         (try
@@ -114,17 +122,78 @@
                            {:paused      (dbg/paused? controller)
                             :step-budget (long (or (:step-budget @controller) 0))
                             :config      (:config (ctrl-handle/live control-handle))})
-                          (catch Throwable _ nil))))]
+                          (catch Throwable _ nil))))
+        ;; Lazy bridges to the UI add-on + ws-push forward frames (boundary-safe:
+        ;; resolved at call time via requiring-resolve, never a static require).
+        resolve-fn    (fn [sym] (try (requiring-resolve sym) (catch Throwable _ nil)))
+        push-catalog! (resolve-fn 'escapement.ui.ws-push/publish-model-catalog!)
+        push-conv!    (resolve-fn 'escapement.ui.ws-push/publish-conversation!)
+        push-dbg!     (resolve-fn 'escapement.ui.ws-push/publish-debug-frame!)
+        dc-catalog    (resolve-fn 'escapement.ui.debug-control/model-catalog)
+        dc-conv       (resolve-fn 'escapement.ui.debug-control/conversation)
+        dc-arm!       (resolve-fn 'escapement.ui.debug-control/arm-llm-breakpoint!)
+        dc-next!      (resolve-fn 'escapement.ui.debug-control/turn-next!)
+        dc-back!      (resolve-fn 'escapement.ui.debug-control/turn-back!)
+        dc-continue!  (resolve-fn 'escapement.ui.debug-control/continue!)
+        dc-frame      (resolve-fn 'escapement.ui.debug-control/debug-frame)
+        dc-rerun!     (resolve-fn 'escapement.ui.debug-control/rerun-from!)
+        push-turn-frame! (fn []
+                           (when (and ws-hub push-dbg! dc-frame)
+                             (try (push-dbg! ws-hub (dc-frame controller {}))
+                                  (catch Throwable _ nil))))]
   {:control
-   (fn [{:keys [op n]}]
+   (fn [{:keys [op n] :as msg}]
      (try
        (case (some-> op str/lower-case)
          "pause"    (when controller (dbg/pause! controller) (push-debug!))
          "step"     (when controller
                       (dotimes [_ (max 1 (or (some-> n long) 1))] (dbg/step! controller))
                       (push-debug!))
-         "continue" (when controller (dbg/continue! controller) (push-debug!))
+         "continue" (do (when (and controller dc-continue!) (dc-continue! controller))
+                        (when (and controller (not dc-continue!)) (dbg/continue! controller))
+                        (push-debug!)
+                        (push-turn-frame!))
          "arm"      (when controller (dbg/arm-pause-on-next-external! controller) (push-debug!))
+         ;; ---- Time-travel debugger ops (wire §9) ----
+         "arm-llm-breakpoint" (do (when dc-arm! (dc-arm! controller)) (push-turn-frame!))
+         "turn-next"          (do (when dc-next! (dc-next! controller)) (push-turn-frame!))
+         "turn-back"          (do (when dc-back! (dc-back! controller)) (push-turn-frame!))
+         "request-model-catalog"
+         (when (and ws-hub push-catalog! dc-catalog)
+           (push-catalog! ws-hub (dc-catalog)))
+         "request-conversation"
+         (when (and ws-hub push-conv! dc-conv)
+           (let [{:keys [env session-id]} (ctrl-handle/live control-handle)
+                 store (:escapement/artifact-store env)]
+             (when store
+               (push-conv! ws-hub
+                 (dc-conv store session-id
+                   {:invokeid (:invokeid msg)
+                    :node-id  (:node-id msg)
+                    :visit    (or (:visit msg) 0)})))))
+         "rerun-from"
+         (when dc-rerun!
+           (let [live (ctrl-handle/live control-handle)]
+             (try
+               (let [r (dc-rerun!
+                         {:live       (assoc (or live {}) :controller controller)
+                          :session-id (:session-id msg)
+                          :node-id    (:node-id msg)
+                          :visit      (or (:visit msg) 0)
+                          :turn       (or (:turn msg) 0)
+                          :overrides  (:overrides msg)})]
+                 (cond
+                   (and ws-hub push-dbg! (:branch-frame r) (:future r))
+                   (push-dbg! ws-hub (:branch-frame r))
+                   ;; A nil future means the branch never started (no resolvable
+                   ;; chart). Surface it so Ctrl-R is never a silent no-op.
+                   (and ws-hub push-dbg!)
+                   (push-dbg! ws-hub {:kind "debug" :mode "running"
+                                      :branch-error "rerun-from produced no branch (no resolvable chart to fork from)"})))
+               (catch Throwable t
+                 (when (and ws-hub push-dbg!)
+                   (push-dbg! ws-hub {:kind "debug" :mode "running"
+                                      :branch-error (str "rerun-from failed: " (.getMessage t))}))))))
          "ui-interrupt" (send-ui-event! control-handle :ui.interrupt)
          "ui-quit"  (do (send-ui-event! control-handle :ui.quit)
                         (when on-quit (on-quit)))

@@ -56,3 +56,58 @@
       (assertions
         "new value visible after successful write"
         (sp/get-working-memory s {} :s3) => {:gen 2}))))
+
+(specification "node-entry checkpoints"
+  (component "save/read by {node-id visit} round-trips and does not touch the canonical file"
+    (let [dir (tmp-dir)
+          s   (store/new-store dir)
+          wm  {:com.fulcrologic.statecharts/configuration #{:conv}
+               :user/data {:n 1}}]
+      (sp/save-working-memory! s {} "sess" {:com.fulcrologic.statecharts/configuration #{:latest}})
+      (store/save-node-entry-checkpoint! s "sess" "node-A" 0 wm)
+      (assertions
+        "node-entry snapshot reads back"
+        (store/node-entry-checkpoint s "sess" "node-A" 0) => wm
+        "missing visit returns nil"
+        (store/node-entry-checkpoint s "sess" "node-A" 1) => nil
+        "canonical session checkpoint is untouched"
+        (sp/get-working-memory s {} "sess")
+        => {:com.fulcrologic.statecharts/configuration #{:latest}})))
+
+  (component "resolve-node-entry-wmem prefers the node-entry snapshot, falls back to latest"
+    (let [dir (tmp-dir)
+          s   (store/new-store dir)
+          ne  {:com.fulcrologic.statecharts/configuration #{:entry}}
+          lat {:com.fulcrologic.statecharts/configuration #{:latest}}]
+      (sp/save-working-memory! s {} "sess" lat)
+      (store/save-node-entry-checkpoint! s "sess" "node-A" 0 ne)
+      (assertions
+        "node-entry source when snapshot present"
+        (store/resolve-node-entry-wmem s {} "sess" "node-A" 0)
+        => {:wmem ne :source :node-entry}
+        "latest fallback when no snapshot"
+        (store/resolve-node-entry-wmem s {} "sess" "node-B" 0)
+        => {:wmem lat :source :latest})))
+
+  (component "checkpoints round-trip a non-namespaced digit-leading session keyword"
+    ;; Regression: the CLI's old session-id `(keyword \"session\" <uuid>)` produced
+    ;; `:session/<uuid>` — a NAMESPACED keyword whose name starts with a digit,
+    ;; which `pr-str` writes but EDN cannot read back (\"Invalid token\"). The
+    ;; engine stamps `::sc/session-id` into working memory, so the debugger's
+    ;; branch fork crashed reading the node-entry checkpoint. Session-ids are now
+    ;; non-namespaced (`:session-<uuid>`), which round-trips cleanly even with a
+    ;; digit-leading uuid embedded in the persisted wmem.
+    (let [dir (tmp-dir)
+          s   (store/new-store dir)
+          sid (keyword (str "session-" "3d78dd3f-fbee-43dc-81aa-84d762c3ae62"))
+          wm  {:com.fulcrologic.statecharts/configuration #{:writer}
+               :com.fulcrologic.statecharts/session-id    sid
+               :data-model                                {:owner sid}}]
+      (sp/save-working-memory! s {} sid wm)
+      (store/save-node-entry-checkpoint! s sid "poet-1" 0 wm)
+      (store/reload-from-disk! s sid)
+      (assertions
+        "node-entry checkpoint reads back (no Invalid-token crash)"
+        (store/node-entry-checkpoint s sid "poet-1" 0) => wm
+        "canonical checkpoint reads back the embedded session keyword"
+        (sp/get-working-memory s {} sid) => wm))))

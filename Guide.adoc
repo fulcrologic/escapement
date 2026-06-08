@@ -1960,6 +1960,39 @@ To review a session *after* it ran, `escapement open <session-dir>` (see
 <<cli>>) re-opens a saved session dir read-only in the same sidecar — replaying
 the recorded transcript with no agent, api-server, or WebSocket.
 
+==== Time-travel debugger
+
+The OpenTUI sidecar (and only it — the JLine and web UIs do not have this) adds
+an opt-in **time-travel debugger** for LLM conversations. Press `o` on a live
+LLM row to open a conversation menu:
+
+* **Re-run from here…** — opens a debug form where you can pick a resume turn
+  (when the conversation has more than one turn), edit the system prompt and the
+  message text, pick a different provider/model (or alias) from a model-catalog
+  dropdown, and set a temperature, then **Run**. The agent restores the
+  statechart at that conversation node, applies your overrides and edited
+  transcript, and continues **forward** in a brand-new **forked branch** session
+  (its own session id, transcript, and artifacts, with `{:parent :branch-point}`
+  parentage recorded). The original run is immutable — nothing about it is
+  mutated. Tool calls on the branch that match a captured parent result are
+  replayed from the capture; genuinely new side effects past the divergence run
+  live and are flagged `:replay/source "live"` in the stream (a destructive-tool
+  guard is the mitigation for unmatched writes). Works for single-session charts
+  and multiplex charts (re-enter at the multiplex parent, scope the override to
+  one child, and the whole chart re-runs forward and is re-judged).
+* **Break before next LLM** — runs the chart until just before the next LLM turn
+  and parks there. `n` / `b` step next/back across captured turns, `c`
+  continues. This is a turn-boundary breakpoint, distinct from the per-event
+  pause/step gate behind `--debug`.
+
+For the JSON wire contract behind these frames and control ops see
+`docs/opentui-wire.md` §9; for the architecture and end-to-end flow see
+`docs/opentui-debugger.md`.
+
+A chart that registers sub-charts (e.g. a multiplex parent registering its
+worker charts) must declare that registration as resume-safe so a branch re-run
+can re-apply it — see <<on-env-ready>>.
+
 [[multi-agent]]
 == Multi-agent / team patterns
 
@@ -2253,6 +2286,37 @@ Opt in by setting `^:multi-session?` metadata on the chart var; the CLI threads 
 
 With `:multi-session?` on, the runner's `drain-once!` calls `receive-events!` without a `:session-id` filter and routes each event to `(:target event)` (falling back to the parent sid), so the parent, the multiplex aggregator, and every child session are pumped from the one loop.
 Without the flag, the parent's runner only pumps its own sid and any children wedge with un-drained events.
+
+[[on-env-ready]]
+=== `:escapement/on-env-ready` resume-safe env setup
+
+A chart that does env setup at entry — most commonly a multiplex parent that
+registers its child charts in `:run`'s `on-entry` via `sp/register-statechart!`
+— has a resume problem: `on-entry` does **not** re-fire on resume, because the
+owning state is already in the restored configuration and is never re-entered.
+On a `--resume` (or a debugger branch re-run), the child charts the parent
+registered at entry are missing, and a re-invoked multiplex/sub-chart node
+silently fails to resolve its child (you see the dead three-line branch
+`started → resumed → done`, nothing ran).
+
+Declare that setup as `:escapement/on-env-ready` metadata on the chart var
+instead. It is a `(fn [env])` the runner calls on **every** `run!` — fresh start
+AND resume — before the chart starts or any invoking state is re-invoked, so the
+registration is idempotently re-applied. Keep it idempotent.
+
+[source,clojure]
+----
+(def ^{:multi-session?           true
+       :escapement/on-env-ready register-child-charts!}  ; (fn [env]) — runs every run!
+  agent
+  (chart/statechart {...}))                ; no sub-chart registration in on-entry
+----
+
+This is what makes a multi-session/multiplex chart correctly resumable and
+re-runnable in the time-travel debugger (see <<opentui>>). A `:runner/reinvoked`
+transcript event names the invoking states the runner re-started on resume, so a
+dead branch is diagnosable. (`:escapement/on-env-ready` is chart-declared; it is
+distinct from `runner/run!`'s `:on-env-ready` caller-wiring hook.)
 
 === Transcript surface
 

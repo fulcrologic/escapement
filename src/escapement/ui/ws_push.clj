@@ -309,6 +309,45 @@
   nil)
 
 ;; -------------------------------------------------------------------------------------------------
+;; Time-travel debugger forward frames (docs/opentui-wire.md §9)
+;; -------------------------------------------------------------------------------------------------
+;; All three ride the existing non-blocking `broadcast!` discipline (out-of-band from the seq'd
+;; transcript stream). The debug frame is remembered on the hub (like `:debug-snap` from
+;; `publish-debug!`) so a late-joining client gets current branch/turn state on attach.
+
+(defn publish-model-catalog!
+  "Fan out the `model-catalog` forward frame (wire §9, R10). `frame` is the
+   Clojure map built by `escapement.ui.debug-control/model-catalog`
+   (`{:kind \"model-catalog\" :aliases […] :preferences […]}`). NON-BLOCKING +
+   never throws."
+  [hub frame]
+  (broadcast! hub (assoc frame :kind "model-catalog"))
+  nil)
+
+(defn publish-conversation!
+  "Fan out the `conversation` (editable-transcript) forward frame (wire §9). `frame`
+   is the map from `escapement.ui.debug-control/conversation`
+   (`{:kind \"conversation\" :invokeid … :node-id … :visit … :turns […]}`).
+   NON-BLOCKING + never throws."
+  [hub frame]
+  (broadcast! hub (assoc frame :kind "conversation"))
+  nil)
+
+(defn publish-debug-frame!
+  "Fan out the EXTENDED `debug` forward frame (wire §9: `mode`/`turn-index`/
+   `breakpoint-armed`/`branch`). `frame` is the map from
+   `escapement.ui.debug-control/debug-frame`. Like `publish-debug!` it is
+   remembered on the hub so a late-joining client re-syncs on attach.
+   NON-BLOCKING + never throws."
+  [hub frame]
+  (try
+    (let [frame (assoc frame :kind "debug")]
+      (swap! hub assoc :debug-snap frame)
+      (broadcast! hub frame))
+    (catch Throwable t (log! hub "publish-debug-frame! threw:" (.getMessage t))))
+  nil)
+
+;; -------------------------------------------------------------------------------------------------
 ;; Back-channel dispatch (UI -> agent)
 ;; -------------------------------------------------------------------------------------------------
 

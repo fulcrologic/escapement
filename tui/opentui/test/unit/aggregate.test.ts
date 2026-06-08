@@ -7,6 +7,8 @@ import {
   statusRank,
   shortSession,
   invokeidLive,
+  liveNodeRef,
+  liveNodeRefForSession,
   capTail,
   compareLiveOrder,
   LIVE_PARTIAL_TAIL_CHARS,
@@ -273,6 +275,67 @@ describe("foldLiveEvent — per-session lifecycle", () => {
       ev("llm/delta", 3, { invokeid: IID, "session-id": "s1", text: "a" }),
     ]);
     expect(Object.keys(m[IID]!.sessions).sort()).toEqual(["s1", "s2"]);
+  });
+
+  test("llm/request stamps node-id/visit onto the existing session (debugger §9.1)", () => {
+    const m = fold([
+      ev("llm/start", 1, { invokeid: IID, "session-id": SID }),
+      ev("llm/request", 2, {
+        invokeid: IID,
+        "session-id": SID,
+        model: "gpt-4o",
+        "node-id": ":writer",
+        visit: 3,
+      }),
+    ]);
+    expect(m[IID]!.sessions[SID]!.nodeId).toBe(":writer");
+    expect(m[IID]!.sessions[SID]!.visit).toBe(3);
+  });
+});
+
+describe("liveNodeRef", () => {
+  test("resolves the latest session's capture coordinates for an invokeid", () => {
+    const m = fold([
+      ev("llm/start", 1, { invokeid: IID, "session-id": SID }),
+      ev("llm/request", 2, { invokeid: IID, "session-id": SID, "node-id": ":writer", visit: 3 }),
+    ]);
+    expect(liveNodeRef(m, IID)).toEqual({ nodeId: ":writer", visit: 3 });
+  });
+
+  test("returns null for an unknown invokeid or one with no node-id seen", () => {
+    const m = fold([ev("llm/start", 1, { invokeid: IID, "session-id": SID })]);
+    expect(liveNodeRef(m, "nope")).toBeNull();
+    expect(liveNodeRef(m, IID)).toBeNull(); // started, no llm/request yet
+    expect(liveNodeRef(m, null)).toBeNull();
+  });
+});
+
+describe("liveNodeRefForSession", () => {
+  // Parallel multiplex children share one invokeid; each is a distinct sub-chart
+  // session with its OWN node-entry checkpoint (visit). A re-run must target the
+  // SELECTED sibling — liveNodeRef (latest) would pick the wrong poet.
+  test("resolves the SPECIFIC session's coordinates, not the most-recent sibling", () => {
+    const m = fold([
+      ev("llm/start", 1, { invokeid: IID, "session-id": "multiplex.poets.4" }),
+      ev("llm/start", 2, { invokeid: IID, "session-id": "multiplex.poets.5" }),
+      ev("llm/request", 3, { invokeid: IID, "session-id": "multiplex.poets.4", "node-id": ":haiku-1", visit: 3 }),
+      ev("llm/request", 4, { invokeid: IID, "session-id": "multiplex.poets.5", "node-id": ":haiku-1", visit: 4 }),
+    ]);
+    // liveNodeRef picks the latest (poets.5 / visit 4)…
+    expect(liveNodeRef(m, IID)).toEqual({ nodeId: ":haiku-1", visit: 4 });
+    // …but the per-session form pins the selected sibling.
+    expect(liveNodeRefForSession(m, IID, "multiplex.poets.4")).toEqual({ nodeId: ":haiku-1", visit: 3 });
+    expect(liveNodeRefForSession(m, IID, "multiplex.poets.5")).toEqual({ nodeId: ":haiku-1", visit: 4 });
+  });
+
+  test("returns null for an unknown session or null args", () => {
+    const m = fold([
+      ev("llm/start", 1, { invokeid: IID, "session-id": "multiplex.poets.4" }),
+      ev("llm/request", 2, { invokeid: IID, "session-id": "multiplex.poets.4", "node-id": ":haiku-1", visit: 3 }),
+    ]);
+    expect(liveNodeRefForSession(m, IID, "multiplex.poets.9")).toBeNull();
+    expect(liveNodeRefForSession(m, IID, null)).toBeNull();
+    expect(liveNodeRefForSession(m, null, "multiplex.poets.4")).toBeNull();
   });
 });
 

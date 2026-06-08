@@ -100,7 +100,7 @@ describe("ansi256ToRgb / decodeSgr — SGR -> truecolor", () => {
 });
 
 // Keys that intentionally carry only a background color (no foreground).
-const BG_ONLY_KEYS = new Set(["selection-bg"]);
+const BG_ONLY_KEYS = new Set(["selection-bg", "overlay-bg"]);
 const keyColor = (t: ReturnType<typeof makeTheme>, k: ThemeKey) =>
   BG_ONLY_KEYS.has(k) ? t.bg(k) : t.themeColor(k);
 

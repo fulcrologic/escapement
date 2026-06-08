@@ -229,9 +229,16 @@ export function Shell(props: ShellProps) {
       </box>
 
       {/* --- human-input modal (task 013), above the footer --- */}
-      <Show when={props.modal?.(ctx(focus(), fullInner()))}>
-        {(el: () => JSX.Element) => el()}
-      </Show>
+      {/* Rendered directly (not wrapped in <Show>): the modal slot always
+          returns a self-hiding fragment, so the slot's children manage their own
+          visibility. Wrapping it in `<Show when={props.modal?.(…)}>` evaluated the
+          render function TWICE (once for the `when` truthiness check, once for the
+          child), mounting two component instances. Imperatively-opened children
+          (the conversation menu + re-run form, reached via a `ref` hook) then bound
+          the ref to one instance while the OTHER was the one actually rendered, so
+          opening them did nothing on screen. A single direct render keeps one
+          instance the ref binds to. */}
+      {props.modal?.(ctx(focus(), fullInner()))}
 
       {/* --- footer --- */}
       <Footer

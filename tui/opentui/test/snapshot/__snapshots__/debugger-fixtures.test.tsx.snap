@@ -1,0 +1,61 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`debugger fixtures — snapshots conversation action menu (open) renders Transcript-first 1`] = `
+"╭──────────────────────────────────────────────────────────────╮
+│ ▸ conversation planner                                       │
+│   ▸ Transcript                                               │
+│     Re-run from here…                                        │
+│     Break before next LLM                                    │
+│     Cancel                                                   │
+│   ↑/↓ move · Enter select · Esc cancel                       │
+╰──────────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`debugger fixtures — snapshots re-run form (multi-turn): turn selector + full model dropdown 1`] = `
+"╭────────────────────────────────────────────────────────────────────────╮
+│ ⤴ Re-run from here · turn 0                                            │
+│▸ Turn                                                                  │
+│     ▸ turn 0 (gpt-4o)                                                  │
+│       turn 1 (gpt-4o)                                                  │
+│  Model                                                                 │
+│     ▸ (keep captured: gpt-4o)                                          │
+│       fast · ollama/gemma3:1b  [pref 0]                                │
+│       smart · openai/gpt-4o  [pref 1]                                  │
+│       smart · anthropic/claude-sonnet  [pref 1]                        │
+│  Temperature                                                           │
+│     (default)                                                          │
+│  System prompt                                                         │
+│     You are a planner.                                                 │
+│  Messages                                                              │
+│       [system] You are a planner.                                      │
+│       [user] Draft a plan.                                             │
+│   Tab field · ↑/↓ move · Enter edit msg · type to edit · Ctrl-R run …  │
+╰────────────────────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`debugger fixtures — snapshots re-run form (single-turn): dropdown only, no turn selector 1`] = `
+"╭────────────────────────────────────────────────────────────────────────╮
+│ ⤴ Re-run from here · turn 0                                            │
+│▸ Model                                                                 │
+│     ▸ (keep captured: gpt-4o)                                          │
+│       fast · ollama/gemma3:1b  [pref 0]                                │
+│       smart · openai/gpt-4o  [pref 1]                                  │
+│       smart · anthropic/claude-sonnet  [pref 1]                        │
+│  Temperature                                                           │
+│     (default)                                                          │
+│  System prompt                                                         │
+│     You are a planner.                                                 │
+│  Messages                                                              │
+│       [system] You are a planner.                                      │
+│       [user] Draft a plan.                                             │
+│   Tab field · ↑/↓ move · Enter edit msg · type to edit · Ctrl-R run …  │
+╰────────────────────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`debugger fixtures — snapshots breakpoint controls: paused at turn (armed) from fixture 1`] = `
+"  ◆ BREAK @ turn 1 · armed  —  n next · b back · c continue
+"
+`;

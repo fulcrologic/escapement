@@ -906,16 +906,22 @@
         {:verb :error :raw text}))
     {:verb :error :raw ""}))
 
-(def ^{:multi-session? true :interactive? true} agent
+;; `:escapement/on-env-ready` is the runner's resume-safe env-setup seam: it runs
+;; on EVERY run! (fresh start AND resume), before the chart starts or any
+;; invoking state is re-invoked. We register the poet/judge sub-charts here
+;; INSTEAD of in `:run`'s on-entry, because on-entry does NOT re-fire on resume
+;; (the `:run` state is already in the restored config) — so a forked/branched
+;; re-run of a downstream multiplex phase (e.g. resuming at `:composing`) would
+;; otherwise find `::poet`/`::judge*` unregistered and silently fail to
+;; re-invoke. register-child-charts! is idempotent. See runner/run!
+;; :chart-env-ready and the CLI's `(:escapement/on-env-ready chart-meta)` wiring.
+(def ^{:multi-session?           true
+       :interactive?            true
+       :escapement/on-env-ready register-child-charts!} agent
   (chart/statechart
     {:initial :run
      :name    "haiku-tournament-dynamic"}
     (state {:id :run :initial :planning}
-
-      (on-entry {}
-        (script {:expr (fn [env _data]
-                         (register-child-charts! env)
-                         nil)}))
 
       ;; ---------- PHASE 1: planner (plain text START/ABORT) ----------
       (state {:id :planning}

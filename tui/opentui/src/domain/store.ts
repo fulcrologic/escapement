@@ -18,9 +18,11 @@
  */
 
 import type {
+  ConversationEnvelope,
   DebugEnvelope,
   EventEnvelope,
   ForwardFrame,
+  ModelCatalogEnvelope,
   PhaseEnvelope,
   PromptEnvelope,
 } from "../transport/wire";
@@ -32,9 +34,13 @@ import {
 } from "./entries";
 import { foldLiveEvent } from "./aggregate";
 import type {
+  DebugBranch,
+  DebugConversation,
+  DebugMode,
   EventLike,
   InvocationEntry,
   LiveMap,
+  ModelCatalog,
   PhaseModel,
   ScrollbackEntry,
 } from "./types";
@@ -64,12 +70,58 @@ export interface DomainState {
   lastSeq: number;
 }
 
-/** Live debugger snapshot mirrored into the store (task 014). */
+/**
+ * Live debugger snapshot mirrored into the store (tasks 014 + time-travel
+ * 009-012). The base fields (`paused`, `stepBudget`, `config`) come from the
+ * original §6 `debug` frame; the time-travel fields are folded from the
+ * extended `debug` frame plus the separate `model-catalog` / `conversation`
+ * forward frames.
+ *
+ * Reducer contract:
+ *  - `reduceDebug` writes mode/branch/turnIndex/breakpointArmed/paused/
+ *    stepBudget/config (defaulting absent wire keys: mode⇒"running",
+ *    branch⇒null, turnIndex⇒null, breakpointArmed⇒false), and PRESERVES the
+ *    last-seen `modelCatalog` / `conversation` (those arrive on their own
+ *    frames, never on `debug`).
+ *  - `reduceModelCatalog` writes only `modelCatalog`, preserving everything else.
+ *  - `reduceConversation` writes only `conversation`, preserving everything else.
+ */
 export interface DebugState {
   paused: boolean;
   stepBudget: number;
   /** Active config the agent reported at snapshot time, if any. */
   config?: string[];
+
+  // --- Time-travel debugger slice (tasks 009-012) --------------------------
+  /** Debugger mode; "running" when the wire omits it. */
+  mode: DebugMode;
+  /** Active forked branch, or null on the original run. */
+  branch: DebugBranch | null;
+  /** Current turn pointer while paused at a turn gate; null otherwise. */
+  turnIndex: number | null;
+  /** True after `arm-llm-breakpoint` until the gate is hit. */
+  breakpointArmed: boolean;
+  /** Last-seen model/alias catalog (from a `model-catalog` frame); null until requested. */
+  modelCatalog: ModelCatalog | null;
+  /** Last-seen editable conversation (from a `conversation` frame); null until requested. */
+  conversation: DebugConversation | null;
+  /** Set when a `rerun-from` failed to start a branch; shown as a banner so
+   *  Ctrl-R is never a silent no-op. Cleared by the next debug frame. */
+  branchError?: string | null;
+}
+
+/** A fresh time-travel slice with all-default values (no controller state yet). */
+function emptyDebugState(): DebugState {
+  return {
+    paused: false,
+    stepBudget: 0,
+    mode: "running",
+    branch: null,
+    turnIndex: null,
+    breakpointArmed: false,
+    modelCatalog: null,
+    conversation: null,
+  };
 }
 
 export function initialDomainState(): DomainState {
@@ -169,8 +221,11 @@ export function reducePrompt(state: DomainState, env: PromptEnvelope): DomainSta
   return { ...state, prompt: env };
 }
 
-/** Fold a `debug` snapshot into state (live debugger). Pure. */
+/** Fold a `debug` snapshot into state (live + time-travel debugger). Pure. */
 export function reduceDebug(state: DomainState, env: DebugEnvelope): DomainState {
+  const prev = state.debug ?? emptyDebugState();
+  const turnIndex = env["turn-index"];
+  const branch = env.branch;
   return {
     ...state,
     debug: {
@@ -178,10 +233,73 @@ export function reduceDebug(state: DomainState, env: DebugEnvelope): DomainState
       stepBudget:
         typeof env["step-budget"] === "number" ? env["step-budget"] : 0,
       // Keep a previously-reported debug config if this snapshot omits one.
-      config:
-        env.config ?? (state.debug ? state.debug.config : undefined),
+      config: env.config ?? prev.config,
+      // Time-travel fields: absent wire keys fall back to their "no debug" default.
+      mode: env.mode ?? "running",
+      branch:
+        branch == null
+          ? null
+          : {
+              sessionId: branch["session-id"],
+              parent: branch.parent,
+              branchPoint: {
+                nodeId: branch["branch-point"]["node-id"],
+                visit: branch["branch-point"].visit,
+                turn: branch["branch-point"].turn,
+              },
+            },
+      turnIndex: typeof turnIndex === "number" ? turnIndex : null,
+      breakpointArmed: Boolean(env["breakpoint-armed"]),
+      // A rerun-from failure rides on its own one-shot debug frame; set it when
+      // present, clear it otherwise so a later frame dismisses the banner.
+      branchError: (env["branch-error"] as string | undefined) ?? undefined,
+      // The catalog and conversation arrive on their OWN frames — preserve them.
+      modelCatalog: prev.modelCatalog,
+      conversation: prev.conversation,
     },
   };
+}
+
+/** Fold a `model-catalog` frame into the debug slice. Pure. */
+export function reduceModelCatalog(
+  state: DomainState,
+  env: ModelCatalogEnvelope,
+): DomainState {
+  const prev = state.debug ?? emptyDebugState();
+  const modelCatalog: ModelCatalog = {
+    aliases: (env.aliases ?? []).map((a) => ({
+      alias: a.alias,
+      targets: (a.targets ?? []).map((t) => ({
+        provider: t.provider,
+        model: t.model,
+      })),
+    })),
+    preferences: env.preferences ?? [],
+  };
+  return { ...state, debug: { ...prev, modelCatalog } };
+}
+
+/** Fold a `conversation` frame into the debug slice. Pure. */
+export function reduceConversation(
+  state: DomainState,
+  env: ConversationEnvelope,
+): DomainState {
+  const prev = state.debug ?? emptyDebugState();
+  const conversation: DebugConversation = {
+    invokeid: env.invokeid,
+    nodeId: env["node-id"],
+    visit: env.visit,
+    turns: (env.turns ?? []).map((t) => ({
+      turn: t.turn,
+      model: t.model,
+      system: t.system,
+      messages: (t.messages ?? []).map((m) => ({
+        role: m.role,
+        text: m.text,
+      })),
+    })),
+  };
+  return { ...state, debug: { ...prev, conversation } };
 }
 
 /** Single dispatch over any forward frame. Pure — the heart of the store. */
@@ -195,6 +313,10 @@ export function reduceFrame(state: DomainState, frame: ForwardFrame): DomainStat
       return reducePrompt(state, frame);
     case "debug":
       return reduceDebug(state, frame);
+    case "model-catalog":
+      return reduceModelCatalog(state, frame);
+    case "conversation":
+      return reduceConversation(state, frame);
     default:
       return state;
   }

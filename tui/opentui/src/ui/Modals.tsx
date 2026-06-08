@@ -278,6 +278,7 @@ export function Modals(props: ModalsProps): import("solid-js").JSX.Element {
           border
           borderStyle="rounded"
           borderColor={fg("border-focus")}
+          backgroundColor={props.theme.bg("overlay-bg") ?? undefined}
           flexDirection="column"
           flexShrink={0}
           width="100%"
@@ -305,19 +306,27 @@ export function Modals(props: ModalsProps): import("solid-js").JSX.Element {
             <Show when={p().type === "select"}>
               <box flexDirection="column">
                 <For each={options()}>
-                  {(opt, i) => (
-                    <text>
-                      <span
-                        style={
-                          i() === cursor()
-                            ? { fg: fg("phase-current"), inverse: true }
-                            : { fg: fg("phase-upcoming") }
+                  {(opt, i) => {
+                    // Box-level bg bar for the cursor row (span `inverse` leaves
+                    // residue on previously-hovered rows; see ConversationMenu).
+                    const sel = () => i() === cursor();
+                    return (
+                      <box
+                        width="100%"
+                        backgroundColor={
+                          (sel()
+                            ? props.theme.bg("selection-bg")
+                            : props.theme.bg("overlay-bg")) ?? undefined
                         }
                       >
-                        {cut(`   ${i() === cursor() ? "▸ " : "  "}${opt.label}`)}
-                      </span>
-                    </text>
-                  )}
+                        <text>
+                          <span style={{ fg: fg(sel() ? "phase-current" : "phase-upcoming") }}>
+                            {cut(`   ${sel() ? "▸ " : "  "}${opt.label}`)}
+                          </span>
+                        </text>
+                      </box>
+                    );
+                  }}
                 </For>
                 <text>
                   <span style={{ fg: fg("border-dim") }}>{"   ↑/↓ move · Enter select · Esc cancel"}</span>
@@ -329,21 +338,27 @@ export function Modals(props: ModalsProps): import("solid-js").JSX.Element {
             <Show when={p().type === "multi"}>
               <box flexDirection="column">
                 <For each={options()}>
-                  {(opt, i) => (
-                    <text>
-                      <span
-                        style={
-                          i() === cursor()
-                            ? { fg: fg("phase-current"), inverse: true }
-                            : { fg: fg("phase-upcoming") }
+                  {(opt, i) => {
+                    const sel = () => i() === cursor();
+                    return (
+                      <box
+                        width="100%"
+                        backgroundColor={
+                          (sel()
+                            ? props.theme.bg("selection-bg")
+                            : props.theme.bg("overlay-bg")) ?? undefined
                         }
                       >
-                        {cut(
-                          `   ${i() === cursor() ? "▸" : " "} [${checked().has(i()) ? "x" : " "}] ${opt.label}`,
-                        )}
-                      </span>
-                    </text>
-                  )}
+                        <text>
+                          <span style={{ fg: fg(sel() ? "phase-current" : "phase-upcoming") }}>
+                            {cut(
+                              `   ${sel() ? "▸" : " "} [${checked().has(i()) ? "x" : " "}] ${opt.label}`,
+                            )}
+                          </span>
+                        </text>
+                      </box>
+                    );
+                  }}
                 </For>
                 <text>
                   <span style={{ fg: fg("border-dim") }}>

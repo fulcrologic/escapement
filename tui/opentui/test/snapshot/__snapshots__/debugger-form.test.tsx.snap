@@ -1,0 +1,73 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`Debugger form — render snapshots with multiple turns (turn selector shown) 1`] = `
+"╭────────────────────────────────────────────────────────────────────────╮
+│ ⤴ Re-run from here · turn 0                                            │
+│▸ Turn                                                                  │
+│     ▸ turn 0 (gpt-4o)                                                  │
+│       turn 1 (gpt-4o)                                                  │
+│  Model                                                                 │
+│     ▸ (keep captured: gpt-4o)                                          │
+│       fast · ollama/gemma3:1b  [pref 0]                                │
+│       smart · openai/gpt-4o  [pref 1]                                  │
+│       smart · anthropic/claude-sonnet  [pref 1]                        │
+│  Temperature                                                           │
+│     (default)                                                          │
+│  System prompt                                                         │
+│     You are turn 0.                                                    │
+│  Messages                                                              │
+│       [system] sys 0                                                   │
+│       [user] hello 0                                                   │
+│   Tab field · ↑/↓ move · Enter edit msg · type to edit · Ctrl-R run …  │
+╰────────────────────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`Debugger form — render snapshots single turn (no turn selector) 1`] = `
+"╭────────────────────────────────────────────────────────────────────────╮
+│ ⤴ Re-run from here · turn 0                                            │
+│▸ Model                                                                 │
+│     ▸ (keep captured: gpt-4o)                                          │
+│       fast · ollama/gemma3:1b  [pref 0]                                │
+│       smart · openai/gpt-4o  [pref 1]                                  │
+│       smart · anthropic/claude-sonnet  [pref 1]                        │
+│  Temperature                                                           │
+│     (default)                                                          │
+│  System prompt                                                         │
+│     You are turn 0.                                                    │
+│  Messages                                                              │
+│       [system] sys 0                                                   │
+│       [user] hello 0                                                   │
+│   Tab field · ↑/↓ move · Enter edit msg · type to edit · Ctrl-R run …  │
+╰────────────────────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`Debugger form — render snapshots breakpoint controls — paused at turn 1`] = `
+"  ◆ BREAK @ turn 1 · armed  —  n next · b back · c continue
+"
+`;
+
+exports[`Debugger form — render snapshots message editor overlay — big body view with message rail 1`] = `
+"╭────────────────────────────────────────────────────────────────────────╮
+│ ✎ Edit message 1/2 [system]                                            │
+│  ▸ 1. [system] sys 0                                                   │
+│    2. [user] hello 0                                                   │
+│  sys 0                                                               █ │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│                                                                        │
+│   type to edit · Enter newline · Tab/⇧Tab switch message · Ctrl-S do…  │
+╰────────────────────────────────────────────────────────────────────────╯
+"
+`;

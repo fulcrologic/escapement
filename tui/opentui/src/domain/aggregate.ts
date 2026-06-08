@@ -160,6 +160,51 @@ export function invokeidLive(live: LiveMap, invokeid: string | null): boolean {
 }
 
 /**
+ * Resolve an invokeid's capture coordinates `{nodeId, visit}` from the live map
+ * (stamped from the `llm/request` event, aggregate fold above). Returns the most
+ * recent session's coordinates — for a parallel multiplex group every child
+ * shares one node-id; visit is the node-entry counter. Returns null when the
+ * invokeid was never seen with a node-id (e.g. a pre-coordinate recording), in
+ * which case `request-conversation` falls back to its `visit 0` default and the
+ * agent yields an empty editor rather than a wrong path.
+ */
+export function liveNodeRef(
+  live: LiveMap,
+  invokeid: string | null,
+): { nodeId: string; visit: number } | null {
+  if (!invokeid) return null;
+  const sessions = live[String(invokeid)]?.sessions;
+  if (!sessions) return null;
+  let best: LiveSession | null = null;
+  for (const s of Object.values(sessions)) {
+    if (s.nodeId === undefined) continue;
+    if (!best || (s["last-ts"] ?? 0) >= (best["last-ts"] ?? 0)) best = s;
+  }
+  if (!best || best.nodeId === undefined) return null;
+  return { nodeId: best.nodeId, visit: best.visit ?? 0 };
+}
+
+/**
+ * Resolve the capture coordinates `{nodeId, visit}` for ONE specific session of
+ * an invokeid group. Parallel multiplex children share an invokeid but are
+ * distinct sub-chart sessions (e.g. `multiplex.poets.4`); each has its OWN
+ * node-entry checkpoint keyed by {session, node-id, visit}. A re-run must target
+ * the SELECTED row's session — `liveNodeRef` (most-recent-session) would pick a
+ * sibling poet's coordinates. Returns null when the session is unknown or never
+ * carried a node-id.
+ */
+export function liveNodeRefForSession(
+  live: LiveMap,
+  invokeid: string | null,
+  session: string | null,
+): { nodeId: string; visit: number } | null {
+  if (!invokeid || !session) return null;
+  const s = live[String(invokeid)]?.sessions?.[String(session)];
+  if (!s || s.nodeId === undefined) return null;
+  return { nodeId: s.nodeId, visit: s.visit ?? 0 };
+}
+
+/**
  * Short label for a child session: drop the `multiplex.` prefix and leading
  * colon, cap at 16 chars (count-based truncate). Port of `short-session`.
  * (Imports truncate lazily to avoid a cycle; uses the count-based form which
@@ -234,6 +279,9 @@ export function foldLiveEvent(live: LiveMap, ev: EventLike): LiveMap {
         model: (data["model"] as string | null | undefined) ?? cur.model,
         provider:
           (data["provider"] as string | null | undefined) ?? cur.provider,
+        // Capture coordinates for the debugger's request-conversation (wire §9.1).
+        nodeId: (data["node-id"] as string | undefined) ?? cur.nodeId,
+        visit: (data["visit"] as number | undefined) ?? cur.visit,
       });
     }
 

@@ -157,11 +157,19 @@ export function LogPane(props: LogPaneProps): JSX.Element {
           const line = `${row.ts} ${row.tag} ${row.glyph} ${row.summary}`;
           const fit = truncateDisplay(line, props.width);
           if (row.selected) {
-            // Reverse-video the whole fitted row (parity with `reverse-on-s`).
+            // Full-width background BAR for the selected row (parity with
+            // LivePanel / the debugger menus). A span-level `inverse` only covers
+            // the fitted text width, leaving background residue on the row when
+            // the cursor moves; the box bg repaints the whole row each render.
             return (
-              <text>
-                <span style={{ inverse: true }}>{fit}</span>
-              </text>
+              <box
+                width="100%"
+                backgroundColor={props.theme.bg("selection-bg") ?? undefined}
+              >
+                <text>
+                  <span style={{ fg: props.theme.fg("title") }}>{fit}</span>
+                </text>
+              </box>
             );
           }
           // Re-segment the fitted line back into ts / tag / glyph / summary so

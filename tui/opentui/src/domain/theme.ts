@@ -224,6 +224,7 @@ export type ThemeKey =
   | "border-dim"
   | "border-focus"
   | "selection-bg"
+  | "overlay-bg"
   | "title"
   | "chart-name"
   | "session-id"
@@ -268,6 +269,10 @@ const THEME_256: SgrMap = {
   // analogue). Must stay dark so the row's bright/colored fgs keep contrast —
   // the light `border-focus` accent does not.
   "selection-bg": "48;5;24",
+  // Opaque fill for modal overlays (conversation menu / re-run form / human
+  // prompt) so they fully occlude the panes behind them — the panes render a
+  // fixed row count and overflow past their shrunk boxes when an overlay opens.
+  "overlay-bg": "48;5;234",
   title: "1;38;5;231",
   "chart-name": "1;38;5;231",
   "session-id": "38;5;244",
@@ -308,6 +313,7 @@ const THEME_16: SgrMap = {
   "border-dim": "90",
   "border-focus": "94",
   "selection-bg": "44",
+  "overlay-bg": "40",
   title: "1;97",
   "chart-name": "1;97",
   "session-id": "90",

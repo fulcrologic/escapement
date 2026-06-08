@@ -38,7 +38,8 @@ import { shortInvokeid } from "../domain/time";
 import type { LiveSession, LiveStatus } from "../domain/types";
 import { Shimmer } from "./live/Shimmer";
 import { CompletionBar, liveBarWidthFor } from "./live/CompletionBar";
-import { groupHueKey, liveRows, type LiveRow } from "./live/rows";
+import { groupHueKey, liveRows, liveRowIndex, type LiveRow } from "./live/rows";
+import type { LiveMap } from "../domain/types";
 import type { ChildCall, ChildNode, PhaseNode } from "./live/tree";
 import { displayWidth } from "../domain/wrap";
 
@@ -773,4 +774,37 @@ export function LivePanel(props: {
       </Show>
     </box>
   );
+}
+
+/**
+ * Resolve the conversation `invokeid` the LIVE cursor row points at — the seam
+ * task 012 uses to open the {@link ConversationMenu} for the selected LLM row.
+ * Mirrors the Enter drill-in: it reads the SAME `liveRowIndex` order as the
+ * rendered rows (so the cursor and the resolved target stay in lockstep), then
+ * returns that row's `RowTarget.invokeid`. Returns null when no row is selected
+ * (null/out-of-range cursor) so the caller can no-op the menu open.
+ */
+export function liveCursorInvokeid(
+  live: LiveMap,
+  cursorRow: number | null | undefined,
+): string | null {
+  if (cursorRow == null) return null;
+  const targets = liveRowIndex(liveGroups(live));
+  return targets[cursorRow]?.invokeid ?? null;
+}
+
+/**
+ * The selected row's child SESSION id (the multiplex sibling under the cursor),
+ * read from the SAME `liveRowIndex` order as {@link liveCursorInvokeid}. A
+ * re-run seeds from this session's node-entry checkpoint, so it must be the
+ * exact sibling — not the invokeid's representative session. Null when no row is
+ * selected or the group had no session.
+ */
+export function liveCursorSession(
+  live: LiveMap,
+  cursorRow: number | null | undefined,
+): string | null {
+  if (cursorRow == null) return null;
+  const targets = liveRowIndex(liveGroups(live));
+  return targets[cursorRow]?.session ?? null;
 }

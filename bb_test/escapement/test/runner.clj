@@ -80,9 +80,11 @@
      (quiet-logging!)
      (quiet-reporting!))
    (let [pairs (discover paths)
-         nses  (into []
-                 (remove jvm-only-namespaces)
-                 (map (fn [[root f]] (path->ns f root)) pairs))]
+         focus (some-> (System/getenv "ESCAPEMENT_TEST_FOCUS") str/trim not-empty)
+         nses  (cond->> (into []
+                          (remove jvm-only-namespaces)
+                          (map (fn [[root f]] (path->ns f root)) pairs))
+                 focus (filterv #(str/includes? (str %) focus)))]
      (println (str "Loading " (count nses) " test namespaces from " (vec paths) "…"))
      (doseq [n nses]
        (require n))

@@ -22,6 +22,16 @@
  *   Enter        LIVE: open selected row's transcript   LOG: open invocation
  *   s/c/p/P      step / continue / pause / arm   (control back-channel)
  *   v            visualize                       (control back-channel — task 014)
+ *   o            open conversation action menu for the selected LIVE row (task 012)
+ *   n/b/c        paused-at-turn: turn-next / turn-back / continue (task 012)
+ *
+ * Time-travel debugger (task 012): `o` opens the conversation action menu
+ * (Transcript / Re-run / Break) for the selected LIVE LLM row; the menu + the
+ * re-run form route at the MODAL tier (above mission-control) via the composed
+ * `modal` hook so their nav/editing never leaks. The `n`/`b`/`c` keys walk /
+ * release the turn gate ONLY while paused-at-turn; otherwise `n`/`b` no-op and
+ * `c` keeps its plain `continue` meaning. See `tasks/012-results.md` for the
+ * full keymap (key → action → tier).
  *
  * Overlay (inspector open) key set is delegated to InspectorControls; pager vs
  * list sub-routing keys off `inspector.inPager()`.
@@ -89,6 +99,33 @@ export interface KeybindingDeps {
 
   /** Optional human-modal hook (task 013). When absent, the modal tier is inert. */
   modal?: ModalHook;
+
+  /** Time-travel debugger bindings (task 012). When absent these keys no-op. */
+  debug?: DebugKeybindings;
+}
+
+/**
+ * Mission-control-tier debugger bindings (task 012). The conversation menu + the
+ * re-run form are routed via the modal {@link ModalHook} (composed in main.tsx);
+ * these are the keys that LIVE at mission-control tier: opening the menu for the
+ * selected row, and the paused-at-turn breakpoint walk (next / back / continue).
+ */
+export interface DebugKeybindings {
+  /**
+   * Open the conversation action menu for the currently-selected row (the LIVE
+   * cursor's LLM row in the LIVE pane). No-op when there is no resolvable target.
+   * Called only at mission-control tier; once open the menu captures keys at the
+   * modal tier (via the composed `modal` hook).
+   */
+  openMenu: () => void;
+  /** Is the agent paused at an LLM turn gate? (gates the n/b/c keys.) */
+  pausedAtTurn: () => boolean;
+  /** Walk the parked turn pointer forward (`turn-next`). */
+  turnNext: () => void;
+  /** Walk the parked turn pointer backward (`turn-back`). */
+  turnBack: () => void;
+  /** Resume from the turn gate (`continue`). */
+  turnContinue: () => void;
 }
 
 /** Is this key Ctrl-C? */
@@ -249,7 +286,12 @@ export function makeKeyHandler(deps: KeybindingDeps): (key: KeyEvent) => void {
         deps.control("step");
         return;
       case "c":
-        deps.control("continue");
+        // `c` = continue. When parked at an LLM turn gate this resumes the turn
+        // gate (`turn-next`/`turn-back` walk; `continue` releases) — agent-side
+        // `continue` is routed to whichever gate is engaged (wire §9), so the
+        // same key serves both the per-event step gate and the turn gate.
+        if (deps.debug?.pausedAtTurn()) deps.debug.turnContinue();
+        else deps.control("continue");
         return;
       case "p":
         deps.control("pause");
@@ -262,6 +304,22 @@ export function makeKeyHandler(deps: KeybindingDeps): (key: KeyEvent) => void {
         return;
       case "a":
         deps.openArtifactsView();
+        return;
+
+      // --- conversation action menu (Transcript / Re-run / Break) ------------
+      // `o` ("open actions") opens the menu for the selected LIVE LLM row. Item 1
+      // is Transcript, so the prior Enter drill-in stays one keystroke away while
+      // Enter itself keeps its direct-drill behavior (acceptance criterion).
+      case "o":
+        if (live()) deps.debug?.openMenu();
+        return;
+
+      // --- paused-at-turn breakpoint walk (only while parked at a turn gate) --
+      case "n":
+        if (deps.debug?.pausedAtTurn()) deps.debug.turnNext();
+        return;
+      case "b":
+        if (deps.debug?.pausedAtTurn()) deps.debug.turnBack();
         return;
     }
 

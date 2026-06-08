@@ -340,6 +340,241 @@ run never sends it and `state.debug` stays `null`.
 
 ---
 
+## 9. Time-travel debugger (additive — sidecar debugger feature)
+
+This section is the **contract of record** for the OpenTUI time-travel debugger
+(`docs/opentui-debugger.md`). It is strictly **additive**: it adds new back-channel `control` ops
+and new forward frames, and extends the existing `debug` frame (§6) and the `event` frame's `data`
+(§3) with a marker. All existing frames/ops in §1–§8 keep their meaning. The debugger frames flow
+on the **same WebSocket** and obey the same §2 encoding rules (keywords→string without leading
+colon, namespaced keep `/`, timestamps integer epoch-ms, `session-id` opaque — never parse).
+
+Implementing seams (forward-looking): agent push via `escapement.ui.ws-push/broadcast!`; new control
+ops dispatched in `tui/opentui/sidecar.clj` `make-ws-handlers` → `escapement.ui.debug-control`;
+TS decode of forward frames + encode of outbound ops in `tui/opentui/src/transport/wire.ts`.
+
+### 9.1 New back-channel control ops (UI → agent)
+
+All reuse the existing `{ "kind":"control", "op":… }` shape (§6), dispatched alongside
+`pause`/`step`/`continue`/`arm` in `make-ws-handlers`. New ops:
+
+```jsonc
+// --- breakpoint mode (pause before next LLM turn, then step turns) ---
+{ "kind":"control", "op":"arm-llm-breakpoint" }   // arm "pause before next LLM conversation turn"
+{ "kind":"control", "op":"turn-next" }            // while paused at a turn gate: advance one turn
+{ "kind":"control", "op":"turn-back" }            // while paused at a turn gate: return one turn (pointer move)
+{ "kind":"control", "op":"continue" }             // resume free-running from the turn gate (see note)
+
+// --- pull data for the debug form ---
+{ "kind":"control", "op":"request-model-catalog" }            // → forward `model-catalog` frame (§9.2)
+{ "kind":"control", "op":"request-conversation",
+  "invokeid":"planner",
+  "node-id":  ":writer",   // capture coords resolved sidecar-side from the llm/request fold;
+  "visit":    0 }          // node-id rides as (str <kw>) ":writer". Optional — absent ⇒ agent
+                           //   defaults visit 0. → forward `conversation` frame (§9.2)
+
+// --- fork a branch and re-enter & continue ---
+{ "kind":"control", "op":"rerun-from",
+  "session-id": "session/…",   // opaque session id of the SELECTED row (string; never parsed).
+                               //   The branch is seeded from THIS session's node-entry checkpoint.
+                               //   For a multi-session run pick the chosen multiplex sibling's
+                               //   child session-id (e.g. "multiplex.poets.4"), NOT the root — its
+                               //   node-entry checkpoint is keyed by the child session. The agent
+                               //   replays captured tool-results from the ROOT transcript regardless.
+  "invokeid":   "planner",     // the llm-conversation invocation id (transcript invokeid)
+  "node-id":    "route-planner",
+  "visit":      0,
+  "turn":       2,             // turn to resume from (the chosen branch-point turn)
+  "overrides": {               // ALL fields optional; omitted/null = "unchanged"
+    "alias":       "smart",    // alias keyword name (string, no leading colon)
+    "provider":    "openai",   // provider keyword name (string)
+    "model":       "gpt-4o",
+    "temperature": 0.7,        // number
+    "system":      "You are …",// full edited system prompt (string)
+    "messages": [              // edited transcript prefix up to (and incl.) `turn`
+      { "role":"user", "text":"…" },
+      { "role":"assistant", "text":"…" }
+    ]
+  }
+}
+```
+
+**Field rules:**
+- `session-id`, `invokeid`, `node-id` are **opaque strings**; compare for equality only (§2).
+- `visit` and `turn` are non-negative integers (`visit` = the node-entry visit counter; `turn` =
+  0-based turn index within that conversation, matching `:transcript/{node-id,visit,turn}`).
+- `overrides` keys mirror the agent-side override map (§9.4). Every key is optional; an absent or
+  `null` value means "keep the captured value". `alias`/`provider`/`model`/`temperature`/`system`
+  are scalars; `messages` is an ordered array of `{ "role", "text" }` (role = keyword name string:
+  `"system"`|`"user"`|`"assistant"`). `messages` carries the **edited transcript prefix** — the
+  agent uses it verbatim as the resume conversation up to `turn`.
+- `continue`'s meaning is **context-dependent** and unchanged on the wire: at a per-event pause gate
+  it is the existing `escapement.control/continue` (§6); at a **turn gate** (after
+  `arm-llm-breakpoint`) it resumes the parked LLM worker free-running. `make-ws-handlers` routes
+  `continue` to whichever gate is currently engaged; a single op covers both.
+
+### 9.2 New forward frames (agent → UI)
+
+Pushed via `broadcast!` (out-of-band from the seq'd transcript stream, like `prompt`/`debug`).
+Each is a top-level `kind` the sidecar's frame router (§7) must learn to decode.
+
+**Model catalog** — answers `request-model-catalog`; feeds the model/alias dropdown. Sourced from
+`config.clj` `:llm/aliases` + `llm/preferences.cljc` defaults.
+
+```jsonc
+{
+  "kind": "model-catalog",
+  "aliases": [
+    { "alias": "smart",
+      "targets": [ { "provider":"openai",    "model":"gpt-4o" },
+                   { "provider":"anthropic",  "model":"claude-opus-4-8" } ] },
+    { "alias": "fast",
+      "targets": [ { "provider":"ollama", "model":"gemma3:1b" } ] }
+  ],
+  "preferences": [ "smart", "fast" ]   // optional: ordered preference list (alias name strings)
+}
+```
+
+- `alias` = alias keyword name string (no leading colon). `targets` = ordered expanded
+  `{ "provider", "model" }` pairs (both keyword-name strings / plain strings). Selecting a target in
+  the UI sets `provider`+`model` together in the override draft.
+- `preferences` is optional; when present it is an ordered list of alias-name strings from
+  `:llm/preferences` (UI may use it to pre-sort the dropdown). Omit/`null` if unavailable.
+
+**Conversation (editable transcript)** — answers `request-conversation`; the editable transcript for
+the debug form, sourced from captured EDN (`capture.cljc` `nodes/<node-id>/<visit>/turns/<turn>/…`).
+
+```jsonc
+{
+  "kind": "conversation",
+  "invokeid": "planner",
+  "node-id":  "route-planner",
+  "visit":    0,
+  "turns": [
+    { "turn": 0,
+      "model":  "gpt-4o",
+      "system": "You are …",
+      "messages": [ { "role":"user", "text":"…" },
+                    { "role":"assistant", "text":"…" } ] },
+    { "turn": 1, "model":"gpt-4o", "system":"You are …",
+      "messages": [ /* … */ ] }
+  ]
+}
+```
+
+- `invokeid`/`node-id` opaque strings; `visit`/`turn` integers as in §9.1.
+- Each turn carries its own `model` (string), `system` (string, captured request system prompt),
+  and `messages` (ordered `{ "role", "text" }`, role = keyword-name string). The UI edits this in
+  place and ships the edited prefix back as `overrides.messages` + `overrides.system` on `rerun-from`.
+- `messages[].text` is the flattened text of the message's content blocks (the UI shows/edits text
+  only; non-text blocks are not editable this iteration).
+
+### 9.3 Extended `debug` frame (agent → UI)
+
+The existing `debug` frame (§6) gains **optional** debugger-state fields. Plain
+`pause/step/continue/arm` debug snapshots keep working unchanged (the new fields are simply absent,
+folded as "unset"). When the time-travel debugger is active the agent populates them:
+
+```jsonc
+{
+  "kind": "debug",
+  "paused": true,
+  "step-budget": 0,
+  "config": ["run","route-planner"],     // (existing optional)
+
+  // --- new optional debugger-state fields ---
+  "mode": "paused-at-turn",              // "running" | "paused-at-turn" | "branch-running"
+  "turn-index": 2,                       // current turn pointer while paused at a turn gate (int) or null
+  "breakpoint-armed": true,              // arm-llm-breakpoint engaged, not yet hit (bool)
+  "branch": {                            // active forked branch, or null when on the original run
+    "session-id": "session/branch-…",    // opaque branch session id
+    "parent":     "session/…",           // opaque parent session id
+    "branch-point": { "node-id":"route-planner", "visit":0, "turn":2 }
+  }
+}
+```
+
+- `mode`: `"running"` (free-running, no debug gate engaged), `"paused-at-turn"` (parked at the LLM
+  turn gate; `turn-index` is meaningful and `turn-next`/`turn-back`/`continue` apply),
+  `"branch-running"` (a forked branch is executing forward after `rerun-from`).
+- `turn-index`: integer turn pointer at the turn gate, or `null`/absent when not paused at a turn.
+- `breakpoint-armed`: `true` after `arm-llm-breakpoint` until the gate is hit (then it flips while
+  `mode` becomes `"paused-at-turn"`); `false`/absent otherwise.
+- `branch`: the active fork (`{ "session-id", "parent", "branch-point":{ "node-id","visit","turn" } }`)
+  or `null` when the stream is the original run. `session-id`/`parent` opaque. The UI uses this for
+  the active-branch banner and to re-root its view onto the branch's `session-id`.
+
+A run with neither breakpoint nor branch active emits the §6 shape (no new keys); the UI treats
+absent new keys as `mode:"running"`, `branch:null`, `breakpoint-armed:false`.
+
+### 9.4 Replay marker on `event` frames (agent → UI)
+
+Re-entry on a branch (§9, decision 3) **replays captured side-effect results by match** and only
+hits the provider live for the changed LLM turn. To let the UI distinguish replayed-from-capture
+events from genuinely new/live ones, side-effect-bearing `event` frames on a branch carry a marker
+**inside the existing `event` frame's `data`** (no new top-level frame — §3 envelope unchanged):
+
+```jsonc
+{
+  "kind": "event",
+  "seq": 412,
+  "ts": 1780798849355,
+  "event": "llm/tool-result",
+  "data": {
+    "tool": "read-file",
+    "is-error": false,
+    "content-preview": "…",
+    "invokeid": "planner",
+    "replay/source": "captured"      // "captured" = served from a matched capture; "live" = executed now
+  }
+}
+```
+
+- `replay/source` (namespaced keyword → string `"replay/source"`, value a keyword-name string) is
+  `"captured"` when the result was served from a matched capture, `"live"` when the side effect
+  actually executed during the branch run (the documented unmatched/new-side-effect case). Absent on
+  the original (non-branch) run — the UI treats absent as "live/normal" and renders no badge.
+- The UI reads `data["replay/source"]` and shows a "replayed" vs "new/live" badge on the row. This
+  rides the existing `event` decode path — no frame-router change beyond reading one `data` key.
+
+### 9.5 Canonical EDN ↔ JSON shapes (single source of truth)
+
+So agent tasks (002–006) and sidecar tasks (008–012) agree byte-for-byte, the shared shapes are
+fixed here. All follow §2 (keyword name without leading colon; namespaced keep `/`; integers for
+`visit`/`turn`/`ts`; `session-id`/`invokeid`/`node-id` opaque strings):
+
+| concept | EDN (agent) | JSON (wire) |
+|---|---|---|
+| override map | `{:alias :smart :provider :openai :model "gpt-4o" :temperature 0.7 :system "…" :messages [{:role :user :text "…"}]}` | `{ "alias":"smart","provider":"openai","model":"gpt-4o","temperature":0.7,"system":"…","messages":[{"role":"user","text":"…"}] }` |
+| message | `{:role :user :text "…"}` | `{ "role":"user", "text":"…" }` |
+| branch-point | `{:node-id "route-planner" :visit 0 :turn 2}` | `{ "node-id":"route-planner", "visit":0, "turn":2 }` |
+| branch | `{:session-id "session/…" :parent "session/…" :branch-point {…}}` | `{ "session-id":"session/…", "parent":"session/…", "branch-point":{…} }` |
+| catalog target | `{:provider :openai :model "gpt-4o"}` | `{ "provider":"openai", "model":"gpt-4o" }` |
+| catalog alias | `{:alias :smart :targets [{…}]}` | `{ "alias":"smart", "targets":[{…}] }` |
+| conversation turn | `{:turn 0 :model "gpt-4o" :system "…" :messages [{…}]}` | `{ "turn":0, "model":"gpt-4o", "system":"…", "messages":[{…}] }` |
+| replay marker | `:replay/source :captured` (a `data` entry) | `"replay/source":"captured"` (a `data` entry) |
+
+`role` values: `:system`/`:user`/`:assistant` ↔ `"system"`/`"user"`/`"assistant"`. `provider` and
+`alias` are keywords agent-side, name-strings on the wire. `model` is already a plain string both
+sides. Override keys that are absent/`null` on the wire decode to "no override" (the captured value
+is kept); the agent must treat missing keys and `null` identically (§2 absent==null).
+
+### 9.6 Frame routing additions (sidecar)
+
+Extends the §7 router table (all additive):
+
+| `kind` | direction | handler |
+|---|---|---|
+| `model-catalog` | agent→UI | fold into the debug-form model dropdown (§9.2) |
+| `conversation` | agent→UI | fill the editable transcript in the debug form (§9.2) |
+| `debug` | agent→UI | now also folds the new debugger-state fields (§9.3) — same `kind` |
+| `control` (new ops) | UI→agent | `arm-llm-breakpoint`/`turn-next`/`turn-back`/`request-*`/`rerun-from` (§9.1) |
+
+Outbound from the UI remains only `answer` and `control` (§7); the debugger adds new `control` ops,
+not a new outbound `kind`.
+
+---
+
 ## 7. Frame routing (sidecar)
 
 The sidecar dispatches each inbound frame on top-level `"kind"`:

@@ -27,12 +27,23 @@ import { LivePanel } from "./ui/LivePanel";
 import { createTick } from "./ui/live/tick";
 import { Inspector, type InspectorControls } from "./ui/Inspector";
 import { copyToClipboard } from "./ui/inspector/artifacts";
-import { debugFromState } from "./ui/Debugger";
+import {
+  debugFromState,
+  RerunForm,
+  MessageEditorOverlay,
+  BreakpointControls,
+  BranchErrorBanner,
+  isPausedAtTurn,
+  type DebugFormHook,
+} from "./ui/Debugger";
 import { liveRowIndex } from "./ui/live/rows";
 import { liveGroups } from "./domain/solid-store";
+import { liveCursorInvokeid, liveCursorSession } from "./ui/LivePanel";
+import { liveNodeRef, liveNodeRefForSession } from "./domain/aggregate";
 import { makeKeyHandler, type LiveCursor, type LogScrollModel } from "./input/keybindings";
-import { makeControlDispatch, type ModalHook } from "./input/dispatch";
+import { makeControlDispatch, makeDebugDispatch, type ModalHook } from "./input/dispatch";
 import { Modals } from "./ui/Modals";
+import { ConversationMenu, type ConversationMenuHook } from "./ui/ConversationMenu";
 
 /** Best-effort chart name from the env (the sidecar parent may set it). */
 function chartNameFromEnv(): string {
@@ -42,6 +53,13 @@ function chartNameFromEnv(): string {
 /** Short session id from the env (the sidecar parent sets it, task 004). */
 function sessionShortFromEnv(): string {
   return process.env["OPENTUI_SESSION_SHORT"] ?? "";
+}
+
+/** Full (opaque) session id — the source session a `rerun-from` branches from.
+ *  The bb sidecar exports `ESCAPEMENT_SESSION_ID` (see tui/opentui/sidecar.clj).
+ *  Empty in replay/dev when unset (the back-channel is a no-op there anyway). */
+function sessionIdFromEnv(): string {
+  return process.env["ESCAPEMENT_SESSION_ID"] ?? "";
 }
 
 /** Shared session-dir (set by the bb sidecar parent, task 004) for artifacts.
@@ -165,6 +183,30 @@ const App = () => {
   // (no-op + false on a replay source). Esc → ui-interrupt, Ctrl-C → ui-quit,
   // s/c/p/P → step/continue/pause/arm.
   const control = makeControlDispatch(source);
+  // Parametrized debugger senders (request-conversation / rerun-from, task 012).
+  const debugDispatch = makeDebugDispatch(source);
+  const sessionId = sessionIdFromEnv();
+
+  // Time-travel debugger hooks (task 012). The conversation menu + the re-run
+  // form are both MODAL-tier surfaces (above mission-control); their imperative
+  // handles are captured via `ref` and dispatched among in the composed modal
+  // hook below. `debugFormOpen` mirrors the form's open state so its render slot
+  // mounts only while active.
+  let menuHook: ConversationMenuHook | undefined;
+  let formHook: DebugFormHook | undefined;
+  // The re-run form mounts only while active; gate its render slot on this. The
+  // ConversationMenu self-hides when closed, so it needs no render gate — the
+  // keymap reads `menuHook.isOpen()` (a reactive component signal) directly.
+  const [debugFormOpen, setDebugFormOpen] = createSignal(false);
+  // Mirrors the re-run form's full-text message editor open state, so the body
+  // (overlay) slot can render the big MessageEditorOverlay reactively.
+  const [msgEditorOpen, setMsgEditorOpen] = createSignal(false);
+  // The CHILD session-id of the row a re-run was launched from (the multiplex
+  // sibling under the cursor at `o`-menu time). Captured at `onMenuRerun` and
+  // shipped as the `rerun-from` session-id so the agent seeds the branch from
+  // THAT session's node-entry checkpoint (a multi-session run keys node-entry
+  // checkpoints by child session, not the root). Null ⇒ fall back to root.
+  const [rerunSession, setRerunSession] = createSignal<string | null>(null);
 
   // Human-input modal hook (task 013). The Modals component sets this via ref;
   // the keymap consults it as the top-precedence tier (when no overlay is open).
@@ -219,6 +261,78 @@ const App = () => {
     },
   };
 
+  // --- Conversation-menu action callbacks (task 010 fires exactly one) ------
+  // Transcript: reuse the inspector's open-then-drill path (same as Enter).
+  const onMenuTranscript = (invokeid: string) => {
+    setInspectorOpen(true);
+    inspector?.openTranscriptFor(invokeid);
+  };
+  // Re-run: request the editable conversation + the model catalog, then open the
+  // form once those frames have populated `debug.conversation`/`debug.modelCatalog`.
+  // We flip the render gate now; RerunForm renders nothing until the conversation
+  // arrives (its `isOpen()` is false meanwhile, so the modal tier stays inert and
+  // mission-control keeps working until the form is actually live).
+  const onMenuRerun = (invokeid: string) => {
+    // The selected row's CHILD session (multiplex sibling). Captured now so the
+    // re-run seeds from the right sub-chart's node-entry checkpoint; remembered
+    // for `onFormRun` below. Null for a plain single-session invocation.
+    const session = liveCursorSession(store.state.live, liveCursorRow());
+    setRerunSession(session);
+    // Resolve the capture coordinates (stamped from llm/request) so the agent can
+    // read the captured turns; without them the conversation comes back empty
+    // (the form would show no system/messages). Prefer the SELECTED session's
+    // coordinates (parallel poets share an invokeid; `liveNodeRef` would pick a
+    // sibling), falling back to the invokeid's most-recent session. See wire §9.1.
+    debugDispatch.requestConversation(
+      invokeid,
+      liveNodeRefForSession(store.state.live, invokeid, session) ??
+        liveNodeRef(store.state.live, invokeid),
+    );
+    control("request-model-catalog");
+    setDebugFormOpen(true);
+  };
+  // Break: arm the per-turn LLM breakpoint (payload-free; invokeid is context).
+  const onMenuBreak = (_invokeid: string) => {
+    control("arm-llm-breakpoint");
+  };
+
+  // --- Re-run form Run handler: ship the edited branch as `rerun-from` --------
+  const onFormRun = (payload: {
+    invokeid: string;
+    nodeId: string;
+    visit: number;
+    turn: number;
+    overrides: import("./transport/wire").RerunOverrides;
+  }) => {
+    debugDispatch.rerunFrom({
+      // The forked branch seeds from the SELECTED row's session (a sub-chart
+      // child in a multi-session run); fall back to the root session for a plain
+      // single-session invocation.
+      sessionId: rerunSession() ?? sessionId,
+      invokeid: payload.invokeid,
+      nodeId: payload.nodeId,
+      visit: payload.visit,
+      turn: payload.turn,
+      overrides: payload.overrides,
+    });
+    setDebugFormOpen(false);
+  };
+  const onFormCancel = () => setDebugFormOpen(false);
+
+  // Composed MODAL-tier hook: menu → form → human prompt, in priority order.
+  // While any is open the keymap routes keys here first (returning true consumes).
+  const composedModal: ModalHook = {
+    isOpen: () =>
+      (menuHook?.isOpen() ?? false) ||
+      (debugFormOpen() && (formHook?.isOpen() ?? false)) ||
+      (modalHook?.isOpen() ?? false),
+    handleKey: (key) => {
+      if (menuHook?.isOpen()) return menuHook.handleKey(key);
+      if (debugFormOpen() && formHook?.isOpen()) return formHook.handleKey(key);
+      return modalHook?.handleKey(key) ?? false;
+    },
+  };
+
   const handleKey = makeKeyHandler({
     shell: () => controls,
     inspector: () => inspector,
@@ -258,12 +372,22 @@ const App = () => {
       renderer.destroy();
       queueMicrotask(() => process.exit(0));
     },
-    // Human-input modal tier (task 013). `isOpen()` gates on the open prompt so
-    // a dismissed/answered prompt no longer captures keys; while open (and the
-    // inspector closed) every key routes to the modal's handleKey.
-    modal: {
-      isOpen: () => modalHook?.isOpen() ?? false,
-      handleKey: (key) => modalHook?.handleKey(key) ?? false,
+    // Modal tier: the composed conversation-menu → re-run-form → human-prompt
+    // hook (task 012/013). While any is open (and the inspector closed) keys
+    // route to its handleKey in priority order.
+    modal: composedModal,
+    // Time-travel debugger mission-control bindings (task 012): `o` opens the
+    // conversation menu for the selected LIVE row; n/b/c walk/release the turn
+    // gate while paused-at-turn.
+    debug: {
+      openMenu: () => {
+        const iid = liveCursorInvokeid(store.state.live, liveCursorRow());
+        if (iid) menuHook?.open(iid);
+      },
+      pausedAtTurn: () => isPausedAtTurn(store.state.debug),
+      turnNext: () => control("turn-next"),
+      turnBack: () => control("turn-back"),
+      turnContinue: () => control("continue"),
     },
   });
 
@@ -281,7 +405,14 @@ const App = () => {
       ref={(c) => (controls = c)}
       logScroll={logScrollIndicator}
       overlay={(ctx) =>
-        inspectorOpen() ? (
+        debugFormOpen() && msgEditorOpen() && formHook?.editorOpen() ? (
+          <MessageEditorOverlay
+            theme={ctx.theme}
+            hook={formHook!}
+            width={ctx.width}
+            height={overlayHeight()}
+          />
+        ) : inspectorOpen() ? (
           <Inspector
             state={ctx.state}
             theme={ctx.theme}
@@ -298,6 +429,40 @@ const App = () => {
       }
       modal={(ctx) => (
         <>
+          {/* Paused-at-turn breakpoint legend (self-hides unless parked/armed). */}
+          <BreakpointControls
+            theme={ctx.theme}
+            debug={ctx.state.debug}
+            width={ctx.width}
+          />
+          {/* Re-run failure banner (self-hides unless a rerun-from failed). */}
+          <BranchErrorBanner
+            theme={ctx.theme}
+            debug={ctx.state.debug}
+            width={ctx.width}
+          />
+          {/* Conversation action menu (self-hides when closed). */}
+          <ConversationMenu
+            theme={ctx.theme}
+            width={ctx.width}
+            onTranscript={onMenuTranscript}
+            onRerun={onMenuRerun}
+            onBreak={onMenuBreak}
+            ref={(h) => (menuHook = h)}
+          />
+          {/* Re-run debug form (mounts only while active; self-hides until the
+              conversation frame arrives). */}
+          <Show when={debugFormOpen()}>
+            <RerunForm
+              theme={ctx.theme}
+              debug={ctx.state.debug}
+              width={ctx.width}
+              onRun={onFormRun}
+              onCancel={onFormCancel}
+              onEditorOpenChange={setMsgEditorOpen}
+              ref={(h) => (formHook = h)}
+            />
+          </Show>
           <Modals
             prompt={openPrompt()}
             theme={ctx.theme}

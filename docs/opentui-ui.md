@@ -136,9 +136,24 @@ OLLAMA_API_KEY=dummy bb -m escapement.cli run <chart> --tui=opentui \
 **Human-input** (`ask`): the prompt opens a modal in the sidecar; typing + Enter sends an `answer`
 frame; Esc cancels (→ `{:reason :cancelled}` → interrupt). Verified end-to-end against a live model.
 
-**Debugger** (`--debug`): `--debug --tui=opentui` is partially wired — control ops (`s`/`c`/`p`/`P`)
-flow over the WS `control` channel to the debug controller, but driving the full pause/step UI live
-is a known follow-up (see Known limitations). `--debug` without `--tui=opentui` is unaffected.
+**Debugger** (`--debug`): `--debug --tui=opentui` wires the per-event pause/step controls
+(`s`/`c`/`p`/`P`) over the WS `control` channel to the debug controller. `--debug` without
+`--tui=opentui` is unaffected.
+
+**Time-travel debugger** (always on under `--tui=opentui`, no `--debug` needed for the re-run path):
+the sidecar can re-enter the statechart at a live LLM conversation and continue forward in a new
+forked branch — optionally changing provider/model, temperature, system prompt, and the edited
+transcript at a chosen turn — plus a breakpoint mode that pauses before the next LLM turn for
+turn-granular next/back/continue. See [`docs/opentui-debugger.md`](opentui-debugger.md) for the
+architecture and [`docs/opentui-wire.md`](opentui-wire.md) §9 for the wire contract. Keys (LIVE
+pane): `o` opens the conversation action menu (Transcript / Re-run from here… / Break before next
+LLM); inside the breakpoint pause, `n` next-turn, `b` back-turn, `c` continue. `Enter` still drills
+directly into the transcript (the menu is additive). The branch is a new session on disk; the parent
+is never mutated. Live wiring: the WS handlers reach the running engine via the shared
+`escapement.debug.control-handle` (filled in `run!`'s `:on-env-ready`), whose env carries
+`::sc/statechart-registry` (chart `:escapement.runner/chart`, used by `rerun-from!`) and
+`:escapement/artifact-store` (captured turns, read by `request-conversation`); all agent glue is
+reached via `requiring-resolve`, so the architecture boundary stays green.
 
 ### Open a saved session (read-only replay)
 
@@ -323,6 +338,13 @@ Collected from the task results. None block the feature; all are documented for 
 - **Live pause/step/continue not driven E2E** (task 019) — the path is HTTP-proven
   (`live_control_http_test.clj`) and key→WS→controller was smoke-proven (task 014), but
   `--debug --tui=opentui` was not driven live through the full pause/step UI.
+- **Time-travel debugger not driven live E2E** (time-travel-debugger task 014) — the full
+  re-run/branch + breakpoint path is wired and covered by tests on both halves (`bb test`
+  `opentui_debugger_test.clj`: branch fork, override injection, replay-by-match, parked-worker
+  turn-gate, WS control-op round-trip; `bb opentui-test` fixtures + snapshots), but a live select→
+  menu→form→run→follow loop needs a real TTY + a model and was not driven on hardware here. The
+  turn-gate worker uses a one-shot arm cleared *before* parking, so a live driver should gate on the
+  `:debug/awaiting-turn` transcript event before the next release, not a fixed sleep.
 - **`ask` cancel chart-final not frame-captured** (task 019) — Esc→clean-exit was observed and the
   `{:reason :cancelled}`→`:cancelled` mapping is unit-tested, but teardown is too fast to capture the
   post-Esc `:cancelled` final frame on a non-transcript-persisting chart.

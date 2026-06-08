@@ -1,0 +1,3 @@
+{"kind":"model-catalog","ts":1780000000040,"aliases":[{"alias":"fast","targets":[{"provider":"ollama","model":"gemma3:1b"}]}],"preferences":["fast"]}
+{"kind":"conversation","ts":1780000000050,"invokeid":"planner","node-id":"node/plan","visit":0,"turns":[{"turn":0,"model":"gpt-4o","system":"You are a planner.","messages":[{"role":"system","text":"You are a planner."},{"role":"user","text":"Draft a plan."}]}]}
+{"kind":"debug","ts":1780000000070,"paused":false,"step-budget":0,"mode":"branch-running","breakpoint-armed":false,"branch":{"session-id":"session/bbbb","parent":"session/aaaa","branch-point":{"node-id":"node/plan","visit":0,"turn":0}}}

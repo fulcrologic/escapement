@@ -46,6 +46,11 @@ export interface LiveSession {
   provider?: string | null;
   /** The session-id this counter belongs to (opaque string). */
   session: string;
+  /** Capture coordinates (from llm/request) so the debugger can resolve this
+   *  invokeid -> {nodeId, visit} for `request-conversation` (wire §9.1). nodeId
+   *  rides as `(str <kw>)` (e.g. ":writer"); the agent strips the colon. */
+  nodeId?: string;
+  visit?: number;
   /** True generation rate from llm/response output-tps (preferred over estimate). */
   "real-tps"?: number;
   "elapsed-ms"?: number;
@@ -162,4 +167,84 @@ export interface PhaseModel {
   config: string[];
   breadcrumb?: string[];
   siblings?: string[];
+}
+
+// --- Time-travel debugger domain state (tasks 009-012) ---------------------
+//
+// These are the domain-layer projections of the wire shapes decoded in
+// `transport/wire.ts` (tasks 001/008). The reducer folds the extended `debug`
+// frame plus the new `model-catalog` / `conversation` forward frames into a
+// single `DebugState` slice that the debug panes (010/011/012) read. Field
+// names use camelCase here (domain convention) even though the wire uses
+// hyphenated keys — `reduceDebug` / the catalog/conversation reducers do the
+// translation at the boundary.
+
+/**
+ * Debugger mode (wire `debug.mode`). Absent on the wire ⇒ "running".
+ *  - "running": no debug gate engaged (or a per-event step gate only).
+ *  - "paused-at-turn": parked at the LLM turn gate; `turnIndex` is the pointer.
+ *  - "branch-running": a forked branch is executing forward after `rerun-from`.
+ */
+export type DebugMode = "running" | "paused-at-turn" | "branch-running";
+
+/** The branch-point coordinate within a captured conversation. */
+export interface DebugBranchPoint {
+  nodeId: string;
+  visit: number;
+  turn: number;
+}
+
+/** Active forked branch descriptor (wire `debug.branch`). null ⇒ original run. */
+export interface DebugBranch {
+  sessionId: string;
+  parent: string;
+  branchPoint: DebugBranchPoint;
+}
+
+/** A provider/model target inside an alias expansion (wire `model-catalog`). */
+export interface CatalogTargetModel {
+  provider: string;
+  model: string;
+}
+
+/** One alias and its ordered expanded targets. */
+export interface CatalogAliasModel {
+  alias: string;
+  targets: CatalogTargetModel[];
+}
+
+/**
+ * The model/alias catalog, mirrored from a `model-catalog` frame. Feeds the
+ * model dropdown in the rerun form (011/012). null ⇒ not yet requested.
+ */
+export interface ModelCatalog {
+  aliases: CatalogAliasModel[];
+  /** Ordered alias preference list (may be empty). */
+  preferences: string[];
+}
+
+/** One conversation message (role + flattened text). */
+export interface ConversationMessage {
+  role: "system" | "user" | "assistant";
+  text: string;
+}
+
+/** One editable conversation turn, mirrored from a `conversation` frame. */
+export interface ConversationTurnModel {
+  turn: number;
+  model: string;
+  system: string;
+  messages: ConversationMessage[];
+}
+
+/**
+ * The editable transcript backing the rerun form (011/012), mirrored from a
+ * `conversation` frame. null ⇒ none loaded. The UI edits `turns` and ships the
+ * edited prefix back as a `rerun-from` override.
+ */
+export interface DebugConversation {
+  invokeid: string;
+  nodeId: string;
+  visit: number;
+  turns: ConversationTurnModel[];
 }

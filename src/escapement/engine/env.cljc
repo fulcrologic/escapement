@@ -40,12 +40,38 @@
       the built-in `preferences/default-preferences` in the processor.
     * `:llm-resilience` (optional) - a partial `escapement.llm/default-resilience`
       map (the overrun output-cap + rerun-on-truncation primitive) injected
-      run-wide under each node's own `:resilience`. Defaults to `{}`."
+      run-wide under each node's own `:resilience`. Defaults to `{}`.
+
+  Time-travel debugger keys (OpenTUI sidecar only; absent/nil ⇒ normal behavior).
+  Defined HERE once; consumed by sibling tasks (override injection / replay policy):
+
+    * `:debug-overrides` (optional) - surfaced on the env as `:debug/overrides`.
+      A map of LLM-turn override inputs applied on (re)entry of the branch's
+      resume conversation node, layered like node-over-alias params. Shape:
+      `{:node-id <opaque-str> :visit <int> :turn <int>
+        :provider <kw>? :model <string>? :temperature <number>?
+        :system <string>? :messages [{:role :user|:assistant|:system :text \"…\"} …]?}`
+      `:node-id`/`:visit`/`:turn` scope WHICH conversation/turn the overrides
+      bind to; the remaining keys are the actual overrides (all optional). nil
+      or absent ⇒ no overrides, the turn assembles exactly as captured. Consumed
+      by the override-injection task (does NOT redefine this key).
+
+    * `:debug-replay-policy` (optional) - surfaced on the env as
+      `:debug/replay-policy`. A map controlling replay-aware re-entry on a forked
+      branch: which captured tool results are served by match vs. executed live,
+      and the divergence point past which everything runs live. Shape:
+      `{:source <opaque-session-id>          ; parent session whose captures back the replay
+        :branch-point {:node-id :visit :turn} ; the divergence coordinates
+        :mode :replay-then-live|:all-live|:all-replay  ; default :replay-then-live
+        :flag-unmatched? <bool>}`             ; tag genuinely-new side effects in the stream
+      nil or absent ⇒ no replay (everything executes live). Consumed by the
+      replay-policy task (does NOT redefine this key)."
   [{:keys [checkpoint-dir invocation-processors registry queue store
            llm-backend llm-default-models llm-catalog-ratings llm-eligibility-strict?
            llm-aliases llm-preferences llm-resilience
            tool-registry transcript-fn human-renderer
-           session-dir artifact-store]
+           session-dir artifact-store
+           debug-overrides debug-replay-policy]
     :or   {invocation-processors []}}]
   (let [registry  (or registry (lmr/new-registry))
         queue     (or queue (queue/new-queue))
@@ -108,4 +134,7 @@
       llm-aliases             (assoc :escapement/llm-aliases llm-aliases)
       llm-preferences         (assoc :escapement/llm-preferences llm-preferences)
       llm-catalog-ratings     (assoc :escapement/llm-catalog-ratings llm-catalog-ratings)
-      llm-eligibility-strict? (assoc :escapement/llm-eligibility-strict? llm-eligibility-strict?))))
+      llm-eligibility-strict? (assoc :escapement/llm-eligibility-strict? llm-eligibility-strict?)
+      ;; Time-travel debugger seams (absent ⇒ normal behavior). See docstring.
+      debug-overrides         (assoc :debug/overrides debug-overrides)
+      debug-replay-policy     (assoc :debug/replay-policy debug-replay-policy))))
