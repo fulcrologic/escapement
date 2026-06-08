@@ -689,7 +689,7 @@
   (let [turn     (when turn-count (dec (long @turn-count)))
         invokeid (:invokeid parent-ctx)
         hooks    {:before-send
-                  (fn [request m]
+                  (fn [request m provider]
                     ;; Externalize the FULL request to a blob (the exact value
                     ;; `escapement.replay/refine-turn` re-feeds). Best-effort,
                     ;; first-write-wins so a fallback re-issue keeps the base.
@@ -699,19 +699,27 @@
                                         (catch Throwable _ nil)))]
                       (transcript! transcript-fn
                         {:event :llm/request :ts (now-ms)
+                         ;; :session-id MUST match the delta/start events so the
+                         ;; live panel folds the resolved model onto the right
+                         ;; (parallel multiplex child) session — letting the
+                         ;; `provider/model` column fill in DURING the wait for
+                         ;; the first token, not only once streaming begins.
                          :data  (cond-> {:n-messages     (count (:messages request))
                                          :user-blocks    (trailing-user-blocks messages)
                                          :system-preview (capture/snippet (:system params))
-                                         :invokeid       invokeid}
-                                  m      (assoc :model m)
-                                  io-ref (assoc :io/ref (:io/ref io-ref)))})))
+                                         :invokeid       invokeid
+                                         :session-id     (:parent-session-id parent-ctx)}
+                                  m        (assoc :model m)
+                                  provider (assoc :provider provider)
+                                  io-ref   (assoc :io/ref (:io/ref io-ref)))})))
                   :delta-sink
-                  (fn [m]
+                  (fn [m provider]
                     (when (:stream? params)
                       (fn [d]
                         (transcript! transcript-fn
                           {:event :llm/delta :ts (now-ms)
-                           :data  (assoc d :model m :invokeid invokeid
+                           :data  (assoc d :model m :provider provider
+                                    :invokeid invokeid
                                     ;; session-id distinguishes the parallel
                                     ;; multiplex children that share one invokeid
                                     ;; (every judge1 child uses invokeid "judge1").
@@ -751,7 +759,14 @@
                     :hooks               hooks}
                    params messages tools)]
     (case (:status env)
-      :ok                {:ok (:response env) :model-used (:model env)}
+      ;; Tag the response payload with the WINNING candidate's provider so the
+      ;; live panel can show `provider/model` per session row (a group may mix
+      ;; providers across its children, so this must ride per-turn, not on the
+      ;; group). nil :provider (backend-default pick) leaves it untouched.
+      :ok                {:ok (cond-> (:response env)
+                                (get-in env [:candidate :provider])
+                                (assoc :provider (get-in env [:candidate :provider])))
+                          :model-used (:model env)}
       :overrun           {:overrun (:response env) :model-used (:model env)}
       :exhausted         {:exhausted      (get-in env [:error :attempts])
                           :last-throwable (:last-throwable env)}
@@ -1116,7 +1131,7 @@
 
       :else
       (let [response      (:ok outcome)
-            {:keys [stop-reason content usage model elapsed-ms]} response
+            {:keys [stop-reason content usage model elapsed-ms wait-ms provider]} response
             ctx-window    (some-> model catalog/context-window)
             input-tokens  (:input-tokens usage)
             output-tokens (:output-tokens usage)
@@ -1142,7 +1157,9 @@
                            :invokeid    (:invokeid parent-ctx)
                            :session-id  (:parent-session-id parent-ctx)}
                     model (assoc :model model)
+                    provider (assoc :provider provider)
                     elapsed-ms (assoc :elapsed-ms elapsed-ms)
+                    wait-ms (assoc :wait-ms wait-ms)
                     output-tps (assoc :output-tps output-tps)
                     ctx-window (assoc :context-window ctx-window)
                     io-ref (assoc :io/ref (:io/ref io-ref))

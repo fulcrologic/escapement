@@ -439,8 +439,8 @@
 ;; ===========================================================================
 
 (def ^:private no-op-hooks
-  {:before-send    (fn [_ _] nil)
-   :delta-sink     (fn [_] nil)
+  {:before-send    (fn [_ _ _] nil)
+   :delta-sink     (fn [_ _] nil)
    :on-retry       (fn [_] nil)
    :on-model-down  (fn [_] nil)
    :on-policy-empty (fn [_] nil)
@@ -464,8 +464,8 @@
        `:down` is skipped. A fresh atom is used when absent.
      * `:hooks` — optional side-effect callbacks (the worker supplies these to
        emit transcript events + capture blobs; all default to no-ops):
-         - `:before-send`   (fn [request model])
-         - `:delta-sink`    (fn [model] → on-delta | nil) streaming sink factory
+         - `:before-send`   (fn [request model provider])
+         - `:delta-sink`    (fn [model provider] → on-delta | nil) streaming sink factory
          - `:on-retry`      (fn [{:keys [model category attempt max-retries]}])
          - `:on-model-down` (fn [{:keys [model category remaining throwable]}])
          - `:on-policy-empty` (fn [{:keys [policy strict?]}])
@@ -545,8 +545,8 @@
                            ;; keyword; tagging the request routes MultiBackend by
                            ;; provider (regex bypassed). nil :provider → untouched.
                            (:provider cand) (assoc :provider (:provider cand)))
-                _        (before-send request m)
-                on-delta (delta-sink m)
+                _        (before-send request m (:provider cand))
+                on-delta (delta-sink m (:provider cand))
                 ;; A deterministic model re-truncates on an identical rerun, so
                 ;; an overrun rerun can bump temperature to force sampling
                 ;; variance (clamped to `:temperature-max`, default 1.0). Off
@@ -570,10 +570,25 @@
                                                      (* (double over) (double temp-bump))))
                                                (* 1000.0) Math/round (/ 1000.0)))
                                            request)
-                                 _       (when bumped? (before-send req m))
+                                 _       (when bumped? (before-send req m (:provider cand)))
                                  t0  (now-ms)
-                                 r   (try (let [resp (p/await! (proto/send-turn* backend req on-delta))]
-                                            (assoc resp :elapsed-ms (- (now-ms) t0)))
+                                 ;; Time-to-first-token: stamp the wall-clock of
+                                 ;; the FIRST delta (model load + prompt eval +
+                                 ;; queue wait) so the UI can show a reliable
+                                 ;; `wait` next to total `:elapsed-ms`. Wrapping
+                                 ;; the sink (variadic — backends may pass extra
+                                 ;; args) is the only spot that sees the first
+                                 ;; token for EVERY backend; the client-side TUI
+                                 ;; estimate misses non-streamed turns. Atom is
+                                 ;; inside the loop body so it resets per attempt.
+                                 first-tok (atom nil)
+                                 on-delta* (when on-delta
+                                             (fn [& args]
+                                               (when (nil? @first-tok) (reset! first-tok (now-ms)))
+                                               (apply on-delta args)))
+                                 r   (try (let [resp (p/await! (proto/send-turn* backend req on-delta*))]
+                                            (cond-> (assoc resp :elapsed-ms (- (now-ms) t0))
+                                              @first-tok (assoc :wait-ms (- (long @first-tok) (long t0)))))
                                           (catch Throwable t {:_throw t}))
                                  t   (:_throw r)
                                  cat (when t (proto/error-category t))]

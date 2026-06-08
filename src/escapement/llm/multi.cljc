@@ -99,10 +99,11 @@
       (proto/send-turn b request))))
 
 ;; Two concrete variants share one selection path. The variant is chosen at
-;; construction so the request-less `proto/streaming?` (which is
-;; `satisfies?`-based) faithfully reflects the sub-backend that would be
-;; picked: a `StreamingMultiBackend` is only constructed when every
-;; selectable sub-backend implements `StreamingLLMBackend`.
+;; construction: a `StreamingMultiBackend` is constructed when ANY selectable
+;; sub-backend implements `StreamingLLMBackend`. Per request it streams from
+;; streaming-capable sub-backends and falls back to a plain `send-turn` for the
+;; rest (`delegate-stream-turn`), so the request-less `proto/streaming?` reports
+;; "can stream" for the route table as a whole.
 
 (defrecord MultiBackend [routes default-backend provider-index]
   proto/LLMBackend
@@ -143,6 +144,13 @@
         default  (:default-backend opts)
         prov-idx (routes->provider-index routes)
         subs     (cond-> (mapv second routes) default (conj default))]
-    (if (and (seq subs) (every? proto/streaming? subs))
+    ;; Stream whenever ANY selectable sub-backend can: `delegate-stream-turn`
+    ;; selects per-request and falls back to a plain `send-turn` for the
+    ;; non-streaming ones, so a single non-streaming sub-backend (e.g. the codex
+    ;; Responses backend) must NOT disable token streaming — and the live
+    ;; first-token `wait`/`t/s` — for the streaming providers it routes
+    ;; alongside. (Was `every?`, which made one non-streaming backend collapse
+    ;; the whole route table to non-streaming.)
+    (if (and (seq subs) (some proto/streaming? subs))
       (->StreamingMultiBackend routes default prov-idx)
       (->MultiBackend routes default prov-idx))))

@@ -47,7 +47,7 @@
    [com.fulcrologic.statecharts.chart :as chart]
    [com.fulcrologic.statecharts.data-model.operations :as ops]
    [com.fulcrologic.statecharts.elements
-    :refer [final on-entry script send state transition]]
+    :refer [cancel final on-entry on-exit script send state transition]]
    [com.fulcrologic.statecharts.invocation.multiplex :as mux :refer [multiplex]]
    [com.fulcrologic.statecharts.invocation.multiplex-options :as mo]
    [com.fulcrologic.statecharts.protocols :as sp]
@@ -74,7 +74,20 @@
 (defn- persona-for [i]
   (nth judge-personas (mod i (count judge-personas))))
 
-(declare format-haikus format-finalists)
+(def poet-judge-model-pool
+  "Alias keywords (defined in `.escapement.edn :llm/aliases`) that poets and
+  judges draw from at random. Spans local ollama + cloud (z.ai GLM). The HOST
+  is NOT in this pool — it is pinned to gpt-5.5 (`:host-gpt`) below. Each child
+  is assigned ONE random model by the parent's multiplex `child-params`, so a
+  given poet/judge uses a single model across all its turns."
+  [:p-gemma1b :p-gemma270m :p-glm47 :p-glm-turbo])
+
+(def ^:private host-model :host-gpt)
+
+(defn- rand-pool-model []
+  (rand-nth poet-judge-model-pool))
+
+(declare format-haikus format-finalists r1-support)
 
 (defn- raise!
   "Self-targeted event send, used for chart-internal transitions out of
@@ -162,6 +175,12 @@
     "vivid imagery and an honest moment. Output ONLY the three lines — "
     "no title, no numbering, no commentary, no preamble."))
 
+(defn- muse-system [idx]
+  (str "You are the Muse whispering to Poet #" idx ". Offer a short burst of "
+    "creative inspiration on the given theme: 3-5 vivid images, sensory "
+    "fragments, or unexpected angles the poet might draw on. Do NOT write a "
+    "haiku yourself. Output only the fragments, one per line, no preamble."))
+
 (defn- judge1-system [idx persona poet-idx]
   (str "You are Judge #" idx ". Persona: " persona "\n"
     "You will see three numbered haiku, all by Poet #" poet-idx ". Pick "
@@ -186,32 +205,71 @@
     "given the full record of the contest — theme, every poet's three "
     "haiku, each judge's round-1 picks with reasons, the finalists, and "
     "each judge's round-2 vote with reasons — and you must produce ONE "
-    "well-formatted Markdown report named `tournament-summary.md`. The "
-    "report should:\n"
+    "well-formatted Markdown report named `tournament-summary.md`.\n\n"
+    "Use the poet numbers EXACTLY as they appear in the input — do not shift "
+    "them. Not every poet number need appear: a poet that produced no usable "
+    "haiku is simply absent from the record, and you must say so rather than "
+    "invent an entry or treat its number as a different poet.\n\n"
+    "The report should:\n"
     "  1. Open with the theme and the size of the field (N poets, M "
     "judges).\n"
     "  2. Announce the WINNER (or declare the tie) up front and crown that "
-    "poet **The Muse** — state the poet number explicitly (e.g. \"Poet 3 — "
-    "The Muse\") with the winning haiku rendered in a fenced block.\n"
-    "  3. Give a one-paragraph reading of why the Muse won, drawing on the "
+    "poet **The Laureate** — state the poet number explicitly (e.g. \"Poet 3 "
+    "— The Laureate\") with the winning haiku rendered in a fenced block.\n"
+    "  3. Give a one-paragraph reading of why the Laureate won, drawing on the "
     "round-2 judges' actual reasons.\n"
-    "  4. A `## The Critique` section: name the SINGLE poet who fared worst "
+    "  4. A `## The Overlooked` section: name the SINGLE poet who fared worst "
     "— the one with the fewest votes across both rounds (break ties by who "
     "drew the least round-1 support; a poet who never reached the finals "
     "counts as worst). State that poet's number explicitly (e.g. \"Poet 5 — "
-    "The Critique\"), render their best haiku in a fenced block, and give a "
-    "frank one-paragraph critique grounded in the judges' silence or their "
+    "The Overlooked\"), render their best haiku in a fenced block, and give a "
+    "frank one-paragraph note grounded in the judges' silence or their "
     "stated reasons for preferring others. Be specific and fair, not cruel.\n"
     "  5. A `## Finalists` section listing each finalist with its haiku, "
     "its poet, and a brief note on the round-1 consensus that lifted it.\n"
     "  6. A `## All entries` section listing every poet's three haiku.\n"
     "  7. A `## Notes from the judges` section quoting one or two of the "
     "most interesting round-2 reasons verbatim, attributed by persona.\n"
+    "  8. A `## Experiment` section. TWO poets were SECRETLY helped (the judges "
+    "were NOT told; they only saw haiku text by index):\n"
+    "       • the MUSE poet got a gpt-5.5 inspiration pass BEFORE composing "
+    "(its whispered fragments were woven into all three drafts);\n"
+    "       • the CRITIQUE poet drafted three haiku, then a gpt-5.5 editor "
+    "critiqued them and the poet REVISED all three (the revised set is what "
+    "the judges saw).\n"
+    "     Both poets are named in the input, along with EXACTLY what each was "
+    "given (the muse's whisper; the editor's feedback) and how each fared "
+    "(round-1 support and round-2 votes). For EACH of the two, state: which "
+    "poet (by number), what it was given (quote or summarize the "
+    "actual text), and how it did in both rounds. Then say plainly whether "
+    "the hidden help appears to have moved the judging — staying honest if it "
+    "didn't, and noting if a helped poet produced no usable haiku.\n"
     "It must be unambiguous from the report exactly which poet earned the "
-    "Muse and which earned the Critique.\n"
+    "Laureate, which was The Overlooked, and which two were the Muse and the "
+    "Critique.\n"
     "Reply with ONLY the Markdown — no preamble, no closing remarks, no "
     "code fences around the document itself. End your turn after the "
     "report."))
+
+(defn- poet-scoreline
+  "Explicit one-line record for a poet so the host reasons from numbers rather
+  than eyeballing indices: round-1 support, finalist status, round-2 votes — or
+  a clear note that the poet produced no usable haiku (absent from the record)."
+  [data poet-idx]
+  (let [haikus  (:haikus data)
+        finals  (vec (:finalists data))
+        votes   (:judge2-votes data)
+        r1      (get (r1-support haikus (:judge1-picks data)) poet-idx 0)
+        fin-idx (first (keep-indexed (fn [i f] (when (= poet-idx (:poet-idx f)) i)) finals))
+        r2      (->> (vals votes)
+                  (map :finalist_idx)
+                  (filter #(= poet-idx (:poet-idx (nth finals % nil))))
+                  count)]
+    (if-not (contains? haikus poet-idx)
+      "produced NO usable haiku — absent from the contest record (abstained or unparseable)"
+      (str "round-1 support: " r1 " judge pick" (when (not= 1 r1) "s") "; "
+        (if fin-idx (str "reached the finals (finalist " (inc fin-idx) ")") "did NOT reach the finals")
+        "; round-2 votes: " r2))))
 
 (defn- host-user-message [data]
   (let [theme    (:theme data)
@@ -220,14 +278,30 @@
         finals   (:finalists data)
         votes    (:judge2-votes data)
         result   (:result data)
-        ;; Round-1 support per poet = how many judges picked any of that poet's
-        ;; haiku. Spelled out so the MC can name The Critique (fewest votes)
-        ;; without having to tally by hand.
-        r1-support (let [tally (frequencies (map :poet_idx (mapcat val picks)))]
-                     (into (sorted-map)
-                       (for [p (sort (keys haikus))] [p (get tally p 0)])))]
+        muse     (:muse-poet data)
+        critique (:critique-poet data)
+        support  (r1-support haikus picks)]
     (str "THEME: " theme "\n"
       "POETS: " (count haikus) ", JUDGES: " (count votes) "\n\n"
+      "## SECRET ROLES — host eyes only (the judges were NOT told)\n"
+      "Two poets were secretly helped; every other poet worked unaided.\n\n"
+      "MUSE poet: Poet " (inc muse) "\n"
+      "  • what it was given (gpt-5.5 inspiration, woven into all 3 drafts):\n"
+      (if-let [m (:muse-text data)]
+        (str "      " (str/replace (str/trim m) "\n" "\n      ") "\n")
+        "      (the muse pass produced nothing / failed)\n")
+      "  • how it fared: " (poet-scoreline data muse) "\n\n"
+      "CRITIQUE poet: Poet " (inc critique) "\n"
+      "  • what it was given (gpt-5.5 editor feedback; the poet then revised all 3):\n"
+      (if-let [c (:critique-text data)]
+        (str "      " (str/replace (str/trim c) "\n" "\n      ") "\n")
+        "      (the critique pass produced nothing / failed)\n")
+      (when-let [d (:critique-drafts data)]
+        (str "  • its PRE-revision drafts were:\n"
+          "      " (str/replace (str/join " / " (map #(str/replace % "\n" " / ") d))
+                     "\n" " ") "\n"))
+      "  • how it fared (after revision — this is what the judges saw): "
+      (poet-scoreline data critique) "\n\n"
       "## All haiku (by poet)\n"
       (format-haikus haikus) "\n\n"
       "## Round-1 picks (one per poet, per judge)\n"
@@ -237,30 +311,32 @@
           (str "Judge " j " (" persona "):\n"
             (str/join "\n"
               (for [{:keys [poet_idx haiku_idx reason]} ps]
-                (str "  - poet " poet_idx " haiku " haiku_idx " — " reason)))))) "\n\n"
+                (str "  - poet " (inc poet_idx) " haiku " (inc haiku_idx) " — " reason)))))) "\n\n"
       "## Finalists (poet → finalist index)\n"
       (format-finalists finals) "\n\n"
       "## Round-2 votes\n"
       (str/join "\n"
         (for [[j {:keys [finalist_idx reason]}] (sort votes)
               :let [persona (persona-for j)]]
-          (str "Judge " j " (" persona ") → finalist " finalist_idx ": " reason))) "\n\n"
-      "## Round-1 support (judges who picked each poet — lowest = The Critique)\n"
+          (str "Judge " j " (" persona ") → finalist " (inc finalist_idx) ": " reason))) "\n\n"
+      "## Round-1 support (judges who picked each poet — lowest = The Overlooked)\n"
       (str/join "\n"
-        (for [[p n] r1-support]
-          (str "  - poet " p ": " n " vote" (when (not= 1 n) "s")))) "\n\n"
+        (for [[p n] support]
+          (str "  - poet " (inc p) ": " n " vote" (when (not= 1 n) "s")))) "\n\n"
       "## Tally\n"
       (pr-str result) "\n\n"
-      "Now write `tournament-summary.md`. Remember: explicitly crown The Muse "
-      "(the winner) AND name The Critique (the poet with the fewest votes).")))
+      "Now write `tournament-summary.md`. "
+      "Explicitly crown The Laureate (winner), name The Overlooked (fewest "
+      "votes), and write the `## Experiment` section covering BOTH the Muse "
+      "poet and the Critique poet — what each was given and how each fared.")))
 
 (defn- format-haikus [haikus]
   (str/join "\n\n"
     (for [[p hs] (sort haikus)]
-      (str "POET " p ":\n"
+      (str "POET " (inc p) ":\n"
         (str/join "\n"
           (map-indexed (fn [hi h]
-                         (str "  [" hi "] "
+                         (str "  [" (inc hi) "] "
                            (str/replace h "\n" " / ")))
             hs))))))
 
@@ -268,7 +344,7 @@
   (str/join "\n\n"
     (map-indexed
       (fn [fi {:keys [poet-idx haiku]}]
-        (str "[" fi "] (from Poet " poet-idx ")\n"
+        (str "[" (inc fi) "] (from Poet " (inc poet-idx) ")\n"
           (str/join "\n"
             (map #(str "    " %) (str/split-lines haiku)))))
       finalists)))
@@ -279,24 +355,108 @@
   (str/join "\n\n"
     (map-indexed (fn [i h] (str (inc i) ".\n" h)) haikus)))
 
+(defn- critic-system [idx]
+  (str "You are a trusted editor mentoring Poet #" idx ". You will see the "
+    "poet's three draft haiku. Give brief, concrete feedback on how to make "
+    "them sharper — imagery, word choice, rhythm, or the 5-7-5 shape. Be "
+    "specific. Do NOT rewrite them yourself; the poet will revise. Output "
+    "only your feedback."))
+
+(defn- poet-revise-msg
+  "Single revise turn: show the poet all three of its drafts plus the editor's
+  free-form feedback, and ask it to regenerate the whole set."
+  [data]
+  (str "Theme: \"" (:theme data) "\". Here are your three draft haiku:\n\n"
+    (format-numbered-haikus (:drafts data)) "\n\n"
+    "An editor offered this feedback:\n" (:critique-text data) "\n\n"
+    "Rewrite all three haiku, applying the feedback. Output the three revised "
+    "haiku, each on three lines, separated by a blank line. No numbering, no "
+    "commentary."))
+
+(defn- parse-haiku-set
+  "Parse `n` haiku out of a single free-form response. Prefers blank-line
+  separated blocks; falls back to chunking all non-blank lines into groups of
+  three. Returns a vector of up to `n` newline-joined haiku."
+  [text n]
+  (when text
+    (let [blocks (->> (str/split text #"\n\s*\n")
+                      (map str/trim) (remove str/blank?)
+                      (keep parse-three-lines) vec)]
+      (if (>= (count blocks) n)
+        (vec (take n blocks))
+        (->> (str/split-lines text)
+             (map str/trim) (remove str/blank?)
+             (partition-all 3) (take n)
+             (mapv #(str/join "\n" %)))))))
+
 ;; ---------------------------------------------------------------------------
-;; CHILD: poet — 3 sequential single-haiku LLM calls.
-;; Each `:haiku-N` state runs one llm-conversation with the poet system
-;; prompt. On `:llm.idle` we capture the text, parse it down to 3 lines,
-;; accumulate into `:haikus`, then advance. The third step calls
-;; `mux/reply` to send the per-poet `:haiku/poet-result` event back to the
-;; tournament parent (the grandparent).
+;; CHILD: poet — composes 3 haiku, with two optional secret roles the parent
+;; assigns to ONE poet each (never the same poet):
+;;
+;;   :role :muse      — a gpt-5.5 inspiration pass runs BEFORE drafting; its
+;;                      whisper (`:muse-text`) is woven into every draft.
+;;   :role :critique  — AFTER the 3 drafts, a gpt-5.5 editor critiques the set
+;;                      (`:critique-text`); the poet then takes one more turn
+;;                      and REGENERATES all 3 haiku with its OWN model, applying
+;;                      the feedback. The revised set is what the judges see.
+;;
+;; `:role-route` sends the muse poet through `:musing` first; everyone else
+;; starts at `:haiku-1`. After `:haiku-3`, `:compose-route` sends the critique
+;; poet through `:critiquing` → `:revising`; everyone else goes straight to
+;; `:report`. The judges never learn which poet took either branch — they only
+;; ever see haiku text indexed by a bare poet number.
+;;
+;; IMPORTANT: the poet ALWAYS sends exactly one `:haiku/poet-result` — the final
+;; set if any haiku parsed, else an abstain. (A previous version replied only on
+;; exactly 3 parsed haiku, so a poet whose draft failed to parse finalized
+;; SILENTLY and vanished from the record — which is what confused the host.)
 ;; ---------------------------------------------------------------------------
 
+(defn- poet-abstain!
+  "Reply to the parent that this poet produced nothing usable, then fall to the
+  `:reported` final. `extra` carries the reason (`:error` / `:hang?` / …). Still
+  forwards any secret-role artifacts so the host can report that a helped poet
+  was given something yet produced no haiku."
+  [env data extra]
+  (mux/reply env :haiku/poet-result
+    (cond-> (merge {:idx (:idx data) :abstained? true} extra)
+      (:muse-text data)     (assoc :muse-text (:muse-text data))
+      (:critique-text data) (assoc :critique-text (:critique-text data))))
+  nil)
+
+(defn- poet-report!
+  "Reply to the parent with the poet's final haiku set (partial sets are fine),
+  carrying the secret-role artifacts (`:muse-text` / `:critique-text`) so the
+  host — and ONLY the host — can report what each blessed poet was given. If no
+  haiku parsed at all, abstain instead."
+  [env data]
+  (let [haikus (:haikus data)]
+    (if (seq haikus)
+      (mux/reply env :haiku/poet-result
+        (cond-> {:idx (:idx data) :haikus haikus}
+          (:muse-text data)     (assoc :muse-text (:muse-text data))
+          (:critique-text data) (assoc :critique-text (:critique-text data)
+                                  :drafts (:drafts data))))
+      (poet-abstain! env data {:reason :no-parseable-haiku})))
+  nil)
+
 (defn- poet-step
-  [n next-id last?]
-  (let [id    (keyword (str "haiku-" n))
-        invk  (str "poet-" n)]
+  "One draft state: compose haiku #n with the poet's own model (plus the Muse's
+  whisper, if present), accumulate into `:haikus`, advance to `next-id`. Never
+  replies itself; the terminal `:report` state owns the single reply."
+  [n next-id]
+  (let [id     (keyword (str "haiku-" n))
+        invk   (str "poet-" n)
+        sendid (str "safety-haiku-" n)]
     (state {:id id}
-      (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms}))
+      ;; Per-state hang backstop, cancelled on exit so a stale timer from a fast
+      ;; early step can't fire during a slower later step and spuriously abort.
+      (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms :id sendid}))
+      (on-exit  {} (cancel {:sendid sendid}))
       (h/llm-conversation
         {:id             invk
          :stream?        true
+         :model          (fn [_env data] (:model data))
          :system         (fn [_env data] (poet-system (:idx data)))
          :real-tools     []
          :allowed-events []
@@ -304,6 +464,10 @@
          :budget-ms      60000
          :message        (fn [_env data]
                            (str "Theme: \"" (:theme data) "\". "
+                             ;; If this poet was secretly given a Muse, its
+                             ;; gpt-5.5 inspiration is woven into every draft.
+                             (when-let [m (:muse-text data)]
+                               (str "Your muse whispers:\n" m "\n"))
                              "Write haiku #" n " of 3. Output only the three lines."))})
 
       (transition {:event :llm.idle
@@ -315,34 +479,144 @@
                          haiku  (parse-three-lines text)
                          haikus (cond-> (or (:haikus data) [])
                                   haiku (conj haiku))]
-                     (when (and last? (= 3 (count haikus)))
-                       (mux/reply env :haiku/poet-result
-                         {:idx (:idx data) :haikus haikus}))
                      [(ops/assign :haikus haikus)]))}))
 
       (transition {:event :error.llm :target :reported}
-        (script {:expr
-                 (fn [env data]
-                   (mux/reply env :haiku/poet-result
-                     {:idx        (:idx data)
-                      :abstained? true
-                      :error      (get-in data [:_event :data])})
-                   nil)}))
+        (script {:expr (fn [env data]
+                         (poet-abstain! env data {:error (get-in data [:_event :data])}))}))
 
       (transition {:event :child/safety-stop :target :reported}
-        (script {:expr
-                 (fn [env data]
-                   (mux/reply env :haiku/poet-result
-                     {:idx (:idx data) :abstained? true :hang? true})
-                   nil)})))))
+        (script {:expr (fn [env data] (poet-abstain! env data {:hang? true}))})))))
+
+;; The Muse — one secret inspiration call that runs BEFORE any haiku, ONLY for
+;; the poet the parent randomly blessed (`:role :muse`). Its model is HARD-PINNED
+;; to `:host-gpt` (gpt-5.5) regardless of the run's `--model`, so we measure what
+;; a strong model's inspiration does for an otherwise-pooled poet. Its output is
+;; stashed in `:muse-text` and woven into every draft (see `poet-step`'s message).
+;; Any failure (error / hang) falls through to composing unaided.
+(defn- muse-step []
+  (state {:id :musing}
+    (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms :id "safety-musing"}))
+    (on-exit  {} (cancel {:sendid "safety-musing"}))
+    (h/llm-conversation
+      {:id             "muse"
+       :stream?        true
+       :model          host-model                       ;; HARD-PINNED gpt-5.5
+       :system         (fn [_env data] (muse-system (:idx data)))
+       :real-tools     []
+       :allowed-events []
+       :max-turns      1
+       :budget-ms      60000
+       :message        (fn [_env data]
+                         (str "Theme: \"" (:theme data) "\". Whisper your inspiration."))})
+    (transition {:event :llm.idle
+                 :cond  (fn [_env data] (= "muse" (from-id data)))
+                 :target :haiku-1}
+      (script {:expr (fn [env data]
+                       [(ops/assign :muse-text (captured-text env data))])}))
+    (transition {:event :error.llm :target :haiku-1})
+    (transition {:event :child/safety-stop :target :haiku-1})))
+
+;; The Critique — a gpt-5.5 editor reads the critique poet's 3 drafts and writes
+;; feedback (`:critique-text`); the poet then revises. HARD-PINNED to gpt-5.5,
+;; mirroring the Muse. Shows live as `poets.<idx>.critique`. Failure → keep the
+;; drafts unrevised.
+(defn- critique-step []
+  (state {:id :critiquing}
+    (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms :id "safety-critiquing"}))
+    (on-exit  {} (cancel {:sendid "safety-critiquing"}))
+    (h/llm-conversation
+      {:id             "critique"
+       :stream?        true
+       :model          host-model                       ;; HARD-PINNED gpt-5.5
+       :system         (fn [_env data] (critic-system (:idx data)))
+       :real-tools     []
+       :allowed-events []
+       :max-turns      1
+       :budget-ms      60000
+       :message        (fn [_env data]
+                         (str "Here are Poet #" (:idx data) "'s three draft haiku:\n\n"
+                           (format-numbered-haikus (:haikus data))
+                           "\n\nGive your feedback for the revision."))})
+    (transition {:event :llm.idle
+                 :cond  (fn [_env data] (= "critique" (from-id data)))
+                 :target :revising}
+      (script {:expr (fn [env data]
+                       [(ops/assign :drafts (:haikus data))
+                        (ops/assign :critique-text (captured-text env data))])}))
+    (transition {:event :error.llm :target :report})
+    (transition {:event :child/safety-stop :target :report})))
+
+;; Revise — the critique poet regenerates all 3 haiku with its OWN pool model,
+;; applying the editor's feedback. The revised set replaces the drafts (judges
+;; see only this). Parse failure / error / hang → fall back to the drafts.
+(defn- revise-step []
+  (state {:id :revising}
+    (on-entry {} (send {:event :child/safety-stop :delay child-safety-ms :id "safety-revising"}))
+    (on-exit  {} (cancel {:sendid "safety-revising"}))
+    (h/llm-conversation
+      {:id             "revise"
+       :stream?        true
+       :model          (fn [_env data] (:model data))   ;; poet's own model
+       :system         (fn [_env data] (poet-system (:idx data)))
+       :real-tools     []
+       :allowed-events []
+       :max-turns      1
+       :budget-ms      60000
+       :message        (fn [_env data] (poet-revise-msg data))})
+    (transition {:event :llm.idle
+                 :cond  (fn [_env data] (= "revise" (from-id data)))
+                 :target :report}
+      (script {:expr (fn [env data]
+                       (let [revised (parse-haiku-set (captured-text env data)
+                                       (count (:drafts data)))]
+                         [(ops/assign :haikus (if (seq revised) revised (:drafts data)))]))}))
+    (transition {:event :error.llm :target :report}
+      (script {:expr (fn [_env data] [(ops/assign :haikus (:drafts data))])}))
+    (transition {:event :child/safety-stop :target :report}
+      (script {:expr (fn [_env data] [(ops/assign :haikus (:drafts data))])}))))
 
 (def poet-chart
   (chart/statechart
-    {:initial :haiku-1
+    {:initial :role-route
      :name    "haiku-poet"}
-    (poet-step 1 :haiku-2 false)
-    (poet-step 2 :haiku-3 false)
-    (poet-step 3 :reported true)
+    ;; Route the muse poet through the Muse first; everyone else composes
+    ;; straight away. Judges never learn which poet took this branch.
+    (state {:id :role-route}
+      (on-entry {}
+        (script {:expr (fn [env data]
+                         (raise! env (if (= :muse (:role data)) :role/muse :role/compose))
+                         nil)}))
+      (transition {:event :role/muse :target :musing})
+      (transition {:event :role/compose :target :haiku-1}))
+    (muse-step)
+    (poet-step 1 :haiku-2)
+    (poet-step 2 :haiku-3)
+    (poet-step 3 :compose-route)
+    ;; After drafting: the critique poet gets an editor + a revise turn; all
+    ;; others report their drafts as-is. A poet that drafted nothing skips
+    ;; straight to report (which abstains).
+    (state {:id :compose-route}
+      (on-entry {}
+        (script {:expr (fn [env data]
+                         (raise! env (if (and (= :critique (:role data))
+                                           (seq (:haikus data)))
+                                       :role/critique
+                                       :role/report))
+                         nil)}))
+      (transition {:event :role/critique :target :critiquing})
+      (transition {:event :role/report :target :report}))
+    (critique-step)
+    (revise-step)
+    ;; Single reply point for the normal path (error/hang paths reply inline and
+    ;; jump straight to :reported, so there is never a double reply).
+    (state {:id :report}
+      (on-entry {}
+        (script {:expr (fn [env data]
+                         (poet-report! env data)
+                         (raise! env :report/done)
+                         nil)}))
+      (transition {:event :report/done :target :reported}))
     (final {:id :reported})))
 
 ;; ---------------------------------------------------------------------------
@@ -358,6 +632,7 @@
       (h/llm-conversation
         {:id             "judge1"
          :stream?        true
+         :model          (fn [_env data] (:model data))
          :system         (fn [_env data]
                            (judge1-system (:idx data) (:persona data)
                              (:poet-idx data)))
@@ -418,6 +693,7 @@
       (h/llm-conversation
         {:id             "judge2"
          :stream?        true
+         :model          (fn [_env data] (:model data))
          :system         (fn [_env data]
                            (judge2-system (:idx data) (:persona data)
                              (count (:finalists data))))
@@ -506,20 +782,20 @@
   (let [tally (frequencies (map :poet_idx (mapcat val judge1-picks)))]
     (into (sorted-map) (for [p (sort (keys haikus))] [p (get tally p 0)]))))
 
-(defn- muse-entry
-  "The winning per-poet champion (`compute-finalists` entry) — The Muse.
+(defn- laureate-entry
+  "The winning per-poet champion (`compute-finalists` entry) — The Laureate.
   On a tie, the first leader. nil if there are no finalists."
   [finalists result]
   (let [idx (or (:winner-idx result) (first (:tie result)))]
     (when idx (nth finalists idx nil))))
 
-(defn- critique-entry
-  "The poet who fared worst — The Critique — by fewest round-1 votes (ties
-  broken by lowest poet index), excluding the Muse. Returns that poet's best
-  haiku as a `compute-finalists`-shaped entry."
-  [haikus judge1-picks finalists muse-poet-idx]
+(defn- overlooked-entry
+  "The poet who fared worst — The Overlooked — by fewest round-1 votes (ties
+  broken by lowest poet index), excluding the Laureate. Returns that poet's
+  best haiku as a `compute-finalists`-shaped entry."
+  [haikus judge1-picks finalists laureate-poet-idx]
   (let [worst (->> (r1-support haikus judge1-picks)
-                (remove (fn [[p _]] (= p muse-poet-idx)))
+                (remove (fn [[p _]] (= p laureate-poet-idx)))
                 (sort-by (fn [[p n]] [n p]))
                 ffirst)]
     (when worst
@@ -528,23 +804,35 @@
 
 (defn- verdict-markdown
   "Deterministic, model-independent verdict block prepended to the summary so
-  the report ALWAYS states exactly which poet earned The Muse (the winner) and
-  which earned The Critique (fewest votes), each with its haiku."
+  the report ALWAYS states exactly which poet earned The Laureate (the winner)
+  and which was The Overlooked (fewest votes), each with its haiku, plus a
+  deterministic note naming the two secretly-helped poets (the gpt-5.5 Muse and
+  the gpt-5.5 Critique), independent of what the host model writes."
   [data]
-  (let [{:keys [theme haikus judge1-picks finalists judge2-votes result]} data
-        muse  (muse-entry finalists result)
-        crit  (critique-entry haikus judge1-picks finalists (:poet-idx muse))
-        fence (fn [h] (str "```\n" (str/trim (str h)) "\n```"))]
+  (let [{:keys [theme haikus judge1-picks finalists judge2-votes result
+                muse-poet critique-poet]} data
+        laureate (laureate-entry finalists result)
+        over     (overlooked-entry haikus judge1-picks finalists (:poet-idx laureate))
+        fence    (fn [h] (str "```\n" (str/trim (str h)) "\n```"))
+        won?     (fn [idx] (and (some? idx) (= idx (:poet-idx laureate))))]
     (str "# Haiku Tournament — " theme "\n\n"
       "**Field:** " (count haikus) " poets · " (count judge2-votes) " judges"
       (when (:tie result) "  ·  _round-2 tie_") "\n\n"
-      "## 🏆 The Muse — Poet " (:poet-idx muse)
-      "  (" (:votes muse 0) " round-1 votes)\n\n"
-      (fence (:haiku muse)) "\n\n"
-      "## 🥀 The Critique — Poet " (:poet-idx crit)
-      "  (" (get (r1-support haikus judge1-picks) (:poet-idx crit) 0)
+      "## 🏆 The Laureate — Poet " (inc (:poet-idx laureate))
+      "  (" (:votes laureate 0) " round-1 votes)\n\n"
+      (fence (:haiku laureate)) "\n\n"
+      "## 🥀 The Overlooked — Poet " (inc (:poet-idx over))
+      "  (" (get (r1-support haikus judge1-picks) (:poet-idx over) 0)
       " round-1 votes — the least loved)\n\n"
-      (fence (:haiku crit)) "\n\n"
+      (fence (:haiku over)) "\n\n"
+      ;; Deterministic record of the hidden experiment — the two secretly-helped
+      ;; poets are named here regardless of what the host writes.
+      "## 🎭 The Muse — secretly given to Poet " (inc muse-poet)
+      (when (won? muse-poet) " — who went on to win")
+      " (gpt-5.5 inspiration before composing, hidden from the judges)\n\n"
+      "## ✍️ The Critique — secretly given to Poet " (inc critique-poet)
+      (when (won? critique-poet) " — who went on to win")
+      " (gpt-5.5 editor feedback, then the poet revised all three, hidden from the judges)\n\n"
       "---\n\n")))
 
 ;; ---------------------------------------------------------------------------
@@ -667,10 +955,20 @@
         (transition {:event :plan/start :target :composing}
           (script {:expr
                    (fn [_env data]
-                     (let [{:keys [poets audience theme]} (:plan data)]
+                     (let [{:keys [poets audience theme]} (:plan data)
+                           ;; Secretly bless ONE random poet with the Muse and a
+                           ;; DIFFERENT random poet with the Critique (editor +
+                           ;; revise). Judges never learn who; only the host is
+                           ;; told. poets >= 3 (planner-enforced), so the two
+                           ;; roles always land on distinct poets.
+                           muse     (rand-int poets)
+                           critique (let [c (rand-int (dec poets))]
+                                      (if (>= c muse) (inc c) c))]
                        [(ops/assign :poet-count poets)
                         (ops/assign :audience-count audience)
-                        (ops/assign :theme theme)]))}))
+                        (ops/assign :theme theme)
+                        (ops/assign :muse-poet muse)
+                        (ops/assign :critique-poet critique)]))}))
         (transition {:event :plan/abort :target :aborted}
           (script {:expr
                    (fn [_env data]
@@ -695,18 +993,32 @@
            mo/child-params (fn [_env data idx]
                              {:src    poet-chart-id
                               :params {:idx   idx
-                                       :theme (:theme data)}})})
+                                       :theme (:theme data)
+                                       :model (rand-pool-model)
+                                       ;; One poet gets :muse, a different one
+                                       ;; gets :critique; the rest get nil and
+                                       ;; compose unaided.
+                                       :role  (cond
+                                                (= idx (:muse-poet data))     :muse
+                                                (= idx (:critique-poet data)) :critique
+                                                :else                         nil)}})})
 
         ;; Accumulate per-poet results as they reply.
         (transition {:event :haiku/poet-result :type :internal}
           (script {:expr
                    (fn [_env data]
-                     (let [{:keys [idx haikus abstained?]}
+                     (let [{:keys [idx haikus abstained? muse-text critique-text drafts]}
                            (get-in data [:_event :data])
                            h' (cond-> (or (:haikus data) {})
                                 (and (not abstained?) (seq haikus))
                                 (assoc idx haikus))]
-                       [(ops/assign :haikus h')]))}))
+                       ;; Stash the secret-role artifacts (host-only) as they
+                       ;; arrive: what the Muse whispered, and the editor's
+                       ;; critique + the poet's pre-revision drafts.
+                       (cond-> [(ops/assign :haikus h')]
+                         muse-text     (conj (ops/assign :muse-text muse-text))
+                         critique-text (conj (ops/assign :critique-text critique-text))
+                         (seq drafts)  (conj (ops/assign :critique-drafts drafts)))))}))
 
         ;; Library-emitted cohort done — every poet has reported.
         (transition {:event :done.invoke.poets :target :judging-r1}))
@@ -731,6 +1043,7 @@
                                 :params {:idx      judge-i
                                          :persona  (persona-for judge-i)
                                          :poet-idx poet-i
+                                         :model    (rand-pool-model)
                                          :haikus   (get-in data [:haikus poet-i])}}))})
 
         (transition {:event :haiku/judge1-result :type :internal}
@@ -771,6 +1084,7 @@
                              {:src    judge2-chart-id
                               :params {:idx       idx
                                        :persona   (persona-for idx)
+                                       :model     (rand-pool-model)
                                        :finalists (:finalists data)}})})
 
         (transition {:event :haiku/judge2-result :type :internal}
@@ -801,6 +1115,7 @@
         (h/llm-conversation
           {:id             "host"
            :stream?        true
+           :model          host-model
            :system         host-system
            :real-tools     []
            :allowed-events []

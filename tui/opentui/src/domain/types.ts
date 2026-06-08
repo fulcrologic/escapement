@@ -29,6 +29,12 @@ export interface LiveSession {
   tokens?: number;
   /** Re-anchored to the FIRST delta (excludes time-to-first-token). */
   "first-ts": number;
+  /** Original llm/start timestamp (ms), preserved across the first-delta
+   *  re-anchor so the streaming WAIT (time-to-first-token) can be measured. */
+  "start-ts"?: number;
+  /** Time-to-first-token (ms): first-delta-ts − start-ts. Frozen once the
+   *  first delta arrives; the "wait" column reads this. */
+  "wait-ms"?: number;
   /** Last activity timestamp (ms). */
   "last-ts": number;
   status: LiveStatus;
@@ -36,6 +42,8 @@ export interface LiveSession {
   /** Capped in-flight partial text (last `LIVE_PARTIAL_TAIL_CHARS` chars). */
   text: string;
   model?: string | null;
+  /** Winning candidate's provider (e.g. "ollama"), for the `provider/model` label. */
+  provider?: string | null;
   /** The session-id this counter belongs to (opaque string). */
   session: string;
   /** True generation rate from llm/response output-tps (preferred over estimate). */
@@ -98,6 +106,12 @@ export interface InvocationEntry {
   "started-ms": number;
   "ended-ms": number | null;
   reason?: unknown;
+  /** This invocation's OWN token count, frozen from its live session at
+   *  worker-exit (so concurrent same-role turns show distinct counts rather
+   *  than the shared role aggregate). Undefined while still streaming. */
+  tokens?: number;
+  /** Model resolved for THIS invocation, frozen at worker-exit. */
+  model?: string | null;
 }
 
 // --- Transcript SENT/REPLY blocks (port of tui/transcript.clj) -------------

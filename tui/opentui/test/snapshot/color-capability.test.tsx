@@ -29,7 +29,7 @@ async function liveFgColors(capability: "none" | "truecolor"): Promise<Set<strin
     focused: true,
     width: 60,
   };
-  const setup = await testRender(() => <LivePanel ctx={ctx} tick={3} />, {
+  const setup = await testRender(() => <LivePanel ctx={ctx} tick={3} height={24} />, {
     width: 60,
     height: 14,
   });

@@ -153,8 +153,16 @@
    per-pane cursor tracking). Idempotent + fire-and-forget."
   []
   (try
-    ;; reset attrs, leave alt-screen, show cursor — straight to /dev/tty
-    (let [seq (str esc "[0m" esc "[?1049l" esc "[?25h")]
+    ;; Straight to /dev/tty. Beyond attrs/alt-screen/cursor we also disable the
+    ;; modes OpenTUI turns ON (kitty keyboard protocol, mouse tracking, focus +
+    ;; bracketed-paste reporting): if the sidecar died abnormally WITHOUT a
+    ;; graceful renderer.destroy(), leaving the kitty keyboard protocol enabled
+    ;; breaks keyboard handling desktop-wide (e.g. Hyprland window switching).
+    (let [seq (str esc "[<u"                                ; pop kitty keyboard protocol
+                   esc "[?1000l" esc "[?1002l" esc "[?1003l" esc "[?1006l" ; mouse tracking off
+                   esc "[?1004l"                            ; focus reporting off
+                   esc "[?2004l"                            ; bracketed paste off
+                   esc "[0m" esc "[?1049l" esc "[?25h")]    ; attrs reset, leave alt-screen, show cursor
       (spit "/dev/tty" seq))
     (catch Throwable _ nil))
   (try
@@ -175,10 +183,14 @@
      * `:port`        — api-server/WS port the sidecar connects to.
      * `:session-id`  — active session id (passed via env for context).
      * `:session-dir` — shared session dir (artifacts read directly off disk).
+     * `:chart-sym`   — the loaded chart symbol; exported as `OPENTUI_CHART` so
+                        the header strip shows the chart name (not `session`).
+     * `:session-short` — short session id; exported as `OPENTUI_SESSION_SHORT`
+                        for the header's `chart · <session>` line.
 
    The child inherits the real TTY (stdin/stdout/stderr) so it owns rendering +
    keys. Returns the `java.lang.Process`."
-  [{:keys [entry port session-id session-dir]}]
+  [{:keys [entry port session-id session-dir chart-sym session-short]}]
   (let [bun     (find-bun)
         pb      (ProcessBuilder. ^"[Ljava.lang.String;"
                                  (into-array String [bun "run" entry]))
@@ -194,6 +206,11 @@
     (.put env "OPENTUI_WS_URL" (str "ws://127.0.0.1:" port "/ws"))
     (.put env "OPENTUI_WS_PORT" (str port))
     (when session-id (.put env "ESCAPEMENT_SESSION_ID" (str session-id)))
+    ;; Header strip parity (task 004): chart name + short session id. The sidecar
+    ;; reads OPENTUI_CHART / OPENTUI_SESSION_SHORT in main.tsx (chartNameFromEnv /
+    ;; sessionShortFromEnv) for header line 1.
+    (when chart-sym (.put env "OPENTUI_CHART" (str chart-sym)))
+    (when session-short (.put env "OPENTUI_SESSION_SHORT" (str session-short)))
     ;; Export an ABSOLUTE session dir: the sidecar's cwd is tui/opentui/ (set above),
     ;; but `session-dir` is relative to the AGENT's cwd (repo root). Resolve it
     ;; here (in the agent) so the sidecar's artifact reads hit the right path.

@@ -1,11 +1,47 @@
 ---
 name: writing-escapement-statecharts
-description: Non-obvious gotchas when authoring Escapement statecharts — event naming, conversation lifecycle, transition types, SCI-safe wiring. Use when writing/modifying charts under src/escapement/examples/ or demos/.
+description: REQUIRED before writing or editing any Escapement statechart/agent — covers the minimal skeleton, which example to clone, and traps the engine won't warn you about. Load it when building or editing an escapement agent/chart.
 ---
 
 # Writing Escapement statecharts
 
-Traps the engine won't warn about. Sources: `Guide.adoc` (Idioms/gotchas, params-fn), `CLAUDE.md`, `examples/fired.clj`.
+Sources: `Guide.adoc` (Idioms/gotchas, params-fn), `CLAUDE.md`, the `examples/` charts.
+
+## Start here (before writing)
+
+1. **Clone the closest example, don't write from scratch.** The `src/escapement/examples/` charts are the canonical patterns — copy the nearest and adapt:
+
+   | Want to… | Clone | 
+   |---|---|
+   | minimal single LLM turn → tool → done | `hello.cljc` |
+   | give the model real tools (fs/shell) | `scan.cljc` |
+   | loop the model until a condition (retry/iterate) | `iterate.cljc` |
+   | ask the human a question mid-run | `ask.cljc` / `steer_midturn.cljc` |
+   | multi-turn live conversation + a worker region | `supervisor.cljc` |
+   | fan out N concurrent subagents and join | `parallel_demo.cljc` / `n_subagents_demo.clj` |
+   | grade outputs with a verdict schema | `scan.cljc` (`:verdict-schema`) |
+
+2. **Minimal shape** (from `hello.cljc`) — note the wrapped `final`, the `h/llm-conversation` block, and the namespaced event:
+
+   ```clojure
+   (chart/statechart {:initial :run}
+     (state {:id :run :initial :greeting}
+       (state {:id :greeting}
+         (h/llm-conversation
+           {:id "hello" :system system-prompt :real-tools []
+            :allowed-events [{:event :hello/done :data-schema [:map [:greeting :string]]}]
+            :message "Say hello."})
+         (transition {:event :hello/done :target :finished}
+           (script {:expr (fn [_env data]
+                            [(ops/assign :greeting (get-in data [:_event :data :greeting]))])})))
+       (final {:id :finished})))            ; top-level final would empty the config — wrap it
+   ```
+
+3. **Then read the traps below** — the engine won't warn you about any of them. They are the actual reason this skill exists.
+
+---
+
+Traps the engine won't warn about:
 
 ## Events
 
@@ -29,9 +65,18 @@ Traps the engine won't warn about. Sources: `Guide.adoc` (Idioms/gotchas, params
 - **Region-final transition on a region ROOT must be `:type :internal`.** A transition whose source is a `parallel` region's root state and whose target is that region's `<final>` is, as an *external* transition, given the whole `parallel` as its SCXML domain (LCCA of root + its final child). Its exit set then spans every sibling region, so `remove-conflicting-transitions` drops it and the region never finalises → the join never completes. `:type :internal` keeps the domain in-region. (A transition sourced on a *deeper* substate is fine — its domain is the region.)
 - **Use `send-after` for safety timers, not a raw `(send {:delay …})`.** A raw delayed send is NOT cancelled when the chart finishes early, so the runner idles for the full delay waiting on the orphaned timer after the chart already reached its final. `(send-after {:id … :event … :delay …})` (from `com.fulcrologic.statecharts.convenience`) pairs an on-entry send with an on-exit cancel. Also: a region-root `:safety/stop` transition has the same external-domain trap as above — terminate via a *top-level* `:safety/stop -> :finished` instead, and handle `:error.llm.max-turns` at top level so a chatty model that burns `:max-turns` ends promptly.
 
+## Multi-agent fan-out (dynamic N subagents)
+
+- **Fan out with `multiplex`, not hand-rolled regions** (`com.fulcrologic.statecharts.invocation.multiplex` + `…multiplex-options :as mo`). Keys: `mo/child-type ::sc/chart`, `mo/count (fn [_ data] …)`, `mo/child-params (fn [_ data idx] {:src <registry-id> :params {…}})`. Patterns: `n_subagents_demo.clj` (deterministic), `haiku_tournament_dynamic.clj` (LLM, nested phases).
+- **The parent var MUST carry `^{:multi-session? true}`** — the runner reads it to drain child + aggregator queues. Without it the run wedges: children's `done.invoke.*` never reach the parent. (CLI threads it into `runner/run!`.)
+- **Register the child chart at parent on-entry** (`sp/register-statechart!`) under the id `mo/child-params` resolves via `:src`.
+- **Children report with `(mux/reply env :ev/foo {:idx (:idx data) …})`**; accumulate parent-side by `:idx` (a map/vector, NOT a counter) under a `:type :internal` transition. `mo/from` carries `{:idx …}`; this is unrelated to the LLM invokeid.
+- **Worker reaches its `final` via an eventless `(transition {:target :done})`** after on-entry — that emits the natural `done.invoke.<child-sid>` the aggregator counts. Parent transitions on `:done.invoke.<multiplex-id>` when all finish.
+
 ## `params-fn`
 
 - **`:max-tokens` is ignored** — output cap comes from the model catalog (`models-api.json` `limit.output`). Remove it.
+- **Output-token runaway → `:resilience {:overrun {…}}`** (escapement.llm). OFF by default. On `:max_tokens` truncation it reruns the SAME turn with identical context up to `:max-retries`. `:on-exhausted :truncate` (accept, default) | `:fail` (`:status :overrun` envelope). `:max-output-tokens` is the trip-wire (+ fallback cap for catalog-unknown/local models). **A deterministic model re-truncates forever** — set `:temperature-bump` (attempt N adds N×bump, clamped `:temperature-max` 1.0) so output can vary and terminate. Example: `haiku_tournament_dynamic.clj`.
 - **Explicit `:model` or `:models` disables auto-fallback**. Use `:needs` to filter without disabling the preference-ordered list.
 - **Caching is on by default** (`:auto-cache? true`, 5-min ephemeral on system + tail of tools). Anthropic ignores cache_control below 1024 tokens (2048 Haiku).
 - **Don't combine `:temperature` with `:thinking`** — temperature is ignored.

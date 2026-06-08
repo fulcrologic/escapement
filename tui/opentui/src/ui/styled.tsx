@@ -72,7 +72,9 @@ export function StyledLineView(props: { line: StyledLine }): JSX.Element {
               bold: sp.bold,
               italic: sp.italic,
               underline: sp.underline,
-              reverse: sp.reverse,
+              // OpenTUI's createTextAttributes reads `inverse`, NOT `reverse`;
+              // passing `reverse` is silently dropped (no selection highlight).
+              inverse: sp.reverse,
             }}
           >
             {sp.text.length > 0 ? sp.text : " "}

@@ -2,16 +2,16 @@
 
 exports[`Shell layout — render-tree text snapshots (no model) two-pane (130 cols): LIVE + LOG side by side 1`] = `
 "╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│escapement · escapement.runner/chart · 889d14f8                                                                           ◷ 0:01│
-│▶ run › route-planner                                                                                     4 LLMs · 0 act · 0 t/s│
+│escapement · escapement.runner/chart · 889d14f8                                                                          ◷ 0:01 │
+│▶ run › route-planner                                                                                    4 LLMs · 0 act · 0 t/s │
 │planning · ◉ route-planner · aborted                                                                                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─LIVE──────────────────────────────────────────────────────────╮┏━LOG━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│ poet2        ◇ 0/2 done ░░░░░░░░░░                     2 tok  │┃02:20:50 poet1 ↩ save_haiku  wrote nodes/poet1/haiku.txt (62 b…┃
-│  ├ session/889d1 ✗ error      gemma3:1b           2 tok   14.8│┃02:20:50 error ⚠ llm error connection reset by peer (ollama)   ┃
-│  └ poet2         ✗ error                          0 tok    0.0│┃02:20:50 error ⚠ model-down gemma3:1b — connection reset by pe…┃
-│ poet1        ✓ done  gemma3:1b           2 tok   61.4 t/s     │┃02:20:50 poet2 · invocation exit reason=error                  ┃
-│ planner      ✓ done  gemma3:1b          28 tok   68.1 t/s     │┃02:20:50 human ? prompt kind=select : Which haiku wins?        ┃
+│ poet2        ◇ 0/2 done ░░░░░░░░░░     2 tok                  │┃02:20:50 poet1 ↩ save_haiku  wrote nodes/poet1/haiku.txt (62 b…┃
+│  ├ session/889d1 ✗ error          2 tok   14.8 t/s            │┃02:20:50 error ⚠ llm error connection reset by peer (ollama)   ┃
+│  └ poet2         ✗ error          0 tok    0.0 t/s            │┃02:20:50 error ⚠ model-down gemma3:1b — connection reset by pe…┃
+│ poet1        ✓ done     17 tok   61.4 t/s                     │┃02:20:50 poet2 · invocation exit reason=error                  ┃
+│ planner      ✓ done     29 tok   68.1 t/s                     │┃02:20:50 human ? prompt kind=select : Which haiku wins?        ┃
 │                                                               │┃02:20:55 human ! answer kind=select = "poet1"                  ┃
 │                                                               │┃02:20:55 chart · winner.picked  ["run" "judging"] → ["run" "do…┃
 │                                                               │┃02:20:55 debug · done final=["run" "done"]                     ┃
@@ -26,8 +26,8 @@ exports[`Shell layout — render-tree text snapshots (no model) two-pane (130 co
 
 exports[`Shell layout — render-tree text snapshots (no model) narrow (80 cols): single stacked pane (focused = log) 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────╮
-│escapement · escapement.runner/chart · 889d14f8                         ◷ 0:01│
-│▶ run › route-planner                                   4 LLMs · 0 act · 0 t/s│
+│escapement · escapement.runner/chart · 889d14f8                        ◷ 0:01 │
+│▶ run › route-planner                                  4 LLMs · 0 act · 0 t/s │
 │planning · ◉ route-planner · aborted                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ┏━LOG━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓

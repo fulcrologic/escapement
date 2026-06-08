@@ -160,7 +160,7 @@ export function LogPane(props: LogPaneProps): JSX.Element {
             // Reverse-video the whole fitted row (parity with `reverse-on-s`).
             return (
               <text>
-                <span style={{ reverse: true }}>{fit}</span>
+                <span style={{ inverse: true }}>{fit}</span>
               </text>
             );
           }

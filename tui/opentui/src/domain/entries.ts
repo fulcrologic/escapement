@@ -14,7 +14,8 @@
  * strings / numbers / bools / null / arrays / objects.
  */
 
-import type { EntrySource, EventLike, InvocationEntry, ScrollbackEntry } from "./types";
+import type { EntrySource, EventLike, InvocationEntry, LiveMap, ScrollbackEntry } from "./types";
+import { liveCount } from "./aggregate";
 import { truncate } from "./wrap";
 
 function dataStr(v: unknown): string | undefined {
@@ -351,6 +352,7 @@ export function debugEventOfInterest(ev: EventLike): boolean {
 export function updateInvocationHistory(
   history: InvocationEntry[],
   ev: EventLike,
+  live?: LiveMap,
 ): InvocationEntry[] {
   const e = ev.event;
   const d = ev.data;
@@ -367,12 +369,32 @@ export function updateInvocationHistory(
   }
   if (e === "llm/worker-exit") {
     const invokeid = dataStr(d["invokeid"]) ?? null;
+    const sid = dataStr(d["session-id"]);
     const reason = d["reason"];
-    return history.map((row) =>
-      row.invokeid === invokeid && row["ended-ms"] == null
-        ? { ...row, "ended-ms": ts, reason }
-        : row,
-    );
+    // Freeze THIS invocation's own tokens/model from its live session (keyed by
+    // invokeid → session-id) BEFORE the live fold runs, so concurrent same-role
+    // turns get distinct counts instead of the shared role aggregate.
+    const sess =
+      invokeid != null && sid !== undefined
+        ? live?.[invokeid]?.sessions?.[sid]
+        : undefined;
+    const tokens = sess ? liveCount(sess) : undefined;
+    const model = sess?.model ?? undefined;
+    // Match the FIRST still-open row for this invokeid+session-id (newest-first
+    // list ⇒ this invocation's own start). Fall back to invokeid-only when the
+    // start carried no session-id, preserving the old behavior.
+    let matched = false;
+    return history.map((row) => {
+      if (matched || row["ended-ms"] != null || row.invokeid !== invokeid) {
+        return row;
+      }
+      const rowSid = dataStr(row["session-id"]);
+      if (sid !== undefined && rowSid !== undefined && rowSid !== sid) {
+        return row;
+      }
+      matched = true;
+      return { ...row, "ended-ms": ts, reason, tokens, model };
+    });
   }
   return history;
 }

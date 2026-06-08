@@ -145,12 +145,26 @@
             (fn [{:keys [iid sessions n] :as g}]
               (let [code (theme/color-for s iid)]
                 (if (<= n 1)
-                  ;; single session → one flat line (planner / host / a lone poet)
+                  ;; single session → one flat line (planner / host / a lone poet
+                  ;; or the muse). When that lone session is a multiplex child
+                  ;; (e.g. the secret Muse, which runs inside ONE poet's session),
+                  ;; prefix the invokeid with the child label so you can see WHICH
+                  ;; poet it served — `poets.2.muse` — without exposing it to the
+                  ;; judges (they only ever see haiku text + a bare poet index).
                   (let [v (first (vals sessions))
-                        [_ glyph label] (live-status v)]
+                        [_ glyph label] (live-status v)
+                        ;; `:session` is `(str session-id)`, and the id is a
+                        ;; keyword, so the stored value is `:multiplex.poets.2`
+                        ;; (leading colon). Strip it before testing — same
+                        ;; normalization `short-session` does.
+                        sid   (str/replace (str (:session v)) #"^:" "")
+                        iid*  (or (util/short-invokeid iid) "?")
+                        lbl   (if (str/starts-with? sid "multiplex.")
+                                (str (short-session sid) "." iid*)
+                                iid*)]
                     [(colorize code
-                       (format "  %-13s %s %-9s %5d tok  %5.1f t/s  %s"
-                         (or (util/short-invokeid iid) "?") glyph label
+                       (format "  %-16s %s %-9s %5d tok  %5.1f t/s  %s"
+                         lbl glyph label
                          (long (live-count v)) (double (live-tps v)) (or (:model v) "")))])
                   ;; multiple concurrent sessions → group header + indented kids
                   (let [head (colorize code
@@ -343,7 +357,7 @@
          ;; keeping the tok/t-s columns aligned across header / single / child.
          ;; Responsive: dropped entirely on narrow panes so the role name /
          ;; completion bar never get crowded out (model-w 0 ⇒ no column).
-         model-w  (cond (>= iw 84) 16 (>= iw 72) 12 :else 0)
+         model-w  (cond (>= iw 100) 24 (>= iw 88) 18 (>= iw 76) 12 :else 0)
          tail-w   (+ 22 (if (pos? model-w) (+ model-w 2) 0))
          lw       (max 1 (- iw tail-w))
          left-fit (fn [body] (cmp/truncate-display body lw))
@@ -352,6 +366,16 @@
                       (metric (format (str "  %-" model-w "s")
                                 (cmp/truncate (or m "") model-w)))
                       ""))
+         ;; `provider/model` label for a session row, e.g. "ollama/gemma3:1b".
+         ;; Falls back to model-only when no provider (backend-default pick),
+         ;; and "" when neither is known yet (a still-waiting row).
+         pm       (fn [v]
+                    (let [m  (:model v)
+                          pv (:provider v)
+                          ps (when pv (if (keyword? pv) (name pv) (str pv)))]
+                      (cond (and ps m) (str ps "/" m)
+                            m          m
+                            :else      "")))
          mtail    (fn [tok tps]
                     (metric (format "  %5d tok  %5.1f t/s" (long tok) (double tps))))
          ;; selection cursor: highlight the row at `:cursor` when LIVE focused
@@ -378,7 +402,7 @@
                                 (theme/sgr-wrap (theme/status-color theme st) label))
                      left     (str " " (theme/sgr-wrap rcode (format "%-12s" name))
                                 " " gl " " prog)
-                     line     (str (left-fit left) (modelcol (:model v))
+                     line     (str (left-fit left) (modelcol (pm v))
                                 (mtail (live-count v) (live-tps v)))]
                  [(fit line)])
                ;; multiple concurrent sessions → group header + bar + kids
@@ -421,7 +445,7 @@
                                                         :error :status/error
                                                         :status/idle)
                                            (format "%-9s" label))))
-                                  (modelcol (:model v))
+                                  (modelcol (pm v))
                                   (mtail (live-count v) (live-tps v))))))
                        kids)]
                  (concat [(fit head)] kid-lines

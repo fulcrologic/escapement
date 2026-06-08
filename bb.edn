@@ -18,30 +18,24 @@
             sanity {:doc  "Run the bb sanity script for the engine."
                     :task (shell "bb bb_test/sanity.clj")}
             haiku
-            {:doc  "Run the dynamic haiku tournament on a fast LOCAL model (ollama gemma3:1b) with the interactive TUI + live streaming-token panel. Needs `ollama serve` running and `ollama pull gemma3:1b`. For poets/judges to STREAM CONCURRENTLY (not one at a time) start the server with parallelism — `OLLAMA_NUM_PARALLEL=4 ollama serve` — it defaults to 1 (sequential). Override the field/theme via the first arg, e.g. `bb haiku 'Run a tournament with 6 poets and 5 judges. Theme: first snow.'`. Guarded against gemma3:1b runaways via the overrun primitive: --max-tokens 2048 caps each turn and --overrun-retries 2 reruns a truncated turn (identical context) before accepting the truncation."
+            {:doc  "Run the dynamic haiku tournament across RANDOM, MIXED models with the interactive TUI + live streaming-token panel. Poets & judges each draw a random model from a pool spanning local ollama (gemma3:1b/270m) + cloud (z.ai GLM, opencode-go gateway); the HOST (Master of Ceremonies) is pinned to gpt-5.5 via the codex backend. This passes NO --backend flag, so the multi-provider dispatcher is assembled from `.escapement.edn :llm/credentials` (needs the opencode auth.json store + a codex OAuth login: `escapement login codex`). A --backend flag would PIN every conversation to one backend and bypass the config, 404-ing every non-local model — that is why the flag is absent here. For LOCAL poets/judges to STREAM CONCURRENTLY (not one at a time) start ollama with `OLLAMA_NUM_PARALLEL=4 ollama serve` (it defaults to 1). Override the field/theme via the first arg, e.g. `bb haiku 'Run a tournament with 6 poets and 5 judges. Theme: first snow.'`. Guarded against runaways via the overrun primitive: --max-tokens 2048 caps each turn and --overrun-retries 2 reruns a truncated turn before accepting the truncation."
              :task (let [prompt (or (first *command-line-args*)
                                   "Run a tournament with 4 poets and 4 judges. Theme: lanterns over the river.")]
                      (shell {:extra-env {"OLLAMA_API_KEY" "dummy"}}
                        "bb" "-m" "escapement.cli" "run"
                        "escapement.examples.haiku-tournament-dynamic/agent"
-                       "--backend" "ollama"
-                       "--api-base-url" "http://localhost:11434/v1"
-                       "--model" "gemma3:1b"
                        "--max-tokens" "2048"
                        "--overrun-retries" "2"
                        "--overrun-temp-bump" "0.3"
                        "--param" (str "user-input=" (pr-str prompt))))}
             haiku-opentui
-            {:doc  "Like `bb haiku`, but renders through the OpenTUI Bun sidecar (--tui=opentui) instead of the in-process JLine TUI. Spawns the api-server+WS, runs the agent headless, and launches `bun run tui/opentui/src/main.tsx` which owns the terminal. Prereqs: a real TTY, `bun` on PATH (or BUN_BIN), `bun install` already run in tui/opentui/, plus the same ollama gemma3:1b setup as `bb haiku`. (Full vision-verified E2E is task 018; this is the runnable entry point.)"
+            {:doc  "Like `bb haiku`, but renders through the OpenTUI Bun sidecar (--tui=opentui) instead of the in-process JLine TUI. Spawns the api-server+WS, runs the agent headless, and launches `bun run tui/opentui/src/main.tsx` which owns the terminal. Same RANDOM, MIXED-model setup as `bb haiku`: poets/judges draw from local ollama + cloud (z.ai GLM, opencode-go gateway), HOST pinned to gpt-5.5 via codex — driven by `.escapement.edn :llm/credentials`, so NO --backend flag (a backend flag would bypass the config and 404 every non-local model). Prereqs: a real TTY, `bun` on PATH (or BUN_BIN), `bun install` already run in tui/opentui/, the opencode auth.json store + codex OAuth (`escapement login codex`), plus a local `ollama serve` (ideally `OLLAMA_NUM_PARALLEL=4`)."
              :task (let [prompt (or (first *command-line-args*)
                                   "Run a tournament with 4 poets and 4 judges. Theme: lanterns over the river.")]
                      (shell {:extra-env {"OLLAMA_API_KEY" "dummy"}}
                        "bb" "-m" "escapement.cli" "run"
                        "escapement.examples.haiku-tournament-dynamic/agent"
                        "--tui=opentui"
-                       "--backend" "ollama"
-                       "--api-base-url" "http://localhost:11434/v1"
-                       "--model" "gemma3:1b"
                        "--max-tokens" "2048"
                        "--overrun-retries" "2"
                        "--overrun-temp-bump" "0.3"

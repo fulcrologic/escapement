@@ -8,7 +8,8 @@
   (:require
     [cheshire.core :as json]
     [clojure.string :as str]
-    [com.fulcrologic.guardrails.malli.core :refer [=> >defn ?]]))
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn ?]]
+    [taoensso.timbre :as log]))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Model normalization
@@ -142,8 +143,12 @@ Notes:
   [{:keys [model system messages tools reasoning] :as request}]
   [:map => :map]
   (when (has-cache-control? request)
-    (binding [*out* *err*]
-      (println "DEBUG [openai-codex] backend ignores cache-control markers; subscription billing uses backend's own caching")))
+    ;; Must go through timbre (NOT a raw println/`*err*` write): in a TUI run the
+    ;; OpenTUI sidecar / JLine alt-screen owns the terminal, and a stray stdout/
+    ;; stderr write scrolls it — losing the header's top border and ghosting the
+    ;; whole frame (the classic Tab-toggle corruption). `route-logs-to-file!`
+    ;; sends timbre to the session log instead.
+    (log/debug "[openai-codex] backend ignores cache-control markers; subscription billing uses backend's own caching"))
   {:model        (normalize-model model)
    :instructions (or system "")
    :input        (anthropic-messages->openai-input messages)
@@ -171,8 +176,7 @@ Notes:
   [item]
   (let [input (try (json/parse-string (:arguments item) true)
                    (catch #?(:clj Throwable :cljs :default) _
-                     (binding [*out* *err*]
-                       (println "WARN [openai-codex] could not parse function_call arguments as JSON; using {}"))
+                     (log/warn "[openai-codex] could not parse function_call arguments as JSON; using {}")
                      {}))]
     {:type  :tool_use
      :id    (:call_id item)

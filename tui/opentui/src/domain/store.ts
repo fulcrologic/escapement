@@ -88,6 +88,7 @@ export function initialDomainState(): DomainState {
 
 const LIVE_LIFECYCLE = new Set([
   "llm/start",
+  "llm/request",
   "llm/response",
   "llm/error",
   "llm/model-down",
@@ -137,7 +138,9 @@ export function reduceEvent(state: DomainState, env: EventEnvelope): DomainState
 
   // Invocation history.
   if (HISTORY_EVENTS.has(ev.event)) {
-    next.invocations = updateInvocationHistory(state.invocations, ev);
+    // Pass the PRE-fold live map so worker-exit can freeze the invocation's own
+    // token count before the live lifecycle fold (below) mutates the session.
+    next.invocations = updateInvocationHistory(state.invocations, ev, state.live);
   }
 
   // Live-panel lifecycle (deltas already handled above on the fast path).

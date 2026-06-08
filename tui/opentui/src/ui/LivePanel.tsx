@@ -2,8 +2,13 @@
  * LIVE pane — the streaming-token mission-control panel, at parity with the
  * JLine `escapement.tui.live/live-pane-lines`.
  *
- * One GROUP per invokeid/role, sorted so in-flight groups stay on top (status
- * rank asc, then recency — via `liveGroups`). A role with a single session
+ * One GROUP per invokeid/role. Top-level units (multiplex phases + non-mux
+ * groups) are interleaved by the shared `compareLiveOrder` (in-flight first,
+ * then most-recent activity first) — the single live-ordering source of truth,
+ * the same comparator `liveGroups` uses. Each top-level group renders in ONE hue
+ * (the resolved `groupHueKey`, threaded as `hue` to every descendant row so a
+ * header and all its children/connectors share one color — no per-call rainbow).
+ * A role with a single session
  * renders one flat line (role-hued name · status glyph · label/SHIMMER · tokens
  * · tok/s · model). A role with concurrent sessions (multiplex children)
  * renders a bold group header (name · ◇ · `done/total done` · determinate
@@ -22,7 +27,8 @@
  * that are actively streaming.
  */
 
-import { For, Show, createMemo, type JSX } from "solid-js";
+import { For, Show, createMemo, createEffect, type JSX } from "solid-js";
+import type { ScrollBoxRenderable } from "@opentui/core";
 import type { PaneContext } from "./Shell";
 import type { Theme } from "../domain/theme";
 import type { LiveGroup } from "../domain/solid-store";
@@ -32,7 +38,7 @@ import { shortInvokeid } from "../domain/time";
 import type { LiveSession, LiveStatus } from "../domain/types";
 import { Shimmer } from "./live/Shimmer";
 import { CompletionBar, liveBarWidthFor } from "./live/CompletionBar";
-import { liveRows, type LiveRow } from "./live/rows";
+import { groupHueKey, liveRows, type LiveRow } from "./live/rows";
 import type { ChildCall, ChildNode, PhaseNode } from "./live/tree";
 import { displayWidth } from "../domain/wrap";
 
@@ -171,6 +177,8 @@ function Cursor(props: { theme: Theme; on: boolean }): JSX.Element {
 /** A single-session (host / lone planner) row. */
 function SingleRow(props: {
   theme: Theme;
+  /** Resolved group hue (one per top-level group; see `groupHueKey`). */
+  hue: string | undefined;
   iid: string;
   session: LiveSession;
   tick: number;
@@ -198,7 +206,7 @@ function SingleRow(props: {
     <box flexDirection="row">
       <text wrapMode="none">
         <span> </span>
-        <span style={{ fg: props.theme.roleColor(props.iid) ?? undefined }}>
+        <span style={{ fg: props.hue }}>
           {padR(name, nameW)}
         </span>
         <span> </span>
@@ -262,6 +270,8 @@ function groupLabelWidth(done: number, total: number): number {
 /** A multi-session group header row (name · ◇ · done/total · bar · metrics). */
 function GroupHeaderRow(props: {
   theme: Theme;
+  /** Resolved group hue (one per top-level group; see `groupHueKey`). */
+  hue: string | undefined;
   group: LiveGroup;
   done: number;
   total: number;
@@ -274,7 +284,7 @@ function GroupHeaderRow(props: {
   const g = () => props.group;
   const name = shortInvokeid(g().iid) ?? "?";
   const [, , statusKey] = liveStatus({ status: g().status } as LiveSession);
-  const role = () => props.theme.roleColor(g().iid) ?? undefined;
+  const role = () => props.hue;
   const labelW = () =>
     props.labelWidth ?? groupLabelWidth(props.done, props.total);
   const label = () => padR(`${props.done}/${props.total} done `, labelW());
@@ -308,7 +318,8 @@ function GroupHeaderRow(props: {
 /** An indented child session row under a group. */
 function ChildRow(props: {
   theme: Theme;
-  iid: string;
+  /** Resolved group hue (one per top-level group; see `groupHueKey`). */
+  hue: string | undefined;
   session: LiveSession;
   last: boolean;
   modelW: number;
@@ -317,7 +328,7 @@ function ChildRow(props: {
 }): JSX.Element {
   const v = () => props.session;
   const [glyph, label, statusKey] = liveStatus(props.session);
-  const role = () => props.theme.roleColor(props.iid) ?? undefined;
+  const role = () => props.hue;
   const sid = () =>
     String(v().session).replace(/^:/, "").replace(/^multiplex\./, "").slice(0, 16);
   return (
@@ -353,14 +364,15 @@ function ChildRow(props: {
 /** The `└ …+N more sessions` roll-up. */
 function MoreRow(props: {
   theme: Theme;
-  iid: string;
+  /** Resolved group hue (one per top-level group; see `groupHueKey`). */
+  hue: string | undefined;
   more: number;
   noun?: string;
 }): JSX.Element {
   return (
     <text wrapMode="none">
       <span>{"  "}</span>
-      <span style={{ fg: props.theme.roleColor(props.iid) ?? undefined }}>└</span>
+      <span style={{ fg: props.hue }}>└</span>
       <span style={{ fg: props.theme.fg("metric") }}>
         {` …+${props.more} more ${props.noun ?? "sessions"}`}
       </span>
@@ -375,6 +387,8 @@ function MoreRow(props: {
  */
 function PhaseHeaderRow(props: {
   theme: Theme;
+  /** Resolved group hue (one per top-level group; see `groupHueKey`). */
+  hue: string | undefined;
   phase: PhaseNode;
   done: number;
   total: number;
@@ -387,6 +401,7 @@ function PhaseHeaderRow(props: {
   return (
     <GroupHeaderRow
       theme={props.theme}
+      hue={props.hue}
       group={group()}
       done={props.done}
       total={props.total}
@@ -404,11 +419,13 @@ function PhaseHeaderRow(props: {
  */
 function ChildHeaderRow(props: {
   theme: Theme;
+  /** Resolved group hue (one per top-level group; see `groupHueKey`). */
+  hue: string | undefined;
   child: ChildNode;
   last: boolean;
 }): JSX.Element {
   const c = () => props.child;
-  const role = () => props.theme.roleColor(c().phase) ?? undefined;
+  const role = () => props.hue;
   const [, , statusKey] = liveStatus({ status: c().agg.status } as LiveSession);
   return (
     <text wrapMode="none">
@@ -434,7 +451,8 @@ function LeafRow(props: {
   theme: Theme;
   indent: string;
   connector: string;
-  colorIid: string;
+  /** Resolved group hue (one per top-level group; see `groupHueKey`). */
+  hue: string | undefined;
   label: string;
   labelW: number;
   session: LiveSession;
@@ -444,7 +462,7 @@ function LeafRow(props: {
 }): JSX.Element {
   const v = () => props.session;
   const [glyph, label, statusKey] = liveStatus(props.session);
-  const role = () => props.theme.roleColor(props.colorIid) ?? undefined;
+  const role = () => props.hue;
   return (
     <box flexDirection="row">
       <text wrapMode="none">
@@ -476,6 +494,8 @@ function LeafRow(props: {
 /** A single call (level 2) beneath a child header, labelled by its invokeid. */
 function CallRow(props: {
   theme: Theme;
+  /** Resolved group hue (one per top-level group; see `groupHueKey`). */
+  hue: string | undefined;
   call: ChildCall;
   last: boolean;
   modelW: number;
@@ -486,7 +506,7 @@ function CallRow(props: {
       theme={props.theme}
       indent={"    "}
       connector={props.last ? "└" : "├"}
-      colorIid={props.call.iid}
+      hue={props.hue}
       label={shortInvokeid(props.call.iid) ?? "?"}
       labelW={12}
       session={props.call.session}
@@ -500,6 +520,8 @@ function CallRow(props: {
 /** A collapsed child (level 1) with a single call — e.g. one judge. */
 function ChildSingleRow(props: {
   theme: Theme;
+  /** Resolved group hue (one per top-level group; see `groupHueKey`). */
+  hue: string | undefined;
   child: ChildNode;
   call: ChildCall;
   last: boolean;
@@ -511,7 +533,7 @@ function ChildSingleRow(props: {
       theme={props.theme}
       indent={"  "}
       connector={props.last ? "└" : "├"}
-      colorIid={props.call.iid}
+      hue={props.hue}
       label={props.child.label}
       labelW={14}
       session={props.call.session}
@@ -561,11 +583,17 @@ function rowInner(props: {
   const bw = liveBarWidthFor(props.width);
   const mw = modelWidthFor(props.width);
   const st = showTimingFor(props.width);
+  // ONE hue per top-level group: resolve the row's group-hue key (the single
+  // source of truth, {@link groupHueKey}) to a color ONCE here, and pass that
+  // resolved color into every row component. No component derives its own hue —
+  // that prevents the per-call "rainbow" regression.
+  const hue = props.theme.roleColor(groupHueKey(r)) ?? undefined;
   switch (r.kind) {
     case "single":
       return (
         <SingleRow
           theme={props.theme}
+          hue={hue}
           iid={r.group.iid}
           session={r.session}
           tick={props.tick}
@@ -579,6 +607,7 @@ function rowInner(props: {
       return (
         <GroupHeaderRow
           theme={props.theme}
+          hue={hue}
           group={r.group}
           done={r.done}
           total={r.total}
@@ -591,7 +620,7 @@ function rowInner(props: {
       return (
         <ChildRow
           theme={props.theme}
-          iid={r.group.iid}
+          hue={hue}
           session={r.session}
           last={r.last}
           modelW={mw}
@@ -600,11 +629,12 @@ function rowInner(props: {
         />
       );
     case "more":
-      return <MoreRow theme={props.theme} iid={r.group.iid} more={r.more} />;
+      return <MoreRow theme={props.theme} hue={hue} more={r.more} />;
     case "phase-header":
       return (
         <PhaseHeaderRow
           theme={props.theme}
+          hue={hue}
           phase={r.phase}
           done={r.done}
           total={r.total}
@@ -614,15 +644,16 @@ function rowInner(props: {
         />
       );
     case "child-header":
-      return <ChildHeaderRow theme={props.theme} child={r.child} last={r.last} />;
+      return <ChildHeaderRow theme={props.theme} hue={hue} child={r.child} last={r.last} />;
     case "call":
       return (
-        <CallRow theme={props.theme} call={r.call} last={r.last} modelW={mw} showTiming={st} />
+        <CallRow theme={props.theme} hue={hue} call={r.call} last={r.last} modelW={mw} showTiming={st} />
       );
     case "child-single":
       return (
         <ChildSingleRow
           theme={props.theme}
+          hue={hue}
           child={r.child}
           call={r.call}
           last={r.last}
@@ -632,7 +663,7 @@ function rowInner(props: {
       );
     case "phase-more":
       return (
-        <MoreRow theme={props.theme} iid={r.phase.phase} more={r.more} noun="children" />
+        <MoreRow theme={props.theme} hue={hue} more={r.more} noun="children" />
       );
   }
 }
@@ -668,8 +699,44 @@ export function LivePanel(props: {
     }
     return w;
   });
-  const selectedIdx = () =>
-    props.ctx.focused && props.cursorRow != null ? props.cursorRow : -1;
+  // One predicate for "the drill-in cursor is active": it gates BOTH the
+  // selected-row highlight (`selectedIdx`) and the scroll-follow (`following`),
+  // so they can never disagree. Active ⇔ the pane is focused and a cursor is set.
+  const cursorActive = () => props.ctx.focused && props.cursorRow != null;
+  const selectedIdx = () => (cursorActive() ? props.cursorRow! : -1);
+
+  // Scroll-follow the drill-in cursor (R2). Every LIVE row is exactly one line
+  // tall, so a row index maps 1:1 to a scroll line. When the pane is focused
+  // and a cursor is set we drive `scrollTop` so the selected row is always
+  // inside the visible window `[top, top + height)` — scrolling UP when the
+  // cursor is above the window and DOWN when below — and disengage sticky
+  // scroll so the box does not snap back to the bottom. When there is no cursor
+  // (null / unfocused) we re-enable `stickyScroll` + `stickyStart="bottom"` so
+  // the pane keeps following the newest activity. Bounding the box height (==
+  // `logHeight()`, the LIVE interior) guarantees no row paints behind the
+  // top/bottom border at any offset.
+  let boxEl: ScrollBoxRenderable | undefined;
+  const following = cursorActive;
+  createEffect(() => {
+    const cur = props.cursorRow;
+    const n = rows().length;
+    const h = Math.max(1, props.height);
+    if (!boxEl || !following() || cur == null) return;
+    const row = Math.max(0, Math.min(cur, n - 1));
+    // Minimal scroll: only move enough to bring `row` into view, keeping the
+    // current offset otherwise (so up/down both work without recentering).
+    const top = boxEl.scrollTop ?? 0;
+    let next = top;
+    if (row < top) next = row;
+    else if (row > top + h - 1) next = row - h + 1;
+    // Clamp to the scrollable range.
+    const max = Math.max(0, n - h);
+    next = Math.max(0, Math.min(next, max));
+    if (next !== top) {
+      if (typeof boxEl.scrollTo === "function") boxEl.scrollTo({ x: 0, y: next });
+      else boxEl.scrollTop = next;
+    }
+  });
   return (
     <box height={props.height} width={props.ctx.width} flexDirection="column">
       <Show
@@ -683,8 +750,9 @@ export function LivePanel(props: {
         }
       >
         <scrollbox
+          ref={boxEl}
           height={props.height}
-          stickyScroll={true}
+          stickyScroll={!following()}
           stickyStart="bottom"
           scrollbarOptions={{ visible: false }}
           contentOptions={{ flexDirection: "column" }}
