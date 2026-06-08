@@ -193,7 +193,11 @@ export function entriesFor(ev: EventLike): ScrollbackEntry[] {
         if (t === "text") {
           entries.push({ source: src, glyph: "◂", ev, block: b, summary: truncate(asStr(b["text"]), 240) });
         } else if (t === "thinking") {
-          entries.push({ source: src, glyph: "…", ev, block: b, summary: truncate(asStr(b["thinking"]), 240) });
+          // Skip empty thinking blocks (encrypted-reasoning providers return a
+          // signature-only block with no plaintext) — nothing to show.
+          const thinking = asStr(b["thinking"]);
+          if (thinking.trim() === "") continue;
+          entries.push({ source: src, glyph: "…", ev, block: b, summary: truncate(thinking, 240) });
         } else {
           entries.push({
             source: src,
