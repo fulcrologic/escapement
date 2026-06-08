@@ -70,6 +70,54 @@ describe("markdown render — fenced code", () => {
   });
 });
 
+describe("markdown render — GFM tables", () => {
+  test("a pipe row + separator renders a box-drawn table (header + data rows)", () => {
+    const out = lines("| Name | Num |\n| :--- | --: |\n| Bob | 5 |\n| Alexander | 100 |", 80);
+    expect(out).toEqual([
+      "┌───────────┬─────┐",
+      "│ Name      │ Num │",
+      "├───────────┼─────┤",
+      "│ Bob       │   5 │",
+      "│ Alexander │ 100 │",
+      "└───────────┴─────┘",
+    ]);
+  });
+
+  test("columns honor :--- / --: / :-: alignment (left / right / center)", () => {
+    const out = lines("| L | R | C |\n| :--- | --: | :-: |\n| a | a | a |\n| xxxx | xxxx | xxxx |", 80);
+    // data row for the short value: left = no leading pad, right = leading pad, center = balanced.
+    expect(out[3]).toBe("│ a    │    a │  a   │");
+  });
+
+  test("the header row is rendered bold (md-bold style)", () => {
+    const spans = render("| H |\n| --- |\n| v |", theme, 80);
+    const headerLine = spans[1]!; // 0 = top border, 1 = header
+    const bold = theme.style("md-bold");
+    expect(headerLine.some((s) => s.text.includes("H") && s.fg === bold.fg)).toBe(true);
+  });
+
+  test("a pipe line NOT followed by a separator is a normal paragraph, not a table", () => {
+    expect(lines("a | b", 80)).toEqual(["a | b"]);
+  });
+
+  test("leading/trailing pipes are optional and inline markup in cells is styled-stripped", () => {
+    const out = lines("h1 | h2\n--- | ---\n**b** | `c`", 80);
+    expect(out).toEqual([
+      "┌────┬────┐",
+      "│ h1 │ h2 │",
+      "├────┼────┤",
+      "│ b  │ c  │",
+      "└────┴────┘",
+    ]);
+  });
+
+  test("ragged data rows are padded to the column count", () => {
+    const out = lines("| a | b |\n| --- | --- |\n| 1 |", 80);
+    // the short row's missing second cell becomes an empty, padded cell.
+    expect(out[3]).toBe("│ 1 │   │");
+  });
+});
+
 describe("renderCached — finalized-body memoization", () => {
   test("returns the SAME array instance for an identical [capability, width, md]", () => {
     const a = renderCached("## Cached body", theme, 60);
