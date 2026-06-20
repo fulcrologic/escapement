@@ -509,32 +509,55 @@
   (description [_] "Run a shell command via `bash -lc`. Returns combined stdout+stderr and exit code.")
   (input-schema [_] shell-run-schema)
   (invoke [_ {:keys [command timeout-ms]}]
-    (let [timeout (or timeout-ms default-shell-timeout-ms)
+    (let [timeout  (or timeout-ms default-shell-timeout-ms)
           ;; Run in the tool base-dir (bound by `tp/dispatch` from the registry's
           ;; `:escapement/base-dir` meta) so `:shell/run` agrees with the `:fs/*`
           ;; tools on the working directory. Falls back to the process cwd when no
           ;; base-dir is set or it does not (yet) exist.
           base-dir (when-let [b tp/*base-dir*]
                      (let [f (io/file b)] (when (.isDirectory f) f)))
-          ;; Build the process without invoking ":wait true" so we can enforce a timeout.
-          proc    (bp/process ["bash" "-lc" command]
-                              (cond-> {:in       nil
-                                       :out      :string
-                                       :err      :string
-                                       :shutdown bp/destroy-tree}
-                                base-dir (assoc :dir base-dir)))
-          done?   (.waitFor ^Process (:proc proc) timeout TimeUnit/MILLISECONDS)]
-      (if-not done?
-        (do
-          (try (.destroyForcibly ^Process (:proc proc)) (catch Throwable _ nil))
-          {:result   (str "Command timed out after " timeout "ms: " command)
-           :is-error true})
-        (let [exit (.exitValue ^Process (:proc proc))
-              out  (or (some-> proc :out deref-or-self) "")
-              err  (or (some-> proc :err deref-or-self) "")
-              body (str out (when-not (str/blank? err) (str "\n[stderr]\n" err)))]
-          {:result   (str body "\n[exit " exit "]")
-           :is-error (not (zero? exit))})))))
+          ;; Redirect child stdio to FILES, never `:out :string`. A `:string`
+          ;; capture spawns a reader thread that reads the child's stdout pipe
+          ;; until EOF — and a backgrounded daemon (a REPL, a dev server) that
+          ;; inherits that pipe holds the write-end open FOREVER. The `bash -lc`
+          ;; parent exits promptly (so `.waitFor` returns "done"), but the deref
+          ;; of the `:string` output would then block on the orphaned grandchild's
+          ;; pipe with no way to kill it — hanging the tool indefinitely past the
+          ;; timeout. File redirection has no reader thread and cannot block: we
+          ;; `.waitFor` the parent within the timeout, then read whatever bytes
+          ;; were written; a lingering daemon writing to the file is harmless.
+          out-file (java.io.File/createTempFile "esc-shell-out" ".log")
+          err-file (java.io.File/createTempFile "esc-shell-err" ".log")]
+      (try
+        (let [proc  (bp/process ["bash" "-lc" command]
+                                (cond-> {:in       nil
+                                         :out      :write :out-file out-file
+                                         :err      :write :err-file err-file
+                                         :shutdown bp/destroy-tree}
+                                  base-dir (assoc :dir base-dir)))
+              done? (.waitFor ^Process (:proc proc) timeout TimeUnit/MILLISECONDS)]
+          (if-not done?
+            (do
+              (try (.destroyForcibly ^Process (:proc proc)) (catch Throwable _ nil))
+              (let [out (slurp out-file)
+                    err (slurp err-file)]
+                {:result   (str out
+                             (when-not (str/blank? err) (str "\n[stderr]\n" err))
+                             "\n[timed out after " timeout "ms; process killed]"
+                             "\nNote: :shell/run is for commands that COMPLETE. Do not start"
+                             " long-running daemons (REPLs, dev servers) with it. If you must,"
+                             " redirect ALL stdio to a file and `disown` (e.g."
+                             " `cmd </dev/null >/tmp/x.log 2>&1 & disown`), or use the managed stack.")
+                 :is-error true}))
+            (let [exit (.exitValue ^Process (:proc proc))
+                  out  (slurp out-file)
+                  err  (slurp err-file)
+                  body (str out (when-not (str/blank? err) (str "\n[stderr]\n" err)))]
+              {:result   (str body "\n[exit " exit "]")
+               :is-error (not (zero? exit))})))
+        (finally
+          (try (.delete out-file) (catch Throwable _ nil))
+          (try (.delete err-file) (catch Throwable _ nil)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; :web/search  (Gemini google_search grounding)

@@ -115,6 +115,10 @@
       (conj {:kind          :zai :source "ZAI_API_KEY"
              :api-key       zai :base-url "https://api.z.ai/api/anthropic"
              :default-model "glm-4.6" :auth-mode :bearer
+             ;; z.ai (esp. glm-5.x) buffers non-streaming turns and runs ~2x slower
+             ;; than Anthropic; a large planning/implement turn routinely exceeds the
+             ;; 60s default and 3x-retries to a model-down dead-end. Give it headroom.
+             :http-timeout-ms 300000
              :route         #"^glm-"})
 
       opencode-go
@@ -139,13 +143,13 @@
   "Instantiate the sub-backend for one credential descriptor."
   [{:keys [kind] :as c}]
   (case kind
-    :anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
-    :zai (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
+    :anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
+    :zai (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
     :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :ollama (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :opencode-go-openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
-    :opencode-go-anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode]))
+    :opencode-go-anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
     :codex (build-codex-backend {:default-model (:default-model c)})))
 
 ;; --- Hermetic explicit-credentials assembly -------------------------------
@@ -170,11 +174,13 @@
                            :route         #"^claude-"}
    :z-ai                  {:kind          :zai :base-url "https://api.z.ai/api/anthropic"
                            :default-model "glm-4.6" :auth-mode :bearer
+                           :http-timeout-ms 300000
                            :route         #"^glm-"}
    ;; `:z-ai-plan` is the subscription-billed face of z.ai used in
    ;; `default-preferences`; same wire backend as metered `:z-ai`.
    :z-ai-plan             {:kind          :zai :base-url "https://api.z.ai/api/anthropic"
                            :default-model "glm-4.6" :auth-mode :bearer
+                           :http-timeout-ms 300000
                            :route         #"^glm-"}
    :openai                {:kind          :openai :base-url "https://api.openai.com/v1"
                            :default-model "gpt-4o-mini"
