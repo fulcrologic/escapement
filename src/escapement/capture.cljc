@@ -49,6 +49,13 @@
   [node-id visit turn]
   (str "nodes/" (encode-node-id node-id) "/" visit "/turns/" turn))
 
+(defn seed-locator
+  "The node-relative locator (`nodes/<enc-node-id>/<visit>/seed.edn`) for the replayable seed of the
+   `(node-id, visit)` invocation. The single source of truth for the seed path — both `capture-seed!`
+   (write) and `escapement.replay/load-seed` (read) address through it."
+  [node-id visit]
+  (str "nodes/" (encode-node-id node-id) "/" visit "/seed.edn"))
+
 (defn capture-blob!
   "Write `data` (any EDN-serializable value) as the captured-I/O blob named `kind` for the turn at
    `(node-id, visit, turn)` of `session-id`, and return `{:io/ref <locator> :io/snippet <≤80 chars
@@ -90,13 +97,29 @@
   [capture turn output]
   (capture-blob! capture turn "output" output (:text output)))
 
+(defn seed-visit-counts
+  "Return `{node-id max-visit}` for every node that already has captured-I/O artifacts in `store`
+   for `session-id`. A resumed or restarted run seeds `:escapement/visit-counts` with this so the
+   NEXT entry into a node is numbered `max-visit + 1` rather than colliding at `0` and overwriting
+   the prior run's blobs. Nodes with no prior artifacts are absent from the result (they start at 0
+   via the increment's `(fnil inc -1)`). Pure over `list-artifacts`; safe on a fresh session — an
+   empty store yields `{}`."
+  [store session-id]
+  (reduce
+    (fn [acc {class :artifact/class node-id :transcript/node-id visit :transcript/visit}]
+      (if (and (= :captured-io class) (some? node-id) (int? visit))
+        (update acc node-id (fnil max -1) visit)
+        acc))
+    {}
+    (proto/list-artifacts store session-id)))
+
 (defn capture-seed!
   "Write the replayable `seed` (resolved params + initiating input) for the `(node-id, visit)`
    invocation of `session-id`. Returns the stored artifact summary. The seed is what
    `escapement.replay` granularities #2/#3 re-enter the node from."
   [{:keys [store session-id node-id visit]} seed]
   (proto/write-artifact! store session-id
-    (str "nodes/" (encode-node-id node-id) "/" visit "/seed.edn")
+    (seed-locator node-id visit)
     (pr-str seed)
     {:transcript/node-id node-id
      :transcript/visit   visit

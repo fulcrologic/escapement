@@ -55,7 +55,7 @@ Traps the engine won't warn about:
 - **`h/tell-llm` only works inside the bound state**; outside it's silently dropped.
 - **`tell-llm` broadcasts to all live `:llm-conversation`s**; use `h/tell-other-llm` with `:target <invokeid>` to target one (kw/string invokeids normalize).
 - **`:on-end-turn-event` defaults to `:llm.idle`**, payload `{:text :from}`, fires once per logical turn (both `:end_turn` and batched-terminator `:tool_use` shapes).
-- **Resume = fresh conversation.** Side-effecting tools (`:fs/edit`, `:shell/run`) are not at-most-once across resume — track durability in the data model (`iterate.clj` bumps `:iterations`).
+- **Resume = fresh conversation, but durable timers + data model.** A `--resume` restarts any live LLM turn from empty history, so side-effecting tools (`:fs/edit`, `:shell/run`) are not at-most-once across resume — track durability in the data model (`iterate.clj` bumps `:iterations`). BUT: (a) delayed/timer events (`send-after`) now SURVIVE resume — they're persisted with the checkpoint and rehydrated, so a poller's pending tick re-fires and the loop stays alive (no need to re-arm on-entry); one whose delivery-time passed while down fires immediately. (b) The runner emits a chart-observable `:escapement/resumed` event on resume — add a transition on it to idempotently self-heal (rebuild a service registry, re-acquire a resource); a chart that ignores it drains it as a no-op (there is NO blanket on-entry replay). See `examples/heartbeat.cljc` for the canonical kill/resume loop.
 
 ## Chart structure
 

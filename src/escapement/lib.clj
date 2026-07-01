@@ -114,6 +114,8 @@
    ;; --- optional: passthrough knobs (forwarded verbatim to runner/run!) ---
    [:chart-id {:optional true} :any]
    [:resume? {:optional true} :boolean]
+   [:resume-events {:optional true} [:vector :map]]           ; events injected after a resume restore
+   [:retain-history? {:optional true} :boolean]               ; retain per-save checkpoint history (Level-3 fork)
    [:trace? {:optional true} :boolean]
    [:max-iterations {:optional true} :int]
    [:quiescent-sleep-ms {:optional true} :int]])
@@ -170,7 +172,8 @@
              {:errors errs :provided-keys (vec (keys opts))})))
   (let [{:keys [chart session-id credentials config backend tool-registry
                 initial-data transcript-tap on-env-ready transcript-path
-                checkpoint-dir session-dir store quiet? cancel chart-id resume? trace?
+                checkpoint-dir session-dir store quiet? cancel chart-id resume? resume-events
+                retain-history? trace?
                 max-iterations quiescent-sleep-ms]
          :or   {quiet? true}} opts
         ;; --- Hermetic resolution: ONLY from injected `:config` /
@@ -231,6 +234,8 @@
                           on-env-ready (assoc :on-env-ready on-env-ready)
                           chart-id (assoc :chart-id chart-id)
                           resume? (assoc :resume? resume?)
+                          resume-events (assoc :resume-events resume-events)
+                          retain-history? (assoc :retain-history? retain-history?)
                           trace? (assoc :trace? trace?)
                           max-iterations (assoc :max-iterations max-iterations)
                           quiescent-sleep-ms (assoc :quiescent-sleep-ms quiescent-sleep-ms)

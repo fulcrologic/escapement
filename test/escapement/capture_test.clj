@@ -72,6 +72,28 @@
       "the seed lands at the invocation-relative seed.edn and round-trips"
       (edn/read-string (proto/read-artifact store "s" "nodes/writer/1/seed.edn")) => seed)))
 
+(specification "seed-visit-counts derives the max prior visit per node"
+  (component "with captured-io artifacts across several visits"
+    (let [store (mem/new-store)
+          cap   (fn [nid v] {:store store :session-id "s" :node-id nid :visit v})]
+      (capture/capture-request! (cap :writer 0) 0 {:q 1} "w0")
+      (capture/capture-request! (cap :writer 1) 0 {:q 1} "w1")
+      (capture/capture-request! (cap :writer 2) 0 {:q 1} "w2")
+      (capture/capture-request! (cap :judge 0) 0 {:q 1} "j0")
+      (capture/capture-seed! (cap :judge 1) {:seed 1})
+      (proto/write-artifact! store "s" "artifacts/notes.md" "hi" {:artifact/class :author})
+      (let [counts (capture/seed-visit-counts store "s")]
+        (assertions
+          "returns the highest visit index seen for each node"
+          counts => {:writer 2 :judge 1}
+          "seeds the increment so the NEXT entry is max+1 (no collision at 0)"
+          (get (swap! (atom counts) update :writer (fnil inc -1)) :writer) => 3
+          "ignores author files (only captured-I/O carries a visit)"
+          (contains? counts :author) => false))))
+  (assertions
+    "returns {} for a fresh session with no artifacts"
+    (capture/seed-visit-counts (mem/new-store) "s") => {}))
+
 (specification "capture-output! externalizes the idle/verdict output per turn"
   (let [store  (mem/new-store)
         cap    {:store store :session-id "s" :node-id :writer :visit 0}

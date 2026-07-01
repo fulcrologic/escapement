@@ -27,6 +27,9 @@
     * `:registry` (optional) - statechart registry; defaults to a fresh `LocalMemoryRegistry`
     * `:queue` (optional) - event queue; defaults to a fresh in-process queue
     * `:store` (optional) - working-memory store; defaults to a file-backed store at `:checkpoint-dir`
+    * `:retain-history?` (optional) - when true, the default file-backed store also retains an
+      append-only, save-index-keyed copy of every checkpoint (for Level-3 replay/fork). Ignored when
+      `:store` is supplied. Off by default (per-event full snapshots are heavy).
     * `:llm-catalog-ratings` (optional) - subjective ratings table threaded
       to the llm-conversation processor's eligibility gate. Resolved ONCE by
       the caller (CLI: from disk config at startup; lib facade Step 4: from
@@ -45,11 +48,12 @@
            llm-backend llm-default-models llm-catalog-ratings llm-eligibility-strict?
            llm-aliases llm-preferences llm-resilience
            tool-registry transcript-fn human-renderer
-           session-dir artifact-store]
+           session-dir artifact-store retain-history?]
     :or   {invocation-processors []}}]
   (let [registry  (or registry (lmr/new-registry))
         queue     (or queue (queue/new-queue))
-        store     (or store (store/new-store (or checkpoint-dir "checkpoints")))
+        store     (or store (store/new-store (or checkpoint-dir "checkpoints")
+                             {:retain-history? (boolean retain-history?)}))
         dm        (wmdm/new-flat-model)
         exec      (exec/new-execution-model dm queue)
         llm-procs (if (and llm-backend tool-registry)

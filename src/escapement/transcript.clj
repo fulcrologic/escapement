@@ -14,6 +14,7 @@
   (:require
     [cheshire.core :as json]
     [clojure.java.io :as io]
+    [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [escapement.threads :as threads])
   (:import
@@ -97,6 +98,24 @@
       (try (.flush w) (catch Throwable _ nil))
       (try (.close w) (catch Throwable _ nil)))))
 
+(defn- last-recorded-seq
+  "Return the highest `:seq` already written to the transcript at `path`, or `nil` when the file is
+   absent or carries no seq'd rows. Lets an append-mode open (a `--resume`) CONTINUE the monotonic seq
+   rather than restarting at 0 and colliding with the prior run's rows — so the transcript stays one
+   navigable, gap-checkable timeline across restarts."
+  [path]
+  (let [f (io/file path)]
+    (when (.exists f)
+      (with-open [r (io/reader f)]
+        (reduce
+          (fn [acc line]
+            (if (str/blank? line)
+              acc
+              (let [s (try (get (json/parse-string line) "seq") (catch Throwable _ nil))]
+                (if (number? s) (max (long (or acc 0)) (long s)) acc))))
+          nil
+          (line-seq r))))))
+
 (defrecord TranscriptSink [^LinkedBlockingQueue queue ^Thread thread seq-counter path closed?])
 
 (>defn open-transcript
@@ -113,7 +132,9 @@
   (assert path "transcript :path is required")
   (ensure-parent-dirs! path)
   (let [q           (LinkedBlockingQueue.)
-        seq-counter (atom 0)
+        ;; On append (resume), continue the seq past the last row already on disk so the
+        ;; combined file stays one monotonic timeline; on a fresh open, start at 0.
+        seq-counter (atom (if append? (or (some-> (last-recorded-seq path) inc) 0) 0))
         w           (io/writer (io/file path) :append append?)
         bw          (BufferedWriter. w)
         raf-fn      (fn [] nil)                             ; fsync support stubbed; would need RandomAccessFile to do properly

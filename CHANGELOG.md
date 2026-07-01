@@ -1,5 +1,81 @@
 # Changelog
 
+## [unreleased] — feat/durable-resume-and-replay — 2026-07-01
+
+Long-running and looping charts are now durable across process exit: a
+`kill -9` + `--resume` picks the chart back up where it left off — pending
+timers still fire, artifact/transcript numbering keeps climbing instead of
+overwriting, and the whole life of the agent reads as one timeline. Adds
+replay tooling to re-issue a single node's opening turn or fork a chart
+forward from a historical checkpoint.
+
+### Added
+
+- **Persistent event queue across resume.** Delayed/timer events
+  (`send-after`) still pending at exit are snapshotted atomically with the
+  working-memory checkpoint and rehydrated on `--resume`; any whose delivery
+  time passed during downtime fire immediately on resume, in scheduled order.
+  A poller therefore keeps polling after a restart instead of exiting at once.
+- **`:escapement/resumed` chart-observable signal.** After a successful
+  `--resume` restore the runner emits `:escapement/resumed` (data `{:config}`)
+  so a chart can add an opt-in transition to idempotently self-heal (rebuild a
+  service registry, re-acquire a resource) on resume. Ignored charts drain it
+  as a no-op — there is NO blanket on-entry replay.
+- **`:resume-events` runner/lib option.** A host-supplied vector of
+  send-request maps injected into the chart AFTER the `:escapement/resumed`
+  signal (each defaulted to `:target session-id`), to drive post-restore
+  behavior a chart cannot self-heal. Ignored on a fresh start.
+- **`:retain-history?` runner/lib option.** Opt-in retention of an
+  append-only, save-index-keyed copy of every checkpoint
+  (`store/list-history`, `store/read-checkpoint-at`) — the substrate a
+  Level-3 fork re-enters the chart from. Off by default.
+- **Replay Level 2 — `escapement.replay/refine-node`** (CLJ-only): re-issue
+  a node's opening assistant turn from its captured `seed.edn` with
+  prompt/model/temperature/tool/message overrides, through the same
+  `escapement.llm/run-turn` engine the live worker uses. `:pinned` forces an
+  exact model (no catalog/alias lookup, no failover). Companion `load-seed`.
+- **Replay Level 3 — `escapement.replay.chart/fork!`** (CLJ-only): re-enter a
+  prior run's chart at a historical checkpoint (requires `:retain-history?`)
+  and run it FORWARD into a new, isolated session — source transcript/
+  artifacts/checkpoints untouched — with optional `:transform-wmem` and
+  backend/tool overrides.
+- **`escapement.examples.heartbeat`** — a pure-timer polling loop (no LLM),
+  the canonical kill/resume demo: `:ticks` continues across a restart and the
+  poller keeps ticking because its `send-after` timer survives resume.
+
+### Changed
+
+- **`--resume` now restores pending timers AND appends the transcript.**
+  Previously resume only reloaded the configuration and re-spawned
+  invocations; it now also rehydrates the durable event queue. The transcript
+  is appended (was truncated) and its `:seq` continues past the prior run, so
+  a resumed session is one navigable, gap-checkable timeline over its whole
+  life. A fresh (non-resume) start still truncates and restarts `:seq` at 0.
+- **Artifact visit numbering is lifetime-stable.** The per-node `visit`
+  counter is seeded from the artifact store on start
+  (`capture/seed-visit-counts`), so a re-entered node after a restart numbers
+  captured-I/O `max+1` instead of colliding at 0 and overwriting the prior
+  run's blobs. No-op on a fresh session.
+- **Simultaneously-due events fire in scheduled order deterministically.**
+  Queue delivery is ordered by `(delivery-time, ordinal)` with a persisted
+  monotonic ordinal, so a timeout and its paired success event resolve in
+  their intended order — reproducibly across a resume.
+- **Checkpoints are a combined `{::wmem ::queue-snapshot}` record.** Working
+  memory and the pending queue are written in one atomic save. Legacy
+  bare-wmem checkpoints still load unchanged.
+
+### Notes
+
+- Durable resume was verified end-to-end via the new `heartbeat` demo — a
+  real CLI `kill -9` + `--resume` (and a fork) — not only unit tests.
+- `refine-node` / `fork!` are unit-tested with mock and real-runner paths; no
+  live LLM key is required.
+- Honest remaining limits: `refine-node` re-issues a SINGLE turn (a full
+  multi-turn tool loop is a chart concern → fork); `fork!` does not auto-copy
+  the source session's captured-I/O artifacts (point `:fork-session-dir` at a
+  copy or override via `:transform-wmem`); a live in-flight LLM turn is still
+  not resumable (the worker restarts with empty history).
+
 ## [unreleased] — docs/fix-web-ui-jar-delivery-claim — 2026-07-01
 
 Documentation correction: the web-UI compiled bundle (`main.js`) is **not**

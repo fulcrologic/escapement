@@ -120,6 +120,17 @@
     [[] {}]
     allowed-events))
 
+(defn node-tool-defs
+  "Assemble the Anthropic tool-definition list a node invocation exposes, from its seed `params` and a
+   `tool-registry`: the real tools (`:real-tools` selector) plus the event tools (`:allowed-events`).
+   Region tools are omitted — they require a live chart's service registry, which a headless replay has
+   no access to. Used by `escapement.replay/refine-node` to re-issue a node's turn with (most of) its
+   original tool palette. A `nil` `tool-registry` yields only the event tools."
+  [tool-registry {:keys [real-tools allowed-events]}]
+  (let [[real-defs _]  (if tool-registry (resolve-real-tools tool-registry real-tools) [[] {}])
+        [event-defs _] (event-tool-defs (or allowed-events []))]
+    (into [] (concat real-defs event-defs))))
+
 ;; ---------------------------------------------------------------------------
 ;; Verdict wrap-up (submit_verdict forced-tool inference at idle boundary)
 ;; ---------------------------------------------------------------------------

@@ -15,6 +15,33 @@
   (with-open [r (io/reader path)]
     (mapv #(json/parse-string % true) (doall (line-seq r)))))
 
+(specification "transcript append continues the seq across a resume"
+  (let [path (tmp-file "resume.jsonl")]
+    ;; Run 1: fresh (truncate).
+    (let [s (transcript/open-transcript {:path path :append? false})]
+      (transcript/write! s {:event :run1/a})
+      (transcript/write! s {:event :run1/b})
+      (transcript/close! s))
+    ;; Run 2: resume (append) — seq must continue past run 1, not restart at 0.
+    (let [s (transcript/open-transcript {:path path :append? true})]
+      (transcript/write! s {:event :run2/c})
+      (transcript/close! s))
+    (let [rows (read-jsonl path)]
+      (assertions
+        "both runs' rows live in ONE file (the whole-life timeline)"
+        (mapv :event rows) => ["run1/a" "run1/b" "run2/c"]
+        "the resumed run's seq continues past the prior run (no restart, no collision)"
+        (mapv :seq rows) => [0 1 2])))
+  (let [path (tmp-file "fresh.jsonl")]
+    ;; A fresh (non-append) open of a reused path truncates and restarts at 0.
+    (let [s (transcript/open-transcript {:path path :append? false})]
+      (transcript/write! s {:event :old/x}) (transcript/close! s))
+    (let [s (transcript/open-transcript {:path path :append? false})]
+      (transcript/write! s {:event :new/y}) (transcript/close! s))
+    (assertions
+      "a fresh open replaces the file and restarts seq at 0"
+      (mapv (juxt :event :seq) (read-jsonl path)) => [["new/y" 0]])))
+
 (specification "transcript sink — round trip"
   (let [path (tmp-file "rt.jsonl")
         sink (transcript/open-transcript {:path path})]

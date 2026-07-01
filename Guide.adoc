@@ -36,8 +36,8 @@ The LLM can only influence chart progression by calling event-tools the author e
 * Reproducibility — chart logic is deterministic; only LLM choices are non-deterministic, and those choices are tightly scoped.
 * Async by construction — the LLM runs on a worker thread, and each parallel region has its own worker.
 Multiple events per turn (fan-out) is natural.
-* Resumability — working memory is checkpointed atomically (write-temp → rename) after every event-processing pass.
-Resume reloads the configuration and re-spawns invocations; processors are written to be idempotent on re-entry.
+* Resumability — working memory **and the pending event queue** are checkpointed atomically together (write-temp → rename) after every event-processing pass.
+Resume reloads the configuration, rehydrates the durable queue (so delayed/timer events fire when their time comes — even if it passed during downtime), re-spawns invocations, and emits a chart-observable `:escapement/resumed` signal a chart can transition on to self-heal; processors are written to be idempotent on re-entry.
 
 The runtime is **Babashka** for the agent process, CLI, and test suite (`bb test`).
 The statechart library's `simple` and `testing` namespaces transitively pull `promesa`, which crashes under SCI, so escapement assembles the env manually and ships its own bb-friendly `escapement.engine.testing`
@@ -209,8 +209,9 @@ Single-writer (one daemon thread); other threads enqueue events through a `Linke
 Lines are guaranteed intact and FIFO.
 
 Checkpoint::
-EDN serialization of the chart's working memory, written via temp-file +
-atomic rename after every event-processing pass.
+A combined EDN record — the chart's working memory **and** a snapshot of the pending event queue (delayed/timer sends) — written together via temp-file + atomic rename after every event-processing pass, so the two never tear apart across a crash.
+Legacy bare-working-memory checkpoints still load.
+Opt-in `:retain-history?` also keeps a save-index-keyed copy of every checkpoint for later fork.
 See
 `src/escapement/engine/store.clj`.
 
@@ -218,7 +219,8 @@ Resume::
 Re-loading the latest checkpoint and continuing.
 The runner detects
 `:resume?` plus an existing non-empty configuration and skips `start!`.
-The library re-enters the saved configuration on the next event; invocation processors re-spawn workers idempotently.
+It rehydrates the durable event queue (delayed events whose time passed during downtime fire immediately, in delivery-time order), re-enters the saved configuration on the next event, and emits a chart-observable `:escapement/resumed` event so a chart can idempotently self-heal; any host-supplied `:resume-events` follow.
+There is no blanket on-entry replay — invocation processors re-spawn workers idempotently.
 
 [[authoring]]
 == Authoring a chart, step by step
@@ -2194,7 +2196,63 @@ This is the tight prompt-tuning inner loop: load the captured request, deep-merg
 The captured request round-trips losslessly (EDN), so keywords, enums, and nested schemas survive.
 It throws if nothing was captured at those coordinates.
 
-Node-invocation refine (re-enter a whole node from its `seed.edn`) and sub-chart refine (from a checkpoint) are designed for but not yet implemented.
+Two coarser-grained replay levels build on the same idea and are now implemented.
+
+[[refine-node]]
+=== Replaying a whole node's opening turn: `refine-node`
+
+Where `refine-turn` tunes ONE recorded request, `escapement.replay/refine-node` re-derives the request from the node's captured `seed.edn` (resolved params + initial messages + its tool palette) and re-issues the node's *opening* assistant turn — so you can experiment with a different system prompt, model, temperature, tool set, or input messages before any turns were taken, still without re-running the chart.
+It runs through the same `escapement.llm/run-turn` engine the live worker uses (model resolution, `:needs` gate, retry/failover, overrun), so the result matches production.
+It is **CLJ-only** (that engine is CLJ), guarded by a reader conditional so the namespace still loads under CLJS.
+
+[source,clojure]
+----
+(require '[escapement.replay :as replay]
+         '[escapement.storage.disk :as disk])
+
+(let [store (disk/new-artifact-store "/path/to/session-dir")]
+  (replay/refine-node store session-id :writer 0
+    {:backend       my-backend
+     :tool-registry my-registry          ; optional; omit ⇒ only the node's event tools
+     :overrides     {:system "A tighter prompt." :temperature 0.2}
+     :pinned        {:model "claude-opus-4-7"}}))  ; force an exact model, no failover
+;; => {:params <effective> :messages <effective> :tools <defs>
+;;     :response <new Response> :model-used <str> :status <status> :seed <original>}
+----
+
+`(node-id, visit)` address the captured seed.
+`:overrides` is a partial PARAMS map deep-merged onto the seed params; `:messages` replaces the seed's `:initial-messages` (replay a different prefix); `:pinned` short-circuits model resolution to run exactly that model (useful to force a model string or drive a mock backend deterministically).
+It re-runs a **single** assistant turn — a full multi-turn tool loop is a chart concern (use `fork!` below).
+Throws if no seed exists at those coordinates. `replay/load-seed` loads the raw seed.
+
+[[fork-chart]]
+=== Forking a chart from history: `escapement.replay.chart/fork!`
+
+`escapement.replay.chart/fork!` (CLJ-only) re-enters a prior run's chart at a historical checkpoint and runs it **forward** into a NEW, isolated session — the source run's transcript, artifacts, and checkpoints are never touched — so you can replay from a past point with substituted inputs, a swapped backend/model, or injected events.
+It requires the source run to have been made with `:retain-history?` so a checkpoint exists at the chosen fork point.
+
+[source,clojure]
+----
+(require '[escapement.replay.chart :as replay-chart]
+         '[escapement.engine.store :as store])
+
+(replay-chart/fork!
+  {:source-store        (store/new-store "/src/checkpoints" {:retain-history? true})
+   :source-session-id   :orig
+   :at-seq              12                      ; at-or-before this save index
+   :chart               my-chart
+   :fork-session-id     :orig-fork
+   :fork-checkpoint-dir "/fork/checkpoints"
+   :fork-session-dir    "/fork"
+   :fork-transcript-path "/fork/transcript.jsonl"
+   :transform-wmem      (fn [wmem] wmem)        ; optional: substitute inputs at the boundary
+   :backend             my-backend})            ; optional overrides / passthroughs
+;; => runner summary + {:fork-session-id … :at-seq …}
+----
+
+`fork!` loads the at-or-before combined checkpoint (working memory + the queue that was pending then), retargets the embedded session id and every pending event's `:target` to the fork session, applies `:transform-wmem`, seeds the fork's own checkpoint, then runs forward via the ordinary runner **resume** path (queue rehydrate + `:escapement/resumed`).
+Limitation: the fork's data model may still reference captured-I/O blobs under the SOURCE session dir — those are not auto-copied; point `:fork-session-dir` at a copy of the source dir, or override the offending refs via `:transform-wmem`, if the forward run needs them.
+Throws if no retained checkpoint exists at-or-before `:at-seq`.
 
 === Dynamic child sessions: multiplex + `:multi-session?`
 
@@ -3217,6 +3275,7 @@ jq -c 'select(.event=="checkpoint/written") | .seq' \
    .escapement/<sid>/transcript.jsonl | wc -l
 ----
 
+[[runner]]
 === Runner
 
 `src/escapement/runner.clj` exposes `run!`.
@@ -3236,6 +3295,20 @@ plus these additive keys (all default to prior behavior when omitted):
 * `:cancel` — a host-supplied cancel handle: an atom (or any `IDeref`) whose truthy current value, or a promise/future/delay whose
 *delivered* value is truthy, requests a prompt abort.
 An undelivered promise never blocks the pump.
+* `:resume-events` — a vector of send-request maps (`{:event … :data …}`)
+injected into the chart AFTER a successful `:resume?` restore and after the
+built-in `:escapement/resumed` signal (each defaulted to `:target
+session-id`).
+Lets a host drive post-resume behavior a chart cannot self-heal.
+Ignored on a fresh (non-resume) start.
+* `:retain-history?` — when true, the default file-backed store retains an
+append-only, save-index-keyed copy of every checkpoint so a Level-3 replay
+(`escapement.replay.chart/fork!`) can fork the chart from any past point. Off
+by default (per-event full snapshots are heavy). Ignored when `:store` is supplied.
+
+On `:resume?`, the runner rehydrates the durable event queue from the checkpoint (restoring pending delayed/timer events — those whose delivery time has passed fire immediately, in delivery-time order), then emits an `:escapement/resumed` chart event (data `{:config}`) for opt-in self-heal.
+The transcript is opened in **append** mode and its `:seq` continues past the prior run, so the resumed session stays one navigable timeline; a fresh start truncates and restarts `:seq` at 0.
+Additionally, the per-node captured-I/O `visit` counter is seeded from the artifact store on start, so a re-entered node numbers `max+1` across a restart instead of overwriting the prior run.
 
 `:max-iterations`::
 **Deprecated / no-op.** Formerly a lifetime cap on total pump iterations.
@@ -3308,6 +3381,8 @@ So an LLM that writes to `notes.md` lands inside the session dir, not wherever t
 Each tool's
 `:llm/tool-result` transcript event carries a `:resolved-path` (the absolute path it actually acted on).
 * `--resume` re-opens the latest checkpoint and skips `start!`.
+It also rehydrates the durable event queue (pending delayed/timer events survive the exit and fire on resume — those whose time passed while down fire immediately) and emits the `:escapement/resumed` chart signal.
+The transcript is appended (not truncated) and its `:seq` continues past the prior run, so the whole life of the session is one file.
 
 Initial data:
 
@@ -3853,6 +3928,8 @@ Only these keys are accepted:
 | `:cancel` | optional | none | atom/volatile/ref/agent (truthy current value) **or** delivered promise/future/delay; truthy ⇒ abort
 | `:chart-id` | optional | runner default | passthrough
 | `:resume?` | optional | `false` | passthrough
+| `:resume-events` | optional | none | `[:vector :map]` — send-request maps injected after a `:resume?` restore + the `:escapement/resumed` signal; passthrough. See <<runner>>
+| `:retain-history?` | optional | `false` | retain per-save checkpoint history (substrate for `escapement.replay.chart/fork!`); passthrough. See <<runner>>
 | `:trace?` | optional | `false` | passthrough
 | `:max-iterations` | optional | runner default (100000) | passthrough
 | `:quiescent-sleep-ms` | optional | runner default (50) | passthrough
@@ -4195,8 +4272,10 @@ This is a packaging concern only, not a code change.
 * **OpenAI Codex backend is reverse-engineered against the ChatGPT CLI auth flow.** OpenAI may change the protocol or revoke this path without notice.
 Use the `api` backend for production work.
 
-* **Checkpoint-resume restarts in-flight conversations.** Re-entering a bound state on resume spawns a fresh worker with an empty message history.
-At-most-once cannot be guaranteed for side-effecting tools.
+* **A live in-flight LLM turn is not resumable.** Working memory, the pending event queue (delayed/timer sends), artifact numbering, and the transcript timeline now all survive a `kill -9` + `--resume` (see <<runner>>), but re-entering a bound state on resume still spawns a fresh worker with an empty message history — an assistant turn that was mid-flight at exit is not replayed.
+At-most-once cannot be guaranteed for side-effecting tools across resume; track durability in the data model (and use the `:escapement/resumed` signal to self-heal).
+
+* **Replay `refine-node` is a single-turn re-issue, and `fork!` does not auto-copy source artifacts.** `escapement.replay/refine-node` (see <<refine-node>>) re-issues only a node's opening turn — a full multi-turn tool loop must be forked. `escapement.replay.chart/fork!` (see <<fork-chart>>) runs a chart forward from history but does not copy the source session's captured-I/O blobs; point `:fork-session-dir` at a copy or override the refs via `:transform-wmem`.
 
 * **Sandboxing of third-party charts is deferred.** A chart can reference arbitrary tools and arbitrary side-effects through `:script` and
 `:on-entry`.

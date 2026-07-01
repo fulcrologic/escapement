@@ -9,9 +9,11 @@
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.capture :as capture]
     [escapement.engine.env :as engine-env]
     [escapement.engine.instrumented-queue :as iq]
     [escapement.engine.queue :as engine-queue]
+    [escapement.engine.store :as engine-store]
     [escapement.invocation.human-input :as human-input]
     [escapement.invocation.llm-conversation :as llm-conv]
     [escapement.storage.disk :as disk]
@@ -280,6 +282,21 @@
                                            stranded on un-pumped sessions)
                                            still self-terminates once the
                                            budget elapses.
+    * `:retain-history?` (optional) — when true, the default file-backed
+                                      store retains an append-only,
+                                      save-index-keyed copy of every
+                                      checkpoint so a Level-3 replay can fork
+                                      the chart from any past point. Off by
+                                      default. Ignored when `:store` is
+                                      supplied.
+    * `:resume-events` (optional) — a vector of send-request maps
+                                    (`{:event … :data …}`) injected into the
+                                    chart AFTER a successful `:resume?` restore
+                                    and after the built-in `:escapement/resumed`
+                                    signal. Each is defaulted to `:target
+                                    session-id`. Lets a host drive post-resume
+                                    behavior a chart can't self-heal. Ignored on
+                                    a fresh (non-resume) start.
     * `:debug-controller` (optional) — `escapement.debug.controller`
                                        atom; when supplied, every event
                                        is gated through pause/step
@@ -296,7 +313,7 @@
            tool-registry initial-data resume? trace?
            max-iterations max-frozen-cycles quiescent-sleep-ms human-renderer
            on-env-ready transcript-tap prelude-events store run-id cancel
-           debug-controller human-input-active? multi-session?]
+           debug-controller human-input-active? multi-session? resume-events retain-history?]
     :or   {chart-id           ::chart
            resume?            false
            trace?             false
@@ -308,7 +325,10 @@
   (assert session-id "session-id is required")
   (assert transcript-path "transcript-path is required")
   (assert checkpoint-dir "checkpoint-dir is required")
-  (let [sink          (transcript/open-transcript {:path transcript-path :append? false})
+  (let [;; Append on resume so the transcript stays ONE navigable timeline across the
+        ;; whole life of the chart (seq continues past the prior run); truncate on a
+        ;; fresh start so a reused session id begins cleanly.
+        sink          (transcript/open-transcript {:path transcript-path :append? (boolean resume?)})
         jsonl-fn      (transcript/make-transcript-fn sink)
         transcript-fn (if transcript-tap
                         (fn [ev]
@@ -330,6 +350,7 @@
                                            :artifact-store          (when session-dir
                                                                       (disk/new-artifact-store session-dir))
                                            :queue                   queue
+                                           :retain-history?         retain-history?
                                            :store                   store
                                            :llm-backend             backend
                                            :llm-default-models      backend-default-models
@@ -345,6 +366,13 @@
         store         (::sc/working-memory-store env)
         processor     (::sc/processor env)]
     (sp/register-statechart! registry chart-id chart)
+    ;; Seed the per-(session,node) visit counter from artifacts already on disk so
+    ;; a restart/resume of a looping chart keeps numbering re-entries `max+1` instead
+    ;; of colliding at 0 and overwriting the prior run's captured-I/O. No-op on a
+    ;; fresh session (empty store ⇒ `{}`), so first-run numbering is unchanged.
+    (when-let [artifact-store (:escapement/artifact-store env)]
+      (reset! (:escapement/visit-counts env)
+        (capture/seed-visit-counts artifact-store session-id)))
     ;; Hook for callers (e.g. CLI's TUI) that need the queue/env at the
     ;; moment env is built but the chart hasn't started yet. Errors in
     ;; the callback are caught so they don't take down the runner.
@@ -362,8 +390,35 @@
       ;; Start or resume
       (let [existing (sp/get-working-memory store env session-id)]
         (if (and resume? existing (seq (::sc/configuration existing #{})))
-          (transcript-fn {:event :runner/resumed
-                          :data  {:config (vec (::sc/configuration existing))}})
+          ;; Rehydrate the durable event queue BEFORE the pump loop so delayed/timer
+          ;; events scheduled before the exit (poll ticks, safety stops) are restored;
+          ;; any whose delivery-time has since passed fire immediately, in
+          ;; delivery-time order. Must restore INTO the live queue (the execution model
+          ;; already captured its reference), not swap a new one in.
+          (let [snap        (when (engine-store/file-backed? store)
+                              (engine-store/get-queue-snapshot store session-id))
+                restored    (engine-queue/restore-into! (::sc/event-queue env) snap)
+                config      (vec (::sc/configuration existing))
+                queue       (::sc/event-queue env)]
+            (transcript-fn {:event :runner/resumed
+                            :data  {:config          config
+                                    :restored-events (if restored
+                                                       (engine-queue/pending-count restored)
+                                                       0)}})
+            ;; Emit a chart-observable resume signal so a chart can idempotently
+            ;; re-establish anything a restored TIMER cannot (service registries,
+            ;; acquired resources, a timer already consumed pre-exit). This is the
+            ;; opt-in self-heal seam: a chart adds a transition on `:escapement/resumed`
+            ;; where it needs one; a chart that ignores it simply drains the event as a
+            ;; no-op. We do NOT blanket-replay on-entry (many on-entry actions acquire
+            ;; resources and would double-fire). Host-supplied `:resume-events` follow,
+            ;; letting a CLI/embedder inject its own post-restore events (something
+            ;; `:on-env-ready` — which fires before restore — and transcript-only
+            ;; `:prelude-events` cannot do).
+            (sp/send! queue env {:event :escapement/resumed :target session-id
+                                 :data  {:config config}})
+            (doseq [ev resume-events]
+              (sp/send! queue env (cond-> ev (not (:target ev)) (assoc :target session-id)))))
           ;; Seed the chart's data model with `:initial-data` by passing it as
           ;; `::sc/invocation-data` in the start params (per the library's
           ;; v20150901_impl/initialize!).
