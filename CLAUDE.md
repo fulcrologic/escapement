@@ -57,14 +57,21 @@ reverse), and that boundary is **enforced by a test**:
   bundle. Loaded **lazily** by `--api-server` via `requiring-resolve`; if its
   deps are absent the flag fails with a clear message.
 
-  These deps are kept OUT of every downstream-facing dependency manifest so a
-  consumer using only the core lib/CLI is not infected by the Pathom/Fulcro/RAD
-  tree: `pom.xml` (Clojars) omits them, and `deps.edn` base `:deps` omits them —
-  they live in the **`:api` alias** instead (compose as `-M:api:ui-test`, etc.).
-  Only `bb.edn`'s own `:deps` carries them, because the bb runtime/bbin product
-  *is* the full tool (its `--api-server` runs the Pathom surface under bb). The
-  only namespace that requires Pathom is `escapement.ui.resolvers` (via
-  `server.clj`); it is server-side only and is NOT in the browser build graph.
+  The **released *library*** is kept clean of the Pathom/EQL/transit tree: the
+  Clojars artifact's deps come from the hand-maintained **`pom.xml`**, which omits
+  them, so a library consumer is never infected. The **CLI *tool*** however DOES
+  need them, and both tool classpaths carry them: `bb.edn`'s `:deps` (the bb
+  runtime tool) and — crucially — **`deps.edn` base `:deps`** (the `bbin`-installed
+  tool). The latter is required because a `bbin install` builds its classpath ONLY
+  from base `deps.edn` via a generated `bb --config <local/root>` launcher that
+  ignores `bb.edn` and cannot activate a deps alias; parking these in the old
+  `:api` alias left the CLI unable to serve its own `--api-server` web UI. The
+  `:api` alias is now an empty no-op retained so existing `-M:api:...` composes
+  still resolve. The only namespace that requires Pathom is
+  `escapement.ui.resolvers` (via `server.clj`); it is server-side only and is NOT
+  in the browser build graph, and no core namespace *statically* requires it
+  (the `--api-server`/`--tui=opentui` bridges stay `requiring-resolve`), so the
+  architecture-boundary test — which scans requires, not deps — stays green.
 - **Terminal-UI add-ons** — there are two, both used by the CLI front-end only; the
   embeddable library (`escapement.lib`) never pulls either:
   1. **JLine TUI** (default) — `escapement.tui` (+ JLine), in-process.

@@ -8,10 +8,23 @@
          org.babashka/http-client    {:mvn/version "0.4.22"}
          ;; Bundled with babashka; declared explicitly so the TUI namespace
          ;; also loads under plain JVM Clojure for IDE/REPL workflows.
-         org.jline/jline-terminal    {:mvn/version "3.27.1"}}
+         org.jline/jline-terminal    {:mvn/version "3.27.1"}
+         ;; EQL/Pathom read surface for the CLI's --api-server (+ --tui=opentui).
+         ;; These live in base :deps — NOT an alias — because that is the ONLY
+         ;; classpath a `bbin install` sees: bbin's generated launcher runs
+         ;; `bb --config <local/root>`, which ignores bb.edn and cannot activate
+         ;; a deps alias. Parking them in an alias made the CLI tool unable to
+         ;; serve its own web UI. The *released library* stays clean regardless:
+         ;; the Clojars artifact's deps come from the hand-maintained pom.xml,
+         ;; which omits these. transit-clj is the /api wire format; http-kit is
+         ;; bundled with bb. guardrails MUST stay pinned 1.2.16 (above) or
+         ;; Pathom's transitive 0.0.12 breaks bb.
+         com.wsscode/pathom          {:mvn/version "2.4.0"}
+         com.cognitect/transit-clj   {:mvn/version "1.0.333"}}
  :aliases
- {:api   {:extra-deps {com.wsscode/pathom        {:mvn/version "2.4.0"}
-                       com.cognitect/transit-clj {:mvn/version "1.0.333"}}}
+ {;; Retained as an (empty) alias so existing `-M:api:...` invocations keep
+  ;; resolving; the Pathom/transit deps it used to carry now live in base :deps.
+  :api   {}
   :demos {:extra-paths ["demos"]}
   :dev   {:extra-paths ["dev" "spike" "demos" "tui"]
           :jvm-opts    ["-Dguardrails.enabled=true"]}
