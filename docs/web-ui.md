@@ -56,18 +56,29 @@ the only per-target code is the thin render adapter.
 
 ## How the bundle is delivered
 
-The compiled bundle (~1.2 MB) is **not committed to git** — it would bloat history, since it changes
-on every build. Instead the server resolves it on demand, cheapest-first:
+The compiled bundle (~3.5 MB, since the RAD/Semantic-UI/elk stack was folded in) is **not committed to
+git** — it would bloat history, since it changes on every build. Instead the server resolves it on
+demand, cheapest-first:
 
-1. **Classpath** `public/js/main/main.js` — present in the release jar and after a local `bb build-ui`.
+1. **Classpath** `public/js/main/main.js` — present after a local `bb build-ui`. **Note:** it is *not*
+   in the Clojars jar (see below), so for a plain jar/library install this rung is normally empty.
 2. **Local cache** `~/.cache/escapement/ui/<version>/main.js` (honours `$XDG_CACHE_HOME`).
 3. **GitHub release asset** — downloaded from
    `https://github.com/fulcrologic/escapement/releases/download/escapement-<version>/main.js`,
    **verified against the SHA-256** in `resources/escapement-ui.edn`, then cached.
 
-So a `bbin install` (which builds its classpath from the git tree, with no bundle in it) fetches the
-bundle from the matching GitHub release the first time you use `--api-server`, and caches it. With no
-bundle and no network, `/` still loads and shows a notice; `/api` always works.
+So both a `bbin install` and a plain jar/library dependency (neither carries the bundle) fetch it from
+the matching GitHub release the first time you use `--api-server`, verify it against the manifest, and
+cache it. With no bundle and no network, `/` still loads and shows a notice; `/api` always works.
+
+> **Why the jar doesn't carry the bundle.** `mvn release:perform` builds the jar from a *fresh git
+> checkout of the release tag*, and `main.js` is gitignored — so it is absent from that checkout and
+> never packaged. The jar therefore ships `escapement-ui.edn` + `public/index.html` + an empty
+> `public/js/main/` (just a `.keep`), and jar consumers take the fetch-and-verify path above, exactly
+> like bbin. This is safe: the manifest SHA is pinned at the installed ref and the fetch **fails closed**
+> on any mismatch. (`-DlocalCheckout` does not change this — a `git checkout` never includes a gitignored
+> file. Embedding the bundle would require the release to copy the built `main.js` into the tag checkout
+> before packaging.)
 
 ### Cache busting
 
@@ -176,7 +187,9 @@ active session id renders.
 
 ## Releasing the UI
 
-The bundle ships two ways — bundled in the clojars jar **and** as a GitHub release asset for bbin.
+The bundle ships **one way** — as a GitHub release asset, fetched-and-verified on first `--api-server`
+use by both jar and bbin installs (the clojars jar carries only the manifest, not `main.js` — see
+[How the bundle is delivered](#how-the-bundle-is-delivered)).
 
 Two tasks cover it:
 
@@ -198,10 +211,13 @@ the bundle must not be recompiled after the manifest is committed:
 2. **Commit** `resources/escapement-ui.edn`.
 3. **Cut the version** (`maven-release-plugin`), which bumps the pom to the release version, commits,
    and tags `escapement-<version>` *at the commit that includes the manifest from step 2*, then pushes.
-   `release:perform` builds/deploys the jar — and because `bb build-ui` already populated the working
-   tree, the `pom.xml` `<resource>` bundles `main.js` into the jar, so jar users serve it from the
-   classpath and never fetch.
-4. **`bb release-ui`** — publishes that exact `main.js` to the GitHub release.
+   `release:perform` builds/deploys the jar from a fresh checkout of that tag. The jar carries the
+   manifest (`escapement-ui.edn`) but **not** `main.js` (it is gitignored, so it isn't in the tag
+   checkout — see [How the bundle is delivered](#how-the-bundle-is-delivered)); jar consumers fetch and
+   verify the asset like everyone else.
+4. **`bb release-ui`** — publishes that exact `main.js` to the GitHub release. This is the step that
+   makes the UI actually reachable — without it, every install 404s on the asset and degrades to the
+   offline notice.
 
 Do **not** run `bb watch-ui` between steps 1 and 4 — it overwrites `main.js` with a dev build, and
 `release-ui` will refuse to publish (SHA mismatch). If you do, just re-run `bb build-ui`.
@@ -221,8 +237,11 @@ So:
 - **`release-ui` guarantees published-asset == manifest.** Because it verifies rather than recompiles,
   the asset on the GitHub release is byte-identical to the manifest SHA at the tag. No reproducible-
   build assumption, and no possibility of a checksum failure for end users.
-- **Jar/library consumers never fetch** — `main.js` is baked into each clojars jar version, so source
-  and UI are inherently consistent for that artifact.
+- **Jar/library consumers fetch the same way** — the Clojars jar carries the manifest but not the
+  bundle (`main.js` is gitignored and absent from the release-tag checkout), so a jar install also
+  fetches `escapement-<version>/main.js` on first `--api-server` use and verifies it against the jar's
+  pinned manifest SHA. Because the manifest travels *in* the jar, source and UI stay consistent for that
+  artifact even though the bytes are fetched, not embedded.
 
 The one residual is process discipline: if you change `client.cljs` but forget step 1 (rebuild) before
 tagging, the tag's manifest still points at the *previous* bundle, so bbin users get the older UI JS

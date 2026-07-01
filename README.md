@@ -98,8 +98,8 @@ escapement run escapement.examples.hello/agent --api-server 8920
 The browser app is a statechart-driven **RAD explorer** — a Sessions report that drills into a
 session's events and artifacts — plus a live **Debugger** with an embedded statechart visualizer. The
 same RAD reports/model also render to a terminal via the fulcro-tui target. The UI is optional and
-lazily delivered (it never loads on a normal run). Its compiled bundle is not in git: jar installs
-serve it from the classpath, and `bbin` installs fetch it once from the matching GitHub release
+lazily delivered (it never loads on a normal run). Its compiled bundle is not in git and not in the
+Clojars jar: both jar and `bbin` installs fetch it once from the matching GitHub release
 (SHA-256-verified) and cache it. Develop it with `bb watch-ui`, compile with `bb build-ui`, and
 publish the release asset with `bb release-ui` (uses `gh`). See [`docs/web-ui.md`](docs/web-ui.md) for
 the architecture, dev loop, and release steps.

@@ -1,5 +1,36 @@
 # Changelog
 
+## [unreleased] — docs/fix-web-ui-jar-delivery-claim — 2026-07-01
+
+Documentation correction: the web-UI compiled bundle (`main.js`) is **not**
+embedded in the Clojars jar. `mvn release:perform` builds from a fresh git
+checkout of the release tag, where `main.js` is gitignored — so the jar ships
+the manifest (`resources/escapement-ui.edn`) but not the bundle.
+
+### Changed
+
+- **CLAUDE.md, README.md, docs/web-ui.md** now state the actual bundle-delivery
+  model: **both** jar and `bbin` installs fetch `main.js` from the matching
+  GitHub release on first `--api-server` use and verify it against the pinned
+  manifest SHA-256 (fails closed on mismatch). Removes the false claim that jar
+  installs serve the bundle from the classpath. `docs/web-ui.md` adds a "Why the
+  jar doesn't carry the bundle" note and corrects the release-steps section.
+
+### Notes
+
+- Doc-only delta (three files); no source or behavior change. Verified by the
+  live release + jar inspection, not by `bb test`.
+- Context: this correction accompanied **1.0.0-RC7**, the first proper web-UI
+  release — the Clojars jar was deployed and the GitHub release
+  `escapement-1.0.0-RC7` published with the SHA-verified `main.js` asset. The
+  UI manifest was refreshed from a stale RC2 to RC7 and committed in `58271ce`
+  (already on main).
+- No Guide.adoc change — the guide delegates bundle-delivery detail to
+  `docs/web-ui.md` (line ~3434) and makes no jar-embedding claim.
+- Primitive surface untouched — skill/CLAUDE.md statecharts-sync N/A (CLAUDE.md
+  is edited, but only its Web-UI delivery paragraph, not the Statecharts caveats
+  / Test conventions sections).
+
 ## [unreleased] — feat/opentui-markdown-tables — 2026-06-08
 
 Read-only session replay in the OpenTUI sidecar (`escapement open`) plus GFM

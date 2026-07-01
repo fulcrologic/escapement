@@ -150,8 +150,9 @@ same origin. The SPA is a **statechart-driven RAD explorer** (Sessions → Event
 live Debugger + embedded statechart visualizer. The RAD reports/model are **shared CLJC** and render
 two ways: Semantic-UI in the browser (`escapement.ui.rendering.semantic-ui`) and a fulcro-tui terminal
 target (`escapement.ui.rendering.tui`). CLJS deps live only in the `:cljs` alias (never on the bb
-runtime). The compiled bundle is gitignored — jar installs serve it from the classpath, `bbin` installs
-fetch it from the GitHub release (SHA-256-verified against the committed `resources/escapement-ui.edn`).
+runtime). The compiled bundle is gitignored and is **not** in the Clojars jar either (it is absent from
+the release-tag checkout `release:perform` builds from) — so both jar and `bbin` installs fetch it from
+the GitHub release on first use (SHA-256-verified against the committed `resources/escapement-ui.edn`).
 The bundle now carries the RAD/Semantic-UI/elk stack; `bb build-ui` is otherwise unchanged. **Read
 [`docs/web-ui.md`](docs/web-ui.md) before touching the UI build/release.** After changing
 `client.cljs` (or any UI code), run `bb build-ui` and commit the refreshed manifest; never commit
