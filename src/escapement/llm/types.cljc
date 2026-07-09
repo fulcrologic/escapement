@@ -150,6 +150,10 @@
    [:tool-choice {:optional true} ToolChoice]
    ;; Optional audit/metadata.
    [:metadata {:optional true} Metadata]
+   ;; Provider escape hatch: a {string value} map merged verbatim onto the
+   ;; serialized body — OpenAI wire layer only (Anthropic drops it); caller keys
+   ;; win; not in the content-cache key. E.g. {"chat_template_kwargs" {...}}.
+   [:extra-body {:optional true} [:maybe [:map-of :string :any]]]
    ;; Extension key for conversation tracking / prompt cache key.
    [:conversation/id {:optional true} [:or :string :keyword :uuid]]])
 

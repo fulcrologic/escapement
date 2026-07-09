@@ -168,6 +168,32 @@
     (get (oai/request->openai-json (assoc sample-request :model "openai/gpt-4o-mini")) "max_completion_tokens")
     => 1024))
 
+(specification "extra-body is the provider escape hatch on the OpenAI wire"
+  ;; `:extra-body` is a {string value} map merged verbatim onto the serialized
+  ;; body — the hook local/llama.cpp servers need for non-standard fields (e.g.
+  ;; disabling Qwen reasoning via chat_template_kwargs). Contract: merged LAST,
+  ;; so caller keys win over framework-produced ones; absent/empty is a no-op.
+  (let [wire (oai/request->openai-json
+               (assoc sample-request
+                 :extra-body {"chat_template_kwargs" {"enable_thinking" false}}))]
+    (assertions
+      "arbitrary vendor key is merged verbatim onto the top-level body"
+      (get wire "chat_template_kwargs") => {"enable_thinking" false}
+      "framework-produced keys are untouched when extra-body doesn't collide"
+      (get wire "model") => "gpt-5"
+      (get wire "max_completion_tokens") => 1024))
+  (let [wire (oai/request->openai-json
+               (assoc sample-request :extra-body {"model" "local-qwen"}))]
+    (assertions
+      "extra-body is merged LAST, so a colliding caller key wins"
+      (get wire "model") => "local-qwen"))
+  (let [base (oai/request->openai-json sample-request)]
+    (assertions
+      "absent extra-body is a no-op"
+      (oai/request->openai-json (assoc sample-request :extra-body nil)) => base
+      "empty extra-body is a no-op"
+      (oai/request->openai-json (assoc sample-request :extra-body {})) => base)))
+
 (specification "tool-choice translation"
   (assertions
     ":auto -> \"auto\""

@@ -92,6 +92,13 @@
                      extended thinking. Requires `:max-tokens` > `N`.
      * `:tool-choice` — `:auto` | `:any` | `:none` | `{:type :tool :name \"...\"}`
      * `:metadata` — `{:user-id \"...\"}`
+     * `:extra-body` — provider escape hatch: a `{string value}` map merged
+                       verbatim onto the serialized request body. Only the
+                       OpenAI Chat Completions wire layer honors it (Anthropic
+                       drops it). Caller keys win over framework-produced ones.
+                       Example: `{\"chat_template_kwargs\" {\"enable_thinking\" false}}`
+                       to disable Qwen/llama.cpp reasoning. NOT part of the
+                       content-cache key.
      * `:auto-cache?` — boolean, default `true`. When true, fills in
        `:system-cache-control` and `:tools-cache-control` with
        `{:type :ephemeral}` if the caller didn't set them. Set to `false`
@@ -117,6 +124,7 @@
      * `:conv-id` — conversation correlation id; used as prompt cache key by openai-codex (string/keyword/uuid)"
   [{:keys [system messages tools model max-tokens conv-id
            temperature top-p top-k stop-sequences thinking tool-choice metadata
+           extra-body
            system-cache-control tools-cache-control message-cache-control auto-cache?]
     :or   {auto-cache? true}}]
   ;; Auto-cache defaulting: an absent (== `nil`) cache-control marker
@@ -182,6 +190,7 @@
       thinking (assoc :thinking thinking)
       (some? tool-choice) (assoc :tool-choice tool-choice)
       (seq metadata) (assoc :metadata metadata)
+      (seq extra-body) (assoc :extra-body extra-body)
       conv-id (assoc :conversation/id conv-id))))
 
 (defn effective-max-tokens
@@ -610,6 +619,7 @@
                                     :thinking             (:thinking eff)
                                     :tool-choice          (:tool-choice params)
                                     :metadata             (:metadata params)
+                                    :extra-body           (:extra-body params)
                                     :system-cache-control (:system-cache-control params)
                                     :tools-cache-control  (:tools-cache-control params)
                                     :message-cache-control (:message-cache-control params)

@@ -149,7 +149,8 @@ body (Clojure map with string keys, ready for JSON serialization)."
   [request]
   [:map => :map]
   (let [{:keys [model system messages tools max-tokens
-                temperature top-p stop-sequences tool-choice metadata]} request
+                temperature top-p stop-sequences tool-choice metadata
+                extra-body]} request
         sys-msg  (when system [{"role" "system" "content" system}])
         rest-msg (into [] (mapcat message->openai messages))
         all-msgs (into (vec sys-msg) rest-msg)]
@@ -161,7 +162,8 @@ body (Clojure map with string keys, ready for JSON serialization)."
       (some? top-p) (assoc "top_p" top-p)
       (seq stop-sequences) (assoc "stop" (vec stop-sequences))
       (some? tool-choice) (assoc "tool_choice" (tool-choice->openai tool-choice))
-      (:user-id metadata) (assoc "user" (:user-id metadata)))))
+      (:user-id metadata) (assoc "user" (:user-id metadata))
+      (seq extra-body) (merge extra-body))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Response translation: OpenAI JSON -> our Response
