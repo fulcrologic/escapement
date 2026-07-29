@@ -50,11 +50,12 @@ rough codex equivalents. nil and unknown values fall back to `gpt-5.1`."
    :parameters  input-schema})
 
 (defn- text-block->input-item
-  "Converts a `:text` content block from a user message to an OpenAI input item."
+  "Converts a `:text` block to a role-appropriate OpenAI message item."
   [role block]
   {:type    "message"
    :role    (name role)
-   :content [{:type "input_text" :text (:text block)}]})
+   :content [{:type (if (= :assistant role) "output_text" "input_text")
+              :text (:text block)}]})
 
 (defn- tool-result-block->input-item
   "Converts a `:tool_result` content block to an OpenAI `function_call_output` item."
@@ -140,7 +141,7 @@ Notes:
 * `cache_control` markers are no-ops; a debug log line is emitted when present.
 * The `:reasoning` key (if present) is passed through as-is; otherwise
  `{:effort \"medium\" :summary \"auto\"}` is used."
-  [{:keys [model system messages tools reasoning] :as request}]
+  [{:keys [model system messages tools reasoning tool-choice] :as request}]
   [:map => :map]
   (when (has-cache-control? request)
     ;; Must go through timbre (NOT a raw println/`*err*` write): in a TUI run the
@@ -149,15 +150,17 @@ Notes:
     ;; whole frame (the classic Tab-toggle corruption). `route-logs-to-file!`
     ;; sends timbre to the session log instead.
     (log/debug "[openai-codex] backend ignores cache-control markers; subscription billing uses backend's own caching"))
-  {:model        (normalize-model model)
-   :instructions (or system "")
-   :input        (anthropic-messages->openai-input messages)
-   :tools        (mapv anthropic-tool->openai-tool (or tools []))
-   :store        false
-   :stream       true
-   :include      ["reasoning.encrypted_content"]
-   :reasoning    (or reasoning {:effort "medium" :summary "auto"})
-   :text         {:verbosity "medium"}})
+  (cond-> {:model        (normalize-model model)
+           :instructions (or system "")
+           :input        (anthropic-messages->openai-input messages)
+           :tools        (mapv anthropic-tool->openai-tool (or tools []))
+           :store        false
+           :stream       true
+           :include      ["reasoning.encrypted_content"]
+           :reasoning    (or reasoning {:effort "medium" :summary "auto"})
+           :text         {:verbosity "medium"}}
+    (= :tool (:type tool-choice))
+    (assoc :tool_choice {:type "function" :name (:name tool-choice)})))
 
 ;;; ---------------------------------------------------------------------------
 ;;; OpenAI → Anthropic response translation

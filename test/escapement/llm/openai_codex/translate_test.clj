@@ -66,7 +66,45 @@
       (get-in items [0 :content 0 :text]) => "Hello!"
       "second item is an assistant message"
       (get-in items [1 :role]) => "assistant"
+      (get-in items [1 :content 0 :type]) => "output_text"
       (get-in items [1 :content 0 :text]) => "Hi there!")))
+
+(specification "anthropic-messages->openai-input — verdict follow-up history"
+  (let [messages [{:role :user
+                   :content [{:type :text :text "work"}]}
+                  {:role :assistant
+                   :content [{:type :thinking :thinking "calling tool" :signature "encrypted-1"}
+                             {:type :tool_use :id "call-1" :name "work" :input {}}]}
+                  {:role :user
+                   :content [{:type :tool_result :tool_use_id "call-1" :content "result"}]}
+                  {:role :assistant
+                   :content [{:type :thinking :thinking "finalizing" :signature "encrypted-2"}
+                             {:type :text :text "{\"status\":\"done\"}"}]}
+                  {:role :user
+                   :content [{:type :text :text "Please call submit_verdict."}]}]
+        items    (t/anthropic-messages->openai-input messages)]
+    (assertions
+      "preserves the Responses API item order"
+      (mapv :type items) => ["message" "reasoning" "function_call" "function_call_output"
+                             "reasoning" "message" "message"]
+      "preserves the final encrypted reasoning signature"
+      (get-in items [4 :encrypted_content]) => "encrypted-2"
+      "replays assistant text as output text"
+      (select-keys (get items 5) [:type :role]) => {:type "message" :role "assistant"}
+      (get-in items [5 :content 0 :type]) => "output_text"
+      "encodes the verdict nudge as user input text"
+      (select-keys (get items 6) [:type :role]) => {:type "message" :role "user"}
+      (get-in items [6 :content 0 :type]) => "input_text")))
+
+(specification "build-request-body — named tool choice"
+  (let [body (t/build-request-body
+               {:model       "gpt-5.5"
+                :messages    []
+                :tools       [{:name "submit_verdict" :description "Submit" :input-schema {}}]
+                :tool-choice {:type :tool :name "submit_verdict"}})]
+    (assertions
+      "forces the named Responses API function"
+      (:tool_choice body) => {:type "function" :name "submit_verdict"})))
 
 (specification "anthropic-messages->openai-input — assistant tool_use"
   (let [items (t/anthropic-messages->openai-input [assistant-tool-use-msg])]
