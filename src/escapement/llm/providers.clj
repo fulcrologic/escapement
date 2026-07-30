@@ -42,6 +42,14 @@
     (assert ctor "escapement.llm.openai-codex/new-backend not found")
     (ctor opts)))
 
+(defn build-claude-cli-backend
+  "Claude Max/Pro-subscription backend via the `claude -p` CLI."
+  [opts]
+  (require 'escapement.llm.claude-cli)
+  (let [ctor (resolve 'escapement.llm.claude-cli/new-backend)]
+    (assert ctor "escapement.llm.claude-cli/new-backend not found")
+    (ctor opts)))
+
 (defn build-multi-backend
   "Model-prefix dispatcher across several sub-backends."
   [opts]
@@ -89,12 +97,15 @@
       anthropic
       (conj {:kind          :anthropic :source "ANTHROPIC_API_KEY"
              :api-key       anthropic :base-url "https://api.anthropic.com"
-             :default-model "claude-sonnet-4-6" :auth-mode :x-api-key
+             :default-model "claude-sonnet-5" :auth-mode :x-api-key
              :route         #"^claude-"})
 
       codex-auth
       (conj {:kind          :codex :source "saved OAuth token"
-             :default-model "gpt-5.1-codex"
+             ;; NOT a `-codex` id: ChatGPT-account auth rejects every one of
+             ;; them (see openai-codex.translate/supported-models). Sol is the
+             ;; GPT-5.6 flagship and OpenAI's best coding model.
+             :default-model "gpt-5.6-sol"
              :route         #"^gpt-5"})
 
       openai
@@ -150,7 +161,10 @@
     :ollama (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :opencode-go-openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :opencode-go-anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
-    :codex (build-codex-backend {:default-model (:default-model c)})))
+    :codex (build-codex-backend {:default-model (:default-model c)})
+    :claude-cli (build-claude-cli-backend
+                  (select-keys c [:default-model :binary :timeout-ms :max-concurrency
+                                  :effort :max-budget-usd]))))
 
 ;; --- Hermetic explicit-credentials assembly -------------------------------
 ;;
@@ -170,7 +184,7 @@
    the env-independent half of the descriptor `detect-available-credentials`
    builds for that provider (the `:api-key` / overrides come from the caller)."
   {:anthropic             {:kind          :anthropic :base-url "https://api.anthropic.com"
-                           :default-model "claude-sonnet-4-6" :auth-mode :x-api-key
+                           :default-model "claude-sonnet-5" :auth-mode :x-api-key
                            :route         #"^claude-"}
    :z-ai                  {:kind          :zai :base-url "https://api.z.ai/api/anthropic"
                            :default-model "glm-4.6" :auth-mode :bearer
@@ -199,10 +213,22 @@
                            :route         #"^minimax-"}
    ;; ChatGPT-subscription: no api-key/base-url; OAuth token is loaded by the
    ;; codex backend itself at send time, not here.
-   :codex                 {:kind  :codex :default-model "gpt-5.1-codex"
+   :codex                 {:kind  :codex :default-model "gpt-5.6-sol"
                            :route #"^gpt-5"}
-   :openai-codex          {:kind  :codex :default-model "gpt-5.1-codex"
-                           :route #"^gpt-5"}})
+   :openai-codex          {:kind  :codex :default-model "gpt-5.6-sol"
+                           :route #"^gpt-5"}
+   ;; Claude Max/Pro subscription via the `claude -p` CLI. Deliberately has NO
+   ;; `:route`: a `#"^claude-"` matcher would collide with `:anthropic`'s and
+   ;; silently reroute metered traffic onto the subscription (or vice versa),
+   ;; which is a billing change nobody asked for. This provider is reachable
+   ;; only by being named explicitly — `--backend claude-cli`, a
+   ;; `{:provider :claude-cli}` credential entry, or a preference alias — and
+   ;; `detect-available-credentials` never emits it, so there is no
+   ;; env-detected twin for the two paths to drift apart on.
+   ;; `:default-model` is a CLI ALIAS, not an Anthropic id: the CLI resolves
+   ;; `--model` against its own registry and exits 1 on ids it does not know
+   ;; (`claude-sonnet-4-7` was one such — an id that exists nowhere).
+   :claude-cli            {:kind :claude-cli :default-model "sonnet"}})
 
 (defn- descriptor->credential
   "Resolve one injected credential descriptor into a full

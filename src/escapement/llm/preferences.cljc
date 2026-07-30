@@ -15,7 +15,7 @@
 
    ```
    {:llm/aliases     {:fast  [{:provider :ollama    :model \"glm-5.1\"}]
-                      :smart [{:provider :anthropic :model \"claude-opus-4-7\"}]}
+                      :smart [{:provider :anthropic :model \"claude-opus-5\"}]}
     :llm/preferences [:fast :smart]}
    ```
 
@@ -38,15 +38,22 @@
    than editing this."
   {:default-glm        [{:provider :z-ai-plan :model "glm-5.1"}
                         {:provider :z-ai :model "glm-4.7"}]
-   :default-sonnet     [{:provider :anthropic :model "claude-sonnet-4-7"}]
-   :default-opus       [{:provider :anthropic :model "claude-opus-4-7"}]
-   :default-gpt        [{:provider :openai :model "gpt-5"}]})
+   ;; Anthropic's current generation. `:default-sonnet` previously named
+   ;; `claude-sonnet-4-7`, a model that does not exist — so the built-in Sonnet
+   ;; default resolved to nothing.
+   :default-sonnet     [{:provider :anthropic :model "claude-sonnet-5"}]
+   :default-opus       [{:provider :anthropic :model "claude-opus-5"}]
+   :default-fable      [{:provider :anthropic :model "claude-fable-5"}]
+   ;; Subscription-backed codex first (mirrors `:default-glm`'s plan→metered
+   ;; ordering), then the metered OpenAI API. Sol is the GPT-5.6 flagship.
+   :default-gpt        [{:provider :codex  :model "gpt-5.6-sol"}
+                        {:provider :openai :model "gpt-5.6-sol"}]})
 
 (def default-preferences
   "Built-in priority order (a VECTOR OF ALIAS KEYWORDS over `default-aliases`)
    used when the config sets no `:llm/preferences`. Cheapest /
    subscription-backed options first, climbing to premium models."
-  [:default-glm :default-sonnet :default-opus :default-gpt])
+  [:default-glm :default-sonnet :default-opus :default-gpt :default-fable])
 
 (defn from-config
   "Extract the raw preference vector from a loaded config map. Accepts the

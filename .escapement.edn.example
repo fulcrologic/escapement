@@ -13,10 +13,13 @@
 ;; You may instead inline `:api-key "sk-…"` (discouraged — then keep the file
 ;; gitignored). `:codex` (ChatGPT subscription) needs neither: it uses the OAuth
 ;; file at ~/.escapement/openai-auth.json (run `escapement login codex`).
+;; `:claude-cli` (Claude Max/Pro subscription) likewise needs no key: it shells the
+;; `claude -p` CLI, which does its own OAuth/keychain read (`claude auth login`, or
+;; `claude setup-token` for headless use).
 ;;
 ;; Supported `:provider` keywords (see escapement.llm.providers/provider-templates):
 ;;   :anthropic :openai :openrouter :z-ai :z-ai-plan :ollama :opencode-go
-;;   :opencode-go-anthropic :codex
+;;   :opencode-go-anthropic :codex :claude-cli
 ;;
 ;; ── Models ─────────────────────────────────────────────────────────────────
 ;; Charts select models by ALIAS KEYWORD, never a raw string. `:llm/aliases`
@@ -34,12 +37,17 @@
   {:provider :z-ai-plan   :key-from [:opencode "zai-coding-plan" "key"]}
   {:provider :ollama      :key-from [:opencode "ollama-cloud" "key"]}
   {:provider :opencode-go :key-from [:opencode "opencode-go" "key"]}
-  {:provider :codex}]                                                ; OAuth file; no key
+  {:provider :codex}                                                 ; OAuth file; no key
+  {:provider :claude-cli}]                                           ; `claude` CLI; no key
 
  :llm/aliases
- {:default-sonnet [{:provider :anthropic :model "claude-sonnet-4-7"}]
+ {:default-sonnet [{:provider :anthropic :model "claude-sonnet-5"}]
   :fast-glm       [{:provider :z-ai-plan :model "glm-4.7"}]
-  :gpt            [{:provider :codex     :model "gpt-5.5"}]}
+  :gpt            [{:provider :codex     :model "gpt-5.5"}]
+  ;; Subscription-billed Claude via the CLI. NOTE the model is a CLI ALIAS
+  ;; ("sonnet"/"opus"/"haiku"/"fable"), not an Anthropic id — the CLI resolves
+  ;; --model against its own registry and rejects ids it does not know.
+  :subs-sonnet    [{:provider :claude-cli :model "sonnet"}]}
 
  ;; Ordered fallback for any conversation that names no model.
  :llm/preferences [:default-sonnet]}

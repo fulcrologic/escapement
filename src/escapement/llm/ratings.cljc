@@ -34,7 +34,7 @@
   ;; opinion, define your own table in `.escapement.edn`, KEYED BY ALIAS
   ;; KEYWORD (each key must also exist in `:llm/aliases`), e.g.:
   ;;
-  ;;   {:llm/aliases {:opus  [{:provider :anthropic :model "claude-opus-4-7"}]
+  ;;   {:llm/aliases {:opus  [{:provider :anthropic :model "claude-opus-5"}]
   ;;                  :gpt   [{:provider :openai    :model "gpt-5"}]}
   ;;    :llm/ratings {:opus {:intelligence 10 :clojure 10 :tool-calling 9}
   ;;                  :gpt  {:intelligence 10 :clojure 6}}}

@@ -14,27 +14,94 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Model normalization
 
-(>defn normalize-model
-  "Maps Anthropic-style or user-friendly model names to ChatGPT backend model IDs.
+(def supported-models
+  "Model ids the ChatGPT-account Codex endpoint actually accepts, flagship first.
 
-Known codex IDs are passed through unchanged. Anthropic names are mapped to
-rough codex equivalents. nil and unknown values fall back to `gpt-5.1`."
+   Verified live 2026-07-29. This backend authenticates ONLY with a ChatGPT
+   subscription token, and that path rejects far more than the model catalog
+   suggests — every `-codex`, `-pro`, and `-nano` variant, plus the previous
+   generation of general models, comes back as:
+
+     \"The '<id>' model is not supported when using Codex with a ChatGPT account.\"
+
+   Confirmed rejected: `gpt-5.1`, `gpt-5.2`, `gpt-5.6`, `sol`, `gpt-5.1-codex`,
+   `gpt-5.2-codex`, `gpt-5.1-codex-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`,
+   `gpt-5.4-nano`, `gpt-5.4-pro`, `gpt-5.5-pro`, `gpt-5.6-sol-ultra`.
+
+   The GPT-5.6 generation is the Luna/Terra/Sol family (least → most capable,
+   released 2026-07-09). Only the SUFFIXED ids work — bare `gpt-5.6` is rejected,
+   and Sol's \"Ultra\" high-effort mode is not a separate model id.
+
+   `bb_test/codex_models_probe.clj` re-verifies this list against a live token."
+  ["gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.6-luna" "gpt-5.5" "gpt-5.4" "gpt-5.4-mini"])
+
+(def default-model
+  "The flagship of `supported-models`. Used whenever a caller names no model."
+  (first supported-models))
+
+(def ^:private legacy-model-aliases
+  "Retired ids → the nearest model that still works.
+
+   These were this backend's documented ids (and its old `:default-model`) but
+   are now hard 400s on ChatGPT-account auth, so passing them through would
+   guarantee failure. Substituting the nearest live model keeps existing charts
+   and `.escapement.edn` aliases running; the Response reports what actually ran."
+  {;; Every `-codex` variant — the family this backend was originally built
+   ;; around — now 404s on ChatGPT-account auth. Coding work goes to Sol, which
+   ;; OpenAI positions as its best coding model.
+   "gpt-5.1-codex"       "gpt-5.6-sol"
+   "gpt-5.1-codex-max"   "gpt-5.6-sol"
+   "gpt-5.2-codex"       "gpt-5.6-sol"
+   "gpt-5.3-codex"       "gpt-5.6-sol"
+   "gpt-5-codex"         "gpt-5.6-sol"
+   "gpt-5.1-codex-mini"  "gpt-5.6-luna"
+   "gpt-5.3-codex-spark" "gpt-5.6-luna"
+   "codex-mini-latest"   "gpt-5.6-luna"
+   ;; Superseded general models map forward within their tier.
+   "gpt-5"               "gpt-5.6-sol"
+   "gpt-5.1"             "gpt-5.6-sol"
+   "gpt-5.2"             "gpt-5.6-sol"
+   "gpt-5.3"             "gpt-5.6-sol"
+   "gpt-5.6"             "gpt-5.6-sol"      ; bare 5.6 is rejected; Sol is the flagship
+   "gpt-5-mini"          "gpt-5.6-luna"
+   ;; `-pro` / `-nano` tiers and Sol's Ultra MODE have no distinct ChatGPT-account
+   ;; model id, so they degrade to the nearest real one.
+   "gpt-5.6-sol-ultra"   "gpt-5.6-sol"
+   "gpt-5.5-pro"         "gpt-5.6-sol"
+   "gpt-5.4-pro"         "gpt-5.6-sol"
+   "gpt-5.4-nano"        "gpt-5.6-luna"})
+
+(def ^:private anthropic-model-aliases
+  "Anthropic-style names → rough codex equivalents, so a chart written against
+   Claude ids still runs here. Matched by PREFIX so dated ids resolve too."
+  {"claude-opus"   "gpt-5.6-sol"
+   "claude-fable"  "gpt-5.6-sol"
+   "claude-sonnet" "gpt-5.6-terra"
+   "claude-haiku"  "gpt-5.6-luna"})
+
+(>defn normalize-model
+  "Maps a requested model name onto an id the ChatGPT-account Codex endpoint
+   accepts.
+
+   - ids in `supported-models` pass through unchanged
+   - retired ids (incl. every `-codex` variant) map to the nearest live model
+     via `legacy-model-aliases` — they are hard 400s on this auth path, so
+     passing them through would guarantee failure
+   - Anthropic-style names map by family (`claude-opus-*` → flagship,
+     `claude-haiku-*` → mini)
+   - nil falls back to `default-model`
+   - anything else passes through so the backend can surface its own error"
   [m]
   [(? :string) => :string]
-  (case m
-    ("gpt-5.2"
-      "gpt-5.2-codex"
-      "gpt-5.1"
-      "gpt-5.1-codex"
-      "gpt-5.1-codex-max"
-      "gpt-5.1-codex-mini"
-      "codex-mini-latest") m
-    ;; Anthropic names → codex equivalents
-    ("claude-opus-4-7" "claude-sonnet-4-6") "gpt-5.2-codex"
-    "claude-haiku-4-5" "gpt-5.1-codex-mini"
-    nil "gpt-5.1"
-    ;; pass unknown through — backend will reject if invalid
-    m))
+  (let [m (some-> m str/trim)]
+    (cond
+      (str/blank? m) default-model
+      (some #{m} supported-models) m
+      (contains? legacy-model-aliases m) (get legacy-model-aliases m)
+      :else
+      (or (some (fn [[prefix target]] (when (str/starts-with? m prefix) target))
+            anthropic-model-aliases)
+        m))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Anthropic → OpenAI request translation

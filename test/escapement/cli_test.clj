@@ -182,7 +182,36 @@
           "z.ai keeps precedence for glm-*"
           (< (index-of kinds :zai)
             (index-of kinds :opencode-go-openai)
-            (index-of kinds :ollama)) => true)))))
+            (index-of kinds :ollama)) => true))))
+
+  (component ":claude-cli is NEVER auto-detected"
+    ;; Billing guard. The subscription-billed CLI backend must be reachable only
+    ;; by being NAMED (`--backend claude-cli`, a `{:provider :claude-cli}` entry,
+    ;; or an alias). Giving it an env-detected twin with a `#"^claude-"` route
+    ;; would collide with `:anthropic`'s route and silently move traffic between
+    ;; a metered key and a subscription — in whichever direction sorted first.
+    (with-redefs [providers/nonblank-env (fn [_] "some-key-value")]
+      (let [creds (#'providers/detect-available-credentials)]
+        (assertions
+          "no descriptor names it, even with every API key env var set"
+          (filterv #(= :claude-cli (:kind %)) creds) => []
+
+          "and no auto-detected route could ever match it into existence"
+          (contains? (set (mapv :kind creds)) :claude-cli) => false)))
+    (assertions
+      "it IS reachable by explicit injection, though"
+      (:kind (#'providers/descriptor->credential {:provider :claude-cli})) => :claude-cli
+
+      "with no :route, so it cannot win a model-prefix match against :anthropic"
+      (:route (#'providers/descriptor->credential {:provider :claude-cli})) => nil
+
+      "and its default model is a CLI alias, not an Anthropic id (the CLI exits 1
+       on ids absent from its own registry)"
+      (:default-model (#'providers/descriptor->credential {:provider :claude-cli})) => "sonnet"
+
+      "an explicit :model overrides it"
+      (:default-model (#'providers/descriptor->credential
+                        {:provider :claude-cli :model "opus"})) => "opus")))
 
 (specification "resolve-log-level (R4)"
   (component "explicit --log-level wins (case-insensitive)"
@@ -277,4 +306,78 @@
                            {:llm/credentials [{:provider :anthropic :api-key "K-INLINE"}]}))))
       => "K-INLINE"
       "returns nil when :llm/credentials is absent"
-      (#'cli/resolve-config-credentials {}) => nil)))
+      (#'cli/resolve-config-credentials {}) => nil))
+
+  (component "keyless subscription providers are never dropped for lacking a key"
+    (let [out (binding [*err* (java.io.StringWriter.)]
+                (#'cli/resolve-config-credentials
+                  {:llm/credentials [{:provider :codex} {:provider :claude-cli}]}))]
+      (assertions
+        "both survive — :codex reads its OAuth file and :claude-cli shells the
+         `claude` binary, which does its own OAuth/keychain read"
+        (mapv :provider out) => [:codex :claude-cli]))))
+
+(specification "--model is the default model (CLI model selection wins)"
+  ;; Models are selected exclusively by ALIAS KEYWORD, and a node that pins none
+  ;; falls back to `:llm/preferences`. `--model` previously reached only the
+  ;; backend's own `:default-model`, which `escapement.llm/env->ctx` never
+  ;; consults — so it was silently ignored for every unpinned node. Observed:
+  ;; `--backend claude-cli --model haiku` in a repo whose aliases name codex
+  ;; still requested `gpt-5.5`, and that id went to the `claude` CLI, which
+  ;; rejected it.
+  (let [cfg-aliases {:codex-builder [{:provider :codex :model "gpt-5.5"}]}
+        cfg-prefs   [:codex-builder]
+        ;; Mirror of the run path's rebinding.
+        resolve*    (fn [opts]
+                      (let [m (:model opts)]
+                        {:aliases     (cond-> cfg-aliases
+                                        m (assoc cli/cli-model-alias
+                                            [{:provider (#'cli/backend-flag->provider (:backend opts))
+                                              :model    m}]))
+                         :preferences (if m [cli/cli-model-alias] cfg-prefs)}))]
+
+    (component "with --model"
+      (let [{:keys [aliases preferences]} (resolve* {:backend "claude-cli" :model "haiku"})]
+        (assertions
+          "the synthesized alias becomes the ONLY preference, so an unpinned node
+           asks for the CLI's model instead of the config's"
+          preferences => [cli/cli-model-alias]
+
+          "its single target carries the requested model"
+          (get aliases cli/cli-model-alias) => [{:provider :claude-cli :model "haiku"}]
+
+          "it REPLACES rather than prepends: falling back to a config target that
+           names another provider is the exact failure above, since an explicit
+           --backend builds ONE backend and every candidate goes to it regardless
+           of the target's :provider tag"
+          (some #{:codex-builder} preferences) => nil
+
+          "the user's own aliases are still reachable by an explicitly-pinned node"
+          (contains? aliases :codex-builder) => true)))
+
+    (component "without --model, config preferences are untouched"
+      (let [{:keys [aliases preferences]} (resolve* {:backend "claude-cli"})]
+        (assertions
+          "no behavior change for anyone not passing --model"
+          preferences => cfg-prefs
+          "and no alias is synthesized"
+          (contains? aliases cli/cli-model-alias) => false)))
+
+    (component "the alias keyword cannot collide with a user's own"
+      (assertions
+        "it is namespaced"
+        (namespace cli/cli-model-alias) => "cli"))
+
+    (component "backend-flag->provider covers every --backend the CLI accepts"
+      (assertions
+        "each flag maps to a provider keyword known to providers/provider-templates"
+        (mapv #(#'cli/backend-flag->provider %)
+          ["api" "codex" "claude-cli" "openai" "ollama" "opencode-go"])
+        => [:anthropic :codex :claude-cli :openai :ollama :opencode-go]
+
+        "and every one of those is a real provider template"
+        (every? (set (keys @(resolve 'escapement.llm.providers/provider-templates)))
+          [:anthropic :codex :claude-cli :openai :ollama :opencode-go]) => true
+
+        "no --backend flag yields nil, leaving routing to the model matcher"
+        (#'cli/backend-flag->provider nil) => nil))))

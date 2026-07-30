@@ -2,6 +2,7 @@
   "Pure roundtrip tests for the Anthropic ↔ OpenAI translation layer."
   (:require
     [cheshire.core :as json]
+    [escapement.llm.catalog :as catalog]
     [escapement.llm.openai-codex.translate :as t]
     [fulcro-spec.core :refer [=> assertions component specification]]))
 
@@ -38,21 +39,100 @@
 
 (specification "normalize-model"
   (assertions
-    "passes known codex IDs through unchanged"
-    (t/normalize-model "gpt-5.1-codex") => "gpt-5.1-codex"
-    (t/normalize-model "gpt-5.2-codex") => "gpt-5.2-codex"
-    (t/normalize-model "gpt-5.1-codex-mini") => "gpt-5.1-codex-mini"
-    (t/normalize-model "codex-mini-latest") => "codex-mini-latest"
-    "maps claude-opus to gpt-5.2-codex"
-    (t/normalize-model "claude-opus-4-7") => "gpt-5.2-codex"
-    "maps claude-sonnet to gpt-5.2-codex"
-    (t/normalize-model "claude-sonnet-4-6") => "gpt-5.2-codex"
-    "maps claude-haiku to gpt-5.1-codex-mini"
-    (t/normalize-model "claude-haiku-4-5") => "gpt-5.1-codex-mini"
-    "nil falls back to gpt-5.1"
-    (t/normalize-model nil) => "gpt-5.1"
-    "unknown string passes through"
-    (t/normalize-model "some-future-model") => "some-future-model"))
+    "passes the supported ids through unchanged"
+    (t/normalize-model "gpt-5.6-sol") => "gpt-5.6-sol"
+    (t/normalize-model "gpt-5.6-terra") => "gpt-5.6-terra"
+    (t/normalize-model "gpt-5.6-luna") => "gpt-5.6-luna"
+    (t/normalize-model "gpt-5.5") => "gpt-5.5"
+    (t/normalize-model "gpt-5.4") => "gpt-5.4"
+    (t/normalize-model "gpt-5.4-mini") => "gpt-5.4-mini"
+
+    "nil falls back to the flagship (Sol)"
+    (t/normalize-model nil) => "gpt-5.6-sol"
+    (t/normalize-model "  ") => "gpt-5.6-sol"
+
+    "unknown string passes through so the backend surfaces its own error"
+    (t/normalize-model "some-future-model") => "some-future-model")
+
+  (component "retired ids are REMAPPED, not passed through"
+    ;; ChatGPT-account auth (the only mode this backend has) rejects every one of
+    ;; these with "The '<id>' model is not supported when using Codex with a
+    ;; ChatGPT account" — verified live 2026-07-29. Passing them through would
+    ;; guarantee a 400, and `gpt-5.1-codex` was this backend's OWN documented
+    ;; default, so `--backend codex` with no --model could not work at all.
+    (assertions
+      "every `-codex` variant maps to Sol, OpenAI's best coding model"
+      (t/normalize-model "gpt-5.1-codex") => "gpt-5.6-sol"
+      (t/normalize-model "gpt-5.1-codex-max") => "gpt-5.6-sol"
+      (t/normalize-model "gpt-5.2-codex") => "gpt-5.6-sol"
+      (t/normalize-model "gpt-5.3-codex") => "gpt-5.6-sol"
+      (t/normalize-model "gpt-5-codex") => "gpt-5.6-sol"
+      "the mini/spark tier maps to Luna, the cheapest of the family"
+      (t/normalize-model "gpt-5.1-codex-mini") => "gpt-5.6-luna"
+      (t/normalize-model "gpt-5.3-codex-spark") => "gpt-5.6-luna"
+      (t/normalize-model "codex-mini-latest") => "gpt-5.6-luna"
+      "superseded general models map forward"
+      (t/normalize-model "gpt-5") => "gpt-5.6-sol"
+      (t/normalize-model "gpt-5.1") => "gpt-5.6-sol"
+      (t/normalize-model "gpt-5.2") => "gpt-5.6-sol"
+      "bare `gpt-5.6` is REJECTED by the endpoint — only the suffixed
+       Luna/Terra/Sol ids work, so it maps to the flagship"
+      (t/normalize-model "gpt-5.6") => "gpt-5.6-sol"
+      "Sol's \"Ultra\" is a high-effort MODE, not a distinct model id"
+      (t/normalize-model "gpt-5.6-sol-ultra") => "gpt-5.6-sol"
+      "`-pro` / `-nano` tiers have no ChatGPT-account equivalent, so they degrade"
+      (t/normalize-model "gpt-5.5-pro") => "gpt-5.6-sol"
+      (t/normalize-model "gpt-5.4-pro") => "gpt-5.6-sol"
+      (t/normalize-model "gpt-5.4-nano") => "gpt-5.6-luna"
+
+      "and NOTHING normalizes to an id outside the supported set"
+      (->> ["gpt-5.1-codex" "gpt-5.2-codex" "gpt-5.1-codex-mini" "gpt-5.3-codex"
+            "gpt-5.3-codex-spark" "codex-mini-latest" "gpt-5" "gpt-5.1" "gpt-5.2"
+            "gpt-5.6" "gpt-5.6-sol-ultra" "gpt-5-codex" "gpt-5-mini"
+            "gpt-5.5-pro" "gpt-5.4-pro" "gpt-5.4-nano" nil
+            "claude-opus-5" "claude-sonnet-5" "claude-fable-5" "claude-haiku-4-5"]
+        (mapv t/normalize-model)
+        (remove (set t/supported-models))
+        vec) => []))
+
+  (component "Anthropic names map by family"
+    (assertions
+      "opus/sonnet/fable → flagship"
+      (t/normalize-model "claude-opus-5") => "gpt-5.6-sol"
+      (t/normalize-model "claude-sonnet-4-6") => "gpt-5.6-terra"
+      (t/normalize-model "claude-fable-5") => "gpt-5.6-sol"
+      "haiku → mini"
+      (t/normalize-model "claude-haiku-4-5") => "gpt-5.6-luna"
+      "matching is by PREFIX, so dated and future ids both resolve"
+      (t/normalize-model "claude-sonnet-5") => "gpt-5.6-terra"
+      (t/normalize-model "claude-opus-5") => "gpt-5.6-sol"
+      (t/normalize-model "claude-haiku-4-5-20251001") => "gpt-5.6-luna"))
+
+  (component "the catalog and the backend agree on the supported set"
+    ;; Drift here is what produced the original bug: the catalog advertised
+    ;; `gpt-5`/`gpt-5-mini`/`o3` while the backend defaulted to `gpt-5.1-codex`,
+    ;; and none of the four actually worked.
+    (assertions
+      "the catalog's :openai-codex models are exactly translate/supported-models"
+      (set (keys (:models (catalog/provider-info :openai-codex))))
+      => (set t/supported-models)
+
+      "the default model is one of them"
+      (contains? (set t/supported-models) t/default-model) => true
+
+      "and :openai-codex is still priced as a flat-fee subscription — EVERY
+       supported model is zero-cost, however many there are"
+      (catalog/subscription? :openai-codex) => true
+      (->> t/supported-models
+        (remove #(= {:input 0 :output 0} (catalog/pricing :openai-codex %)))
+        vec) => []
+
+      "the `:codex` spelling of the provider agrees — `provider-templates`
+       accepts both, and `preferences/default-aliases` names `:codex`"
+      (catalog/subscription? :codex) => true
+      (->> t/supported-models
+        (remove #(= {:input 0 :output 0} (catalog/pricing :codex %)))
+        vec) => [])))
 
 (specification "anthropic-messages->openai-input — text-only messages"
   (let [items (t/anthropic-messages->openai-input [user-text-msg assistant-text-msg])]

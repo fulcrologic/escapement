@@ -49,10 +49,68 @@
 (def local-models
   "Intrinsic facts for ids the models.dev dump doesn't carry yet but that
    the project still wants reachable. Keep this as small as possible."
-  {"claude-sonnet-4-7" {:context-tokens 1000000 :max-output-tokens 64000
+  ;; Anthropic's current generation. Absent from the models.dev dump, which
+  ;; stops at `claude-opus-4-8` / `claude-sonnet-4-6`. Verified 2026-07-29
+  ;; against the Claude Code CLI's live registry (`fable`→`claude-fable-5`,
+  ;; `opus`→`claude-opus-5`, `sonnet`→`claude-sonnet-5`) and the published
+  ;; model reference.
+  ;;
+  ;; NOTE: these REPLACE a `claude-sonnet-4-7` row that named a model which
+  ;; does not exist — the CLI rejects that id outright and it appears in no
+  ;; Anthropic model list. It was reachable through `preferences/default-aliases`
+  ;; as `:default-sonnet`, so the built-in Sonnet default pointed at nothing.
+  {"claude-fable-5"    {:context-tokens 1000000 :max-output-tokens 128000
                         :vision?        true :tool-call? true :reasoning? true
                         :family         "claude" :company "Anthropic"
-                        :name           "Claude Sonnet 4.7"}
+                        :name           "Claude Fable 5"}
+   "claude-opus-5"     {:context-tokens 1000000 :max-output-tokens 128000
+                        :vision?        true :tool-call? true :reasoning? true
+                        :family         "claude" :company "Anthropic"
+                        :name           "Claude Opus 5"}
+   "claude-sonnet-5"   {:context-tokens 1000000 :max-output-tokens 128000
+                        :vision?        true :tool-call? true :reasoning? true
+                        :family         "claude" :company "Anthropic"
+                        :name           "Claude Sonnet 5"}
+   ;; OpenAI's GPT-5.6 generation — the Luna/Terra/Sol family (least → most
+   ;; capable, released 2026-07-09). Absent from the models.dev dump, which
+   ;; stops at 5.5.
+   ;;
+   ;; Pricing is published; the LIMITS are not, so `:context-tokens` /
+   ;; `:max-output-tokens` are INHERITED from the 5.4/5.5 generation
+   ;; (context 1050000, output 128000 — identical across both) as a documented
+   ;; assumption, not a published spec. Refresh when the dump carries 5.6.
+   "gpt-5.6-sol"       {:context-tokens 1050000 :max-output-tokens 128000
+                        :vision?        true :tool-call? true :reasoning? true
+                        :family         "gpt-5.6" :company "OpenAI"
+                        :name           "GPT-5.6 Sol"}
+   "gpt-5.6-terra"     {:context-tokens 1050000 :max-output-tokens 128000
+                        :vision?        true :tool-call? true :reasoning? true
+                        :family         "gpt-5.6" :company "OpenAI"
+                        :name           "GPT-5.6 Terra"}
+   "gpt-5.6-luna"      {:context-tokens 1050000 :max-output-tokens 128000
+                        :vision?        true :tool-call? true :reasoning? true
+                        :family         "gpt-5.6" :company "OpenAI"
+                        :name           "GPT-5.6 Luna"}
+   ;; The Claude Code CLI's own model ALIASES (`:claude-cli` provider). The CLI
+   ;; resolves these against its current registry, so the facts here are the
+   ;; conservative floor for the family rather than a pinned model's spec — the
+   ;; Response reports whichever dated model actually ran.
+   "fable"             {:context-tokens 200000 :max-output-tokens 64000
+                        :vision?        true :tool-call? true :reasoning? true
+                        :family         "claude" :company "Anthropic"
+                        :name           "Claude Fable (CLI alias)"}
+   "opus"              {:context-tokens 200000 :max-output-tokens 64000
+                        :vision?        true :tool-call? true :reasoning? true
+                        :family         "claude" :company "Anthropic"
+                        :name           "Claude Opus (CLI alias)"}
+   "sonnet"            {:context-tokens 200000 :max-output-tokens 64000
+                        :vision?        true :tool-call? true :reasoning? true
+                        :family         "claude" :company "Anthropic"
+                        :name           "Claude Sonnet (CLI alias)"}
+   "haiku"             {:context-tokens 200000 :max-output-tokens 32000
+                        :vision?        true :tool-call? true :reasoning? true
+                        :family         "claude" :company "Anthropic"
+                        :name           "Claude Haiku (CLI alias)"}
    "deepseek-v4-flash" {:max-output-tokens 65536}
    ;; ollama-cloud advertises `limit.output: 1048576` for this id, but the
    ;; underlying DeepSeek API rejects max_tokens > 393216 ("Invalid
@@ -61,18 +119,65 @@
    ;; than enough for any single LLM turn this project asks for.
    "deepseek-v4-pro"   {:max-output-tokens 16384}})
 
+(def ^:private codex-subscription-models
+  "The ChatGPT-account Codex model set, zero-priced (flat-fee subscription).
+   Shared by BOTH provider spellings — see `local-providers`."
+  {"gpt-5.6-sol"   {:pricing {:input 0 :output 0}}
+   "gpt-5.6-terra" {:pricing {:input 0 :output 0}}
+   "gpt-5.6-luna"  {:pricing {:input 0 :output 0}}
+   "gpt-5.5"       {:pricing {:input 0 :output 0}}
+   "gpt-5.4"       {:pricing {:input 0 :output 0}}
+   "gpt-5.4-mini"  {:pricing {:input 0 :output 0}}})
+
 (def local-providers
   "Provider entries / model rows not present in the dump:
-   * `claude-sonnet-4-7` priced under `:anthropic` (mirrors Sonnet list price).
+   * Anthropic's current 5-series priced under `:anthropic` (the dump stops at
+     `claude-opus-4-8` / `claude-sonnet-4-6`). List prices as published
+     2026-07-29; Sonnet 5 carries an introductory rate through 2026-08-31
+     ($2.00/$10.00) that is NOT encoded here — the standard rate is.
    * `:openai-codex` — a flat-fee subscription endpoint that is not a
-     models.dev provider; per-token pricing is zeroed."
+     models.dev provider; per-token pricing is zeroed.
+   * `:claude-cli` — likewise flat-fee (a Claude Max/Pro subscription driven
+     through `claude -p`), so pricing is zeroed. Its model keys are the CLI's
+     own ALIASES rather than Anthropic ids, because the CLI resolves `--model`
+     against its own registry and rejects ids it does not know."
   {:anthropic
-   {:models {"claude-sonnet-4-7" {:pricing {:input 3.0 :output 15.0}}}}
+   {:models {"claude-fable-5"  {:pricing {:input 10.0 :output 50.0}}
+             "claude-opus-5"   {:pricing {:input 5.0 :output 25.0}}
+             "claude-sonnet-5" {:pricing {:input 3.0 :output 15.0}}}}
+   ;; Only the ids the ChatGPT-ACCOUNT Codex endpoint actually accepts, which is
+   ;; a much smaller set than the OpenAI catalog implies: every `-codex`,
+   ;; `-pro`, and `-nano` variant is rejected with "The '<id>' model is not
+   ;; supported when using Codex with a ChatGPT account", as is the previous
+   ;; generation of general models. Verified live 2026-07-29 — the previous
+   ;; entries here (`gpt-5`, `gpt-5-mini`, `o3`) were all stale.
+   ;; `escapement.llm.openai-codex.translate/supported-models` is the source of
+   ;; truth; `bb_test/codex_models_probe.clj` re-verifies both against a token.
    :openai-codex
    {:display "OpenAI Codex" :auth :subscription
-    :models  {"gpt-5"      {:pricing {:input 0 :output 0}}
-              "gpt-5-mini" {:pricing {:input 0 :output 0}}
-              "o3"         {:pricing {:input 0 :output 0}}}}})
+    :models  codex-subscription-models}
+   ;; `:codex` is the OTHER accepted spelling of the same provider —
+   ;; `providers/provider-templates` takes both, `detect-available-credentials`
+   ;; emits `:kind :codex`, and `preferences/default-aliases` names `:codex`.
+   ;; Without this entry `subscription? :codex` was false and
+   ;; `pricing :codex <model>` nil, so a codex target was accounted as METERED.
+   :codex
+   {:display "OpenAI Codex" :auth :subscription
+    :models  codex-subscription-models}
+   ;; Metered OpenAI list prices for the GPT-5.6 generation, which the
+   ;; models.dev dump does not carry yet (it stops at 5.5). Sol's $5/$30 is
+   ;; exactly `gpt-5.5`'s tier and Terra's $2.50/$15 exactly `gpt-5.4`'s, so the
+   ;; family slots into the existing ladder; Luna is a new cheaper tier.
+   :openai
+   {:models {"gpt-5.6-sol"   {:pricing {:input 5.0 :output 30.0}}
+             "gpt-5.6-terra" {:pricing {:input 2.5 :output 15.0}}
+             "gpt-5.6-luna"  {:pricing {:input 1.0 :output 6.0}}}}
+   :claude-cli
+   {:display "Claude Code CLI" :auth :subscription
+    :models  {"fable"  {:pricing {:input 0 :output 0}}
+              "opus"   {:pricing {:input 0 :output 0}}
+              "sonnet" {:pricing {:input 0 :output 0}}
+              "haiku"  {:pricing {:input 0 :output 0}}}}})
 
 ;; =============================================================================
 ;; Assembled tables
@@ -96,7 +201,7 @@
 
 (defn- prefix-lookup
   "Exact key match in `table`, else longest-prefix match so dated ids like
-   `claude-opus-4-7-20260101` resolve to the family entry."
+   `claude-haiku-4-5-20251001` resolve to the family entry."
   [table k]
   (when (string? k)
     (or (get table k)

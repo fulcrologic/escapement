@@ -108,7 +108,7 @@
     "zero-arg form returns an OpenAICodexBackend"
     (instance? escapement.llm.openai_codex.OpenAICodexBackend
       (codex/new-backend)) => true
-    "default-model defaults to gpt-5.1-codex"
-    (:default-model (codex/new-backend)) => "gpt-5.1-codex"
+    "default-model defaults to translate/default-model (the GPT-5.6 flagship)"
+    (:default-model (codex/new-backend)) => "gpt-5.6-sol"
     "default-model is overridable via opts"
     (:default-model (codex/new-backend {:default-model "gpt-5.2-codex"})) => "gpt-5.2-codex"))

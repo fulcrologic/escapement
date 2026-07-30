@@ -49,7 +49,22 @@
     (catalog/serves? :openai "gpt-5") => true
     (catalog/serves? :openai "totally-made-up") => false
     "providers-for lists provider keywords for an id"
-    (contains? (set (catalog/providers-for "glm-4.7")) :z-ai) => true))
+    (contains? (set (catalog/providers-for "glm-4.7")) :z-ai) => true
+
+    ":claude-cli is a flat-fee subscription, so it must never contribute a
+     per-token cost to any spend accounting"
+    (catalog/subscription? :claude-cli) => true
+    (catalog/pricing :claude-cli "sonnet") => {:input 0 :output 0}
+    (catalog/pricing :claude-cli "opus") => {:input 0 :output 0}
+    (catalog/pricing :claude-cli "haiku") => {:input 0 :output 0}
+
+    "it serves the CLI's own aliases, not Anthropic ids — the CLI resolves
+     --model against its own registry"
+    (catalog/serves? :claude-cli "sonnet") => true
+    (catalog/serves? :claude-cli "claude-sonnet-5") => false
+
+    "and those aliases carry intrinsic facts so context-window checks work"
+    (pos? (catalog/context-window "sonnet")) => true))
 
 (specification "catalog — declarative model policy"
   (assertions
@@ -137,3 +152,30 @@
     "the default alias targets are reachable {:provider :model} maps"
     (every? (fn [t] (and (keyword? (:provider t)) (string? (:model t))))
       (mapcat identity (vals prefs/default-aliases))) => true))
+
+(specification "catalog — every built-in default alias names a REAL model"
+  ;; Regression guard. `:default-sonnet` shipped pointing at `claude-sonnet-4-7`,
+  ;; a model id that exists nowhere — not in the models.dev dump, not in
+  ;; Anthropic's model list, and rejected outright by the Claude Code CLI. The
+  ;; built-in Sonnet default therefore resolved to a model that could never
+  ;; serve a turn, and nothing caught it because the older assertions only
+  ;; checked the SHAPE of the targets, never that the ids resolve.
+  (let [targets (mapcat identity (vals prefs/default-aliases))]
+    (assertions
+      "every default-alias model has catalog facts (context window, caps, …)"
+      (->> targets (remove #(some? (catalog/info (:model %)))) (mapv :model)) => []
+
+      "and its provider actually serves it, so pricing/subscription resolve"
+      (->> targets
+        (remove #(catalog/serves? (:provider %) (:model %)))
+        (mapv (juxt :provider :model))) => []
+
+      "which means no default target can silently be accounted as metered when
+       it is really a flat-fee subscription"
+      (->> targets
+        (filterv #(#{:z-ai-plan :codex :openai-codex :claude-cli} (:provider %)))
+        (remove #(catalog/subscription? (:provider %)))
+        (mapv :provider)) => []
+
+      "and there really are targets being checked"
+      (pos? (count targets)) => true)))

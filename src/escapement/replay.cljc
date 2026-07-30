@@ -68,7 +68,7 @@
         * `:tool-registry` (optional) — resolves the seed's `:real-tools`; omit to replay with only the
                                         node's event tools (region tools are never included headlessly).
         * `:overrides`     (optional) — a partial PARAMS map deep-merged onto the seed params, e.g.
-                                        `{:system \"tuned\" :model \"claude-opus-4-7\" :temperature 0.2}`.
+                                        `{:system \"tuned\" :model \"claude-opus-5\" :temperature 0.2}`.
         * `:messages`      (optional) — replacement message vector; defaults to the seed's
                                         `:initial-messages` (override to replay a different prefix).
         * `:aliases` / `:preferences` (optional) — model-resolution inputs forwarded to `run-turn`.
@@ -112,7 +112,7 @@
    `opts`:
      * `:backend`   (required) — an `escapement.llm.protocol/LLMBackend` to issue the turn against.
      * `:overrides` (optional) — a partial request map deep-merged onto the captured request, e.g.
-                                 `{:system \"tuned prompt\" :model \"claude-opus-4-7\" :temperature 0.2}`.
+                                 `{:system \"tuned prompt\" :model \"claude-opus-5\" :temperature 0.2}`.
 
    Throws if no request was captured at the coordinates (nothing to refine)."
   [store session-id node-id visit turn {:keys [backend overrides]}]

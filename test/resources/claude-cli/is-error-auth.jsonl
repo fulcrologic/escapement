@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"4a6b013e-05f4-44b1-99b5-968902c81dc9","model":"claude-haiku-4-5-20251001","tools":[],"mcp_servers":[]}
+{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"session_id":"4a6b013e-05f4-44b1-99b5-968902c81dc9","duration_ms":300,"result":"API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired. Please run /login\"}}","usage":{"input_tokens":0,"output_tokens":0},"api_error_status":"authentication_failed","terminal_reason":"error"}

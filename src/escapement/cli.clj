@@ -21,7 +21,7 @@
                                 dir). Set this to a repo the chart clones/operates on
                                 to decouple tool I/O from the session/checkpoint dir.
         --resume                Resume from saved working memory.
-        --backend (api|codex|openai|ollama|opencode-go)  LLM backend (optional; only needed for LLM charts).
+        --backend (api|codex|claude-cli|openai|ollama|opencode-go)  LLM backend (optional; only needed for LLM charts).
         --model <name>          Model name.
         --api-base-url <url>    API base URL.
         --api-key-env <name>    Env-var name holding the API key.
@@ -290,6 +290,7 @@
 (def ^:private build-api-backend providers/build-api-backend)
 (def ^:private build-openai-backend providers/build-openai-backend)
 (def ^:private build-codex-backend providers/build-codex-backend)
+(def ^:private build-claude-cli-backend providers/build-claude-cli-backend)
 (def ^:private build-multi-backend providers/build-multi-backend)
 (def ^:private nonblank-env providers/nonblank-env)
 (def ^:private build-opencode-go-backend providers/build-opencode-go-backend)
@@ -347,13 +348,40 @@
       (try (json/parse-string (slurp f))
            (catch Throwable _ nil)))))
 
+(def ^:const cli-model-alias
+  "Alias keyword synthesized for `--model`. Namespaced under `cli` so it can
+   never collide with a user's own `:llm/aliases` key."
+  :cli/model)
+
+(def ^:private backend-flag->provider
+  "`--backend <flag>` → the provider keyword used to tag the synthesized
+   `--model` target. Only meaningful for the multi-dispatch path (a single
+   explicit backend ignores the tag); nil when no `--backend` was given, which
+   leaves routing to the model-string matcher exactly as an untagged target
+   would."
+  {"api"         :anthropic
+   "codex"       :codex
+   "claude-cli"  :claude-cli
+   "openai"      :openai
+   "ollama"      :ollama
+   "opencode-go" :opencode-go})
+
+(def ^:private keyless-credential-providers
+  "Providers that authenticate WITHOUT an API key, so a `:llm/credentials` entry
+   naming one must never be dropped for lacking a key:
+   `:codex` reads `~/.escapement/openai-auth.json`; `:claude-cli` shells the
+   `claude` binary, which does its own OAuth/keychain read."
+  #{:codex :claude-cli})
+
 (defn- resolve-config-credentials
   "Resolve `:llm/credentials` from `run-cfg` into concrete descriptor maps for
    `providers/build-injected-credentials-backend`. Each descriptor's API key is
    taken inline (`:api-key`) or fetched from a `:llm/credential-sources` store
    via `:key-from [<source-kw> <json-path…>]`. Stores are read once and cached.
-   Descriptors that need a key but can't resolve one are dropped (with a warning);
-   `:codex` (OAuth file) needs no key. Returns a vector, or nil when unconfigured."
+   Descriptors that need a key but can't resolve one are dropped (with a warning).
+   The KEYLESS providers need no key and are never dropped: `:codex` (OAuth file)
+   and `:claude-cli` (the `claude` binary does its own OAuth/keychain read).
+   Returns a vector, or nil when unconfigured."
   [run-cfg]
   (when-let [descs (seq (:llm/credentials run-cfg))]
     (let [sources (:llm/credential-sources run-cfg)
@@ -370,7 +398,8 @@
                          (dissoc :key-from)
                          (cond-> k (assoc :api-key k)))]
               (cond
-                (= :codex provider) base          ; OAuth file; no key needed
+                ;; Subscription providers that authenticate themselves.
+                (contains? keyless-credential-providers provider) base
                 (str/blank? k)
                 (do (binding [*out* *err*]
                       (println (str "[cli] WARN :llm/credentials — no API key resolved for "
@@ -428,6 +457,13 @@
       "codex"
       {:backend        (build-codex-backend (cond-> {}
                                               model (assoc :default-model model)))
+       :default-models (when model [model])}
+
+      ;; Claude Max/Pro subscription via the `claude -p` CLI. No API key, and no
+      ;; env detection — this backend is only ever reached by being named.
+      "claude-cli"
+      {:backend        (build-claude-cli-backend (cond-> {}
+                                                   model (assoc :default-model model)))
        :default-models (when model [model])}
 
       (die! (str "Unknown backend: " backend)))
@@ -541,6 +577,17 @@
     (println "  codex OAuth       : " (or codex-info "not logged in"))
     (when auth-file
       (println "  codex auth file   : " auth-file)))
+  ;; Claude Code CLI (subscription-billed, `--backend claude-cli`). Resolved
+  ;; lazily so `info` stays cheap and never fails when the binary is absent.
+  (let [version (try
+                  (require 'escapement.llm.claude-cli)
+                  (when-let [f (resolve 'escapement.llm.claude-cli/cli-version)]
+                    (f))
+                  (catch Throwable _ nil))]
+    (println "  claude CLI        : " (or version "not found on PATH"))
+    (when version
+      (println "                      (--backend claude-cli bills a Claude subscription;"
+        "run `claude auth login` or `claude setup-token` if turns fail with :auth)")))
   (let [creds (detect-available-credentials)]
     (println)
     (cond
@@ -770,6 +817,30 @@
         ;; candidate set the resolver flattens when a node names no model;
         ;; falls back to the built-in `default-preferences`.
         llm-preferences        (preferences/preferences run-cfg)
+        ;; `--model` IS the default model. Models are selected exclusively by
+        ;; alias keyword, and a node that pins none falls back to
+        ;; `:llm/preferences` — so without this, `--model` reached only the
+        ;; backend's own `:default-model` (which `env->ctx` never consults) and
+        ;; was silently ignored for every unpinned node. Observed: `--backend
+        ;; claude-cli --model haiku` in a repo whose config aliases name codex
+        ;; still requested `gpt-5.5`, and that id was handed to the `claude`
+        ;; CLI, which rejected it.
+        ;;
+        ;; So synthesize a single-target alias and make it THE preference list.
+        ;; It REPLACES rather than prepends: falling back to config targets that
+        ;; name some other provider is exactly the failure above, since an
+        ;; explicit `--backend` builds ONE backend and every candidate is sent
+        ;; to it regardless of the target's `:provider` tag.
+        ;;
+        ;; A node that explicitly pins `:model`/`:models` still wins — those
+        ;; take priority over preferences — so this only sets the DEFAULT.
+        cli-model              (:model opts)
+        llm-aliases            (cond-> llm-aliases
+                                 cli-model
+                                 (assoc cli-model-alias
+                                   [{:provider (backend-flag->provider (:backend opts))
+                                     :model    cli-model}]))
+        llm-preferences        (if cli-model [cli-model-alias] llm-preferences)
         eligibility-strict?    (boolean
                                 (or (:llm/eligibility-strict? run-cfg)
                                     (get-in run-cfg [:llm :eligibility-strict?])))
@@ -1302,8 +1373,10 @@ Common `run` flags:
   --transcript <path>           Transcript path.
   --checkpoint-dir <dir>        Checkpoint dir.
   --resume                      Resume from saved working memory.
-  --backend (api|codex|openai|ollama|opencode-go)
+  --backend (api|codex|claude-cli|openai|ollama|opencode-go)
                                 LLM backend (only needed for LLM charts).
+                                `claude-cli` drives the `claude -p` CLI, billing a
+                                Claude Max/Pro subscription instead of an API key.
   --model <name>                Model name.
   --api-base-url <url>          API base URL.
   --api-key-env <name>          Env-var name holding the API key.

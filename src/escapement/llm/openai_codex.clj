@@ -4,7 +4,7 @@
 
   Usage:
     (require '[escapement.llm.openai-codex :as codex])
-    (codex/new-backend {:default-model \"gpt-5.1-codex\"})
+    (codex/new-backend {:default-model \"gpt-5.6-sol\"})
 
   Authentication:
     Run `escapement login codex` once to save credentials to
@@ -57,12 +57,14 @@
 
 Optional opts:
 * `:default-model`  — model string used when the Request omits `:model`
-                     (default `\"gpt-5.1-codex\"`).
+                     (default `t/default-model`, currently \"gpt-5.6-sol\").
+                     Must be one of `t/supported-models` — ChatGPT-account auth
+                     rejects every `-codex`/`-pro`/`-nano` variant.
 * `:http-transport` — `escapement.llm.http-transport/HttpTransport`. Defaults
                      to the bb http-client backed transport. CLJS hosts
                      must supply their own."
   ([] [=> :any] (new-backend {}))
   ([opts]
    [:map => :any]
-   (->OpenAICodexBackend (or (:default-model opts) "gpt-5.1-codex")
+   (->OpenAICodexBackend (or (:default-model opts) t/default-model)
      (:http-transport opts))))

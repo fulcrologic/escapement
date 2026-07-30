@@ -78,7 +78,7 @@
      * `:system` — system prompt string
      * `:messages` — required; the running conversation
      * `:tools` — vector of tool definitions
-     * `:model` — model id string (e.g. `\"claude-opus-4-7\"`)
+     * `:model` — model id string (e.g. `\"claude-opus-5\"`)
      * `:max-tokens` — int output cap. NOT a chart param: the invocation
                        supplies the resolved model's catalog
                        `max-output-tokens` (models-api.json `limit.output`).

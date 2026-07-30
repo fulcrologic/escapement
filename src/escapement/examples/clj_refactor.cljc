@@ -27,8 +27,8 @@
    This policy filters nothing until you supply the keys it gates on in
    `.escapement.edn`, e.g.:
 
-     {:llm/ratings {\"claude-opus-4-7\"   {:clojure 10 :tool-calling 9}
-                    \"claude-sonnet-4-7\" {:clojure  8 :tool-calling 8}
+     {:llm/ratings {\"claude-opus-5\"   {:clojure 10 :tool-calling 9}
+                    \"claude-sonnet-5\" {:clojure  8 :tool-calling 8}
                     \"gpt-5\"             {:clojure  6 :tool-calling 7}}}
 
    With that config the policy keeps the Claude family and drops gpt-5

@@ -1403,7 +1403,7 @@ Intelligence is just one key in that overlay, filtered like any other fact via
 The 2-arity is a backward-compatible CLI seam that resolves ratings from `.escapement.edn` per call. `cat/eligibility-facts` is the stable, published vocabulary of objective gate keys (`:vision?`,
 `:tool-call?`, `:reasoning?`, `:context-tokens`, `:max-output-tokens`,
 `:company`, `:family`, `:knowledge`); this backs the `:needs` node option.
-Subscription providers (`:z-ai-plan`, `:ollama`, `:openai-codex`) report zero marginal per-token cost.
+Subscription providers (`:z-ai-plan`, `:ollama`, `:openai-codex`, `:claude-cli`) report zero marginal per-token cost.
 
 Resolution is exact-match-first, then longest-prefix.
 Dated ids like
@@ -2792,7 +2792,7 @@ No OpenAI API key is required; billing is against your subscription's per-tier m
 [source,clojure]
 ----
 (require '[escapement.llm.openai-codex :as codex])
-(codex/new-backend {:default-model "gpt-5.1-codex"})
+(codex/new-backend {:default-model "gpt-5.6-sol"})
 ----
 
 ==== Authentication
@@ -2808,16 +2808,31 @@ The backend refreshes the token automatically when it is within 60 seconds of ex
 
 ==== Available models
 
-* `gpt-5.2-codex` — latest flagship Codex model (supports `xhigh` reasoning)
-* `gpt-5.2` — GPT-5.2 general purpose
-* `gpt-5.1-codex` — standard Codex model *(default)*
-* `gpt-5.1-codex-max` — extended context Codex variant
-* `gpt-5.1-codex-mini` — lighter Codex variant (lower quota cost)
-* `codex-mini-latest` — legacy mini alias
-* `gpt-5.1` — GPT-5.1 general purpose
+IMPORTANT: ChatGPT-account auth accepts a *much* smaller set than the OpenAI model
+catalog implies. Every `-codex`, `-pro`, and `-nano` variant is rejected with
+`The '<id>' model is not supported when using Codex with a ChatGPT account`, as is
+the previous generation of general models. Since ChatGPT-account auth is the only
+mode this backend has, only these ids work (verified live 2026-07-29):
 
-Anthropic-style model names (`claude-opus-4-7`, `claude-sonnet-4-6`) are silently mapped to `gpt-5.2-codex`; `claude-haiku-4-5` maps to
-`gpt-5.1-codex-mini`.
+* `gpt-5.6-sol` — GPT-5.6 flagship, OpenAI's best coding model *(default)*
+* `gpt-5.6-terra` — GPT-5.6 mid tier
+* `gpt-5.6-luna` — GPT-5.6 small tier
+* `gpt-5.5` — previous-generation flagship
+* `gpt-5.4` — previous-generation mid tier
+* `gpt-5.4-mini` — previous-generation small tier
+
+`escapement.llm.openai-codex.translate/supported-models` is the source of truth, and
+`bb_test/codex_models_probe.clj` re-verifies it against a live token.
+
+Retired ids are **remapped, not passed through** — `gpt-5.1-codex`, `gpt-5.2-codex`,
+`gpt-5.3-codex`, and the older generals all resolve to `gpt-5.6-sol`;
+`gpt-5.1-codex-mini` / `codex-mini-latest` resolve to `gpt-5.6-luna`. Bare `gpt-5.6`
+is rejected by the endpoint (only the suffixed ids work) and Sol's "Ultra" is a
+high-effort *mode*, not a model id — both map to `gpt-5.6-sol`.
+
+Anthropic-style names map by family: `claude-opus-*` / `claude-fable-*` →
+`gpt-5.6-sol`, `claude-sonnet-*` → `gpt-5.6-terra`, `claude-haiku-*` →
+`gpt-5.6-luna`.
 
 ==== Reasoning effort
 
@@ -2854,10 +2869,142 @@ key described above).
 * Stateless: `store: false`.
 The full conversation is re-sent on every turn (no server-side caching across turns beyond reasoning summaries).
 
+=== `escapement.llm.claude-cli` — Claude subscription via the `claude -p` CLI
+
+Defined in `src/escapement/llm/claude_cli.clj` (entry point) plus the pure
+`claude_cli/translate.clj`.
+Instead of calling `api.anthropic.com` with a metered API key, this backend
+shells the real **Claude Code CLI** once per turn and bills your Claude
+Max/Pro **subscription**.
+
+Driving `claude -p` headlessly is a documented product surface — `claude -p`
+*is* the Agent SDK's CLI, and `claude setup-token` exists specifically to
+authorize headless use from a subscription. This backend therefore never mints,
+stores, or reuses an OAuth token of its own; it lets the CLI do its own
+keychain read.
+
+==== Constructor
+
+[source,clojure]
+----
+(require '[escapement.llm.claude-cli :as cc])
+(cc/new-backend {:default-model "sonnet" :max-concurrency 3})
+----
+
+Or from the CLI:
+
+[source,bash]
+----
+escapement run my.ns/agent --backend claude-cli --model sonnet
+----
+
+Or as a credential entry in `.escapement.edn`:
+
+[source,clojure]
+----
+{:llm/credentials [{:provider :claude-cli}]           ; no API key needed
+ :llm/aliases     {:subs-sonnet [{:provider :claude-cli :model "sonnet"}]}}
+----
+
+==== Authentication
+
+[source,bash]
+----
+claude auth login      # interactive, one-time
+claude setup-token     # long-lived token for headless/CI use
+----
+
+`escapement info` reports whether the binary is present and its version.
+Auth failures surface as a categorized `:auth` error, which is terminal — so a
+chart fails fast rather than retrying three times.
+
+==== Available models
+
+The CLI resolves `--model` against **its own** registry and exits 1 on an id it
+does not recognize (`claude-sonnet-4-7` is one such). Escapement therefore
+family-maps model ids onto the CLI's bare aliases:
+
+|===
+| You ask for | The CLI receives
+
+| `claude-sonnet-4-7`, `claude-sonnet-4-6`, `sonnet` | `sonnet`
+| `claude-opus-4-1-20250805`, `opus`                 | `opus`
+| `claude-haiku-4-5`, `haiku`                        | `haiku`
+| `claude-fable-5`, `fable`                          | `fable`
+|===
+
+An alias always points at the current model for that family, so the exact model
+is not pinnable here. The Response's `:model` reports whichever dated model
+actually ran, so the transcript still records the truth.
+
+==== Escapement keeps owning the loop
+
+All of the CLI's built-in tools are disabled (`--tools ""`), no MCP server is
+loaded (`--strict-mcp-config` with no `--mcp-config`), and CLAUDE.md / skills /
+plugins / hooks are off (`--safe-mode`). Escapement's own tools are described to
+the model in the system prompt and its chosen calls come back through a
+schema-validated JSON envelope (`--json-schema`), which this backend translates
+into ordinary `:tool_use` content blocks.
+
+The upshot is that **Escapement executes every tool itself**, exactly as it does
+on the `api` backend, so a chart behaves identically on both. Delegate mode
+(the CLI keeping its own tools as a sub-agent) and an MCP bridge are
+deliberately out of scope — either would break tool-execution symmetry across
+backends.
+
+==== Subscription billing
+
+IMPORTANT: Turns count against your Claude subscription's usage windows, not the
+Anthropic API meter. Every `ANTHROPIC_*` variable is stripped from the child
+process, so an ambient `ANTHROPIC_API_KEY` cannot silently redirect a turn onto
+metered billing. The `--bare` flag is never passed, because bare mode skips
+OAuth and keychain reads and would defeat subscription billing outright.
+
+**This path is for personal development use with your own subscription.** For
+multi-user or production deployment, use a pay-per-token backend (the `api`
+backend above).
+
+NOTE: This provider is never auto-detected. `detect-available-credentials`
+deliberately does not emit it and it carries no model `:route`, because a
+`+#"^claude-"+` route would collide with `:anthropic`'s and silently move
+traffic between a metered key and a subscription. It is reachable only by being
+named: `--backend claude-cli`, a `{:provider :claude-cli}` credential entry, or
+a preference alias.
+
+==== Limitations vs `api` backend
+
+* `:temperature`, `:top-p`, `:top-k`, `:stop-sequences`, and `:metadata` are
+silently dropped (one warning is logged) — the CLI exposes no such controls.
+Consequently `:overrun :temperature-bump` becomes a **no-op**, so an overrun
+rerun produces identical output rather than a varied one.
+* `:max-tokens` is dropped. `CLAUDE_CODE_MAX_OUTPUT_TOKENS` exists but exceeding
+it fails the turn hard instead of truncating, which would turn a routine long
+answer into a dead node. If a user-level setting does impose a ceiling, the
+resulting truncation is reported as `:end_turn` with
+`:backend-metadata {:truncated true}` — never `:max_tokens`, which this backend
+cannot stitch (the continuation would require injecting an *assistant* message,
+and the CLI accepts only user messages).
+* `cache_control` markers are no-ops; the CLI owns its own prompt caching.
+* Extended thinking is not directly controllable; `:thinking {:type :enabled}`
+maps onto the CLI's `--effort high`.
+* **No streaming.** The backend implements `LLMBackend` only, so there is no
+live token display and `:latency :first-token-ms` degrades to a total-response
+cap.
+* Stateless: no `--resume`, no session reuse. The full conversation is
+re-rendered as a single flattened user message every turn.
+* Each turn is a separate ~300-500 MB process with a real cold start, so
+concurrency is gated (`:max-concurrency`, default 3). Turns queue rather than
+being dropped.
+
+TIP: The CLI retries internally on rate-limit and overload, so charts using this
+backend usually want `:resilience {:max-retries 1}` to stop the two retry layers
+multiplying. A backend cannot set this for you — `alias-target->candidate`
+carries only sampling parameters — so declare it chart-side.
+
 === `escapement.llm.multi` — multi-backend dispatcher
 
 Routes each request to a sub-backend based on the requested `:model`.
-A chart that asks for `claude-sonnet-4-6` in one state and `gpt-5.2-codex`
+A chart that asks for `claude-sonnet-5` in one state and `gpt-5.6-sol`
 in the next will reach Anthropic and the codex subscription endpoint respectively, with no caller changes.
 
 [source,clojure]
@@ -3393,7 +3540,7 @@ Numbers, keywords, booleans, and collections parse natively.
 
 LLM backend selection:
 
-* `--backend (api|codex|openai|ollama|opencode-go)` — explicit single backend.
+* `--backend (api|codex|claude-cli|openai|ollama|opencode-go)` — explicit single backend.
 * Without `--backend`, the CLI scans available credentials and auto-assembles a backend:
 +
 [options="header"]
@@ -3409,6 +3556,9 @@ LLM backend selection:
 |===
 +
 A blank/empty value in any of these env vars is treated as unset (it no longer registers a dead route).
+`claude-cli` is deliberately absent from this table: it is never auto-detected and carries no model route, so it
+cannot silently take `+#"^claude-"+` traffic away from a metered `ANTHROPIC_API_KEY` (or vice versa).
+Reach it by naming it — `--backend claude-cli`, a `{:provider :claude-cli}` credential entry, or an alias.
 With a single credential the bare sub-backend is used.
 With two or more, a `escapement.llm.multi`
 dispatcher is built so that a per-state `:model` conversation key
