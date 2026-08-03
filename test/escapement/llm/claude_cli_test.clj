@@ -225,7 +225,12 @@
       (send! b (request))
       ;; Give the OS a beat to finish reaping.
       (Thread/sleep 1500)
-      (let [{:keys [out]} (bp/sh ["bash" "-lc" (str "pgrep -f 'sleep " marker "' || true")])]
+      ;; pgrep is exec'd DIRECTLY, with no shell wrapper. `pgrep -f` matches
+      ;; against whole command lines and excludes only itself — so running it as
+      ;; `bash -lc "pgrep -f 'sleep <marker>'"` always matched the wrapping bash,
+      ;; whose own cmdline contains the marker, and the probe could never come
+      ;; back empty no matter how well destroy-tree worked.
+      (let [{:keys [out]} (bp/sh {:continue true} "pgrep" "-f" (str "sleep " marker))]
         (assertions
           "no orphaned `sleep` survives the timeout — SIGTERM reached the whole
            tree, so a real CLI's Bash grandchildren cannot leak either"
