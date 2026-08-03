@@ -17,6 +17,9 @@
                                           (deref (promise)))}
             sanity {:doc  "Run the bb sanity script for the engine."
                     :task (shell "bb bb_test/sanity.clj")}
+            jvm-smoke
+            {:doc  "Require every core namespace under a plain JVM (clojure -M) and fail if any cannot load. bb/SCI is more permissive than the JVM reader+compiler, so source that is green under `bb test` can still break the Clojars library consumer (issue #24: a reader conditional in a .clj file). Covers src/escapement minus the escapement.ui.* RAD add-on (that one wants the :ui-test classpath — see `bb ui-test`). Needs a JVM + the clojure CLI."
+             :task (shell "bb bb_test/jvm_smoke.clj")}
             haiku
             {:doc  "Run the dynamic haiku tournament across RANDOM, MIXED models with the interactive TUI + live streaming-token panel. Poets & judges each draw a random model from a pool spanning local ollama (gemma3:1b/270m) + cloud (z.ai GLM, opencode-go gateway); the HOST (Master of Ceremonies) is pinned to gpt-5.5 via the codex backend. This passes NO --backend flag, so the multi-provider dispatcher is assembled from `.escapement.edn :llm/credentials` (needs the opencode auth.json store + a codex OAuth login: `escapement login codex`). A --backend flag would PIN every conversation to one backend and bypass the config, 404-ing every non-local model — that is why the flag is absent here. For LOCAL poets/judges to STREAM CONCURRENTLY (not one at a time) start ollama with `OLLAMA_NUM_PARALLEL=4 ollama serve` (it defaults to 1). Override the field/theme via the first arg, e.g. `bb haiku 'Run a tournament with 6 poets and 5 judges. Theme: first snow.'`. Guarded against runaways via the overrun primitive: --max-tokens 2048 caps each turn and --overrun-retries 2 reruns a truncated turn before accepting the truncation."
              :task (let [prompt (or (first *command-line-args*)

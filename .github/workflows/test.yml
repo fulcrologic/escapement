@@ -46,6 +46,35 @@ jobs:
       - name: bb test
         run: bb test
 
+  # bb (SCI) is more permissive than the JVM reader/compiler, so source that is
+  # green under `bb test` can still fail to load for a plain-JVM consumer of the
+  # Clojars library (issue #24). This requires every core namespace under a real
+  # JVM. Takes seconds; see bb_test/jvm_smoke.clj.
+  jvm-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          bb: latest
+          cli: latest
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: ${{ runner.os }}-deps-${{ hashFiles('bb.edn', 'deps.edn') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-
+      - name: bb jvm-smoke
+        run: bb jvm-smoke
+
   cljs-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
