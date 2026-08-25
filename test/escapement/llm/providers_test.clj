@@ -156,6 +156,24 @@
           (filter (fn [[m _]] (= (str m) "^gpt-5")))
           first second backend-class) => "OpenAICodexBackend")))
 
+  (component ":zai-coding-plan (v1 legacy Responses wire) resolves to the codex backend"
+    (let [mb (providers/build-injected-credentials-backend
+               [{:provider :zai-coding-plan :api-key "k"}]
+               [{:provider :zai-coding-plan :model "glm-5.3"}])
+          b    (->> (:routes mb)
+                  (filter (fn [[m _]] (= (str m) "^glm-")))
+                  first second)]
+      (assertions
+        "resolves to the OpenAICodex backend (Responses wire)"
+        (backend-class b) => "OpenAICodexBackend"
+
+        "carries the api-key and v1 endpoint root"
+        (select-keys b [:api-key :base-url]) => {:api-key "k"
+                                                 :base-url "https://api.z.ai/api/v1"}
+
+        "default model is glm-5.3"
+        (:default-model b) => "glm-5.3")))
+
   (component "caller overrides win over the static template"
     (let [mb (providers/build-injected-credentials-backend
                [{:provider :openai :api-key "k" :base-url "https://proxy.local/v1"

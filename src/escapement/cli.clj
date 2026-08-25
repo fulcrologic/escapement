@@ -364,7 +364,11 @@
    "claude-cli"  :claude-cli
    "openai"      :openai
    "ollama"      :ollama
-   "opencode-go" :opencode-go})
+   "opencode-go" :opencode-go
+   ;; z.ai coding plan, v1 (legacy) Responses wire — see
+   ;; `escapement.llm.providers/detect-available-credentials` for the
+   ;; endpoint-generation table.
+   "zai-coding-plan" :zai-coding-plan})
 
 (def ^:private keyless-credential-providers
   "Providers that authenticate WITHOUT an API key, so a `:llm/credentials` entry
@@ -458,6 +462,20 @@
       {:backend        (build-codex-backend (cond-> {}
                                               model (assoc :default-model model)))
        :default-models (when model [model])}
+
+      ;; z.ai coding plan, v1 (legacy) Responses wire. Reads ZAI_API_KEY (or
+      ;; --api-key-env); --api-base-url overrides the endpoint root.
+      "zai-coding-plan"
+      (let [m (or model "glm-5.3")
+            k (System/getenv (or api-key-env "ZAI_API_KEY"))]
+        (when (str/blank? k)
+          (die! (str "--backend zai-coding-plan requires "
+                     (or api-key-env "ZAI_API_KEY") " to be set")))
+        {:backend        (build-codex-backend (cond-> {:base-url        (or api-base-url "https://api.z.ai/api/v1")
+                                                       :default-model   m
+                                                       :http-timeout-ms 300000}
+                                                k (assoc :api-key k)))
+         :default-models [m]})
 
       ;; Claude Max/Pro subscription via the `claude -p` CLI. No API key, and no
       ;; env detection — this backend is only ever reached by being named.

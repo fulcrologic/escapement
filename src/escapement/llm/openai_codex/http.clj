@@ -5,6 +5,11 @@
   `https://chatgpt.com/backend-api/codex/responses` and parses the
   event stream into a structured result map.
 
+  Also serves any OpenAI-Responses-compatible endpoint reached with a
+  plain API key (`:api-key` + `:url`) — e.g. z.ai's coding-plan v1
+  endpoint `https://api.z.ai/api/v1/responses`. The api-key path sends
+  none of the ChatGPT OAuth headers.
+
   Goes through `escapement.llm.http-transport`, so the host picks the
   underlying HTTP impl. The CLJ default uses bb's http-client."
   (:require
@@ -106,8 +111,13 @@
 
 Options map:
 * `:body`           — Clojure map to serialize as JSON request body (required)
-* `:access-token`   — OAuth bearer token (required)
-* `:account-id`     — ChatGPT account ID header value (required)
+* `:access-token`   — OAuth bearer token (OAuth path; mutually exclusive with
+                      `:api-key`)
+* `:account-id`     — ChatGPT account ID header value (OAuth path)
+* `:api-key`        — plain API-key bearer auth (alternative path; suppresses
+                      every ChatGPT-specific header)
+* `:url`            — full endpoint URL (api-key path; defaults to the ChatGPT
+                      backend URL for the OAuth path)
 * `:timeout-ms`     — HTTP timeout in milliseconds (default 180000)
 * `:http-transport` — `escapement.llm.http-transport/HttpTransport`. Defaults
                       to `(http-transport/default-transport)`.
@@ -118,22 +128,31 @@ Error handling:
 - 401: throws ex-info with `:retry? true` (caller should refresh and retry)
 - 429: throws ex-info with `:retry? false` (surface to user)
 - Other non-2xx: throws ex-info with `:status` and `:body`"
-  [{:keys [body access-token account-id timeout-ms http-transport]}]
+  [{:keys [body url api-key access-token account-id timeout-ms http-transport]}]
   [[:map
     [:body :map]
-    [:access-token :string]
-    [:account-id :string]
+    [:access-token {:optional true} :string]
+    [:account-id {:optional true} :string]
+    [:api-key {:optional true} :string]
+    [:url {:optional true} :string]
     [:timeout-ms {:optional true} pos-int?]
     [:http-transport {:optional true} :any]]
    => :map]
   (let [transport (or http-transport (ht/default-transport))
-        headers   {"Authorization"      (str "Bearer " access-token)
-                   "chatgpt-account-id" account-id
-                   "OpenAI-Beta"        "responses=experimental"
-                   "originator"         "codex_cli_rs"
-                   "accept"             "text/event-stream"
-                   "content-type"       "application/json"}
-        req       {:url        RESPONSES-URL
+        headers   (if api-key
+                    {"Authorization" (str "Bearer " api-key)
+                     "accept"        "text/event-stream"
+                     "content-type"  "application/json"}
+                    (do
+                      (assert (and access-token account-id)
+                        "post-responses-stream!: OAuth path requires :access-token and :account-id")
+                      {"Authorization"      (str "Bearer " access-token)
+                       "chatgpt-account-id" account-id
+                       "OpenAI-Beta"        "responses=experimental"
+                       "originator"         "codex_cli_rs"
+                       "accept"             "text/event-stream"
+                       "content-type"       "application/json"}))
+        req       {:url        (or url RESPONSES-URL)
                    :method     :post
                    :headers    headers
                    :body       (json/generate-string body)
@@ -144,9 +163,9 @@ Error handling:
                   (p/await! (ht/request-streaming transport req on-line))]
     (when-not (and (>= status 200) (< status 300))
       (case status
-        401 (throw (ex-info "OAuth token rejected by ChatGPT backend"
-                     {:status 401 :body (or body-str "") :retry? true}))
-        429 (throw (ex-info "Subscription rate limit reached"
+        401 (throw (ex-info "Bearer token rejected by Responses backend"
+                     {:status 401 :body (or body-str "") :retry? (nil? api-key)}))
+        429 (throw (ex-info "Rate limit reached"
                      {:status 429 :body (or body-str "") :retry? false}))
         (throw (ex-info (str "Codex backend error: HTTP " status)
                  {:status status :body (or body-str "")}))))

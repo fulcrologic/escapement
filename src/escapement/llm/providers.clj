@@ -122,10 +122,20 @@
 
       ;; Keep established provider routes before newer hosted gateways so
       ;; adding Ollama/OpenCode credentials does not steal existing glm-* traffic.
+      ;;
+      ;; z.ai coding plan, v1 (legacy) generation — OpenAI **Responses** wire
+      ;; at `https://api.z.ai/api/v1` (append `/responses`). Endpoint
+      ;; generations, all reachable with a coding-plan key (verified
+      ;; 2026-08-25, glm-5.3):
+      ;;   v1 legacy  https://api.z.ai/api/v1                 Responses  — full tool support; THIS entry's default
+      ;;   v1–v3 chat https://api.z.ai/api/coding/{v1,v2,v3}  chat-comp  — text turns OK; tool calls 500 upstream (dead)
+      ;;   v4         https://api.z.ai/api/coding/paas/v4     chat-comp  — full tool support; reach via an
+      ;;                                                                {:provider :openai :base-url …} override
+      ;;   Anthropic  https://api.z.ai/api/anthropic          Messages   — the `:z-ai` / `:z-ai-plan` templates below
       zai
-      (conj {:kind          :zai :source "ZAI_API_KEY"
-             :api-key       zai :base-url "https://api.z.ai/api/anthropic"
-             :default-model "glm-4.6" :auth-mode :bearer
+      (conj {:kind          :zai-coding-plan :source "ZAI_API_KEY"
+             :api-key       zai :base-url "https://api.z.ai/api/v1"
+             :default-model "glm-5.3"
              ;; z.ai (esp. glm-5.x) buffers non-streaming turns and runs ~2x slower
              ;; than Anthropic; a large planning/implement turn routinely exceeds the
              ;; 60s default and 3x-retries to a model-down dead-end. Give it headroom.
@@ -156,6 +166,7 @@
   (case kind
     :anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
     :zai (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
+    :zai-coding-plan (build-codex-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms]))
     :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :ollama (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
@@ -194,6 +205,16 @@
    ;; `default-preferences`; same wire backend as metered `:z-ai`.
    :z-ai-plan             {:kind          :zai :base-url "https://api.z.ai/api/anthropic"
                            :default-model "glm-4.6" :auth-mode :bearer
+                           :http-timeout-ms 300000
+                           :route         #"^glm-"}
+   ;; z.ai coding plan, v1 (legacy) generation — OpenAI Responses wire. Mirrors
+   ;; the descriptor `detect-available-credentials` emits for ZAI_API_KEY.
+   ;; Newer generations stay reachable: override `:base-url` (any Responses
+   ;; root), or use an `{:provider :openai :base-url …}` descriptor for the
+   ;; chat-completions generations (v1–v3 text-only, v4 full) — see the
+   ;; generation table in `detect-available-credentials`.
+   :zai-coding-plan       {:kind          :zai-coding-plan :base-url "https://api.z.ai/api/v1"
+                           :default-model "glm-5.3"
                            :http-timeout-ms 300000
                            :route         #"^glm-"}
    :openai                {:kind          :openai :base-url "https://api.openai.com/v1"

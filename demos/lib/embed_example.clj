@@ -63,7 +63,7 @@
     (or (pick (env "ANTHROPIC_API_KEY") :anthropic "claude-sonnet-4-6")
       (pick (env "OPENAI_API_KEY") :openai "gpt-4o-mini")
       (pick (env "OPENROUTER_API_KEY") :openrouter "openai/gpt-4o-mini")
-      (pick (env "ZAI_API_KEY") :z-ai "glm-4.6")
+      (pick (env "ZAI_API_KEY") :zai-coding-plan "glm-5.3")
       (pick (env "OLLAMA_API_KEY") :ollama "gpt-oss:20b")
       (throw (ex-info "Set one of ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / ZAI_API_KEY / OLLAMA_API_KEY"
                {:reason :missing-credential})))))

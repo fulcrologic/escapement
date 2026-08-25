@@ -117,7 +117,16 @@
    ;; max_tokens value, the valid range of max_tokens is [1, 393216]").
    ;; Clamp at 16384 — comfortably under every observed wire cap and more
    ;; than enough for any single LLM turn this project asks for.
-   "deepseek-v4-pro"   {:max-output-tokens 16384}})
+   "deepseek-v4-pro"   {:max-output-tokens 16384}
+   ;; z.ai's GLM flagship as of 2026-08. The dump's zai / zai-coding-plan
+   ;; providers stop at glm-5.1 (z.ai server-side auto-routes glm-5.1/5.2
+   ;; requests to glm-5.3, per the coding-plan docs). Limits mirror the
+   ;; published glm-5.1 row; context confirmed by the coding-plan docs
+   ;; ("other models 200000").
+   "glm-5.3"           {:context-tokens  200000 :max-output-tokens 131072
+                        :vision?         false :tool-call? true :reasoning? true
+                        :family          "glm" :company "Zhipu"
+                        :name            "GLM-5.3"}})
 
 (def ^:private codex-subscription-models
   "The ChatGPT-account Codex model set, zero-priced (flat-fee subscription).
@@ -177,7 +186,24 @@
     :models  {"fable"  {:pricing {:input 0 :output 0}}
               "opus"   {:pricing {:input 0 :output 0}}
               "sonnet" {:pricing {:input 0 :output 0}}
-              "haiku"  {:pricing {:input 0 :output 0}}}}})
+              "haiku"  {:pricing {:input 0 :output 0}}}}
+   ;; z.ai coding plan, v1 (legacy) generation — flat-fee subscription on the
+   ;; OpenAI Responses wire (`https://api.z.ai/api/v1`). Same plan/billing as
+   ;; the dump's `:z-ai-plan` (Anthropic face); this is the provider keyword
+   ;; `detect-available-credentials` emits for ZAI_API_KEY. glm-5.3 is absent
+   ;; from the dump's zai-coding-plan model list, so it is spelled out here;
+   ;; the other ids mirror the dump's rows (zeroed: subscription).
+   :zai-coding-plan
+   {:display "Z.AI Coding Plan" :auth :subscription
+    :models  {"glm-5.3"     {:pricing {:input 0 :output 0}}
+              "glm-5.1"     {:pricing {:input 0 :output 0}}
+              "glm-5-turbo" {:pricing {:input 0 :output 0}}
+              "glm-4.7"     {:pricing {:input 0 :output 0}}}}
+   ;; glm-5.3 under the Anthropic-face subscription provider too (deep-merged
+   ;; over the dump's zai-coding-plan rows), so a `{:provider :z-ai-plan
+   ;; :model "glm-5.3"}` target resolves pricing/subscription.
+   :z-ai-plan
+   {:models {"glm-5.3" {:pricing {:input 0 :output 0}}}}})
 
 ;; =============================================================================
 ;; Assembled tables

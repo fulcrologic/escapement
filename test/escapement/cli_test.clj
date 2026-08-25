@@ -174,13 +174,13 @@
       (let [kinds (mapv :kind (#'providers/detect-available-credentials))]
         (assertions
           "z.ai route is present"
-          (some? (index-of kinds :zai)) => true
+          (some? (index-of kinds :zai-coding-plan)) => true
           "OpenCode Go route is present"
           (some? (index-of kinds :opencode-go-openai)) => true
           "Ollama route is present"
           (some? (index-of kinds :ollama)) => true
           "z.ai keeps precedence for glm-*"
-          (< (index-of kinds :zai)
+          (< (index-of kinds :zai-coding-plan)
             (index-of kinds :opencode-go-openai)
             (index-of kinds :ollama)) => true))))
 

@@ -36,7 +36,7 @@
    path resolves THROUGH — there is no longer a parallel pair-based fallback.
    Tune via `:llm/aliases` + `:llm/preferences` in `.escapement.edn` rather
    than editing this."
-  {:default-glm        [{:provider :z-ai-plan :model "glm-5.1"}
+  {:default-glm        [{:provider :z-ai-plan :model "glm-5.3"}
                         {:provider :z-ai :model "glm-4.7"}]
    ;; Anthropic's current generation. `:default-sonnet` previously named
    ;; `claude-sonnet-4-7`, a model that does not exist — so the built-in Sonnet
