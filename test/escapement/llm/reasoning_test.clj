@@ -5,7 +5,9 @@
    makes the field safe to land: a request WITHOUT `:reasoning` produces
    exactly the wire body it produced before the field existed."
   (:require
+    [escapement.config :as cfg]
     [escapement.llm :as llm]
+    [malli.core :as m]
     [escapement.llm.api :as api]
     [escapement.llm.claude-cli.translate]
     [escapement.llm.openai :as openai]
@@ -74,6 +76,37 @@
 
       "an unknown level is not an effort"
       (rsn/valid-effort? :normal) => false)))
+
+(specification "an alias target may carry :reasoning, and it survives resolution"
+  ;; This was unreachable: `alias-target->candidate` selects `:reasoning` out of
+  ;; a target, but the CLOSED target schema in `escapement.config` omitted the
+  ;; key, so no config could ever supply it. Both halves are asserted here so
+  ;; the two layers cannot drift apart again.
+
+  (component "the resolver keeps it as that target's default params"
+    (let [cand (#'llm/alias-target->candidate
+                 {:provider :openai :model "gpt-5" :reasoning {:effort :high}} :deep)]
+      (assertions
+        "carried into the candidate's params"
+        (:params cand) => {:reasoning {:effort :high}}
+
+        "alongside the target's identity"
+        (select-keys cand [:provider :model :alias])
+        => {:provider :openai :model "gpt-5" :alias :deep})))
+
+  (component "and the config schema accepts what the resolver reads"
+    (assertions
+      "the map form"
+      (m/validate cfg/alias-target-schema
+        {:provider :openai :model "gpt-5" :reasoning {:effort :high}}) => true
+
+      "the bare-keyword sugar"
+      (m/validate cfg/alias-target-schema
+        {:provider :openai :model "gpt-5" :reasoning :high}) => true
+
+      "but not an effort outside the ordinal"
+      (m/validate cfg/alias-target-schema
+        {:provider :openai :model "gpt-5" :reasoning {:effort :normal}}) => false)))
 
 (specification "dialect: Anthropic-shaped (thinking + budget)"
 

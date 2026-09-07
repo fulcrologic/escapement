@@ -906,7 +906,7 @@ It maps an alias keyword to a **non-empty, ordered vector of target maps**:
             {:provider :fireworks   :model "accounts/fireworks/models/kimi-k2p6"}]}}
 ----
 
-Each target is a **closed** map: required `:provider` (keyword) and `:model` (provider-specific id string), plus optional per-target generation params `:temperature`, `:top-p`, `:top-k`, `:thinking`, and `:max-tokens`.
+Each target is a **closed** map: required `:provider` (keyword) and `:model` (provider-specific id string), plus optional per-target generation params `:temperature`, `:top-p`, `:top-k`, `:thinking`, `:reasoning`, and `:max-tokens`.
 A single-element vector is the degenerate single-target case.
 The alias **schema is unchanged** — only its role (now the *only* target definition) and the surrounding references changed.
 
@@ -979,7 +979,7 @@ The credential-backend route ordering derives from the **preference aliases' pro
 
 ==== Param precedence
 
-A target's optional `:temperature` / `:top-p` / `:top-k` / `:thinking` are **defaults** for that attempt.
+A target's optional `:temperature` / `:top-p` / `:top-k` / `:thinking` / `:reasoning` are **defaults** for that attempt.
 An explicit node authoring-key value for the same key always **overrides** the target value (merge order is target-under-node).
 A target with no params just inherits the node/backend defaults.
 
