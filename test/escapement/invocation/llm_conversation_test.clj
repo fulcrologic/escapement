@@ -144,7 +144,12 @@
   (assertions
     "resolves the model's catalog output cap"
     (llmc/effective-max-tokens "claude-sonnet-5") => 128000
-    (llmc/effective-max-tokens "claude-3-sonnet-20240229") => 4096
+    ;; A second model with a DIFFERENT cap, so this cannot pass by returning a
+    ;; constant. `claude-3-sonnet-20240229` used to serve that role and was
+    ;; retired from models.dev upstream — a catalog refresh legitimately drops
+    ;; ids, and an id the catalog no longer knows correctly returns nil (the
+    ;; backend's own default then applies), which the next assertion covers.
+    (llmc/effective-max-tokens "claude-haiku-4-5") => 64000
     "unknown model → nil (backend wire default applies)"
     (llmc/effective-max-tokens "totally-unknown-model") => nil
     "nil model (backend default pick) → nil"
