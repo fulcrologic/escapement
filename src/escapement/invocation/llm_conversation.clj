@@ -908,6 +908,20 @@
             (and acc-content (= merged (vec acc-content)))
             {:no-progress resp' :detail :no-forward-progress}
 
+            ;; The backend that answered says this endpoint cannot honour an
+            ;; assistant prefill (evidence-backed, declared per provider). Stop
+            ;; here and report the truncation honestly rather than spend a call
+            ;; discovering it — or, worse, stitch a restart.
+            (get-in resp [:backend-metadata :prefill-unsupported?])
+            (do
+              (transcript! transcript-fn
+                {:event :llm/continuation-unsupported :ts (now-ms)
+                 :data  {:segment    (inc seg)
+                         :model      (:model resp)
+                         :invokeid   (:invokeid parent-ctx)
+                         :session-id (:parent-session-id parent-ctx)}})
+              {:no-progress resp' :detail :continuation-unsupported})
+
             :else
             (do
               (transcript! transcript-fn

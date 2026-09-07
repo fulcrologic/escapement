@@ -1730,6 +1730,44 @@
         "nothing accumulated yet, nothing to restart"
         (#'llmc/continuation-restarted? nil (blocks long-a)) => false))))
 
+(specification "drive-turn!: continuation is not attempted where it is KNOWN not to work"
+  ;; Evidence-only, per provider. Ollama answers a trailing assistant message
+  ;; with a hard 400 ("Expected last role User or Tool (or Assistant with
+  ;; prefix True)"), the claude CLI accepts only type:user messages, and the
+  ;; Responses wire starts a new message. Everything else keeps today's
+  ;; behaviour — notably Anthropic, whose prefill support is documented and was
+  ;; simply not verifiable here.
+
+  (let [captured (atom [])
+        truncated (assoc-in (max-tokens-response "half a document")
+                    [:backend-metadata :prefill-unsupported?] true)
+        backend  (mock-backend [truncated (end-turn-response "should never be asked for")])
+        result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                   {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+    (assertions
+      "the turn stops at the truncation instead of spending a doomed call"
+      (:detail result) => :continuation-unsupported
+
+      "the partial content is kept, not discarded"
+      (->> (get-in result [:no-progress :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+      => "half a document"
+
+      "and it is observable"
+      (count (filter #(= :llm/continuation-unsupported (:event %)) @captured)) => 1
+
+      "no continuation was requested"
+      (count (filter #(= :llm/continuation (:event %)) @captured)) => 0))
+
+  (component "an untagged backend continues exactly as before"
+    (let [captured (atom [])
+          backend  (mock-backend [(max-tokens-response "Hel") (end-turn-response "lo world")])
+          result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "stitched as before"
+        (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+        => "Hello world"))))
+
 (specification "try-models!: transient category is retried (bounded) then succeeds"
   (let [captured (atom [])
         [backend cnt] (flaky-backend 2 #(llm/llm-error :rate-limited "429" {})

@@ -304,4 +304,7 @@ Notes:
                       :cache-creation-input-tokens 0
                       :cache-read-input-tokens     (get-in usage [:input_tokens_details :cached_tokens] 0)}
    :model            (or model request-model)
-   :backend-metadata {:backend :openai-codex}})
+   ;; The Responses wire turns an assistant message into an `output_text`
+   ;; INPUT item and starts a new message; there is no prefill to continue, so
+   ;; the continuation loop should not spend a call finding that out.
+   :backend-metadata {:backend :openai-codex :prefill-unsupported? true}})

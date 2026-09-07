@@ -245,6 +245,16 @@ Response map."
                          (get parsed "id") (assoc :message-id (get parsed "id"))
                          reasoning-only? (assoc :reasoning-only? true))}))
 
+(defn tag-prefill-support
+  "Mark a Response when THIS endpoint is known not to honour an assistant
+   prefill, so the continuation loop can decline to try rather than spend a
+   call discovering it. Set from the provider's declared capability; absent,
+   the response is untouched and continuation is attempted as before."
+  [response opts]
+  (cond-> response
+    (= :unsupported (:prefill-support opts))
+    (assoc-in [:backend-metadata :prefill-unsupported?] true)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; HTTP
 
@@ -521,7 +531,8 @@ Response map."
                                               :model    (:model request)
                                               :body     body-map}))
               parsed        (post-chat! transport opts body-map)
-              response      (openai-json->response parsed (:model request))]
+              response      (-> (openai-json->response parsed (:model request))
+                              (tag-prefill-support opts))]
           (when transcript-fn
             (transcript-fn {:event    :llm/response
                             :backend  :openai
@@ -553,7 +564,8 @@ Response map."
                                               :model    (:model request)
                                               :stream   true
                                               :body     body-map}))
-              response      (stream-chat! transport opts body-map (:model request) on-delta)]
+              response      (-> (stream-chat! transport opts body-map (:model request) on-delta)
+                              (tag-prefill-support opts))]
           (when transcript-fn
             (transcript-fn {:event    :llm/response
                             :backend  :openai
@@ -575,6 +587,10 @@ Required opts:
 Optional opts:
 - `:default-model`   — string used when Request omits `:model`.
 - `:extra-headers`   — map of additional request headers.
+- `:prefill-support` — `:unsupported` when this endpoint is KNOWN not to honour
+                       an assistant-prefill continuation (evidence required —
+                       see `escapement.llm.providers`). Absent, continuation is
+                       attempted as before.
 - `:model-quirks`    — vector of per-model request-key constraints for THIS
                        endpoint (see `escapement.llm.model-quirks`). Absent, no
                        request is adjusted.

@@ -214,7 +214,8 @@
     ;; wire format of its reasoning field.
     :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
     :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
-    :ollama (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
+    :ollama (build-openai-backend (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect])
+                                    (assoc :prefill-support :unsupported)))
     :deepseek (build-openai-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms :reasoning-dialect]))
     ;; Both opencode.ai routes carry the mandatory `x-opencode-session` header;
     ;; without it the gateway 400s every request, whichever wire format.
@@ -288,6 +289,15 @@
    :deepseek              {:kind          :deepseek :base-url "https://api.deepseek.com/v1"
                            :default-model "deepseek-v4-flash" :reasoning-dialect :deepseek
                            :route         #"^deepseek-"}
+   ;; `:prefill-support :unsupported` — evidence, not caution: this endpoint
+   ;; answers a trailing assistant message with a hard 400,
+   ;; "Expected last role User or Tool (or Assistant with prefix True) for
+   ;; serving but got assistant" (verified 2026-09-07, mistral-large-3). Every
+   ;; other provider keeps today's behaviour and relies on the restart guard in
+   ;; `llm-conversation/continuation-restarted?`; in particular Anthropic proper
+   ;; is deliberately NOT downgraded — its prefill support is documented and was
+   ;; simply not verifiable here, and declaring it unsupported on a guess would
+   ;; remove working behaviour from existing embedders.
    :ollama                {:kind          :ollama :base-url "https://ollama.com/v1"
                            ;; See the note in `detect-available-credentials`:
                            ;; `kimi-k2.5` was retired upstream 2026-07-31.

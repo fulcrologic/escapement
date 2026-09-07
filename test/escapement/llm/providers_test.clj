@@ -335,3 +335,31 @@
         "the two still agree on everything else"
         (-> (get tmpl :z-ai) (dissoc :kind) (update :route str))
         => (-> (get tmpl :z-ai-plan) (dissoc :kind) (update :route str))))))
+
+(specification "assistant-prefill continuation support is declared per provider"
+  ;; Evidence-only: Ollama answers a trailing assistant message with a hard 400
+  ;; (verified 2026-09-07). Providers we could not verify keep today's
+  ;; behaviour, because declaring :unsupported REMOVES working behaviour rather
+  ;; than withholding an unverified payload.
+
+  (component "the endpoint with evidence of breakage is declared"
+    (let [b (-> (providers/build-injected-credentials-backend
+                  [{:provider :ollama :api-key "k"}] [])
+              :default-backend)]
+      (assertions
+        "Ollama declares prefill unsupported"
+        (-> b :opts :prefill-support) => :unsupported)))
+
+  (component "unverified providers are NOT downgraded on a guess"
+    (let [anth (-> (providers/build-injected-credentials-backend
+                     [{:provider :anthropic :api-key "k"}] [])
+               :default-backend)
+          oai  (-> (providers/build-injected-credentials-backend
+                     [{:provider :openai :api-key "k"}] [])
+                 :default-backend)]
+      (assertions
+        "Anthropic — documented prefill support, not verifiable here, left alone"
+        (-> anth :opts :prefill-support) => nil
+
+        "OpenAI — no evidence either way, left alone"
+        (-> oai :opts :prefill-support) => nil))))
