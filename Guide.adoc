@@ -4315,13 +4315,22 @@ Each names a
 ----
 
 **The keys that are honoured** are `:provider` (required keyword), `:api-key`,
-`:base-url`, `:model`, `:default-model`, `:auth-mode` and `:reasoning-dialect`
-— and `:auth-mode` only reaches the Anthropic-shaped providers, since the
-OpenAI-shaped ones authenticate one way. The descriptor map is not closed, so
-**any other key is accepted by validation and then silently ignored**: an
-`:http-timeout-ms` written here does not change the timeout, which comes from
-the provider template. If you need a knob that is not in that list, construct
-the backend yourself and pass it as `:backend`.
+`:base-url`, `:model`, `:default-model`, `:auth-mode`, `:reasoning-dialect` and
+`:http-timeout-ms` — and `:auth-mode` only reaches the Anthropic-shaped
+providers, since the OpenAI-shaped ones authenticate one way. The descriptor map
+is not closed, so **any other key is accepted by validation and then silently
+ignored**. If you need a knob that is not in that list, construct the backend
+yourself and pass it as `:backend`.
+
+`:http-timeout-ms` is worth setting deliberately rather than inheriting. It
+defaults to **60 s** on the OpenAI-shaped backends (a few provider templates
+raise it — z.ai's entries use 300 s because that endpoint buffers), and **it is
+the only bound on a stalled turn**: the runner's no-progress detection does not
+advance while an invocation is live, so a turn that streams and then stops has
+nothing else to stop it. A host whose generations legitimately run long should
+raise it per credential, and should know that a `:timeout` is a *transient*
+category — it is retried up to `:max-retries` before the turn fails, so the wall
+clock cost of a too-low value is the timeout multiplied by the attempts.
 
 `:subscription` is a special case worth stating plainly: it is **accepted and
 inert**. It appears in the schema for backwards compatibility with hosts

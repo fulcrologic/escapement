@@ -213,21 +213,22 @@
     ;; descriptor/template — never sniffed from the base-url, so pointing a
     ;; provider at a proxy or a self-hosted gateway cannot silently change the
     ;; wire format of its reasoning field.
-    :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
-    :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
-    :ollama (build-openai-backend (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect])
+    :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms]))
+    :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms]))
+    :ollama (build-openai-backend (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms])
                                     (assoc :prefill-support :unsupported)))
     :deepseek (build-openai-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms :reasoning-dialect]))
     ;; Both opencode.ai routes carry the mandatory `x-opencode-session` header;
     ;; without it the gateway 400s every request, whichever wire format.
     :opencode-go-openai (build-openai-backend
-                          (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect])
+                          (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms])
                             (assoc :extra-headers (opencode-session-headers)
                               :model-quirks (opencode-go-quirks))))
     :opencode-go-anthropic (build-api-backend
                              (-> (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms])
                                (assoc :extra-headers (opencode-session-headers))))
-    :codex (build-codex-backend {:default-model (:default-model c)})
+    :codex (build-codex-backend (cond-> {:default-model (:default-model c)}
+                                  (:http-timeout-ms c) (assoc :http-timeout-ms (:http-timeout-ms c))))
     :claude-cli (build-claude-cli-backend
                   (select-keys c [:default-model :binary :timeout-ms :max-concurrency
                                   :effort :max-budget-usd]))))
@@ -351,7 +352,13 @@
       (pr-str (vec (sort (keys provider-templates))))))
   (when-let [tmpl (get provider-templates provider)]
     (let [overrides (-> desc
-                      (select-keys [:api-key :base-url :default-model :auth-mode :reasoning-dialect])
+                      (select-keys [:api-key :base-url :default-model :auth-mode :reasoning-dialect
+                    ;; A host-supplied HTTP timeout used to be dropped here for
+                    ;; EVERY provider, so only a template's own value survived —
+                    ;; which is why the z.ai entries (which set one) worked and
+                    ;; nothing else did. A caller whose generations legitimately
+                    ;; run past the 60s default had no way to say so.
+                    :http-timeout-ms])
                       (cond-> (:model desc) (assoc :default-model (:model desc))))]
       (merge tmpl (into {} (remove (comp nil? val)) overrides)))))
 

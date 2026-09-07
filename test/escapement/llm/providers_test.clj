@@ -444,3 +444,70 @@
           "the poisoned template no longer matches its detected twin"
           (= (select-keys (get poisoned :anthropic) shared)
             (select-keys desc shared)) => false)))))
+
+(specification "a host-supplied :http-timeout-ms reaches the backend"
+  ;; It used to be dropped by `descriptor->credential`'s override select-keys
+  ;; for EVERY provider, so only a template's own value survived — which is why
+  ;; the z.ai entries worked and nothing else did. A caller whose generations
+  ;; legitimately run past the 60s default had no way to say so, and a stalled
+  ;; turn has no other bound: the runner's no-progress counter does not advance
+  ;; while an invocation is live, so the HTTP timeout is the only one there is.
+
+  (component "every openai-shaped provider honours it, asserted one by one"
+    ;; NOT one representative. `:deepseek`'s branch already threaded it, so a
+    ;; half-fix — the select-keys alone — would look complete when tested
+    ;; through DeepSeek while leaving Ollama and OpenRouter at the default.
+    (let [timeout-of (fn [provider]
+                       (-> (providers/build-injected-credentials-backend
+                             [{:provider provider :api-key "k" :http-timeout-ms 300000}] [])
+                         :default-backend :opts :http-timeout-ms))]
+      (assertions
+        ":openai"
+        (timeout-of :openai) => 300000
+
+        ":openrouter"
+        (timeout-of :openrouter) => 300000
+
+        ":ollama"
+        (timeout-of :ollama) => 300000
+
+        ":opencode-go"
+        (timeout-of :opencode-go) => 300000
+
+        ":deepseek (already threaded — the one that would mask a half-fix)"
+        (timeout-of :deepseek) => 300000)))
+
+  (component "and so do the other backend families"
+    (let [record-timeout (fn [provider]
+                           (-> (providers/build-injected-credentials-backend
+                                 [{:provider provider :api-key "k" :http-timeout-ms 300000}] [])
+                             :default-backend :http-timeout-ms))
+          opts-timeout   (fn [provider]
+                           (-> (providers/build-injected-credentials-backend
+                                 [{:provider provider :api-key "k" :http-timeout-ms 300000}] [])
+                             :default-backend :opts :http-timeout-ms))]
+      (assertions
+        ;; The codex backend keeps its config on the record, not under :opts.
+        ":zai-coding-plan (Responses wire)"
+        (record-timeout :zai-coding-plan) => 300000
+
+        ":codex — was dropped too; its branch passed only :default-model"
+        (record-timeout :codex) => 300000
+
+        ":anthropic (Anthropic-shaped)"
+        (opts-timeout :anthropic) => 300000
+
+        ":z-ai"
+        (opts-timeout :z-ai) => 300000)))
+
+  (component "a template's own value still applies when the host says nothing"
+    (assertions
+      "z.ai keeps its 300s default — that endpoint is slow and the template knows it"
+      (-> (providers/build-injected-credentials-backend
+            [{:provider :z-ai :api-key "k"}] [])
+        :default-backend :opts :http-timeout-ms) => 300000
+
+      "and a provider with no template value leaves the backend on its own default"
+      (-> (providers/build-injected-credentials-backend
+            [{:provider :openai :api-key "k"}] [])
+        :default-backend :opts :http-timeout-ms) => nil)))
