@@ -62,27 +62,74 @@
   (when (.exists (io/file file))
     (edn/read-string {:default tagged-literal} (slurp file))))
 
+;; ---------------------------------------------------------------------------
+;; ON-DISK CHECKPOINT FORMAT — READ THIS BEFORE CHANGING THE RECORD SHAPE
+;; ---------------------------------------------------------------------------
 ;; A checkpoint on disk is a COMBINED point-in-time record so the working-memory
 ;; configuration and the pending event queue are captured together in ONE atomic
 ;; write (never two files that could tear across a crash). `::wmem` is the library
 ;; working memory `get-working-memory` returns; `::queue-snapshot` is the durable
 ;; event queue (delayed timers) as `escapement.engine.queue/snapshot` data.
-;; Back-compat: a checkpoint written before this change is a bare wmem map with no
-;; `::wmem` marker key, so `record->wmem` returns it unchanged.
+;;
+;; THE RULE: **any** change to the on-disk record shape MUST
+;;   1. bump `current-version` below, AND
+;;   2. add a case to `normalize-record` (the single reader seam) that upgrades
+;;      the older shape to the current one.
+;; Every reader goes through `normalize-record`; nothing else may sniff the record
+;; shape. A record whose `::version` is NEWER than `current-version` is a hard
+;; error (we cannot know what it means) — never silently misread it.
+
+(def current-version
+  "Schema version of the checkpoint record this build writes.
+
+   History:
+     * (pre-version, legacy bare) — the file was the bare working-memory map itself,
+       with no `::wmem` marker key and no queue snapshot.
+     * (pre-version, combined)    — `{::wmem … ::queue-snapshot …}` with no `::version`.
+     * 1                          — the same combined record, now carrying `::version 1`.
+
+   Normalized on read to the current shape by `normalize-record`."
+  1)
+
+(defn normalize-record
+  "THE single reader seam for on-disk checkpoint records: given whatever `record` was read from
+   disk, return it in the CURRENT combined shape (`{::version ::wmem ::queue-snapshot}`), or nil
+   for nil input.
+
+   Handles: a versioned combined record (current); an unversioned combined record (has `::wmem`);
+   and a legacy bare working-memory map (no `::wmem` marker at all → nil queue snapshot).
+
+   Throws `ex-info` when the record's `::version` is newer than this build understands."
+  [record]
+  (when (some? record)
+    (let [v (when (map? record) (::version record))]
+      (cond
+        (and v (> v current-version))
+        (throw (ex-info (str "Checkpoint was written by a newer version of Escapement "
+                          "(checkpoint schema v" v ", this build understands v" current-version
+                          "). Upgrade Escapement to read it.")
+                 {:checkpoint-version v
+                  :supported-version  current-version}))
+
+        ;; versioned or unversioned combined record
+        (and (map? record) (contains? record ::wmem))
+        (assoc record ::version current-version)
+
+        ;; legacy: the file WAS the bare working-memory map
+        :else
+        {::version current-version ::wmem record ::queue-snapshot nil}))))
 
 (defn record->wmem
-  "Unwrap the working memory from an on-disk checkpoint `record`. A combined record carries it under
-   `::wmem`; a legacy bare-wmem checkpoint (no marker key) is returned as-is."
+  "Unwrap the working memory from an on-disk checkpoint `record` (any supported schema version).
+   A legacy bare-wmem checkpoint is returned as-is."
   [record]
-  (if (and (map? record) (contains? record ::wmem))
-    (::wmem record)
-    record))
+  (::wmem (normalize-record record)))
 
 (defn record->queue-snapshot
-  "Return the event-queue snapshot from a combined checkpoint `record` (nil for a legacy bare-wmem
+  "Return the event-queue snapshot from a checkpoint `record` (nil for a legacy bare-wmem
    checkpoint)."
   [record]
-  (when (map? record) (::queue-snapshot record)))
+  (::queue-snapshot (normalize-record record)))
 
 (defrecord FileBackedStore [dir cache history]
   sp/WorkingMemoryStore
@@ -99,7 +146,9 @@
     ;; land in one atomic write — the crash-consistent point-in-time the resume path
     ;; and a Level-3 fork both rehydrate from.
     (swap! cache assoc session-id wmem)
-    (let [base {::wmem wmem ::queue-snapshot (some-> (::sc/event-queue env) queue/snapshot)}]
+    (let [base {::version       current-version
+                ::wmem          wmem
+                ::queue-snapshot (some-> (::sc/event-queue env) queue/snapshot)}]
       (if history
         ;; Retain an append-only, save-index-keyed COPY of the same combined record under
         ;; history/<slug>/<n>.edn so a Level-3 fork can re-enter the chart at any past point
@@ -157,7 +206,7 @@
    their time arrives. Reads from disk (not the wmem cache), so it is valid at process start."
   [store session-id]
   [[:fn (partial instance? FileBackedStore)] [:or :keyword :string :uuid :symbol] => [:maybe :map]]
-  (some-> (read-edn-file (session-file (:dir store) session-id)) ::queue-snapshot))
+  (record->queue-snapshot (read-edn-file (session-file (:dir store) session-id))))
 
 (>defn new-store
   "Create a new checkpoint store backed by `dir` (creating it if necessary).

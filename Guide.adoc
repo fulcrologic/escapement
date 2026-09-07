@@ -37,7 +37,10 @@ The LLM can only influence chart progression by calling event-tools the author e
 * Async by construction — the LLM runs on a worker thread, and each parallel region has its own worker.
 Multiple events per turn (fan-out) is natural.
 * Resumability — working memory **and the pending event queue** are checkpointed atomically together (write-temp → rename) after every event-processing pass.
-Resume reloads the configuration, rehydrates the durable queue (so delayed/timer events fire when their time comes — even if it passed during downtime), re-spawns invocations, and emits a chart-observable `:escapement/resumed` signal a chart can transition on to self-heal; processors are written to be idempotent on re-entry.
+Resume reloads the configuration, rehydrates the durable queue (so delayed/timer events fire when their time comes — even if it passed during downtime), and emits a chart-observable `:escapement/resumed` signal a chart can transition on to self-heal.
+Resume does **not** restart invocations that were live at exit: the statechart engine starts an `<invoke>` only when its state is *entered*, and restoring a checkpoint enters nothing.
+A chart with a long-lived `<invoke>` must therefore handle `:escapement/resumed` and transition so the invoking state is re-entered.
+If it does not, the runner detects the parked-with-a-dead-`<invoke>` configuration and stops with `:runner/error {:reason :orphaned-invocation}` rather than reporting a false `:done`.
 
 The runtime is **Babashka** for the agent process, CLI, and test suite (`bb test`).
 The statechart library's `simple` and `testing` namespaces transitively pull `promesa`, which crashes under SCI, so escapement assembles the env manually and ships its own bb-friendly `escapement.engine.testing`
@@ -220,7 +223,8 @@ Re-loading the latest checkpoint and continuing.
 The runner detects
 `:resume?` plus an existing non-empty configuration and skips `start!`.
 It rehydrates the durable event queue (delayed events whose time passed during downtime fire immediately, in delivery-time order), re-enters the saved configuration on the next event, and emits a chart-observable `:escapement/resumed` event so a chart can idempotently self-heal; any host-supplied `:resume-events` follow.
-There is no blanket on-entry replay — invocation processors re-spawn workers idempotently.
+There is no blanket on-entry replay, and no invocation is restarted: an `<invoke>` is started only on state *entry*, which a checkpoint restore does not perform.
+A chart with a long-lived `<invoke>` must re-enter the invoking state itself (transition on `:escapement/resumed`); otherwise the runner terminates with `:runner/error {:reason :orphaned-invocation}` instead of a false `:done`.
 
 [[authoring]]
 == Authoring a chart, step by step
@@ -3454,6 +3458,7 @@ append-only, save-index-keyed copy of every checkpoint so a Level-3 replay
 by default (per-event full snapshots are heavy). Ignored when `:store` is supplied.
 
 On `:resume?`, the runner rehydrates the durable event queue from the checkpoint (restoring pending delayed/timer events — those whose delivery time has passed fire immediately, in delivery-time order), then emits an `:escapement/resumed` chart event (data `{:config}`) for opt-in self-heal.
+Invocations live at exit are **not** restarted — only a state *entry* starts an `<invoke>` — so a chart holding a long-lived invocation must transition on `:escapement/resumed` to re-enter the invoking state; if it doesn't, the runner stops with `:runner/error {:reason :orphaned-invocation}` instead of falsely reporting `:done`.
 The transcript is opened in **append** mode and its `:seq` continues past the prior run, so the resumed session stays one navigable timeline; a fresh start truncates and restarts `:seq` at 0.
 Additionally, the per-node captured-I/O `visit` counter is seeded from the artifact store on start, so a re-entered node numbers `max+1` across a restart instead of overwriting the prior run.
 
@@ -3529,6 +3534,7 @@ Each tool's
 `:llm/tool-result` transcript event carries a `:resolved-path` (the absolute path it actually acted on).
 * `--resume` re-opens the latest checkpoint and skips `start!`.
 It also rehydrates the durable event queue (pending delayed/timer events survive the exit and fire on resume — those whose time passed while down fire immediately) and emits the `:escapement/resumed` chart signal.
+It does not restart invocations that were live when the previous process exited — a chart with a long-lived `<invoke>` must re-enter that state via an `:escapement/resumed` transition, or the run ends with `:runner/error {:reason :orphaned-invocation}`.
 The transcript is appended (not truncated) and its `:seq` continues past the prior run, so the whole life of the session is one file.
 
 Initial data:

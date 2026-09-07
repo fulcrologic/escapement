@@ -8,11 +8,13 @@
     [clojure.set :as set]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.chart :as chart]
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.capture :as capture]
     [escapement.engine.env :as engine-env]
     [escapement.engine.instrumented-queue :as iq]
     [escapement.engine.queue :as engine-queue]
+    [escapement.engine.session-lock :as session-lock]
     [escapement.engine.store :as engine-store]
     [escapement.invocation.human-input :as human-input]
     [escapement.invocation.llm-conversation :as llm-conv]
@@ -73,12 +75,52 @@
     0
     (::sc/invocation-processors env)))
 
+(defn- orphaned-invocation-states
+  "The state ids in `session-id`'s CURRENT configuration that declare an `<invoke>`
+   yet have no invocation actually running for them. Empty vector = healthy.
+
+   Why not ask the processors? `count-live-invocations` above only understands the
+   LLM and human-input processors (plus a duck-typed `:workers` fallback), so it is
+   BLIND to e.g. the library's chart-as-invokable processor
+   (`:com.fulcrologic.statecharts/chart`) and to any host-supplied processor. Using
+   it as the liveness oracle would make this guard fire on perfectly healthy runs
+   whose only invocation is a live child chart. There is also no portable working-memory
+   record of \"currently running invocations\": the library populates
+   `::sc/states-to-invoke` on state ENTRY and `dissoc`es it at the end of every
+   macrostep (`with-processing-context`), so it is never observable here and never
+   present in a checkpoint — which is the very bug this guard exists to catch.
+
+   So we mirror the library's OWN lifecycle rule instead: an invocation exists if and
+   only if its state was ENTERED while this process was running (entry is the only
+   thing that ever populates `::sc/states-to-invoke`, and `run-invocations!` is the
+   only thing that starts an invocation). `entered-this-run` is that set — seeded from
+   the fresh-start configuration and maintained from the per-event entered/exited
+   delta. On a `:resume?` run it starts EMPTY, because restoring a checkpoint enters
+   nothing; hence a restored state that declares an `<invoke>` is orphaned unless the
+   chart re-entered it itself (e.g. via an `:escapement/resumed` self-heal transition),
+   in which case it lands in the set and this returns empty. That test is
+   processor-agnostic and cannot be fooled by a processor we don't know about."
+  [chart env session-id entered-this-run]
+  (let [store (::sc/working-memory-store env)
+        wmem  (sp/get-working-memory store env session-id)
+        cfg   (::sc/configuration wmem #{})]
+    (vec
+      (sort-by str
+        (filter (fn [state-id]
+                  (and (not (contains? entered-this-run state-id))
+                       ;; `chart/invocations` returns the ids of `<invoke>` children of
+                       ;; the node. Defensive try: a configuration id that isn't a chart
+                       ;; node (shouldn't happen) must never wedge the pump.
+                       (boolean (seq (try (chart/invocations chart state-id)
+                                          (catch Throwable _ nil))))))
+          cfg)))))
+
 (defn- process-targeted-event!
   "Advance session `sid` by `event` against its current `wmem`, checkpoint,
    and emit the `:runner/event-processed` transcript row (with the
    `:entered`/`:exited` state-membership delta and an unconditional
    `:session-id` join key)."
-  [{:keys [store env processor transcript-fn sid wmem event ts]}]
+  [{:keys [store env processor transcript-fn sid wmem event ts entered-this-run]}]
   (let [before-set    (set (::sc/configuration wmem #{}))
         config-before (vec before-set)
         wmem'         (sp/process-event! processor env wmem event)
@@ -87,6 +129,12 @@
         entered       (vec (set/difference after-set before-set))
         exited        (vec (set/difference before-set after-set))]
     (sp/save-working-memory! store env sid wmem')
+    ;; Maintain the "states entered while THIS process was running" set that the
+    ;; orphaned-invocation guard consults. Entry is what starts an invocation and
+    ;; exit is what cancels it, so tracking the same delta keeps our notion of
+    ;; liveness exactly in step with the library's.
+    (when entered-this-run
+      (swap! entered-this-run (fn [s] (apply disj (into s entered) exited))))
     ;; `:session-id` is now unconditional so a timeline UI has a
     ;; uniform join key across single- and multi-session runs.
     ;; `:entered`/`:exited` make the per-event state-membership
@@ -120,7 +168,7 @@
    processor, `com.fulcrologic.statecharts.invocation.multiplex`). The
    target sid for each event is read from the event itself, so the parent,
    the multiplex aggregator, and every child are pumped from the one loop."
-  [{:keys [env session-id transcript-fn multi-session?]}]
+  [{:keys [env session-id transcript-fn multi-session? entered-this-run]}]
   (let [queue       (::sc/event-queue env)
         store       (::sc/working-memory-store env)
         processor   (::sc/processor env)
@@ -148,7 +196,13 @@
                                       :reason     :session-finished}})
               (process-targeted-event! {:store store :env env :processor processor
                                         :transcript-fn transcript-fn
-                                        :sid sid :wmem wmem :event event :ts ts}))))]
+                                        :sid sid :wmem wmem :event event :ts ts
+                                        ;; Only the ROOT session's entries feed the
+                                        ;; orphaned-invocation guard; child sessions in a
+                                        ;; multi-session drain have their own (possibly
+                                        ;; same-named) state ids and must not pollute it.
+                                        :entered-this-run (when (= sid session-id)
+                                                            entered-this-run)}))))]
     (if multi-session?
       (sp/receive-events! queue env handler)
       (sp/receive-events! queue env handler {:session-id session-id}))
@@ -297,6 +351,20 @@
                                     session-id`. Lets a host drive post-resume
                                     behavior a chart can't self-heal. Ignored on
                                     a fresh (non-resume) start.
+    * `:lock?` (default true) — take the single-writer session lock (see
+                                `escapement.engine.session-lock`) for the whole
+                                run. Held from before the transcript is opened
+                                until the `finally` below, so a SECOND process
+                                (or a second `run!` in this process) pointed at
+                                the same `:checkpoint-dir` + `:session-id` fails
+                                immediately with a clear error instead of
+                                silently clobbering checkpoints and colliding
+                                transcript `:seq` numbers. It is an OS advisory
+                                lock: the kernel releases it if this process is
+                                killed, so a crash never leaves a stale lock.
+                                Set false ONLY when the host already guarantees
+                                single-writer access by other means — doing so
+                                restores the old silent-corruption failure mode.
     * `:debug-controller` (optional) — `escapement.debug.controller`
                                        atom; when supplied, every event
                                        is gated through pause/step
@@ -313,7 +381,8 @@
            tool-registry initial-data resume? trace?
            max-iterations max-frozen-cycles quiescent-sleep-ms human-renderer
            on-env-ready transcript-tap prelude-events store run-id cancel
-           debug-controller human-input-active? multi-session? resume-events retain-history?]
+           debug-controller human-input-active? multi-session? resume-events retain-history?
+           lock?]
     :or   {chart-id           ::chart
            resume?            false
            trace?             false
@@ -325,230 +394,278 @@
   (assert session-id "session-id is required")
   (assert transcript-path "transcript-path is required")
   (assert checkpoint-dir "checkpoint-dir is required")
-  (let [;; Append on resume so the transcript stays ONE navigable timeline across the
-        ;; whole life of the chart (seq continues past the prior run); truncate on a
-        ;; fresh start so a reused session id begins cleanly.
-        sink          (transcript/open-transcript {:path transcript-path :append? (boolean resume?)})
-        jsonl-fn      (transcript/make-transcript-fn sink)
-        transcript-fn (if transcript-tap
-                        (fn [ev]
-                          (jsonl-fn ev)
-                          (try (transcript-tap ev) (catch Throwable _ nil)))
-                        jsonl-fn)
-        ;; When a debug controller is supplied, the event queue becomes an
-        ;; instrumented queue that applies the pause/step gate per event (and
-        ;; exposes pending/last-delivered instrumentation to the api-server).
-        ;; With no controller the default in-process queue is used, so normal
-        ;; runs carry zero stepping overhead. The gate's human-input yield is
-        ;; threaded in here so a live human-input modal keeps focus.
-        queue         (when debug-controller
-                        (iq/new-instrumented-queue
-                          {:controller   debug-controller
-                           :human-input? human-input-active?}))
-        env           (engine-env/new-env {:checkpoint-dir          checkpoint-dir
-                                           :session-dir             session-dir
-                                           :artifact-store          (when session-dir
-                                                                      (disk/new-artifact-store session-dir))
-                                           :queue                   queue
-                                           :retain-history?         retain-history?
-                                           :store                   store
-                                           :llm-backend             backend
-                                           :llm-default-models      backend-default-models
-                                           :llm-catalog-ratings     catalog-ratings
-                                           :llm-eligibility-strict? eligibility-strict?
-                                           :llm-aliases             llm-aliases
-                                           :llm-preferences         llm-preferences
-                                           :llm-resilience          llm-resilience
-                                           :tool-registry           tool-registry
-                                           :human-renderer          human-renderer
-                                           :transcript-fn           transcript-fn})
-        registry      (::sc/statechart-registry env)
-        store         (::sc/working-memory-store env)
-        processor     (::sc/processor env)]
-    (sp/register-statechart! registry chart-id chart)
-    ;; Seed the per-(session,node) visit counter from artifacts already on disk so
-    ;; a restart/resume of a looping chart keeps numbering re-entries `max+1` instead
-    ;; of colliding at 0 and overwriting the prior run's captured-I/O. No-op on a
-    ;; fresh session (empty store ⇒ `{}`), so first-run numbering is unchanged.
-    (when-let [artifact-store (:escapement/artifact-store env)]
-      (reset! (:escapement/visit-counts env)
-        (capture/seed-visit-counts artifact-store session-id)))
-    ;; Hook for callers (e.g. CLI's TUI) that need the queue/env at the
-    ;; moment env is built but the chart hasn't started yet. Errors in
-    ;; the callback are caught so they don't take down the runner.
-    (when on-env-ready
-      (try (on-env-ready env)
-           (catch Throwable _ nil)))
-    (doseq [ev prelude-events]
-      (transcript-fn ev))
-    (transcript-fn {:event :runner/started
-                    :data  (cond-> {:session-id (str session-id)
-                                    :chart-id   (str chart-id)
-                                    :resume?    (boolean resume?)}
-                             run-id (assoc :run-id (str run-id)))})
+  ;; Single-writer guard: take the session lock BEFORE the transcript is opened (opening
+  ;; truncates/appends — already a write to the session) and before any checkpoint can be
+  ;; saved. See `escapement.engine.session-lock`: it is an OS advisory lock, so it is released
+  ;; by the kernel if this process is killed and can never go stale.
+  (let [lock (session-lock/acquire! checkpoint-dir session-id {:lock? (if (some? lock?) lock? true)})]
     (try
-      ;; Start or resume
-      (let [existing (sp/get-working-memory store env session-id)]
-        (if (and resume? existing (seq (::sc/configuration existing #{})))
-          ;; Rehydrate the durable event queue BEFORE the pump loop so delayed/timer
-          ;; events scheduled before the exit (poll ticks, safety stops) are restored;
-          ;; any whose delivery-time has since passed fire immediately, in
-          ;; delivery-time order. Must restore INTO the live queue (the execution model
-          ;; already captured its reference), not swap a new one in.
-          (let [snap        (when (engine-store/file-backed? store)
-                              (engine-store/get-queue-snapshot store session-id))
-                restored    (engine-queue/restore-into! (::sc/event-queue env) snap)
-                config      (vec (::sc/configuration existing))
-                queue       (::sc/event-queue env)]
-            (transcript-fn {:event :runner/resumed
-                            :data  {:config          config
-                                    :restored-events (if restored
-                                                       (engine-queue/pending-count restored)
-                                                       0)}})
-            ;; Emit a chart-observable resume signal so a chart can idempotently
-            ;; re-establish anything a restored TIMER cannot (service registries,
-            ;; acquired resources, a timer already consumed pre-exit). This is the
-            ;; opt-in self-heal seam: a chart adds a transition on `:escapement/resumed`
-            ;; where it needs one; a chart that ignores it simply drains the event as a
-            ;; no-op. We do NOT blanket-replay on-entry (many on-entry actions acquire
-            ;; resources and would double-fire). Host-supplied `:resume-events` follow,
-            ;; letting a CLI/embedder inject its own post-restore events (something
-            ;; `:on-env-ready` — which fires before restore — and transcript-only
-            ;; `:prelude-events` cannot do).
-            (sp/send! queue env {:event :escapement/resumed :target session-id
-                                 :data  {:config config}})
-            (doseq [ev resume-events]
-              (sp/send! queue env (cond-> ev (not (:target ev)) (assoc :target session-id)))))
-          ;; Seed the chart's data model with `:initial-data` by passing it as
-          ;; `::sc/invocation-data` in the start params (per the library's
-          ;; v20150901_impl/initialize!).
-          (let [w0 (sp/start! processor env chart-id
-                     (cond-> {::sc/session-id session-id}
-                       initial-data (assoc ::sc/invocation-data initial-data)))]
-            (sp/save-working-memory! store env session-id w0)
-            (transcript-fn {:event :runner/start-config
-                            :data  {:config (vec (::sc/configuration w0))}}))))
-      ;; Pump. The loop returns a terminal status keyword:
-      ;;   :done          — quiescent with no live invocations (normal)
-      ;;   :aborted        — host cancel signal fired
-      ;;   :frozen-config  — config wedged: no progress with live work for
-      ;;                     `:max-frozen-cycles` consecutive cycles
-      (let [status
-                       ;; A SINGLE counter, `no-progress`, bounds *consecutive*
-                       ;; no-progress quiescent cycles while live work (or stranded
-                       ;; deliverable events) exist — the frozen-config wedge guard.
-                       ;; It RESETS to 0 on any progress, so an infinite *event-driven*
-                       ;; chart (one that keeps draining events) never trips it and runs
-                       ;; forever — the chart owns its own termination. The old
-                       ;; lifetime `:max-iterations` cap is gone: it counted total pump
-                       ;; iterations without resetting, so it mis-aborted legitimately
-                       ;; infinite event charts. The real *transitionless* (eventless)
-                       ;; loop guard lives in the statecharts library (bounded per
-                       ;; macrostep, fresh each event) and is untouched.
-                       (loop [no-progress 0]
-                         (when trace?
-                           (transcript-fn {:event :runner/tick :data {:no-progress no-progress}}))
-                         (cond
-                           ;; Cancellation is checked FIRST, at the top of the
-                           ;; iteration — a safe boundary between events, never
-                           ;; mid-transcript-write or mid-checkpoint-write — so an
-                           ;; abort can never tear a partial transcript/checkpoint
-                           ;; row. "Promptly" = by the next pump iteration.
-                           (cancel-requested? cancel)
-                           (do (transcript-fn {:event :runner/aborted
-                                               :data  {:reason :cancelled}})
-                               :aborted)
+    (let [;; Append on resume so the transcript stays ONE navigable timeline across the
+          ;; whole life of the chart (seq continues past the prior run); truncate on a
+          ;; fresh start so a reused session id begins cleanly.
+          sink          (transcript/open-transcript {:path transcript-path :append? (boolean resume?)})
+          jsonl-fn      (transcript/make-transcript-fn sink)
+          transcript-fn (if transcript-tap
+                          (fn [ev]
+                            (jsonl-fn ev)
+                            (try (transcript-tap ev) (catch Throwable _ nil)))
+                          jsonl-fn)
+          ;; When a debug controller is supplied, the event queue becomes an
+          ;; instrumented queue that applies the pause/step gate per event (and
+          ;; exposes pending/last-delivered instrumentation to the api-server).
+          ;; With no controller the default in-process queue is used, so normal
+          ;; runs carry zero stepping overhead. The gate's human-input yield is
+          ;; threaded in here so a live human-input modal keeps focus.
+          queue         (when debug-controller
+                          (iq/new-instrumented-queue
+                            {:controller   debug-controller
+                             :human-input? human-input-active?}))
+          env           (engine-env/new-env {:checkpoint-dir          checkpoint-dir
+                                             :session-dir             session-dir
+                                             :artifact-store          (when session-dir
+                                                                        (disk/new-artifact-store session-dir))
+                                             :queue                   queue
+                                             :retain-history?         retain-history?
+                                             :store                   store
+                                             :llm-backend             backend
+                                             :llm-default-models      backend-default-models
+                                             :llm-catalog-ratings     catalog-ratings
+                                             :llm-eligibility-strict? eligibility-strict?
+                                             :llm-aliases             llm-aliases
+                                             :llm-preferences         llm-preferences
+                                             :llm-resilience          llm-resilience
+                                             :tool-registry           tool-registry
+                                             :human-renderer          human-renderer
+                                             :transcript-fn           transcript-fn})
+          registry      (::sc/statechart-registry env)
+          store         (::sc/working-memory-store env)
+          processor     (::sc/processor env)
+          ;; State ids ENTERED while this process ran — the liveness oracle for the
+          ;; orphaned-invocation guard (see `orphaned-invocation-states`). Seeded below
+          ;; from the fresh-start configuration; deliberately left EMPTY on a resume,
+          ;; because restoring a checkpoint enters nothing and therefore starts nothing.
+          entered-this-run (atom #{})]
+      (sp/register-statechart! registry chart-id chart)
+      ;; Seed the per-(session,node) visit counter from artifacts already on disk so
+      ;; a restart/resume of a looping chart keeps numbering re-entries `max+1` instead
+      ;; of colliding at 0 and overwriting the prior run's captured-I/O. No-op on a
+      ;; fresh session (empty store ⇒ `{}`), so first-run numbering is unchanged.
+      (when-let [artifact-store (:escapement/artifact-store env)]
+        (reset! (:escapement/visit-counts env)
+          (capture/seed-visit-counts artifact-store session-id)))
+      ;; Hook for callers (e.g. CLI's TUI) that need the queue/env at the
+      ;; moment env is built but the chart hasn't started yet. Errors in
+      ;; the callback are caught so they don't take down the runner.
+      (when on-env-ready
+        (try (on-env-ready env)
+             (catch Throwable _ nil)))
+      (doseq [ev prelude-events]
+        (transcript-fn ev))
+      (transcript-fn {:event :runner/started
+                      :data  (cond-> {:session-id (str session-id)
+                                      :chart-id   (str chart-id)
+                                      :resume?    (boolean resume?)}
+                               run-id (assoc :run-id (str run-id)))})
+      (try
+        ;; Start or resume
+        (let [existing (sp/get-working-memory store env session-id)]
+          (if (and resume? existing (seq (::sc/configuration existing #{})))
+            ;; Rehydrate the durable event queue BEFORE the pump loop so delayed/timer
+            ;; events scheduled before the exit (poll ticks, safety stops) are restored;
+            ;; any whose delivery-time has since passed fire immediately, in
+            ;; delivery-time order. Must restore INTO the live queue (the execution model
+            ;; already captured its reference), not swap a new one in.
+            (let [snap        (when (engine-store/file-backed? store)
+                                (engine-store/get-queue-snapshot store session-id))
+                  restored    (engine-queue/restore-into! (::sc/event-queue env) snap)
+                  config      (vec (::sc/configuration existing))
+                  queue       (::sc/event-queue env)]
+              (transcript-fn {:event :runner/resumed
+                              :data  {:config          config
+                                      :restored-events (if restored
+                                                         (engine-queue/pending-count restored)
+                                                         0)}})
+              ;; Emit a chart-observable resume signal so a chart can idempotently
+              ;; re-establish anything a restored TIMER cannot (service registries,
+              ;; acquired resources, a timer already consumed pre-exit). This is the
+              ;; opt-in self-heal seam: a chart adds a transition on `:escapement/resumed`
+              ;; where it needs one; a chart that ignores it simply drains the event as a
+              ;; no-op. We do NOT blanket-replay on-entry (many on-entry actions acquire
+              ;; resources and would double-fire). Host-supplied `:resume-events` follow,
+              ;; letting a CLI/embedder inject its own post-restore events (something
+              ;; `:on-env-ready` — which fires before restore — and transcript-only
+              ;; `:prelude-events` cannot do).
+              (sp/send! queue env {:event :escapement/resumed :target session-id
+                                   :data  {:config config}})
+              (doseq [ev resume-events]
+                (sp/send! queue env (cond-> ev (not (:target ev)) (assoc :target session-id)))))
+            ;; Seed the chart's data model with `:initial-data` by passing it as
+            ;; `::sc/invocation-data` in the start params (per the library's
+            ;; v20150901_impl/initialize!).
+            (let [w0 (sp/start! processor env chart-id
+                       (cond-> {::sc/session-id session-id}
+                         initial-data (assoc ::sc/invocation-data initial-data)))]
+              (sp/save-working-memory! store env session-id w0)
+              ;; A fresh start DID enter every state in the initial configuration, so the
+              ;; library has already started their invocations: seed them as live.
+              (reset! entered-this-run (set (::sc/configuration w0 #{})))
+              (transcript-fn {:event :runner/start-config
+                              :data  {:config (vec (::sc/configuration w0))}}))))
+        ;; Pump. The loop returns a terminal status keyword:
+        ;;   :done          — quiescent with no live invocations (normal)
+        ;;   :aborted        — host cancel signal fired
+        ;;   :frozen-config  — config wedged: no progress with live work for
+        ;;                     `:max-frozen-cycles` consecutive cycles
+        ;;   :orphaned-invocation — parked in a state that declares an `<invoke>`
+        ;;                     with nothing running for it (see the guard below)
+        (let [status
+                         ;; A SINGLE counter, `no-progress`, bounds *consecutive*
+                         ;; no-progress quiescent cycles while live work (or stranded
+                         ;; deliverable events) exist — the frozen-config wedge guard.
+                         ;; It RESETS to 0 on any progress, so an infinite *event-driven*
+                         ;; chart (one that keeps draining events) never trips it and runs
+                         ;; forever — the chart owns its own termination. The old
+                         ;; lifetime `:max-iterations` cap is gone: it counted total pump
+                         ;; iterations without resetting, so it mis-aborted legitimately
+                         ;; infinite event charts. The real *transitionless* (eventless)
+                         ;; loop guard lives in the statecharts library (bounded per
+                         ;; macrostep, fresh each event) and is untouched.
+                         (loop [no-progress 0]
+                           (when trace?
+                             (transcript-fn {:event :runner/tick :data {:no-progress no-progress}}))
+                           (cond
+                             ;; Cancellation is checked FIRST, at the top of the
+                             ;; iteration — a safe boundary between events, never
+                             ;; mid-transcript-write or mid-checkpoint-write — so an
+                             ;; abort can never tear a partial transcript/checkpoint
+                             ;; row. "Promptly" = by the next pump iteration.
+                             (cancel-requested? cancel)
+                             (do (transcript-fn {:event :runner/aborted
+                                                 :data  {:reason :cancelled}})
+                                 :aborted)
 
-                           :else
-                           (let [progressed? (drain-once! {:env            env
-                                                           :session-id     session-id
-                                                           :transcript-fn  transcript-fn
-                                                           :multi-session? multi-session?})]
-                             (if progressed?
-                               ;; Made progress this pass — the config is moving, so
-                               ;; the frozen-config counter resets.
-                               (recur 0)
-                               (let [live        (count-live-invocations env)
-                                     pending     (engine-queue/pending-count
-                                                   (::sc/event-queue env))
-                                     deliverable (engine-queue/deliverable-now-count
-                                                   (::sc/event-queue env))]
-                                 (cond
-                                   ;; A delayed `send` (e.g. a safety-stop timer) sits
-                                   ;; in the queue with a *future* delivery-time. Until
-                                   ;; that time arrives `drain-once!` returns no events
-                                   ;; AND `count-live-invocations` is zero, so without
-                                   ;; this check the loop would declare :done and lose
-                                   ;; the timer. Sleep without bumping `no-progress` —
-                                   ;; this is *planned* idle, not a wedge, and a chart
-                                   ;; waiting on its own timer is a RUNNING chart, so it
-                                   ;; is intentionally UNBOUNDED (the chart owns when it
-                                   ;; ends). Gated on `(zero? deliverable)`: if events
-                                   ;; are deliverable NOW yet drain made no progress,
-                                   ;; they are stranded on sessions this run does not
-                                   ;; pump (e.g. a multiplex chart run without
-                                   ;; `:multi-session?`) — that is a wedge, not a timer,
-                                   ;; so it falls through to the frozen path below.
-                                   (and (zero? live) (pos? pending) (zero? deliverable))
-                                   (do (Thread/sleep ^long quiescent-sleep-ms)
-                                       (recur 0))
+                             :else
+                             (let [progressed? (drain-once! {:env            env
+                                                             :session-id     session-id
+                                                             :transcript-fn  transcript-fn
+                                                             :multi-session? multi-session?
+                                                             :entered-this-run entered-this-run})]
+                               (if progressed?
+                                 ;; Made progress this pass — the config is moving, so
+                                 ;; the frozen-config counter resets.
+                                 (recur 0)
+                                 (let [live        (count-live-invocations env)
+                                       pending     (engine-queue/pending-count
+                                                     (::sc/event-queue env))
+                                       deliverable (engine-queue/deliverable-now-count
+                                                     (::sc/event-queue env))]
+                                   (cond
+                                     ;; A delayed `send` (e.g. a safety-stop timer) sits
+                                     ;; in the queue with a *future* delivery-time. Until
+                                     ;; that time arrives `drain-once!` returns no events
+                                     ;; AND `count-live-invocations` is zero, so without
+                                     ;; this check the loop would declare :done and lose
+                                     ;; the timer. Sleep without bumping `no-progress` —
+                                     ;; this is *planned* idle, not a wedge, and a chart
+                                     ;; waiting on its own timer is a RUNNING chart, so it
+                                     ;; is intentionally UNBOUNDED (the chart owns when it
+                                     ;; ends). Gated on `(zero? deliverable)`: if events
+                                     ;; are deliverable NOW yet drain made no progress,
+                                     ;; they are stranded on sessions this run does not
+                                     ;; pump (e.g. a multiplex chart run without
+                                     ;; `:multi-session?`) — that is a wedge, not a timer,
+                                     ;; so it falls through to the frozen path below.
+                                     (and (zero? live) (pos? pending) (zero? deliverable))
+                                     (do (Thread/sleep ^long quiescent-sleep-ms)
+                                         (recur 0))
 
-                                   (and (zero? live) (zero? deliverable))
-                                   :done                    ;; done — no live work, nothing deliverable stuck
+                                     (and (zero? live) (zero? deliverable))
+                                     ;; Nothing live, nothing deliverable. Normally that is
+                                     ;; :done — including the entirely legitimate case of a
+                                     ;; chart parked in a NON-final state awaiting an external
+                                     ;; event (many charts and tests rely on that). But there
+                                     ;; is one shape that only LOOKS done: a parked state that
+                                     ;; DECLARES an `<invoke>` for which nothing is running.
+                                     ;; That happens after `--resume`, because the library
+                                     ;; starts invocations only from `::sc/states-to-invoke`
+                                     ;; (populated on state ENTRY, cleared each macrostep, so
+                                     ;; never in a checkpoint): the config comes back but the
+                                     ;; worker does not. Left alone, the run would exit 0 with
+                                     ;; `:runner/done` while parked mid-work — a SILENT FALSE
+                                     ;; COMPLETION, worse than a hang because it is invisible.
+                                     ;; A state with NO `<invoke>` is untouched by this and
+                                     ;; still reports :done exactly as before. Terminal-status
+                                     ;; + `:runner/error`, no throw, mirroring :frozen-config.
+                                     (let [orphans (orphaned-invocation-states
+                                                     chart env session-id @entered-this-run)]
+                                       (if (seq orphans)
+                                         (do (transcript-fn
+                                               {:event :runner/error
+                                                :data  {:reason :orphaned-invocation
+                                                        :states (mapv str orphans)
+                                                        :hint   "parked in a state that declares an <invoke> with no live invocation (typically after --resume, which restores configuration but does NOT restart invocations); give the chart a transition on :escapement/resumed to re-establish it"}})
+                                             :orphaned-invocation)
+                                         :done))                ;; done — no live work, nothing deliverable stuck
 
-                                   ;; A LIVE invocation is in-flight (e.g. an LLM turn
-                                   ;; mid-generation) — the run is WORKING, not wedged.
-                                   ;; Wait UNBOUNDEDLY without bumping the frozen counter:
-                                   ;; a slow model (or a long turn over a big context)
-                                   ;; must not be aborted as "frozen" — the agent should
-                                   ;; STOP itself (idle/done/need-human), never BE stopped
-                                   ;; mid-thought. A genuinely hung HTTP call is caught by
-                                   ;; the backend's own request timeout, which posts an
-                                   ;; error event → progress → this loop advances. The
-                                   ;; frozen-config guard below therefore targets only the
-                                   ;; real wedge: events STRANDED on un-drained sessions
-                                   ;; (live = 0, deliverable > 0).
-                                   (pos? live)
-                                   (do (Thread/sleep ^long quiescent-sleep-ms)
-                                       (recur 0))
+                                     ;; A LIVE invocation is in-flight (e.g. an LLM turn
+                                     ;; mid-generation) — the run is WORKING, not wedged.
+                                     ;; Wait UNBOUNDEDLY without bumping the frozen counter:
+                                     ;; a slow model (or a long turn over a big context)
+                                     ;; must not be aborted as "frozen" — the agent should
+                                     ;; STOP itself (idle/done/need-human), never BE stopped
+                                     ;; mid-thought. A genuinely hung HTTP call is caught by
+                                     ;; the backend's own request timeout, which posts an
+                                     ;; error event → progress → this loop advances. The
+                                     ;; frozen-config guard below therefore targets only the
+                                     ;; real wedge: events STRANDED on un-drained sessions
+                                     ;; (live = 0, deliverable > 0).
+                                     (pos? live)
+                                     (do (Thread/sleep ^long quiescent-sleep-ms)
+                                         (recur 0))
 
-                                   ;; No progress, no live work, but deliverable events
-                                   ;; remain (stranded on un-pumped sessions — almost
-                                   ;; always a multiplex chart missing `^:multi-session?`).
-                                   ;; This is the genuine wedge: bump; at the threshold
-                                   ;; emit :runner/error and return a terminal status
-                                   ;; (clean exit, no throw), mirroring :aborted.
-                                   (>= (inc no-progress) max-frozen-cycles)
-                                   (do (transcript-fn {:event :runner/error
-                                                       :data  {:reason           :frozen-config
-                                                               :live-invocations live
-                                                               :pending          pending
-                                                               :deliverable-now  deliverable
-                                                               :cycles           (inc no-progress)
-                                                               ;; `deliverable-now > 0` with no live work means events
-                                                               ;; are stranded on un-pumped sessions — almost always a
-                                                               ;; multiplex chart missing `^:multi-session?`.
-                                                               :hint             (when (and (zero? live) (pos? deliverable))
-                                                                                   "deliverable events stranded on un-drained sessions — does this chart need ^:multi-session?")}})
-                                       :frozen-config)
+                                     ;; No progress, no live work, but deliverable events
+                                     ;; remain (stranded on un-pumped sessions — almost
+                                     ;; always a multiplex chart missing `^:multi-session?`).
+                                     ;; This is the genuine wedge: bump; at the threshold
+                                     ;; emit :runner/error and return a terminal status
+                                     ;; (clean exit, no throw), mirroring :aborted.
+                                     (>= (inc no-progress) max-frozen-cycles)
+                                     (do (transcript-fn {:event :runner/error
+                                                         :data  {:reason           :frozen-config
+                                                                 :live-invocations live
+                                                                 :pending          pending
+                                                                 :deliverable-now  deliverable
+                                                                 :cycles           (inc no-progress)
+                                                                 ;; `deliverable-now > 0` with no live work means events
+                                                                 ;; are stranded on un-pumped sessions — almost always a
+                                                                 ;; multiplex chart missing `^:multi-session?`.
+                                                                 :hint             (when (and (zero? live) (pos? deliverable))
+                                                                                     "deliverable events stranded on un-drained sessions — does this chart need ^:multi-session?")}})
+                                         :frozen-config)
 
-                                   :else
-                                   (do (Thread/sleep ^long quiescent-sleep-ms)
-                                       (recur (inc no-progress)))))))))
-            final-wmem (sp/get-working-memory store env session-id)
-            cfg        (vec (::sc/configuration final-wmem #{}))]
-        (transcript-fn {:event :runner/done
-                        :data  {:final-config cfg
-                                :status       status}})
-        {:final-config   cfg
-         :status         status
-         :session-id     session-id
-         :transcript     transcript-path
-         :checkpoint-dir checkpoint-dir
-         :env            env})
+                                     :else
+                                     (do (Thread/sleep ^long quiescent-sleep-ms)
+                                         (recur (inc no-progress)))))))))
+              final-wmem (sp/get-working-memory store env session-id)
+              cfg        (vec (::sc/configuration final-wmem #{}))]
+          (transcript-fn {:event :runner/done
+                          :data  {:final-config cfg
+                                  :status       status}})
+          {:final-config   cfg
+           :status         status
+           :session-id     session-id
+           :transcript     transcript-path
+           :checkpoint-dir checkpoint-dir
+           :env            env})
+        (catch Throwable t
+          (transcript-fn {:event :runner/error
+                          :data  {:message (.getMessage t)}})
+          (throw t))
+        (finally
+          (transcript/close! sink)
+          (session-lock/release! lock))))
       (catch Throwable t
-        (transcript-fn {:event :runner/error
-                        :data  {:message (.getMessage t)}})
-        (throw t))
-      (finally
-        (transcript/close! sink)))))
+        ;; Covers the window the inner try cannot: a throw while BUILDING the run (opening the
+        ;; transcript, constructing env). The inner `finally` releases on every other path.
+        (session-lock/release! lock)
+        (throw t)))))

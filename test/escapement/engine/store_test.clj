@@ -71,6 +71,73 @@
         "no queue snapshot is present when the env carried no queue"
         (store/get-queue-snapshot s :s6) => nil)))
 
+  (component "schema version: a written record carries ::version and round-trips"
+    (let [dir   (tmp-dir)
+          s     (store/new-store dir)
+          queue (queue/new-queue)
+          env   {::sc/event-queue queue}
+          wm    {::sc/configuration #{:a}}]
+      (sp/send! queue env {:event :tick :target :v1 :delay 60000})
+      (sp/save-working-memory! s env :v1 wm)
+      (store/reload-from-disk! s :v1)
+      (let [record (read-string (slurp (io/file dir "v1.edn")))]
+        (assertions
+          "the on-disk record declares the current schema version"
+          (:escapement.engine.store/version record) => store/current-version
+          "the version key does not leak into the working memory"
+          (sp/get-working-memory s env :v1) => wm
+          "the queue snapshot still projects"
+          (get-in (store/get-queue-snapshot s :v1) [:sessions :v1 0 :event :name]) => :tick))))
+
+  (component "back-compat: an UNVERSIONED combined record still reads"
+    (let [dir   (tmp-dir)
+          s     (store/new-store dir)
+          queue (queue/new-queue)
+          env   {::sc/event-queue queue}
+          wm    {::sc/configuration #{:x :y}}]
+      (sp/send! queue env {:event :old/tick :target :u1 :delay 60000})
+      ;; Hand-write the pre-version combined record exactly as the older build wrote it.
+      (spit (io/file dir "u1.edn")
+        (pr-str {:escapement.engine.store/wmem           wm
+                 :escapement.engine.store/queue-snapshot (queue/snapshot queue)}))
+      (assertions
+        "working memory projects"
+        (sp/get-working-memory s {} :u1) => wm
+        "queue snapshot projects"
+        (get-in (store/get-queue-snapshot s :u1) [:sessions :u1 0 :event :name]) => :old/tick)))
+
+  (component "back-compat: a LEGACY bare-wmem record still reads"
+    (let [dir (tmp-dir)
+          s   (store/new-store dir)
+          wm  {::sc/configuration #{:legacy}}]
+      (spit (io/file dir "l1.edn") (pr-str wm))
+      (assertions
+        "the bare map IS the working memory"
+        (sp/get-working-memory s {} :l1) => wm
+        "there is no queue snapshot"
+        (store/get-queue-snapshot s :l1) => nil)))
+
+  (component "a checkpoint from a NEWER Escapement is a hard error"
+    (let [dir (tmp-dir)
+          s   (store/new-store dir)]
+      (spit (io/file dir "f1.edn")
+        (pr-str {:escapement.engine.store/version (inc store/current-version)
+                 :escapement.engine.store/wmem    {::sc/configuration #{:a}}}))
+      (assertions
+        "reading throws with actionable data"
+        (try
+          (sp/get-working-memory s {} :f1)
+          :no-throw
+          (catch Exception e (ex-data e)))
+        => {:checkpoint-version (inc store/current-version)
+            :supported-version  store/current-version}
+        "the message names the cause"
+        (try
+          (sp/get-working-memory s {} :f1)
+          nil
+          (catch Exception e (boolean (re-find #"newer version of Escapement" (ex-message e)))))
+        => true)))
+
   (component "retained history: save-index-keyed snapshots enable at-or-before lookup"
     (let [dir   (tmp-dir)
           s     (store/new-store dir {:retain-history? true})

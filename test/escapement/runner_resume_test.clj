@@ -15,7 +15,7 @@
     [clojure.java.io :as io]
     [com.fulcrologic.statecharts :as-alias sc]
     [com.fulcrologic.statecharts.chart :as chart]
-    [com.fulcrologic.statecharts.elements :refer [final on-entry script state transition]]
+    [com.fulcrologic.statecharts.elements :refer [final invoke on-entry script state transition]]
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.engine.queue :as queue]
     [escapement.engine.store :as store]
@@ -174,3 +174,92 @@
       "the resume transcript reports the restored pending-event count"
       (let [rows (with-open [r (io/reader transcript2)] (doall (line-seq r)))]
         (boolean (some #(re-find #"\"restored-events\":1" %) rows))) => true)))
+
+;; ---------------------------------------------------------------------------
+;; The orphaned-invocation guard
+;; ---------------------------------------------------------------------------
+
+(def orphan-child-chart
+  "Invoked child. Parks forever (its only transition awaits an event nobody sends)
+   so the parent's `<invoke>` is genuinely long-lived during run 1."
+  (chart/statechart {:initial :busy}
+    (state {:id :busy}
+      (on-entry {} (script {:expr (fn [_ _] (bump! :child) nil)}))
+      (transition {:event :never :target :child-done}))
+    (final {:id :child-done})))
+
+(def orphan-parent-chart
+  "Parks in :working with a live child-chart `<invoke>`. On resume the library does
+   NOT restart that invocation (invocations start only on state ENTRY, and restoring
+   a checkpoint enters nothing), so :working is parked with a dead `<invoke>`."
+  (chart/statechart {:initial :working}
+    (state {:id :working}
+      (invoke {:id :job :type :com.fulcrologic.statecharts/chart :src :orphan/child})
+      (transition {:event :finish :target :parent-done}))
+    (final {:id :parent-done})))
+
+(specification "runner resume: a parked state whose <invoke> is dead reports :orphaned-invocation, not a false :done"
+  (let [dir         (tmp-dir "runner-resume-orphan-")
+        chk         (str dir "/chk")
+        transcript1 (str dir "/run1.jsonl")
+        transcript2 (str dir "/run2.jsonl")
+        sid         :resume-orphan/session
+        entries     (atom {})
+        base        {:chart              orphan-parent-chart
+                     :session-id         sid
+                     :checkpoint-dir     chk
+                     :quiescent-sleep-ms 5
+                     :max-frozen-cycles  20
+                     ;; `run!` takes no `:invocation-processors`, so the child is
+                     ;; registered through the env-ready hook and invoked by the
+                     ;; built-in chart-as-invokable processor.
+                     :on-env-ready       (fn [env]
+                                           (sp/register-statechart!
+                                             (::sc/statechart-registry env) :orphan/child orphan-child-chart))}
+        r1          (binding [*entries* entries]
+                      (runner/run! (assoc base :transcript-path transcript1)))
+        after-1     @entries
+        _           (reset! entries {})
+        r2          (binding [*entries* entries]
+                      (runner/run! (assoc base :transcript-path transcript2 :resume? true)))]
+    (assertions
+      "run 1 started the child invocation"
+      (get after-1 :child) => 1
+      "run 1 parked in :working (the invoking state)"
+      (:final-config r1) => [:working]
+      "resume did NOT restart the invocation"
+      (get @entries :child) => nil
+      "resume still restores the invoking configuration"
+      (:final-config r2) => [:working]
+      "resume does NOT report a false :done"
+      (:status r2) => :orphaned-invocation
+      "the transcript records the reason and the offending state"
+      (let [rows (with-open [r (io/reader transcript2)] (doall (line-seq r)))
+            row  (first (filter #(re-find #"orphaned-invocation" %) rows))]
+        (boolean (and row (re-find #"runner/error" row) (re-find #"working" row)))) => true)))
+
+(specification "runner resume: the guard does NOT fire for a state parked with no <invoke>"
+  ;; Regression fence for over-triggering: parking in a non-final state simply
+  ;; awaiting an external event is legitimate and must still report :done.
+  (let [dir         (tmp-dir "runner-resume-no-orphan-")
+        chk         (str dir "/chk")
+        transcript1 (str dir "/run1.jsonl")
+        transcript2 (str dir "/run2.jsonl")
+        sid         :resume-no-orphan/session
+        entries     (atom {})
+        base        {:chart two-step-chart :session-id sid :checkpoint-dir chk
+                     :quiescent-sleep-ms 5}
+        r1          (binding [*entries* entries]
+                      (runner/run! (assoc base :transcript-path transcript1)))
+        r2          (binding [*entries* entries]
+                      (runner/run! (assoc base :transcript-path transcript2 :resume? true)))]
+    (assertions
+      "fresh run parked awaiting :go and reported :done"
+      (:status r1) => :done
+      "resume into the same invoke-less parked state still reports :done"
+      (:status r2) => :done
+      "and it really is parked in a non-final state"
+      (boolean (some #{:a} (:final-config r2))) => true
+      "no :orphaned-invocation error was emitted"
+      (let [rows (with-open [r (io/reader transcript2)] (doall (line-seq r)))]
+        (boolean (some #(re-find #"orphaned-invocation" %) rows))) => false)))
