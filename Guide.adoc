@@ -4609,7 +4609,7 @@ Escapement therefore never collapses the two ids. The requested id and the id th
 --
 ** **Anthropic assistant prefill** — documented by Anthropic, unverified here; deliberately left enabled rather than downgraded on a guess.
 ** **OpenAI `reasoning_effort` `"none"` and `"minimal"`** — no `OPENAI_API_KEY` was available. `:effort :none` therefore emits *nothing* on the OpenAI dialect (the provider default applies) rather than a guessed wire value, and `:minimal` is sent as `"low"`.
-** **The Responses API `"xhigh"` effort level** — model-dependent and unconfirmed, so `:effort :max` renders as `"high"`. A caller who needs `xhigh` specifically can pass it through by supplying `:reasoning` with a *string* `:effort`, which is sent verbatim on that wire.
+** **The Responses API `"xhigh"` effort level** — confirmed on ONE implementation of that wire, not on the other. z.ai's coding-plan endpoint validates the field and names its accepted set in the error text (`none, minimal, low, medium, high, xhigh, max`), and a bogus value is a 400 there, so the check discriminates. OpenAI's own Responses models remain unverified — a different implementation of the same wire. `:effort :max` therefore still renders as `"high"` for everyone. A caller who needs `xhigh` on an endpoint that accepts it can pass it verbatim by supplying `:reasoning` with a *string* `:effort`.
 ** **Ollama reasoning models and prefill** — inconclusive: they returned reasoning and no content under every output cap tried, so their prefill behaviour was never established. The hard `400` recorded above came from a non-reasoning model on the same endpoint.
 --
 

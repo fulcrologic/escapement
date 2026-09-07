@@ -42,8 +42,22 @@
      `reasoning_effort` values are emitted, but `:none` omits the field
      (provider default) rather than guessing at a wire value, and `:minimal`
      is emitted as \"low\".
-   - Codex/Responses `:max` — emitted as \"high\", not \"xhigh\"; the xhigh
-     level is model-dependent and was not confirmed."
+   - Codex/Responses `:max` — emitted as \"high\", not \"xhigh\".
+
+     PARTIALLY RESOLVED 2026-09-07. z.ai's coding-plan Responses endpoint
+     validates the field and enumerates its accepted values in the error:
+     `reasoning_effort must be one of: none, minimal, low, medium, high, xhigh,
+     max` — verified discriminating, since a bogus value is a 400 while
+     `xhigh` completes. So on THAT endpoint `xhigh` (and `none`, and `max`) are
+     real levels and this mapping is conservative.
+
+     It is still NOT confirmed on OpenAI's own Responses models, which is a
+     different implementation of the same wire and the one the `:codex`
+     provider talks to; a permissive or stricter validator there proves nothing
+     either way from this evidence. The mapping therefore stays conservative
+     for everyone. A caller who needs a specific level on an endpoint that
+     accepts it can pass it verbatim through the string-`:effort` passthrough
+     (see `escapement.llm.types/ReasoningPassthrough`)."
   (:require
     [escapement.llm.types :as types]))
 
