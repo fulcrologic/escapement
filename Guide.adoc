@@ -4285,14 +4285,30 @@ Each names a
 ----
 ;; app-lifetime, built once at startup
 (def llm-credentials
-  [{:provider :z-ai-plan :subscription true}
+  [{:provider :z-ai-plan}                                    ; subscription: no key
    {:provider :anthropic :api-key (System/getenv "ANTHROPIC_API_KEY")}
    {:provider :openai    :api-key (System/getenv "OPENAI_API_KEY")}])
 ----
 
-Per-descriptor keys: `:provider` (required keyword), and any of
-`:api-key`, `:base-url`, `:model`, `:default-model`, `:auth-mode`,
-`:subscription`.
+**The keys that are honoured** are `:provider` (required keyword), `:api-key`,
+`:base-url`, `:model`, `:default-model`, `:auth-mode` and `:reasoning-dialect`
+— and `:auth-mode` only reaches the Anthropic-shaped providers, since the
+OpenAI-shaped ones authenticate one way. The descriptor map is not closed, so
+**any other key is accepted by validation and then silently ignored**: an
+`:http-timeout-ms` written here does not change the timeout, which comes from
+the provider template. If you need a knob that is not in that list, construct
+the backend yourself and pass it as `:backend`.
+
+`:subscription` is a special case worth stating plainly: it is **accepted and
+inert**. It appears in the schema for backwards compatibility with hosts
+already passing it, but nothing reads it — whether a provider bills a
+subscription is a fact about the provider, taken from the model catalog, not
+something a descriptor declares. Do not write it in new code; it selects
+nothing.
+
+An unrecognised `:provider` keyword is dropped rather than fatal (so a host may
+pass a superset of descriptors across library versions), but it is **warned**,
+naming both the unknown keyword and the known set.
 The backend is assembled from this vector via
 `escapement.llm.providers/build-injected-credentials-backend` (zero env, zero disk), ordered by the resolved preference list.
 An explicit

@@ -224,6 +224,10 @@
               [:base-url {:optional true} :string]
               [:default-model {:optional true} :string]
               [:model {:optional true} :string]
+              ;; Accepted and INERT — nothing reads it. Subscription billing is
+              ;; a fact about the provider (model catalog `:auth`), not
+              ;; something a descriptor declares. Kept so existing configs
+              ;; still load.
               [:subscription {:optional true} :boolean]]]]
    [:llm {:optional true} :any]])
 
