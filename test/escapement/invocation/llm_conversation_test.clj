@@ -144,7 +144,12 @@
   (assertions
     "resolves the model's catalog output cap"
     (llmc/effective-max-tokens "claude-sonnet-5") => 128000
-    (llmc/effective-max-tokens "claude-3-sonnet-20240229") => 4096
+    ;; A second model with a DIFFERENT cap, so this cannot pass by returning a
+    ;; constant. `claude-3-sonnet-20240229` used to serve that role and was
+    ;; retired from models.dev upstream — a catalog refresh legitimately drops
+    ;; ids, and an id the catalog no longer knows correctly returns nil (the
+    ;; backend's own default then applies), which the next assertion covers.
+    (llmc/effective-max-tokens "claude-haiku-4-5") => 64000
     "unknown model → nil (backend wire default applies)"
     (llmc/effective-max-tokens "totally-unknown-model") => nil
     "nil model (backend default pick) → nil"
@@ -1516,7 +1521,7 @@
                     :aliases         {:small [{:provider :openai :model "gpt-4o-mini"}]}
                     :preferences     [:small]
                     :catalog-ratings {}
-                    :parent-ctx      {:invokeid "iv"}}
+                    :parent-ctx      {:invokeid "iv" :parent-session-id "sess-1"}}
                    {:needs {:context-tokens [:>= 999999999]}}
                    [{:role :user :content [{:type :text :text "hi"}]}]
                    [])
@@ -1524,6 +1529,8 @@
     (assertions
       "the event was emitted"
       (some? ev) => true
+      "it names the invocation and session it belongs to"
+      (select-keys (:data ev) [:invokeid :session-id]) => {:invokeid "iv" :session-id "sess-1"}
       "it carries the resolved (canonical) policy"
       (get-in ev [:data :policy]) => {:require {} :min {:context-tokens 999999999} :max {}}
       "strict? is false by default"
@@ -1544,7 +1551,7 @@
                     :preferences         [:small]
                     :catalog-ratings     {}
                     :eligibility-strict? true
-                    :parent-ctx          {:invokeid "iv"}}
+                    :parent-ctx          {:invokeid "iv" :parent-session-id "sess-1"}}
                    {:needs {:context-tokens [:>= 999999999]}}
                    [{:role :user :content [{:type :text :text "hi"}]}]
                    [])
@@ -1552,6 +1559,8 @@
     (assertions
       "the gap event still records strict?=true"
       (get-in ev [:data :strict?]) => true
+      "and names the invocation and session it belongs to"
+      (select-keys (:data ev) [:invokeid :session-id]) => {:invokeid "iv" :session-id "sess-1"}
       "no turn was issued (fail-closed)"
       (:ok result) => nil
       "the :eligibility-empty shape is returned for the caller to fail the node"
@@ -1620,12 +1629,21 @@
     => {:max-retries 3 :backoff-ms 500
         :latency {:first-token-ms nil :fallback nil}
         :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
-                  :temperature-bump nil :temperature-max 1.0}}
+                  :temperature-bump nil :temperature-max 1.0}
+        :continuation {:enabled? true :max-segments 64 :max-chars 2000000}}
     (#'llmc/params->resilience {:resilience {:max-retries 0}})
     => {:max-retries 0 :backoff-ms 500
         :latency {:first-token-ms nil :fallback nil}
         :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
-                  :temperature-bump nil :temperature-max 1.0}}
+                  :temperature-bump nil :temperature-max 1.0}
+        :continuation {:enabled? true :max-segments 64 :max-chars 2000000}}
+    "a nested override keeps that group's other defaults (a shallow merge dropped them)"
+    (:continuation (#'llmc/params->resilience {:resilience {:continuation {:max-segments 3}}}))
+    => {:enabled? true :max-segments 3 :max-chars 2000000}
+    "and the same holds for the other resilience groups"
+    (:overrun (#'llmc/params->resilience {:resilience {:overrun {:max-retries 2}}}))
+    => {:max-output-tokens nil :max-retries 2 :on-exhausted :truncate
+        :temperature-bump nil :temperature-max 1.0}
     "merge-segment-content stitches text across a truncation boundary"
     (#'llmc/merge-segment-content [{:type :text :text "Hel"}]
       [{:type :text :text "lo"}])
@@ -1670,6 +1688,334 @@
       "stuck model surfaces :no-progress (handler maps it to :error.llm.unexpected-stop)"
       (boolean (:no-progress result)) => true
       (contains? result :ok) => false)))
+
+(specification "drive-turn!: a provider that RESTARTS instead of continuing is caught"
+  ;; Verified live 2026-09-07: DeepSeek and opencode-go resume a prefilled
+  ;; partial turn; OpenRouter and z.ai silently start the message over. Merging
+  ;; a restart onto the accumulation produces a document containing its own
+  ;; prefix twice — no error, plausible transcript. That is the bug this
+  ;; guards, and the pre-existing :no-progress guard cannot see it, because a
+  ;; restart is never exactly equal to what came before.
+
+  (let [prefix   "The quick brown fox jumps over the lazy dog and keeps running for a while"
+        captured (atom [])
+        backend  (mock-backend [(max-tokens-response prefix)
+                                ;; the provider ignores the prefill and starts again
+                                (end-turn-response (str prefix " and then some more"))])
+        result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                   {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+    (assertions
+      "the restart is not stitched — the turn aborts instead"
+      (contains? result :ok) => false
+
+      "reported through the existing terminal path, with its own detail"
+      (:detail result) => :continuation-restarted
+
+      "the content kept is what we had, NOT the duplicated merge"
+      (->> (get-in result [:no-progress :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+      => prefix
+
+      "and it is observable in the transcript"
+      (count (filter #(= :llm/continuation-restarted (:event %)) @captured)) => 1))
+
+  (component "a legitimate resume is never mistaken for a restart"
+    (let [captured (atom [])
+          backend  (mock-backend [(max-tokens-response "Hel")
+                                  (end-turn-response "lo world")])
+          result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "the segments stitch as before"
+        (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+        => "Hello world"
+
+        "no restart was reported"
+        (count (filter #(= :llm/continuation-restarted (:event %)) @captured)) => 0)))
+
+  (component "the detector itself"
+    (let [blocks (fn [t] [{:type :text :text t}])
+          long-a (apply str (repeat 10 "abcdefghij"))]
+      (assertions
+        "a segment repeating the accumulated opening is a restart"
+        (#'llmc/continuation-restarted? (blocks long-a) (blocks (str long-a " more"))) => true
+
+        "a genuine resume is not"
+        (#'llmc/continuation-restarted? (blocks long-a) (blocks " and then more")) => false
+
+        "a short accumulation cannot false-positive on a coincidence"
+        (#'llmc/continuation-restarted? (blocks "Hel") (blocks "lo world")) => false
+
+        "nothing accumulated yet, nothing to restart"
+        (#'llmc/continuation-restarted? nil (blocks long-a)) => false))))
+
+(specification "drive-turn!: continuation is not attempted where it is KNOWN not to work"
+  ;; Evidence-only, per provider. Ollama answers a trailing assistant message
+  ;; with a hard 400 ("Expected last role User or Tool (or Assistant with
+  ;; prefix True)"), the claude CLI accepts only type:user messages, and the
+  ;; Responses wire starts a new message. Everything else keeps today's
+  ;; behaviour — notably Anthropic, whose prefill support is documented and was
+  ;; simply not verifiable here.
+
+  (let [captured (atom [])
+        truncated (assoc-in (max-tokens-response "half a document")
+                    [:backend-metadata :prefill-unsupported?] true)
+        backend  (mock-backend [truncated (end-turn-response "should never be asked for")])
+        result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                   {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+    (assertions
+      "the turn stops at the truncation instead of spending a doomed call"
+      (:detail result) => :continuation-unsupported
+
+      "the partial content is kept, not discarded"
+      (->> (get-in result [:no-progress :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+      => "half a document"
+
+      "and it is observable"
+      (count (filter #(= :llm/continuation-unsupported (:event %)) @captured)) => 1
+
+      "no continuation was requested"
+      (count (filter #(= :llm/continuation (:event %)) @captured)) => 0))
+
+  (component "an untagged backend continues exactly as before"
+    (let [captured (atom [])
+          backend  (mock-backend [(max-tokens-response "Hel") (end-turn-response "lo world")])
+          result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "stitched as before"
+        (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+        => "Hello world"))))
+
+(defrecord AlwaysTruncatingBackend [n counter]
+  ;; A model that hits the output cap on EVERY segment. Each segment is genuine
+  ;; new content, so forward progress is real every round and the no-progress
+  ;; guard never trips — the exact shape that used to grow the accumulation
+  ;; until the JVM died with an OutOfMemoryError in the runner.
+  llm/LLMBackend
+  (send-turn [_ _]
+    (p/do!
+      (swap! counter inc)
+      {:stop-reason :max_tokens
+       ;; DISTINCT text per segment: identical repeated content would (rightly)
+       ;; be classified as a restart by `continuation-restarted?`, which is a
+       ;; different failure. This is the honest shape — real new content every
+       ;; round, real forward progress, and still unbounded.
+       :content     [{:type :text :text (apply str (repeat n (char (+ 97 (mod @counter 26)))))}]
+       :usage       {:input-tokens 1 :output-tokens 1}
+       :model       "mock"})))
+
+(specification "drive-turn!: a model that truncates every segment is bounded, not fatal"
+  ;; Regression: with only the forward-progress guard this looped forever,
+  ;; growing the stitched content each round, and killed the runner with an
+  ;; OutOfMemoryError that said nothing about continuation. Reachable with any
+  ;; model under a tight output cap, not just adversarially.
+
+  (component "the segment ceiling stops it"
+    (let [captured (atom [])
+          counter  (atom 0)
+          result   (#'llmc/drive-turn! (drive-ctx (->AlwaysTruncatingBackend 8 counter) captured)
+                     {:resilience {:continuation {:max-segments 5 :max-chars 1000000}}}
+                     [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "it terminates at all"
+        (some? result) => true
+
+        "through the terminal path, with a named detail"
+        (:detail result) => :continuation-limit
+
+        "after exactly the configured number of segments"
+        @counter => 5
+
+        "everything stitched so far is kept — the caller still gets what it paid for"
+        (count (->> (get-in result [:no-progress :content])
+                 (filter #(= :text (:type %))) (map :text) (apply str))) => 40
+
+        "and the limit is observable"
+        (count (filter #(= :llm/continuation-limit (:event %)) @captured)) => 1)))
+
+  (component "the size ceiling stops it — the axis that actually OOMed"
+    (let [captured (atom [])
+          counter  (atom 0)
+          result   (#'llmc/drive-turn! (drive-ctx (->AlwaysTruncatingBackend 500 counter) captured)
+                     {:resilience {:continuation {:max-segments 1000 :max-chars 2000}}}
+                     [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "a few huge segments trip the char ceiling long before the segment count"
+        (:detail result) => :continuation-limit
+
+        "stopped as soon as the accumulation reached the ceiling"
+        @counter => 4)))
+
+  (component "the DEFAULT ceilings terminate it — this is the OOM regression"
+    ;; No resilience params at all: the shape that killed the runner.
+    (let [captured (atom [])
+          counter  (atom 0)
+          result   (#'llmc/drive-turn! (drive-ctx (->AlwaysTruncatingBackend 16 counter) captured)
+                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "it terminates on the built-in defaults, with no configuration"
+        (:detail result) => :continuation-limit
+
+        "at the default segment ceiling"
+        @counter => 64)))
+
+  (component "a well-behaved run is unaffected by the defaults"
+    (let [captured (atom [])
+          backend  (mock-backend [(max-tokens-response "Hel") (end-turn-response "lo world")])
+          result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "still stitches normally under the default ceilings"
+        (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+        => "Hello world"
+
+        "and no limit event fires"
+        (count (filter #(= :llm/continuation-limit (:event %)) @captured)) => 0))))
+
+(defrecord CountingTruncatingBackend [counter]
+  ;; Always truncates, and counts the calls. Call COUNT is the whole point: the
+  ;; cost of each configuration is what distinguishes them.
+  llm/LLMBackend
+  (send-turn [_ _]
+    (p/do!
+      (let [n (swap! counter inc)]
+        {:stop-reason :max_tokens
+         ;; distinct per call — identical text would trip the restart guard
+         :content     [{:type :text :text (str "segment-" n " ")}]
+         :usage       {:input-tokens 1 :output-tokens 1}
+         :model       "mock"}))))
+
+(specification "continuation off and bounded reruns are independent"
+  ;; These two were once welded together: continuation was skipped ONLY when
+  ;; `:overrun :max-retries` was positive, so a caller who wanted "do not
+  ;; continue a truncated turn" had to buy a full extra generation on every
+  ;; truncation. Measured, not theorised — the rerun fires with no
+  ;; `:max-output-tokens` ceiling configured. All three combinations must now be
+  ;; selectable on their own, and the call count is what proves it.
+
+  (component "continuation OFF, no reruns — one call, and that is all"
+    (let [counter (atom 0)
+          result  (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend counter) (atom []))
+                    {:resilience {:continuation {:enabled? false}}}
+                    [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "exactly one call — no continuation, and no rerun it never asked for"
+        @counter => 1
+
+        "the truncated turn is returned as-is"
+        (get-in result [:ok :stop-reason]) => :max_tokens
+
+        "with its partial content intact"
+        (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+        => "segment-1 ")))
+
+  (component "continuation OFF, WITH reruns — the rerun is still available"
+    ;; Deliberately preserved: a second attempt can land a complete answer where
+    ;; the first was cut off, so this is a retry with a real success rate, not a
+    ;; no-op. A caller trading correctness against cost should choose it.
+    (let [counter (atom 0)]
+      (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend counter) (atom []))
+        {:resilience {:overrun {:max-retries 1 :on-exhausted :truncate}}}
+        [{:role :user :content [{:type :text :text "hi"}]}] [])
+      (assertions
+        "the initial call plus one rerun"
+        @counter => 2)))
+
+  (component "continuation ON — the default, unchanged"
+    (let [counter (atom 0)
+          result  (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend counter) (atom []))
+                    {:resilience {:continuation {:max-segments 3}}}
+                    [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "it continues, stitching until the ceiling"
+        @counter => 3
+
+        "and the segments are stitched, not discarded"
+        (->> (get-in result [:no-progress :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+        => "segment-1 segment-2 segment-3 ")))
+
+  (component "turning continuation off costs nothing extra"
+    ;; The bug, stated as a comparison: the same intent, at two different prices.
+    (let [off-only (atom 0)
+          via-overrun (atom 0)]
+      (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend off-only) (atom []))
+        {:resilience {:continuation {:enabled? false}}}
+        [{:role :user :content [{:type :text :text "hi"}]}] [])
+      (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend via-overrun) (atom []))
+        {:resilience {:overrun {:max-retries 1 :on-exhausted :truncate}}}
+        [{:role :user :content [{:type :text :text "hi"}]}] [])
+      (assertions
+        "the explicit off-switch spends one generation"
+        @off-only => 1
+
+        "reaching the same suppression through :overrun spends two"
+        @via-overrun => 2))))
+
+(defrecord AlwaysFailingBackend []
+  llm/LLMBackend
+  (send-turn [_ _]
+    (p/do! (throw (llm/llm-error :overloaded "HTTP 503 upstream is overloaded" {})))))
+
+(defn- error-ctx
+  "A worker ctx complete enough to drive ONE turn through
+   `handle-running-turn!`, which is where `:llm/error` is emitted."
+  [backend captured]
+  {:backend        backend
+   :transcript-fn  (fn [ev] (swap! captured conj ev))
+   :worker-state   (atom :running)
+   :model-status   (atom {})
+   :default-models ["mock"]
+   :messages-atom  (atom [])
+   :retry-counts   (atom {})
+   :turn-count     (atom 1)
+   :params         {:resilience {:max-retries 0 :backoff-ms 0}}
+   :parent-ctx     {:invokeid "design-node" :parent-session-id "sess-1"}})
+
+(specification "every invocation-scoped event carries its :invokeid"
+  ;; `:llm/error` was the ONE llm event emitted without one, while its six
+  ;; siblings (:llm/start :llm/request :llm/retry :llm/model-down
+  ;; :llm/worker-exit :llm/response) all carried it. A host tap filtering on
+  ;; :invokeid — the documented way to attribute an event to an invocation —
+  ;; therefore received every event about a failing turn EXCEPT the one saying
+  ;; what went wrong, so the failure reason, the category and the
+  ;; `:partial-usage` of the failed turn were all unreachable.
+
+  (component "a failing turn's error event is attributable"
+    (let [captured (atom [])
+          _        (#'llmc/handle-running-turn!
+                     (error-ctx (->AlwaysFailingBackend) captured)
+                     (fn [_ _] nil) :on-end)
+          errs     (filter #(= :llm/error (:event %)) @captured)]
+      (assertions
+        "the error event was emitted"
+        (count errs) => 1
+
+        "and it names the invocation it belongs to"
+        (get-in (first errs) [:data :invokeid]) => "design-node"
+
+        "and the session, like its siblings"
+        (get-in (first errs) [:data :session-id]) => "sess-1"
+
+        "the diagnosis rides with it — a 503 must not read as anything else"
+        (get-in (first errs) [:data :category]) => :overloaded)))
+
+  (component "no invocation-scoped event in a failing run is left unattributable"
+    ;; The general invariant, not just the one event the failing run happened to
+    ;; expose. Run-level events (`:runner/*`, `:checkpoint/*`) are excluded by
+    ;; construction — they belong to no invocation and none is emitted here.
+    (let [captured (atom [])
+          _        (#'llmc/handle-running-turn!
+                     (error-ctx (->AlwaysFailingBackend) captured)
+                     (fn [_ _] nil) :on-end)
+          orphans  (->> @captured
+                     (remove #(get-in % [:data :invokeid]))
+                     (mapv :event))]
+      (assertions
+        "every emitted event is attributable to the invocation"
+        orphans => []
+
+        "and the run did emit something, so this is not vacuous"
+        (boolean (seq @captured)) => true))))
 
 (specification "try-models!: transient category is retried (bounded) then succeeds"
   (let [captured (atom [])
@@ -1924,3 +2270,367 @@
           (:messages base-request)))
       => false)))
 
+
+;; ---------------------------------------------------------------------------
+;; Model identity: requested vs reported ids on the transcript
+;; ---------------------------------------------------------------------------
+
+(defn- events-named [transcript event-kw]
+  (filterv #(= event-kw (:event %)) transcript))
+
+(defn- run-aliased-chart!
+  "Run a one-turn chart whose worker resolves `:primary` → provider :a /
+   model \"asked-for\" and answers with `backend`. Returns the captured
+   transcript once the chart has parked on :llm.idle (or `max-ms` elapsed)."
+  [backend]
+  (let [captured  (atom [])
+        chart     (chart/statechart
+                    {:initial :wrap}
+                    (state {:id :wrap :initial :work}
+                      (state {:id :work}
+                        (h/llm-conversation {:id "p" :message "go"})
+                        (transition {:event :llm.idle :target :done})
+                        (transition {:event :error.llm.* :target :failed}))
+                      (final {:id :done})
+                      (final {:id :failed})))
+        processor (llmc/new-processor
+                    {:backend       backend
+                     :tool-registry (tp/new-registry)
+                     :transcript-fn (fn [ev] (swap! captured conj ev))
+                     :aliases       {:primary [{:provider :a :model "asked-for"}]}
+                     :preferences   [:primary]})
+        t         (-> (dct/new-testing-env {:statechart chart} processor)
+                    (dct/start!))
+        t         (await-config! t :done 3000)]
+    {:in-done? (dct/in? t :done) :transcript @captured}))
+
+(specification "a silent model substitution is recorded on the transcript"
+  ;; Providers substitute silently (a retired id answered by its successor)
+  ;; and return a normal 200. The transcript keeps BOTH ids on the response
+  ;; row and emits a dedicated :llm/model-substituted row so anything pricing
+  ;; or comparing the run by the id it ASKED for can see it was wrong.
+
+  (component "the provider answers with a different model than requested"
+    (let [{:keys [in-done? transcript]}
+          (run-aliased-chart!
+            (mock-backend [(assoc (end-turn-response "ok") :model "answered-with")]))
+          resp (first (events-named transcript :llm/response))
+          subs (events-named transcript :llm/model-substituted)]
+      (assertions
+        "the turn still completes — a substitution is not an error"
+        in-done? => true
+
+        "the :llm/response row keeps the id the provider reported"
+        (get-in resp [:data :model]) => "answered-with"
+
+        "AND the id that was asked for, never collapsed into one field"
+        (get-in resp [:data :model-requested]) => "asked-for"
+
+        "and flags the mismatch"
+        (get-in resp [:data :model-substituted?]) => true
+
+        "exactly one :llm/model-substituted row is emitted"
+        (count subs) => 1
+
+        "carrying both ids"
+        (select-keys (:data (first subs)) [:requested :reported])
+        => {:requested "asked-for" :reported "answered-with"}
+
+        "and attributable to the invocation and its session"
+        (select-keys (:data (first subs)) [:invokeid :session-id])
+        => {:invokeid "p" :session-id :dcch.test/session})))
+
+  (component "the provider answers with the model requested"
+    (let [{:keys [in-done? transcript]}
+          (run-aliased-chart!
+            (mock-backend [(assoc (end-turn-response "ok") :model "asked-for")]))
+          resp (first (events-named transcript :llm/response))]
+      (assertions
+        "the turn completes"
+        in-done? => true
+
+        "the response row still records what was asked for"
+        (get-in resp [:data :model-requested]) => "asked-for"
+
+        "nothing is flagged"
+        (contains? (:data resp) :model-substituted?) => false
+
+        "and no substitution row is emitted"
+        (events-named transcript :llm/model-substituted) => []))))
+
+;; ---------------------------------------------------------------------------
+;; :partial-usage — what a turn burned before it failed or was cancelled
+;; ---------------------------------------------------------------------------
+
+(defrecord FailingStreamBackend [usages throw-fn]
+  ;; Streams a delta per entry in `usages` — each carrying the running
+  ;; cumulative `:usage`, exactly as the real streaming backends do — and
+  ;; THEN dies with `(throw-fn)`.
+  llm/LLMBackend
+  (send-turn [_ _] (p/do! (end-turn-response "unreachable")))
+  llm/StreamingLLMBackend
+  (stream-turn [_ _ on-delta]
+    (p/do!
+      (doseq [u usages]
+        (on-delta {:type :text-delta :text "tok" :usage u}))
+      (throw (throw-fn)))))
+
+(defn- streaming-error-ctx
+  "`error-ctx` with streaming on, so the delta-sink (and therefore the
+   partial-usage accounting) is engaged."
+  [backend captured]
+  (assoc (error-ctx backend captured)
+    :params {:stream? true :resilience {:max-retries 0 :backoff-ms 0}}))
+
+(specification "a turn that did not complete still reports what it burned"
+  ;; The running usage from a streamed turn's deltas used to die with the
+  ;; stream. A cancelled run is exactly when someone wants to know what it
+  ;; cost, so the LAST cumulative usage seen rides on the failure rows.
+
+  (component "a streamed turn that errors → :llm/error carries :partial-usage"
+    (let [captured (atom [])
+          backend  (->FailingStreamBackend
+                     [{:input-tokens 10 :output-tokens 1}
+                      {:input-tokens 10 :output-tokens 4}]
+                     (fn [] (llm/llm-error :overloaded "503" {})))
+          _        (#'llmc/handle-running-turn!
+                     (streaming-error-ctx backend captured)
+                     (fn [_ _] nil) :on-end)
+          err      (first (events-named @captured :llm/error))]
+      (assertions
+        "the error row was emitted"
+        (some? err) => true
+
+        "it carries the usage seen on the wire before the failure"
+        (get-in err [:data :partial-usage]) => {:input-tokens 10 :output-tokens 4}
+
+        "and is still attributable"
+        (get-in err [:data :invokeid]) => "design-node")))
+
+  (component "a streamed turn that is cancelled → :llm/worker-exit carries :partial-usage"
+    (let [captured (atom [])
+          backend  (->FailingStreamBackend
+                     [{:input-tokens 10 :output-tokens 4}]
+                     (fn [] (InterruptedException. "cancelled")))
+          _        (#'llmc/handle-running-turn!
+                     (streaming-error-ctx backend captured)
+                     (fn [_ _] nil) :on-end)
+          exit     (first (events-named @captured :llm/worker-exit))]
+      (assertions
+        "the worker-exit row was emitted for the mid-turn interrupt"
+        (get-in exit [:data :reason]) => :interrupted-mid-turn
+
+        "it carries the usage burned before the cancel"
+        (get-in exit [:data :partial-usage]) => {:input-tokens 10 :output-tokens 4}
+
+        "and is attributable to the invocation and its session"
+        (select-keys (:data exit) [:invokeid :session-id])
+        => {:invokeid "design-node" :session-id "sess-1"})))
+
+  (component "nothing is invented when nothing was seen"
+    ;; The non-streaming backend fails before any usage reaches the wire;
+    ;; the error row must not claim otherwise.
+    (let [captured (atom [])
+          _        (#'llmc/handle-running-turn!
+                     (error-ctx (->AlwaysFailingBackend) captured)
+                     (fn [_ _] nil) :on-end)
+          err      (first (events-named @captured :llm/error))]
+      (assertions
+        "the error row was emitted"
+        (some? err) => true
+
+        "with no :partial-usage key at all"
+        (contains? (:data err) :partial-usage) => false))))
+
+;; ---------------------------------------------------------------------------
+;; :invokeid on the resolution-failure and budget events
+;; ---------------------------------------------------------------------------
+
+(specification "resolution failures are attributable :llm/error rows"
+  ;; These fail BEFORE a request is built (nothing ever reaches a backend),
+  ;; so the :llm/error row is the only evidence the invocation produced.
+
+  (component "fail-closed :needs gate → :eligibility-empty-strict"
+    (let [captured (atom [])
+          ctx      (assoc (error-ctx (mock-backend [(end-turn-response "never")]) captured)
+                     :aliases             {:small [{:provider :openai :model "gpt-4o-mini"}]}
+                     :preferences         [:small]
+                     :catalog-ratings     {}
+                     :eligibility-strict? true
+                     :params              {:needs {:context-tokens [:>= 999999999]}})
+          _        (#'llmc/handle-running-turn! ctx (fn [_ _] nil) :on-end)
+          err      (first (events-named @captured :llm/error))]
+      (assertions
+        "the error row is the strict eligibility failure"
+        (select-keys (:data err) [:reason :detail])
+        => {:reason :invalid-request :detail :eligibility-empty-strict}
+
+        "and is attributable to the invocation and its session"
+        (select-keys (:data err) [:invokeid :session-id])
+        => {:invokeid "design-node" :session-id "sess-1"})))
+
+  (component "a keyword :model naming no configured alias → :unknown-alias"
+    (let [captured (atom [])
+          ctx      (assoc (error-ctx (mock-backend [(end-turn-response "never")]) captured)
+                     :aliases {:known [{:provider :a :model "m"}]}
+                     :params  {:model :nope})
+          _        (#'llmc/handle-running-turn! ctx (fn [_ _] nil) :on-end)
+          err      (first (events-named @captured :llm/error))]
+      (assertions
+        "the error row is the unknown-alias failure, naming the alias"
+        (select-keys (:data err) [:reason :detail :alias :known])
+        => {:reason :invalid-request :detail :unknown-alias :alias :nope :known [:known]}
+
+        "and is attributable to the invocation and its session"
+        (select-keys (:data err) [:invokeid :session-id])
+        => {:invokeid "design-node" :session-id "sess-1"})))
+
+  (component "a STRING :model → :string-model"
+    (let [captured (atom [])
+          ctx      (assoc (error-ctx (mock-backend [(end-turn-response "never")]) captured)
+                     :params {:model "some-string"})
+          _        (#'llmc/handle-running-turn! ctx (fn [_ _] nil) :on-end)
+          err      (first (events-named @captured :llm/error))]
+      (assertions
+        "the error row is the string-model failure, carrying the offending string"
+        (select-keys (:data err) [:reason :detail :model])
+        => {:reason :invalid-request :detail :string-model :model "some-string"}
+
+        "and is attributable to the invocation and its session"
+        (select-keys (:data err) [:invokeid :session-id])
+        => {:invokeid "design-node" :session-id "sess-1"}))))
+
+(defn- run-budget-chart!
+  "Run the :max-turns 2 looping-tool chart from the max-turns spec with a
+   `:budget-extender`. `n-responses` tool_use turns are canned. Returns the
+   captured transcript, the :error.llm.* event the chart saw, and the calls
+   the extender received."
+  [budget-extender n-responses]
+  (let [always-tool (tool-use-response [{:id "u1" :name "test_noop" :input {}}])
+        backend     (mock-backend (vec (repeat n-responses always-tool)))
+        registry    (tp/new-registry [(->AlwaysOkTool)])
+        captured    (atom [])
+        err-seen    (atom nil)
+        chart       (chart/statechart
+                      {:initial :wrap}
+                      (state {:id :wrap :initial :work}
+                        (state {:id :work}
+                          (h/llm-conversation
+                            {:id              "p"
+                             :max-turns       2
+                             :budget-extender budget-extender
+                             :real-tools      [:test/noop]
+                             :message         "go"})
+                          (transition {:event :error.llm.* :target :failed}
+                            (script {:expr (fn [_ d] (reset! err-seen (:_event d)) nil)})))
+                        (final {:id :failed})))
+        t           (new-llm-test-env {:statechart    chart
+                                       :backend       backend
+                                       :tool-registry registry
+                                       :transcript-fn (fn [ev] (swap! captured conj ev))})
+        t           (await-config! t :failed 3000)]
+    {:in-failed? (dct/in? t :failed)
+     :event      @err-seen
+     :transcript @captured
+     :n-calls    (count @(:call-log backend))}))
+
+(specification ":budget-extender at the turn cap"
+  ;; :max-turns is a SOFT cap when a :budget-extender is supplied: the worker
+  ;; asks it, once, each time the cap is reached. Either answer is recorded
+  ;; on the transcript, attributed to the invocation.
+
+  (component "an extender that grants more turns → :llm/budget-extended, and the run continues"
+    (let [calls    (atom [])
+          extender (fn [{:keys [max-turns] :as call}]
+                     (swap! calls conj call)
+                     ;; Grant once (2 → 4); decline the second time.
+                     (when (= 2 max-turns) 4))
+          {:keys [in-failed? event transcript n-calls]} (run-budget-chart! extender 4)
+          ext      (events-named transcript :llm/budget-extended)]
+      (assertions
+        "the extender was consulted at the original cap and again at the raised one"
+        (mapv #(select-keys % [:turn-count :max-turns]) @calls)
+        => [{:turn-count 2 :max-turns 2} {:turn-count 4 :max-turns 4}]
+
+        "the extender's call carries the conversation so far and the elapsed time"
+        (every? #(and (vector? (:messages %)) (number? (:elapsed-ms %))) @calls) => true
+
+        "exactly one :llm/budget-extended row was emitted"
+        (count ext) => 1
+
+        "recording the raise"
+        (select-keys (:data (first ext)) [:from :to :turns]) => {:from 2 :to 4 :turns 2}
+
+        "and attributable to the invocation and its session"
+        (select-keys (:data (first ext)) [:invokeid :session-id])
+        => {:invokeid "p" :session-id :dcch.test/session}
+
+        "the model was driven for all four turns — the raised cap was honoured"
+        n-calls => 4
+
+        "then the (raised) cap bit: chart reached :failed on :error.llm.max-turns with the raised limit"
+        [in-failed? (:name event) (get-in event [:data :limit])] => [true :error.llm.max-turns 4])))
+
+  (component "an extender that throws → :llm/budget-extender-error, and the cap stands"
+    (let [extender (fn [_] (throw (ex-info "extender exploded" {})))
+          {:keys [in-failed? event transcript n-calls]} (run-budget-chart! extender 2)
+          errs     (events-named transcript :llm/budget-extender-error)]
+      (assertions
+        "exactly one :llm/budget-extender-error row was emitted"
+        (count errs) => 1
+
+        "carrying the throwable's message"
+        (get-in (first errs) [:data :message]) => "extender exploded"
+
+        "and attributable to the invocation and its session"
+        (select-keys (:data (first errs)) [:invokeid :session-id])
+        => {:invokeid "p" :session-id :dcch.test/session}
+
+        "no :llm/budget-extended row was emitted"
+        (events-named transcript :llm/budget-extended) => []
+
+        "the original cap stood: two turns, then :error.llm.max-turns with the original limit"
+        [n-calls in-failed? (:name event) (get-in event [:data :limit])]
+        => [2 true :error.llm.max-turns 2]
+
+        "and the :max-turns :llm/error row is attributable to the invocation"
+        (let [err (first (filter #(= :max-turns (get-in % [:data :reason]))
+                                 (events-named transcript :llm/error)))]
+          (select-keys (:data err) [:reason :limit :invokeid :session-id]))
+        => {:reason :max-turns :limit 2 :invokeid "p" :session-id :dcch.test/session}))))
+
+(specification ":max-conversation-duration-ms budget — the :timeout :llm/error row is attributable"
+  ;; A looping real tool with a 1 ms wall-clock budget: the first turn always
+  ;; exhausts it, so the worker emits :llm/error {:reason :timeout} and dies.
+  ;; Like every sibling error row it must carry :invokeid/:session-id.
+  (let [always-tool (tool-use-response [{:id "u1" :name "test_noop" :input {}}])
+        backend     (mock-backend (vec (repeat 4 always-tool)))
+        registry    (tp/new-registry [(->AlwaysOkTool)])
+        captured    (atom [])
+        err-seen    (atom nil)
+        chart       (chart/statechart
+                      {:initial :wrap}
+                      (state {:id :wrap :initial :work}
+                        (state {:id :work}
+                          (h/llm-conversation
+                            {:id                           "p"
+                             :max-turns                    50
+                             :max-conversation-duration-ms 1
+                             :real-tools                   [:test/noop]
+                             :message                      "go"})
+                          (transition {:event :error.llm.* :target :failed}
+                            (script {:expr (fn [_ d] (reset! err-seen (:_event d)) nil)})))
+                        (final {:id :failed})))
+        t           (new-llm-test-env {:statechart    chart
+                                       :backend       backend
+                                       :tool-registry registry
+                                       :transcript-fn (fn [ev] (swap! captured conj ev))})
+        t           (await-config! t :failed 3000)
+        err         (first (filter #(= :timeout (get-in % [:data :reason]))
+                                   (events-named @captured :llm/error)))]
+    (assertions
+      "chart reached :failed on :error.llm.timeout"
+      [(dct/in? t :failed) (:name @err-seen)] => [true :error.llm.timeout]
+      "the :timeout :llm/error row carries the limit and the invocation identity"
+      (select-keys (:data err) [:limit-ms :invokeid :session-id])
+      => {:limit-ms 1 :invokeid "p" :session-id :dcch.test/session})))

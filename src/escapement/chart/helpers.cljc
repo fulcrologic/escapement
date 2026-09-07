@@ -109,7 +109,13 @@
      * `:id` (required)       — invoke id / `invokeid` in the processor.
      * `:system`              — system prompt.
      * `:message`             — initial user message; alias for the processor's
-                                `:initial-user-message`. Usually a lambda.
+                                `:initial-user-message`. STRING only — it cannot
+                                carry image or other non-text blocks.
+     * `:initial-messages`    — vector of pre-built message maps, for an opening
+                                turn that is more than plain text (a multi-block
+                                user message carrying an `:image`, or a short
+                                prior exchange). Takes precedence over
+                                `:message` and starts the worker in `:running`.
      * `:max-turns`           — turn cap.
      * `:budget-extender`     — RAW pass-through fn (not resolved as `(fn [env data])`).
                                 The worker calls it at the turn cap with a single map

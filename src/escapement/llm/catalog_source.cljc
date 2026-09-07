@@ -42,7 +42,32 @@
     :openai {:source "openai" :auth :metered}
     :z-ai {:source "zai" :auth :metered}
     :z-ai-plan {:source "zai-coding-plan" :auth :subscription}
-    :ollama {:source "ollama-cloud" :auth :subscription}))
+    :zai-coding-plan {:source "zai-coding-plan" :auth :subscription}
+    :ollama {:source "ollama-cloud" :auth :subscription}
+    :deepseek {:source "deepseek" :auth :metered}
+    :openrouter {:source "openrouter" :auth :metered}
+    :opencode-go {:source "opencode-go" :auth :subscription}
+    :opencode-go-anthropic {:source "opencode-go" :auth :subscription}))
+
+;; DELIBERATELY NOT in this allowlist, though escapement has templates for
+;; them: `:codex`, `:openai-codex` and `:claude-cli`. They are served instead
+;; by the hand-curated `local-providers` overlay in `escapement.llm.catalog`,
+;; and that is the RIGHT source for them rather than an omission:
+;;
+;; * `:codex` / `:openai-codex` — the ChatGPT-account endpoint serves OpenAI's
+;;   models, so mapping it to the `openai` dump entry is tempting and wrong:
+;;   the dump lists 48 models and that path ACCEPTS SIX. Every `-codex`,
+;;   `-pro` and `-nano` variant is rejected ("The '<id>' model is not
+;;   supported when using Codex with a ChatGPT account", verified live
+;;   2026-07-29). Advertising the dump's list would let a `:needs` gate select
+;;   a model guaranteed to 400. The narrower curated set is better evidence,
+;;   and `openai_codex/translate_test.clj` asserts the two agree.
+;; * `:claude-cli` — models.dev has no corresponding provider at all (neither
+;;   `claude-code` nor `anthropic-claude-code` is among its 213), and its
+;;   `--model` takes the CLI's own ALIASES (`sonnet`), not Anthropic ids, so
+;;   borrowing `anthropic`'s table would attach real context windows and prices
+;;   to identifiers that provider does not accept. The overlay carries the
+;;   aliases instead.
 
 (def ^:private family->company
   "Coarse model family → maker, for display. The dump has no per-model

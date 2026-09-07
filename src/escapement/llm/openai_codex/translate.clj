@@ -9,6 +9,7 @@
     [cheshire.core :as json]
     [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn ?]]
+    [escapement.llm.reasoning :as reasoning]
     [taoensso.timbre :as log]))
 
 ;;; ---------------------------------------------------------------------------
@@ -153,16 +154,72 @@
   {:type              "reasoning"
    :encrypted_content (:data block)})
 
+(defn- image-block->content-part
+  "Converts an `:image` block to a Responses `input_image` content part.
+
+   Verified against the live Responses wire 2026-09-07 (z.ai coding plan,
+   `glm-5v-turbo`): a data URL in `:image_url`, in the SAME message item as the
+   text part, is read by the model. The form mirrors the chat-completions
+   encoder in `escapement.llm.openai` rather than inventing a variant."
+  [{:keys [source]}]
+  {:type      "input_image"
+   :image_url (case (:type source)
+                :url (:url source)
+                :base64 (str "data:" (:media-type source) ";base64," (:data source)))})
+
+(defn- unrepresentable-block!
+  "An unknown content-block type reaching a translator is a PROGRAMMING error,
+   not a runtime condition — the Request was schema-validated on the way in.
+
+   This throws rather than dropping because dropping is how `:image` blocks
+   went missing on this wire in the first place: the turn went out without the
+   image, the model answered a vision prompt it could not see, and the run
+   returned normal-looking prose with no error anywhere. Adding one branch
+   would have fixed that block type and left the next one to vanish the same
+   silent way."
+  [role block]
+  (throw (ex-info (str "[openai-codex] no Responses-wire encoding for a "
+                    (pr-str (:type block)) " block in a " (name role) " message")
+           {:role role :block-type (:type block)})))
+
+(defn- message-content-part
+  "The Responses `content` part for a block that belongs INSIDE a message item
+   (as opposed to a sibling item like `function_call_output`), or nil when the
+   block is not one of those."
+  [role block]
+  (case (:type block)
+    :text {:type (if (= :assistant role) "output_text" "input_text")
+           :text (:text block)}
+    :image (image-block->content-part block)
+    nil))
+
 (defn- user-message->input-items
-  "Expands a user message into a vector of OpenAI input items."
+  "Expands a user message into OpenAI Responses input items.
+
+   Text and image blocks of ONE message are merged into ONE message item's
+   `:content` vector — that is what the wire expects for a multimodal turn, and
+   emitting an item per block would separate an image from the text asking
+   about it. `:tool_result` blocks are siblings (`function_call_output`), not
+   message content, so they are flushed as their own items in place, preserving
+   order."
   [{:keys [content]}]
-  (into []
-    (keep (fn [block]
-            (case (:type block)
-              :text (text-block->input-item :user block)
-              :tool_result (tool-result-block->input-item block)
-              nil)))
-    content))
+  (let [flush (fn [items parts]
+                (if (seq parts)
+                  (conj items {:type "message" :role "user" :content (vec parts)})
+                  items))
+        [items parts]
+        (reduce (fn [[items parts] block]
+                  (cond
+                    (= :tool_result (:type block))
+                    [(conj (flush items parts) (tool-result-block->input-item block)) []]
+
+                    (message-content-part :user block)
+                    [items (conj parts (message-content-part :user block))]
+
+                    :else (unrepresentable-block! :user block)))
+          [[] []]
+          content)]
+    (flush items parts)))
 
 (defn- assistant-message->input-items
   "Expands an assistant message into a vector of OpenAI input items."
@@ -172,9 +229,11 @@
             (case (:type block)
               :text (text-block->input-item :assistant block)
               :tool_use (tool-use-block->input-item block)
+              ;; Deliberate, not an oversight: a thinking block without a
+              ;; signature has nothing the wire can carry.
               :thinking (thinking-block->input-item block)
               :redacted_thinking (redacted-thinking-block->input-item block)
-              nil)))
+              (unrepresentable-block! :assistant block))))
     content))
 
 (>defn anthropic-messages->openai-input
@@ -206,8 +265,15 @@ Notes:
 * `:max-tokens` is silently ignored (not accepted by the ChatGPT backend).
 * `:temperature`, `:top-p`, `:top-k`, `:stop-sequences` are silently dropped.
 * `cache_control` markers are no-ops; a debug log line is emitted when present.
-* The `:reasoning` key (if present) is passed through as-is; otherwise
- `{:effort \"medium\" :summary \"auto\"}` is used."
+* `:reasoning` — the normalised, provider-neutral reasoning control
+ (`escapement.llm.types/Reasoning`) is translated into the Responses API's
+ `reasoning` object. A map carrying a STRING `:effort` is instead passed
+ through verbatim, which is what this key meant before the normalised field
+ existed. With neither, `{:effort \"medium\" :summary \"auto\"}` is used, exactly
+ as before.
+
+ `:max` is rendered as \"high\", not \"xhigh\": the xhigh level is
+ model-dependent and was not verified against the live API."
   [{:keys [model system messages tools reasoning tool-choice] :as request}]
   [:map => :map]
   (when (has-cache-control? request)
@@ -224,7 +290,11 @@ Notes:
            :store        false
            :stream       true
            :include      ["reasoning.encrypted_content"]
-           :reasoning    (or reasoning {:effort "medium" :summary "auto"})
+           :reasoning    (cond
+                           (string? (:effort reasoning)) reasoning
+                           (some? reasoning) (or (reasoning/responses-reasoning request)
+                                               {:effort "medium" :summary "auto"})
+                           :else {:effort "medium" :summary "auto"})
            :text         {:verbosity "medium"}}
     (= :tool (:type tool-choice))
     (assoc :tool_choice {:type "function" :name (:name tool-choice)})))
@@ -292,4 +362,7 @@ Notes:
                       :cache-creation-input-tokens 0
                       :cache-read-input-tokens     (get-in usage [:input_tokens_details :cached_tokens] 0)}
    :model            (or model request-model)
-   :backend-metadata {:backend :openai-codex}})
+   ;; The Responses wire turns an assistant message into an `output_text`
+   ;; INPUT item and starts a new message; there is no prefill to continue, so
+   ;; the continuation loop should not spend a call finding that out.
+   :backend-metadata {:backend :openai-codex :prefill-unsupported? true}})

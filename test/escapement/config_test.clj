@@ -256,6 +256,20 @@
           "alias map preserved verbatim"
           (:llm/aliases cfg) => aliases))))
 
+  (component ":llm/aliases — a target may carry :reasoning"
+    ;; The target schema is CLOSED, so a key the resolver reads but the schema
+    ;; omits is unreachable through config. `escapement.llm` selects
+    ;; `:reasoning` out of a target and merges it as that target's default —
+    ;; this makes the two layers agree.
+    (let [root    (tmp-dir)
+          aliases {:deep [{:provider :openai :model "gpt-5" :reasoning {:effort :high}}
+                          {:provider :ollama :model "glm-5.3-flash" :reasoning :low}]}]
+      (spit (io/file root ".escapement.edn") (pr-str {:llm/aliases aliases}))
+      (let [cfg (:config (config/load-project-config root))]
+        (assertions
+          "both the map form and the bare-keyword sugar load verbatim"
+          (:llm/aliases cfg) => aliases))))
+
   (component ":llm/aliases — malformed entries rejected"
     (let [root (tmp-dir)
           bad! (fn [v]

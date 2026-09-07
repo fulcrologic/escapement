@@ -13,7 +13,7 @@
     [com.fulcrologic.statecharts.elements :refer [final state transition]]
     [escapement.engine.store :as store]
     [escapement.lib :as lib]
-    [fulcro-spec.core :refer [=> assertions specification]]))
+    [fulcro-spec.core :refer [=> assertions component specification]]))
 
 (def trivial-chart
   (chart/statechart {:initial :work}
@@ -80,6 +80,50 @@
       (get-in started [:data :run-id]) => (:run-id result)
       "and it is non-nil"
       (some? (get-in started [:data :run-id])) => true)))
+
+(specification "a host callback that throws is survivable, but not silent"
+  ;; The swallow is correct — a broken host callback must not take down the
+  ;; runner. It was TOTAL, though: a tap whose sink was down received nothing
+  ;; and was told nothing for a whole run, while the transcript FILE stayed
+  ;; healthy so nothing else looked wrong.
+
+  (component ":transcript-tap"
+    (let [calls  (atom 0)
+          out    (with-out-str
+                   (lib/run {:chart          trivial-chart
+                             :session-id     :tap-throws
+                             :credentials    creds
+                             :transcript-tap (fn [_] (swap! calls inc)
+                                               (throw (ex-info "sink down" {})))}))]
+      (assertions
+        "the run still completes"
+        (> @calls 0) => true
+
+        "the failure is reported"
+        (str/includes? out ":transcript-tap threw") => true
+
+        "exactly once, however many events were dropped"
+        (count (re-seq #":transcript-tap threw" out)) => 1)))
+
+  (component ":on-env-ready"
+    (let [out (with-out-str
+                (lib/run {:chart        trivial-chart
+                          :session-id   :env-ready-throws
+                          :credentials  creds
+                          :on-env-ready (fn [_] (throw (ex-info "setup failed" {})))}))]
+      (assertions
+        "the run continues, and says what failed"
+        (str/includes? out ":on-env-ready threw") => true)))
+
+  (component "a well-behaved tap is silent"
+    (let [out (with-out-str
+                (lib/run {:chart          trivial-chart
+                          :session-id     :tap-fine
+                          :credentials    creds
+                          :transcript-tap (fn [_] nil)}))]
+      (assertions
+        "nothing is warned about"
+        (str/includes? out "threw") => false))))
 
 (specification ":store override is threaded to engine.env/new-env"
   (let [tmp    (str (fs/create-temp-dir {:prefix "lib-store-"}))

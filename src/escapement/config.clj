@@ -127,11 +127,29 @@
    [:type [:= :enabled]]
    [:budget-tokens :int]])
 
+(def reasoning-schema
+  "A per-target reasoning directive. Mirrors `escapement.llm.types/Reasoning`
+   — the provider-neutral effort ordinal each backend renders into its own
+   dialect — plus the bare-keyword sugar, which
+   `escapement.llm/build-request` widens to the map form.
+
+   This schema exists because the target schema is CLOSED: without the key
+   here, `:reasoning` on an alias target fails validation even though
+   `escapement.llm/alias-target->candidate` reads it, which made per-target
+   reasoning unreachable through config."
+  (let [effort [:enum :none :minimal :low :medium :high :max]]
+    [:or
+     effort
+     [:map {:closed true}
+      [:effort {:optional true} effort]
+      [:budget-tokens {:optional true} [:int {:min 1024}]]]]))
+
 (def alias-target-schema
   "One alias target: a concrete `{:provider :model …}` bundle. `:provider`
    (keyword) and `:model` (string) are required; the generation params are
    optional defaults that `escapement.invocation.llm-conversation` merges
-   UNDER explicit node params (node wins). `:temperature`/`:top-p` are
+   UNDER explicit node params (node wins). `:reasoning` takes the same
+   provider-neutral effort ordinal a chart node takes. `:temperature`/`:top-p` are
    restricted to `(0,1]`. `:max-tokens` is an alias-only escape hatch (NOT a
    chart param): when a target enables `:thinking`, its budget must stay below
    the output cap (`max-tokens > budget-tokens`); supply `:max-tokens` here when
@@ -144,6 +162,7 @@
    [:top-p {:optional true} [:and number? [:> 0] [:<= 1]]]
    [:top-k {:optional true} :int]
    [:thinking {:optional true} thinking-schema]
+   [:reasoning {:optional true} reasoning-schema]
    [:max-tokens {:optional true} :int]])
 
 (def aliases-schema
@@ -206,6 +225,10 @@
               [:base-url {:optional true} :string]
               [:default-model {:optional true} :string]
               [:model {:optional true} :string]
+              ;; Accepted and INERT — nothing reads it. Subscription billing is
+              ;; a fact about the provider (model catalog `:auth`), not
+              ;; something a descriptor declares. Kept so existing configs
+              ;; still load.
               [:subscription {:optional true} :boolean]]]]
    [:llm {:optional true} :any]])
 

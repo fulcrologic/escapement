@@ -393,13 +393,46 @@
 ;; Resilience: transient-error retry + max_tokens continuation
 ;; ---------------------------------------------------------------------------
 
-(defn- merge-with-usage
+(def ^:private merge-with-usage
   "Sum numeric usage fields across continuation segments; non-numeric fields
-   take the latest non-nil value."
-  [a b]
-  (merge-with (fn [x y]
-                (if (and (number? x) (number? y)) (+ x y) (or y x)))
-    (or a {}) (or b {})))
+   take the latest non-nil value. Shared with `escapement.llm/run-turn`, which
+   uses the same arithmetic to total what a failed turn spent."
+  ellm/sum-usage)
+
+(defn- content-text
+  "All :text block text of a content vector, concatenated."
+  [content]
+  (->> content (filter #(= :text (:type %))) (map :text) (apply str)))
+
+(def ^:private restart-probe-chars
+  "How much of the accumulated text a continuation segment must repeat before
+   we call it a restart. Long enough that a model legitimately resuming
+   mid-sentence cannot trip it, short enough to catch a restart that then
+   diverges (a re-generation is rarely token-identical for long)."
+  64)
+
+(defn- continuation-restarted?
+  "True when a continuation segment BEGINS with what we already accumulated —
+   i.e. the provider ignored the assistant prefill and started the message
+   over.
+
+   Verified live 2026-09-07: DeepSeek and opencode-go resume a prefilled
+   partial turn, while OpenRouter and z.ai silently start again. Stitching a
+   restart onto the accumulation yields a document containing its own prefix
+   twice, with no error and a plausible-looking transcript — so the repeat is
+   detected and reported instead of merged.
+
+   Needs no provider knowledge: it is a property of the two texts. The
+   `:no-progress` guard does NOT cover this, since a restart is never exactly
+   equal to what came before."
+  [acc-content segment-content]
+  (let [acc (content-text acc-content)
+        seg (content-text segment-content)]
+    (boolean
+      (when (and (seq acc) (seq seg))
+        (let [probe (subs acc 0 (min restart-probe-chars (count acc)))]
+          (and (>= (count seg) (count probe))
+            (str/starts-with? seg probe)))))))
 
 (defn- merge-segment-content
   "Append continuation blocks `more` onto accumulated `acc`, merging the
@@ -758,7 +791,9 @@
                   (fn [{:keys [policy strict?]}]
                     (transcript! transcript-fn
                       {:event :llm/model-policy-empty :ts (now-ms)
-                       :data  {:policy policy :strict? strict?}}))
+                       :data  {:policy policy :strict? strict?
+                               :invokeid invokeid
+                               :session-id (:parent-session-id parent-ctx)}}))
                   :on-latency-switch
                   (fn [{:keys [model provider first-token-ms remaining]}]
                     (transcript! transcript-fn
@@ -789,9 +824,14 @@
                                 (assoc :provider (get-in env [:candidate :provider])))
                           :model-used (:model env)}
       :overrun           {:overrun (:response env) :model-used (:model env)}
+      ;; `:partial-usage` — tokens the turn burned before it failed or was
+      ;; cancelled. Kept rather than discarded: a cancelled run is exactly when
+      ;; someone wants to know what it cost.
       :exhausted         {:exhausted      (get-in env [:error :attempts])
-                          :last-throwable (:last-throwable env)}
-      :interrupted       {:interrupted (get-in env [:error :throwable])}
+                          :last-throwable (:last-throwable env)
+                          :partial-usage  (:partial-usage env)}
+      :interrupted       {:interrupted   (get-in env [:error :throwable])
+                          :partial-usage (:partial-usage env)}
       :eligibility-empty {:eligibility-empty (:error env)}
       :unknown-alias     {:unknown-alias (get-in env [:error :alias])
                           :known         (get-in env [:error :known])}
@@ -820,14 +860,30 @@
    forward progress and is surfaced via `:no-progress` rather than a malformed
    tool call ever being dispatched."
   [{:keys [transcript-fn parent-ctx] :as ctx} params base-messages tools]
-  ;; Overrun primitive (escapement.llm `:resilience :overrun`): when a per-turn
-  ;; output ceiling with reruns is configured, a `:max_tokens` stop is the
-  ;; truncation trip wire — NOT an invitation to stitch an unbounded
-  ;; continuation. `run-turn` already reran the identical turn up to
-  ;; `:max-retries`; we must therefore SKIP continuation here, or it would undo
-  ;; the cap by resuming the runaway. The single returned turn is terminal:
-  ;; `:ok` (truncate accepted) or `:overrun` (`:on-exhausted :fail`).
-  (if (pos? (long (or (:max-retries (:overrun (params->resilience params))) 0)))
+  ;; Continuation is skipped for either of two INDEPENDENT reasons:
+  ;;
+  ;; 1. `:continuation {:enabled? false}` — the caller simply does not want a
+  ;;    truncated turn continued. Costs nothing extra: one call, and the
+  ;;    truncation is terminal. Not a degraded mode — on a provider that
+  ;;    ignores an assistant prefill and restarts, continuing can silently
+  ;;    duplicate content, so taking the truncation is a correctness choice.
+  ;;
+  ;; 2. The overrun primitive (`escapement.llm` `:resilience :overrun`) is
+  ;;    configured with reruns: a `:max_tokens` stop is then the truncation trip
+  ;;    wire, NOT an invitation to stitch an unbounded continuation, and
+  ;;    `run-turn` has already RERUN the identical turn up to `:max-retries`.
+  ;;    Continuing here would undo the cap by resuming the runaway. The single
+  ;;    returned turn is terminal: `:ok` (truncate accepted) or `:overrun`
+  ;;    (`:on-exhausted :fail`).
+  ;;
+  ;; They are kept separate on purpose. These two were once welded together, so
+  ;; a caller who wanted only (1) had to buy (2) — an extra full generation on
+  ;; every truncation, measured, not theorised. A rerun is a real retry with a
+  ;; real success rate, so it is still available; it is just no longer the
+  ;; price of turning continuation off.
+  (let [{:keys [enabled? max-segments max-chars]} (:continuation (params->resilience params))]
+   (if (or (false? enabled?)
+         (pos? (long (or (:max-retries (:overrun (params->resilience params))) 0))))
     (try-models! ctx params (vec base-messages) tools)
     (loop [acc-content nil
          acc-usage   {}
@@ -846,12 +902,68 @@
               merged-usage (merge-with-usage acc-usage usage)
               resp'        (assoc resp :content merged :usage merged-usage)]
           (cond
+            ;; FIRST: the provider ignored the prefill and started the message
+            ;; over. This is checked before the terminal-stop branch because a
+            ;; restart usually COMPLETES — it comes back as a clean :end_turn —
+            ;; and would otherwise be returned as a successful turn whose
+            ;; content holds its own prefix twice.
+            (continuation-restarted? acc-content content)
+            (do
+              (transcript! transcript-fn
+                {:event :llm/continuation-restarted :ts (now-ms)
+                 :data  {:segment    (inc seg)
+                         :model      (:model resp)
+                         :invokeid   (:invokeid parent-ctx)
+                         :session-id (:parent-session-id parent-ctx)}})
+              {:no-progress (assoc resp :content (vec acc-content)
+                              :usage (merge-with-usage acc-usage usage))
+               :detail      :continuation-restarted})
+
             (not= :max_tokens stop-reason)
             {:ok resp' :model-used (:model-used outcome)}
 
             ;; truncated but the continuation added nothing new → stuck.
             (and acc-content (= merged (vec acc-content)))
-            {:no-progress resp'}
+            {:no-progress resp' :detail :no-forward-progress}
+
+            ;; The backend that answered says this endpoint cannot honour an
+            ;; assistant prefill (evidence-backed, declared per provider). Stop
+            ;; here and report the truncation honestly rather than spend a call
+            ;; discovering it — or, worse, stitch a restart.
+            (get-in resp [:backend-metadata :prefill-unsupported?])
+            (do
+              (transcript! transcript-fn
+                {:event :llm/continuation-unsupported :ts (now-ms)
+                 :data  {:segment    (inc seg)
+                         :model      (:model resp)
+                         :invokeid   (:invokeid parent-ctx)
+                         :session-id (:parent-session-id parent-ctx)}})
+              {:no-progress resp' :detail :continuation-unsupported})
+
+            ;; The stitch loop's other guard is forward progress, and a model
+            ;; that truncates EVERY segment makes real progress every round —
+            ;; so that guard never trips and the accumulation grows until the
+            ;; JVM dies (observed: OutOfMemoryError in `runner/run!` against a
+            ;; backend that always answers `:max_tokens`). Reachable with any
+            ;; model under a tight cap, not just adversarially. Two ceilings:
+            ;; segments bound the CALLS (and the quota they spend), size bounds
+            ;; the MEMORY, which is what actually failed.
+            (or (>= (inc seg) (long max-segments))
+              (>= (count (content-text merged)) (long max-chars)))
+            (do
+              (transcript! transcript-fn
+                {:event :llm/continuation-limit :ts (now-ms)
+                 :data  {:segments     (inc seg)
+                         :max-segments max-segments
+                         :chars        (count (content-text merged))
+                         :max-chars    max-chars
+                         :model        (:model resp)
+                         :invokeid     (:invokeid parent-ctx)
+                         :session-id   (:parent-session-id parent-ctx)}})
+              ;; Keep everything stitched so far — the caller gets the long
+              ;; answer it paid for, plus an honest terminal error, rather than
+              ;; an OOM that says nothing about continuation.
+              {:no-progress resp' :detail :continuation-limit})
 
             :else
             (do
@@ -861,7 +973,7 @@
                          :blocks   (count content)
                          :usage    (or usage {})
                          :invokeid (:invokeid parent-ctx)}})
-              (recur merged merged-usage (inc seg))))))))))
+              (recur merged merged-usage (inc seg)))))))))))
 
 (defn- run-verdict-inference!
   "Run a single forced-tool inference asking the model to call `submit_verdict`
@@ -1032,7 +1144,9 @@
            :data  {:reason     :invalid-request
                    :detail     :eligibility-empty-strict
                    :policy     policy
-                   :candidates candidates}})
+                   :candidates candidates
+                   :invokeid   (:invokeid parent-ctx)
+                   :session-id (:parent-session-id parent-ctx)}})
         ;; Fail-closed: the eligibility gate excluded every candidate target
         ;; and `:llm/eligibility-strict?` is set. Categorize as
         ;; :invalid-request so the chart's :error.llm.* / .invalid-request
@@ -1052,10 +1166,12 @@
             known (:known outcome)]
         (transcript! transcript-fn
           {:event :llm/error :ts (now-ms)
-           :data  {:reason  :invalid-request
-                   :detail  :unknown-alias
-                   :alias   alias
-                   :known   known}})
+           :data  {:reason     :invalid-request
+                   :detail     :unknown-alias
+                   :alias      alias
+                   :known      known
+                   :invokeid   (:invokeid parent-ctx)
+                   :session-id (:parent-session-id parent-ctx)}})
         (post-error! :invalid-request {:detail :unknown-alias
                                        :alias  alias
                                        :known  known})
@@ -1068,9 +1184,11 @@
       (let [s (:string-model outcome)]
         (transcript! transcript-fn
           {:event :llm/error :ts (now-ms)
-           :data  {:reason :invalid-request
-                   :detail :string-model
-                   :model  s}})
+           :data  {:reason     :invalid-request
+                   :detail     :string-model
+                   :model      s
+                   :invokeid   (:invokeid parent-ctx)
+                   :session-id (:parent-session-id parent-ctx)}})
         (post-error! :invalid-request {:detail :string-model
                                        :model  s})
         (reset! worker-state :dying)
@@ -1081,10 +1199,12 @@
             bad (:bad outcome)]
         (transcript! transcript-fn
           {:event :llm/error :ts (now-ms)
-           :data  {:reason :invalid-request
-                   :detail :string-models
-                   :models ms
-                   :bad    bad}})
+           :data  {:reason     :invalid-request
+                   :detail     :string-models
+                   :models     ms
+                   :bad        bad
+                   :invokeid   (:invokeid parent-ctx)
+                   :session-id (:parent-session-id parent-ctx)}})
         (post-error! :invalid-request {:detail :string-models
                                        :models ms
                                        :bad    bad})
@@ -1097,9 +1217,11 @@
           {:event :llm/error :ts (now-ms)
            :data  {:reason      :unexpected-stop
                    :stop-reason :max_tokens
-                   :detail      :no-forward-progress}})
+                   :detail      (or (:detail outcome) :no-forward-progress)
+                   :invokeid    (:invokeid parent-ctx)
+                   :session-id  (:parent-session-id parent-ctx)}})
         (post-error! :unexpected-stop {:stop-reason :max_tokens
-                                       :detail      :no-forward-progress})
+                                       :detail      (or (:detail outcome) :no-forward-progress)})
         (reset! worker-state :dying)
         :error-and-die)
 
@@ -1112,7 +1234,9 @@
           {:event :llm/error :ts (now-ms)
            :data  {:reason      :unexpected-stop
                    :stop-reason :max_tokens
-                   :detail      :overrun-retries-exhausted}})
+                   :detail      :overrun-retries-exhausted
+                   :invokeid    (:invokeid parent-ctx)
+                   :session-id  (:parent-session-id parent-ctx)}})
         (post-error! :unexpected-stop {:stop-reason :max_tokens
                                        :detail      :overrun-retries-exhausted})
         (reset! worker-state :dying)
@@ -1122,9 +1246,11 @@
       (do
         (transcript! transcript-fn
           {:event :llm/worker-exit :ts (now-ms)
-           :data  {:reason :interrupted-mid-turn
-                   :invokeid (:invokeid parent-ctx)
-                   :session-id (:parent-session-id parent-ctx)}})
+           :data  (cond-> {:reason :interrupted-mid-turn
+                           :invokeid (:invokeid parent-ctx)
+                           :session-id (:parent-session-id parent-ctx)}
+                    (seq (:partial-usage outcome))
+                    (assoc :partial-usage (:partial-usage outcome)))})
         (reset! worker-state :dying)
         :error-and-die)
 
@@ -1140,10 +1266,14 @@
                        category
                        :backend)]
         (transcript! transcript-fn {:event :llm/error :ts (now-ms)
-                                    :data  (assoc details
-                                             :reason reason
-                                             :category category
-                                             :attempts attempts)})
+                                    :data  (cond-> (assoc details
+                                                     :reason reason
+                                                     :category category
+                                                     :attempts attempts
+                                                     :invokeid (:invokeid parent-ctx)
+                                                     :session-id (:parent-session-id parent-ctx))
+                                             (seq (:partial-usage outcome))
+                                             (assoc :partial-usage (:partial-usage outcome)))})
         (post-error! reason (-> (select-keys details [:message :class])
                               (assoc :category category
                                      :attempts attempts)))
@@ -1152,7 +1282,8 @@
 
       :else
       (let [response      (:ok outcome)
-            {:keys [stop-reason content usage model elapsed-ms wait-ms provider]} response
+            {:keys [stop-reason content usage model elapsed-ms wait-ms provider
+                    model-requested model-substituted?]} response
             ctx-window    (some-> model catalog/context-window)
             input-tokens  (:input-tokens usage)
             output-tokens (:output-tokens usage)
@@ -1177,7 +1308,13 @@
                            :content     (mapv ->transcript-content-block content)
                            :invokeid    (:invokeid parent-ctx)
                            :session-id  (:parent-session-id parent-ctx)}
+                    ;; `:model` is what the PROVIDER reported; `:model-requested`
+                    ;; is what we asked for. Never collapsed — servers substitute
+                    ;; silently, and a transcript that records only one id is
+                    ;; confidently wrong about what ran.
                     model (assoc :model model)
+                    model-requested (assoc :model-requested model-requested)
+                    model-substituted? (assoc :model-substituted? true)
                     provider (assoc :provider provider)
                     elapsed-ms (assoc :elapsed-ms elapsed-ms)
                     wait-ms (assoc :wait-ms wait-ms)
@@ -1186,6 +1323,17 @@
                     io-ref (assoc :io/ref (:io/ref io-ref))
                     ctx-used-frac (assoc :context-used-frac
                                          (Double/parseDouble (format "%.3f" ctx-used-frac))))})
+        ;; A silent server-side substitution is a first-class observable, not
+        ;; an anomaly to smooth over: anything pricing or comparing this run by
+        ;; the id it ASKED for is wrong until it sees this.
+        (when model-substituted?
+          (transcript! transcript-fn
+            {:event :llm/model-substituted
+             :ts    (now-ms)
+             :data  {:requested  model-requested
+                     :reported   model
+                     :invokeid   (:invokeid parent-ctx)
+                     :session-id (:parent-session-id parent-ctx)}}))
         (when (and ctx-used-frac (>= ctx-used-frac 0.8))
           (transcript! transcript-fn
             {:event :llm/context-warning
@@ -1409,19 +1557,25 @@
                                   (catch Throwable t
                                     (transcript! transcript-fn
                                       {:event :llm/budget-extender-error :ts (now-ms)
-                                       :data  {:message (.getMessage t)}})
+                                       :data  {:message    (.getMessage t)
+                                               :invokeid   (:invokeid parent-ctx)
+                                               :session-id (:parent-session-id parent-ctx)}})
                                     nil)))]
                 (if (and extension (> (long extension) (long @eff-max-turns)))
                   (do
                     (transcript! transcript-fn
                       {:event :llm/budget-extended :ts (now-ms)
-                       :data  {:from @eff-max-turns :to (long extension) :turns @turn-count}})
+                       :data  {:from       @eff-max-turns :to (long extension) :turns @turn-count
+                               :invokeid   (:invokeid parent-ctx)
+                               :session-id (:parent-session-id parent-ctx)}})
                     (reset! eff-max-turns (long extension))
                     (recur))
                   (do
                     (transcript! transcript-fn
                       {:event :llm/error :ts (now-ms)
-                       :data  {:reason :max-turns :limit @eff-max-turns}})
+                       :data  {:reason     :max-turns :limit @eff-max-turns
+                               :invokeid   (:invokeid parent-ctx)
+                               :session-id (:parent-session-id parent-ctx)}})
                     (post-error! :max-turns {:limit @eff-max-turns :turns @turn-count})
                     (reset! worker-state :dying)
                     (recur))))
@@ -1433,7 +1587,9 @@
                   {:event :llm/error :ts (now-ms)
                    :data  {:reason     :timeout
                            :elapsed-ms elapsed
-                           :limit-ms   max-conversation-duration-ms}})
+                           :limit-ms   max-conversation-duration-ms
+                           :invokeid   (:invokeid parent-ctx)
+                           :session-id (:parent-session-id parent-ctx)}})
                 (post-error! :timeout {:elapsed-ms elapsed
                                        :limit-ms   max-conversation-duration-ms})
                 (reset! worker-state :dying)

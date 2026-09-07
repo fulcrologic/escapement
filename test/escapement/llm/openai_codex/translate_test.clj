@@ -285,7 +285,10 @@
         "cache-creation is always 0"
         (get-in resp [:usage :cache-creation-input-tokens]) => 0
         "backend-metadata identifies openai-codex"
-        (get-in resp [:backend-metadata :backend]) => :openai-codex)))
+        (get-in resp [:backend-metadata :backend]) => :openai-codex
+        "the Responses API has no assistant prefill to continue (a trailing
+         assistant turn is just another input item), so the Response says so"
+        (get-in resp [:backend-metadata :prefill-unsupported?]) => true)))
 
   (component "empty/missing usage does not blow up"
     (let [stream-result {:items [] :usage {} :stop-reason :end_turn :model nil}
@@ -299,3 +302,89 @@
         (get-in resp [:usage :output-tokens]) => 0
         "content is empty vector"
         (:content resp) => []))))
+
+(def ^:private tiny-png-b64 "iVBORw0KGgoAAAANSUhEUg==")
+
+(specification "anthropic-messages->openai-input — vision"
+  ;; REGRESSION. `:image` blocks used to hit a `case` with no branch for them,
+  ;; inside a `keep`, so they became nil and vanished: the turn went out
+  ;; text-only, the model answered a vision prompt it could not see, and the
+  ;; run returned plausible prose with a normal 200. Nothing anywhere said an
+  ;; image had been dropped.
+  ;;
+  ;; The wire shape below is verified against the live Responses API
+  ;; (2026-09-07, z.ai coding plan, `glm-5v-turbo`): the model read the image
+  ;; and answered correctly.
+
+  (component "an image block becomes an input_image part"
+    (let [items (t/anthropic-messages->openai-input
+                  [{:role    :user
+                    :content [{:type :text :text "What colour?"}
+                              {:type   :image
+                               :source {:type :base64 :media-type "image/png" :data tiny-png-b64}}]}])]
+      (assertions
+        "the image is not dropped"
+        (->> items (mapcat :content) (filter #(= "input_image" (:type %))) count) => 1
+
+        "as a data URL, mirroring the chat-completions encoder"
+        (->> items (mapcat :content) (some #(when (= "input_image" (:type %)) (:image_url %))))
+        => (str "data:image/png;base64," tiny-png-b64)
+
+        "text and image ride in ONE message item — an image separated from the
+         text asking about it is not the same request"
+        (count items) => 1
+
+        "with both parts, in order"
+        (mapv :type (:content (first items))) => ["input_text" "input_image"])))
+
+  (component "a URL-sourced image passes the URL through"
+    (let [items (t/anthropic-messages->openai-input
+                  [{:role    :user
+                    :content [{:type :image :source {:type :url :url "https://example.test/a.png"}}]}])]
+      (assertions
+        "used verbatim"
+        (->> items (mapcat :content) (some :image_url)) => "https://example.test/a.png")))
+
+  (component "tool results stay siblings, and order is preserved"
+    (let [items (t/anthropic-messages->openai-input
+                  [{:role    :user
+                    :content [{:type :tool_result :tool_use_id "t1" :content "42"}
+                              {:type :text :text "and now this"}
+                              {:type   :image
+                               :source {:type :base64 :media-type "image/png" :data tiny-png-b64}}]}])]
+      (assertions
+        "the tool result is its own item, before the message it precedes"
+        (mapv :type items) => ["function_call_output" "message"]
+
+        "and the trailing text+image are merged into that one message"
+        (mapv :type (:content (second items))) => ["input_text" "input_image"]))))
+
+(specification "a block type the wire cannot encode is an ERROR, not a silent drop"
+  ;; Adding the `:image` branch fixes today's bug; this is what stops tomorrow's
+  ;; identical one. An unknown block type reaching a translator means the
+  ;; Request carried something nobody taught this wire about — a programming
+  ;; error, since the Request was schema-validated on the way in.
+
+  (component "user message"
+    (assertions
+      "throws, naming the offending block type"
+      (try (t/anthropic-messages->openai-input
+             [{:role :user :content [{:type :some_future_block :data "x"}]}])
+           :no-throw
+           (catch clojure.lang.ExceptionInfo e (:block-type (ex-data e))))
+      => :some_future_block))
+
+  (component "assistant message"
+    (assertions
+      "throws too"
+      (try (t/anthropic-messages->openai-input
+             [{:role :assistant :content [{:type :some_future_block :data "x"}]}])
+           :no-throw
+           (catch clojure.lang.ExceptionInfo e (:block-type (ex-data e))))
+      => :some_future_block))
+
+  (component "the known types still encode as before"
+    (assertions
+      "text-only messages are unaffected"
+      (mapv :type (t/anthropic-messages->openai-input [user-text-msg assistant-text-msg]))
+      => ["message" "message"])))

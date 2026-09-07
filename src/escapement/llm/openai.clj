@@ -20,7 +20,9 @@
     [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [escapement.llm.http-transport :as ht]
+    [escapement.llm.model-quirks :as quirks]
     [escapement.llm.protocol :as proto]
+    [escapement.llm.reasoning :as reasoning]
     [escapement.llm.types :as types]
     [com.fulcrologic.statecharts.promise :as p])
   (:import
@@ -38,6 +40,12 @@
             (str/join ""))]
     (when (seq s) s)))
 
+(def ^:private deliberately-dropped-block-types
+  "Anthropic-only block types this wire cannot carry, dropped ON PURPOSE (see
+   the ns docstring). Listed so that a block type which is NOT here — i.e. one
+   nobody has thought about — is an error rather than a silent disappearance."
+  #{:thinking :redacted_thinking})
+
 (defn- user-content-block->openai [block]
   (case (:type block)
     :text
@@ -53,7 +61,17 @@
       (when url
         {"type" "image_url" "image_url" {"url" url}}))
 
-    nil))
+    ;; Everything else: deliberate drop, or a programming error. An unknown
+    ;; block type reaching a translator means the Request carried something
+    ;; nobody taught this wire about, and dropping it silently is how `:image`
+    ;; blocks went missing on the sibling Responses backend — the turn went out
+    ;; without the image and the model answered a vision prompt it could not
+    ;; see, with no error anywhere.
+    (if (contains? deliberately-dropped-block-types (:type block))
+      nil
+      (throw (ex-info (str "[openai] no chat-completions encoding for a "
+                        (pr-str (:type block)) " block in a user message")
+               {:block-type (:type block)})))))
 
 (defn- tool-use-blocks [blocks]
   (filterv #(= :tool_use (:type %)) blocks))
@@ -145,10 +163,20 @@
 
 (>defn request->openai-json
   "Pure translation from our Request map to an OpenAI Chat Completions request
-body (Clojure map with string keys, ready for JSON serialization)."
-  [request]
-  [:map => :map]
-  (let [{:keys [model system messages tools max-tokens
+body (Clojure map with string keys, ready for JSON serialization).
+
+`dialect` selects how the normalised `:reasoning` field is rendered, because
+this one namespace serves several providers whose reasoning wire formats
+genuinely differ — `:openai` (`reasoning_effort`), `:openrouter` (a
+`reasoning` object), `:ollama` (a `think` flag), `:deepseek` (`thinking` plus
+`reasoning_effort`), or `:none` to emit nothing. It is a static property of
+the provider (see `escapement.llm.providers/provider-templates`), never
+sniffed from the base-url. Defaults to `:openai`. A request without
+`:reasoning` is unaffected by it."
+  ([request] [:map => :map] (request->openai-json request :openai))
+  ([request dialect]
+   [:map [:maybe :keyword] => :map]
+   (let [{:keys [model system messages tools max-tokens
                 temperature top-p stop-sequences tool-choice metadata]} request
         sys-msg  (when system [{"role" "system" "content" system}])
         rest-msg (into [] (mapcat message->openai messages))
@@ -161,7 +189,9 @@ body (Clojure map with string keys, ready for JSON serialization)."
       (some? top-p) (assoc "top_p" top-p)
       (seq stop-sequences) (assoc "stop" (vec stop-sequences))
       (some? tool-choice) (assoc "tool_choice" (tool-choice->openai tool-choice))
-      (:user-id metadata) (assoc "user" (:user-id metadata)))))
+      (:user-id metadata) (assoc "user" (:user-id metadata))
+      (seq (reasoning/wire-fields dialect request))
+      (merge (reasoning/wire-fields dialect request))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Response translation: OpenAI JSON -> our Response
@@ -213,7 +243,13 @@ Response map."
   (let [choice  (first (get parsed "choices"))
         msg     (get choice "message")
         finish  (get choice "finish_reason")
-        content (message->content-blocks msg)]
+        content (message->content-blocks msg)
+        ;; A turn that spent itself reasoning and returned nothing usable. The
+        ;; provider tells us both halves (empty content + a non-empty
+        ;; `reasoning_content`/`reasoning`), so this is a wire fact, not a
+        ;; guess; `escapement.llm/run-turn` gives such a turn one more bounded
+        ;; attempt instead of handing back an empty answer.
+        reasoning-only? (reasoning/reasoning-only-message? msg)]
     {:stop-reason      (parse-finish-reason finish)
      ;; Our Response schema requires at least an empty content vector. Some
      ;; pure-tool-call turns have no text — that's fine, the :tool_use blocks
@@ -222,7 +258,18 @@ Response map."
      :usage            (usage->ours (get parsed "usage" {}))
      :model            (or (get parsed "model") request-model)
      :backend-metadata (cond-> {:backend :openai}
-                         (get parsed "id") (assoc :message-id (get parsed "id")))}))
+                         (get parsed "id") (assoc :message-id (get parsed "id"))
+                         reasoning-only? (assoc :reasoning-only? true))}))
+
+(defn tag-prefill-support
+  "Mark a Response when THIS endpoint is known not to honour an assistant
+   prefill, so the continuation loop can decline to try rather than spend a
+   call discovering it. Set from the provider's declared capability; absent,
+   the response is untouched and continuation is attempted as before."
+  [response opts]
+  (cond-> response
+    (= :unsupported (:prefill-support opts))
+    (assoc-in [:backend-metadata :prefill-unsupported?] true)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; HTTP
@@ -483,12 +530,15 @@ Response map."
     (p/do!
       (let [request (cond-> request
                       (and (nil? (:model request)) (:default-model opts))
-                      (assoc :model (:default-model opts)))]
+                      (assoc :model (:default-model opts)))
+            ;; Per-endpoint request-key quirks (e.g. a model that accepts only
+            ;; temperature 1 on THIS gateway). No table → untouched.
+            request (quirks/apply-quirks (:model-quirks opts) request)]
         (when-let [err (types/validate-request request)]
           (throw (ex-info "Invalid LLM request" {:errors err :request request})))
         (let [transport     (or (:http-transport opts) (ht/default-transport))
               transcript-fn (:transcript-fn opts)
-              body-map      (request->openai-json request)
+              body-map      (request->openai-json request (:reasoning-dialect opts :openai))
               _             (when transcript-fn
                               (transcript-fn {:event    :llm/request
                                               :backend  :openai
@@ -497,7 +547,8 @@ Response map."
                                               :model    (:model request)
                                               :body     body-map}))
               parsed        (post-chat! transport opts body-map)
-              response      (openai-json->response parsed (:model request))]
+              response      (-> (openai-json->response parsed (:model request))
+                              (tag-prefill-support opts))]
           (when transcript-fn
             (transcript-fn {:event    :llm/response
                             :backend  :openai
@@ -512,12 +563,15 @@ Response map."
     (p/do!
       (let [request (cond-> request
                       (and (nil? (:model request)) (:default-model opts))
-                      (assoc :model (:default-model opts)))]
+                      (assoc :model (:default-model opts)))
+            ;; Per-endpoint request-key quirks (e.g. a model that accepts only
+            ;; temperature 1 on THIS gateway). No table → untouched.
+            request (quirks/apply-quirks (:model-quirks opts) request)]
         (when-let [err (types/validate-request request)]
           (throw (ex-info "Invalid LLM request" {:errors err :request request})))
         (let [transport     (or (:http-transport opts) (ht/default-transport))
               transcript-fn (:transcript-fn opts)
-              body-map      (request->openai-json request)
+              body-map      (request->openai-json request (:reasoning-dialect opts :openai))
               _             (when transcript-fn
                               (transcript-fn {:event    :llm/request
                                               :backend  :openai
@@ -526,7 +580,8 @@ Response map."
                                               :model    (:model request)
                                               :stream   true
                                               :body     body-map}))
-              response      (stream-chat! transport opts body-map (:model request) on-delta)]
+              response      (-> (stream-chat! transport opts body-map (:model request) on-delta)
+                              (tag-prefill-support opts))]
           (when transcript-fn
             (transcript-fn {:event    :llm/response
                             :backend  :openai
@@ -548,11 +603,24 @@ Required opts:
 Optional opts:
 - `:default-model`   — string used when Request omits `:model`.
 - `:extra-headers`   — map of additional request headers.
+- `:prefill-support` — `:unsupported` when this endpoint is KNOWN not to honour
+                       an assistant-prefill continuation (evidence required —
+                       see `escapement.llm.providers`). Absent, continuation is
+                       attempted as before.
+- `:model-quirks`    — vector of per-model request-key constraints for THIS
+                       endpoint (see `escapement.llm.model-quirks`). Absent, no
+                       request is adjusted.
 - `:http-timeout-ms` — request timeout (default 60000).
 - `:http-transport`  — an `escapement.llm.http-transport/HttpTransport`.
                        Defaults to `(http-transport/default-transport)` (bb
                        http-client on CLJ/bb). CLJS hosts must supply one.
-- `:transcript-fn`   — `(fn [event])` called with `:llm/request` / `:llm/response`."
+- `:transcript-fn`   — `(fn [event])` called with `:llm/request` / `:llm/response`.
+- `:reasoning-dialect` — how to render a request's normalised `:reasoning`
+                       field on this endpoint: `:openai` (default),
+                       `:openrouter`, `:ollama`, `:deepseek`, or `:none` to
+                       emit nothing. `escapement.llm.providers` sets this per
+                       provider; a caller only overrides it for an endpoint
+                       the library does not know about."
   ([] [=> :any] (new-backend {}))
   ([opts]
    [:map => :any]

@@ -219,7 +219,8 @@
                   (:prompt params) (assoc :prompt (:prompt params)))})
       (cond
         (= :dying @worker-state)
-        (transcript! transcript-fn {:event :human-input/cancelled :ts (now-ms) :data {}})
+        (transcript! transcript-fn {:event :human-input/cancelled :ts (now-ms)
+                                    :data  {:invokeid (:invokeid parent-ctx)}})
 
         (= :progress kind)
         ;; Progress is fundamentally event-driven; for v1 just end immediately
@@ -233,14 +234,15 @@
         (let [answer (p/await! (dispatch-kind! renderer params env data))]
           (cond
             (= :dying @worker-state)
-            (transcript! transcript-fn {:event :human-input/cancelled :ts (now-ms) :data {}})
+            (transcript! transcript-fn {:event :human-input/cancelled :ts (now-ms)
+                                    :data  {:invokeid (:invokeid parent-ctx)}})
 
             (and answer-schema (not (m/validate answer-schema answer)))
             (let [err (humanize-malli-errors answer-schema answer)]
               (transcript! transcript-fn
                 {:event :human-input/validation-failed
                  :ts    (now-ms)
-                 :data  {:errors err}})
+                 :data  {:errors err :invokeid (:invokeid parent-ctx)}})
               (post-error! :invalid-answer
                 {:errors err :answer answer}))
 
@@ -255,14 +257,15 @@
                           (assoc :answer answer))})
               (post-event-to-parent! parent-ctx on-answer-event {:answer answer})))))
       (catch InterruptedException _
-        (transcript! transcript-fn {:event :human-input/interrupted :ts (now-ms) :data {}}))
+        (transcript! transcript-fn {:event :human-input/interrupted :ts (now-ms)
+                                    :data  {:invokeid (:invokeid parent-ctx)}}))
       (catch Throwable t
         (if (= :cancelled (:reason (ex-data t)))
           (do
             (transcript! transcript-fn
               {:event :human-input/cancelled
                :ts    (now-ms)
-               :data  {}})
+               :data  {:invokeid (:invokeid parent-ctx)}})
             (try
               (post-event-to-parent! parent-ctx on-cancel-event {})
               (catch Throwable _ nil)))
@@ -270,7 +273,7 @@
             (transcript! transcript-fn
               {:event :human-input/error
                :ts    (now-ms)
-               :data  {:message (.getMessage t)}})
+               :data  {:message (.getMessage t) :invokeid (:invokeid parent-ctx)}})
             (try
               (post-error! :worker-exception {:message (.getMessage t)})
               (catch Throwable _ nil)))))

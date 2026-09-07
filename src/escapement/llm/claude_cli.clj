@@ -57,6 +57,7 @@
     [escapement.llm.claude-cli.translate :as t]
     [escapement.llm.protocol :as proto]
     [escapement.llm.types :as types]
+    [escapement.llm.reasoning :as rsn]
     [taoensso.timbre :as log])
   (:import
     (java.io File)
@@ -217,11 +218,19 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Turn
 
+(def ^:private effort->cli
+  "Normalised effort ordinal → the CLI's own `--effort` vocabulary. `:none`
+   yields nil: the CLI has no \"do not think\" switch, so the directive is
+   dropped rather than guessed at."
+  {:minimal "low" :low "low" :medium "medium" :high "high" :max "high"})
+
 (defn- effort-for
-  "Maps the Request's `:thinking` onto the CLI's `--effort`, the nearest thing
-   the CLI exposes to a thinking budget. An explicit backend `:effort` wins."
+  "Maps the Request onto the CLI's `--effort`, the nearest thing the CLI
+   exposes to a thinking budget. An explicit backend `:effort` wins, then the
+   normalised `:reasoning` field, then a legacy `:thinking` directive."
   [request opts]
   (or (:effort opts)
+    (get effort->cli (rsn/effort request))
     (when (= :enabled (get-in request [:thinking :type])) "high")))
 
 (defn- send-turn*

@@ -6,7 +6,7 @@
     [escapement.llm.openai :as oai]
     [escapement.llm.protocol :as proto]
     [escapement.llm.types :as types]
-    [fulcro-spec.core :refer [=> assertions specification]]
+    [fulcro-spec.core :refer [=> assertions component specification]]
     [com.fulcrologic.statecharts.promise :as p])
   (:import (java.io BufferedReader StringReader)))
 
@@ -393,7 +393,40 @@
             (p/await! (proto/send-turn* b req #(swap! d2 conj %)))
             (count @d2)) => 2)))))
 
+(specification "tag-prefill-support — a declared :prefill-support :unsupported marks the Response"
+  (let [resp (oai/openai-json->response sample-openai-response "gpt-5")]
+    (component "the pure tag"
+      (assertions
+        "an endpoint declared :unsupported gets the flag"
+        (get-in (oai/tag-prefill-support resp {:prefill-support :unsupported})
+          [:backend-metadata :prefill-unsupported?]) => true
+        "the rest of the metadata is untouched"
+        (get-in (oai/tag-prefill-support resp {:prefill-support :unsupported})
+          [:backend-metadata :backend]) => :openai
+        "no declaration → the Response is returned as-is (continuation is attempted)"
+        (oai/tag-prefill-support resp {}) => resp
+        (contains? (:backend-metadata (oai/tag-prefill-support resp {})) :prefill-unsupported?) => false
+        "any other declared value is not :unsupported"
+        (contains? (:backend-metadata (oai/tag-prefill-support resp {:prefill-support :supported}))
+          :prefill-unsupported?) => false))
 
+    (component "end-to-end through send-turn (buffered path)"
+      (let [req       {:model      "gpt-5"
+                       :messages   [{:role :user :content [{:type :text :text "hi"}]}]
+                       :max-tokens 64}
+            fake-post (fn [_url _opts]
+                        {:status 200
+                         :body   (json/generate-string sample-openai-response)})
+            send      (fn [opts]
+                        (with-redefs [babashka.http-client/post fake-post]
+                          (p/await! (proto/send-turn (oai/new-backend opts) req))))]
+        (assertions
+          "a backend built with :prefill-support :unsupported tags its Responses"
+          (get-in (send {:api-key "k" :base-url "http://x/v1" :prefill-support :unsupported})
+            [:backend-metadata :prefill-unsupported?]) => true
+          "a backend built without the declaration does not"
+          (contains? (:backend-metadata (send {:api-key "k" :base-url "http://x/v1"}))
+            :prefill-unsupported?) => false)))))
 
 (specification "status->category — error categorization parity with Anthropic backend"
   (let [c (fn [s b] (#'oai/status->category s b))]
@@ -420,3 +453,43 @@
       "whitespace tolerated"              (r {"retry-after" "  5 "})                  => 5000
       "absent header -> nil"              (r {})                                      => nil
       "unparseable -> nil"                (r {"retry-after" "Wed, 21 Oct 2026 07:28:00 GMT"}) => nil)))
+
+(specification "an unencodable block is an error, a documented drop is not"
+  ;; Found by sweeping for the shape that hid the Responses-wire vision bug: a
+  ;; `case` with a nil default inside a `keep`, which makes an unhandled block
+  ;; type disappear without a word. This wire drops `:thinking` /
+  ;; `:redacted_thinking` ON PURPOSE (they are Anthropic-only and the ns
+  ;; docstring says so); anything else is a programming error.
+
+  (component "the deliberate drops stay silent"
+    (let [body (oai/request->openai-json
+                 {:model    "m"
+                  :messages [{:role    :user
+                              :content [{:type :text :text "hi"}
+                                        {:type :thinking :thinking "…" :signature "s"}]}]})]
+      (assertions
+        "the turn still goes out"
+        (count (get body "messages")) => 1
+
+        "carrying only the text part — the thinking block is gone, as documented"
+        (get (first (get body "messages")) "content") => [{"type" "text" "text" "hi"}])))
+
+  (component "an unknown block type throws instead of vanishing"
+    (assertions
+      "and names the type"
+      (try (oai/request->openai-json
+             {:model    "m"
+              :messages [{:role :user :content [{:type :some_future_block :data "x"}]}]})
+           :no-throw
+           (catch clojure.lang.ExceptionInfo e (:block-type (ex-data e))))
+      => :some_future_block))
+
+  (component "images are unaffected — they were always handled here"
+    (let [body (oai/request->openai-json
+                 {:model    "m"
+                  :messages [{:role    :user
+                              :content [{:type   :image
+                                         :source {:type :base64 :media-type "image/png" :data "AAA"}}]}]})]
+      (assertions
+        "still an image_url part"
+        (-> (get body "messages") first (get "content") first (get "type")) => "image_url"))))

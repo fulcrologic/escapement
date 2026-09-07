@@ -1,6 +1,8 @@
 (ns escapement.cli-test
   (:require
+    [babashka.process :as bp]
     [clojure.java.io :as io]
+    [clojure.string :as str]
     [escapement.cli :as cli]
     [escapement.llm.providers :as providers]
     [fulcro-spec.core :refer [=> assertions component specification]])
@@ -126,7 +128,63 @@
           "default model"
           (get-in result [:backend :default-model]) => "kimi-k2.5"
           "fallback list"
-          (:default-models result) => ["kimi-k2.5"]))))
+          (:default-models result) => ["kimi-k2.5"]
+          "reasoning dialect"
+          (get-in result [:backend :reasoning-dialect]) => :ollama))))
+
+  (component "explicit Ollama backend with no --model falls back to glm-5.3-flash"
+    (with-redefs [cli/build-openai-backend       identity
+                  providers/build-openai-backend identity]
+      (let [result (#'cli/make-backend {:backend "ollama"})]
+        (assertions
+          "default model"
+          (get-in result [:backend :default-model]) => "glm-5.3-flash"
+          "fallback list"
+          (:default-models result) => ["glm-5.3-flash"]))))
+
+  (component "explicit OpenAI backend speaks the :openai reasoning dialect"
+    (with-redefs [cli/build-openai-backend       identity
+                  providers/build-openai-backend identity]
+      (let [result (#'cli/make-backend {:backend "openai"})]
+        (assertions
+          "base URL"
+          (get-in result [:backend :base-url]) => "https://api.openai.com/v1"
+          "default model"
+          (get-in result [:backend :default-model]) => "gpt-4o-mini"
+          "reasoning dialect"
+          (get-in result [:backend :reasoning-dialect]) => :openai
+          "fallback list"
+          (:default-models result) => ["gpt-4o-mini"]))))
+
+  (component "explicit DeepSeek backend uses the DeepSeek OpenAI-compatible endpoint"
+    (with-redefs [cli/build-openai-backend       identity
+                  providers/build-openai-backend identity]
+      (let [result (#'cli/make-backend {:backend "deepseek"})]
+        (assertions
+          "base URL"
+          (get-in result [:backend :base-url]) => "https://api.deepseek.com/v1"
+          "default model"
+          (get-in result [:backend :default-model]) => "deepseek-v4-flash"
+          "reasoning dialect"
+          (get-in result [:backend :reasoning-dialect]) => :deepseek
+          "fallback list"
+          (:default-models result) => ["deepseek-v4-flash"]))))
+
+  (component "explicit DeepSeek backend honors --model and --api-base-url"
+    (with-redefs [cli/build-openai-backend       identity
+                  providers/build-openai-backend identity]
+      (let [result (#'cli/make-backend {:backend      "deepseek"
+                                        :model        "deepseek-reasoner"
+                                        :api-base-url "https://proxy.example/v1"})]
+        (assertions
+          "base URL override"
+          (get-in result [:backend :base-url]) => "https://proxy.example/v1"
+          "explicit model"
+          (get-in result [:backend :default-model]) => "deepseek-reasoner"
+          "dialect is unchanged by the override"
+          (get-in result [:backend :reasoning-dialect]) => :deepseek
+          "fallback list"
+          (:default-models result) => ["deepseek-reasoner"]))))
 
   (component "OpenCode Go chooses OpenAI-compatible wiring for GLM/Kimi/MIMO models"
     (with-redefs [providers/build-openai-backend identity
@@ -212,6 +270,34 @@
       "an explicit :model overrides it"
       (:default-model (#'providers/descriptor->credential
                         {:provider :claude-cli :model "opus"})) => "opus")))
+
+(specification "info — LLM backend credential report"
+  ;; `cmd-info` ends in `(System/exit 0)`, which cannot be redef'd under SCI and
+  ;; would kill the test runner mid-spec, so `info` is driven as the real
+  ;; subprocess (`bb -m escapement.cli info`, the same path `--doctor` users hit).
+  ;; The child env is built explicitly so the set/not-set verdict is deterministic
+  ;; regardless of the developer's own shell.
+  (let [base-env  (dissoc (into {} (System/getenv)) "DEEPSEEK_API_KEY")
+        info-with (fn [env]
+                    (:out (bp/shell {:out :string :err :string :continue true :env env}
+                            "bb" "-m" "escapement.cli" "info")))
+        line-for  (fn [out k] (some #(when (re-find (re-pattern (str "^\\s*" k "\\s*:")) %) %)
+                                (str/split-lines out)))
+        verdict   (fn [line] (str/trim (subs line (inc (.indexOf ^String line ":")))))
+        set-out   (info-with (assoc base-env "DEEPSEEK_API_KEY" "sk-test"))
+        unset-out (info-with base-env)]
+    (assertions
+      "the report has an LLM backends section"
+      (str/includes? set-out "LLM backends:") => true
+      "DEEPSEEK_API_KEY is reported as set when the env var is present"
+      (some? (line-for set-out "DEEPSEEK_API_KEY")) => true
+      (verdict (line-for set-out "DEEPSEEK_API_KEY")) => "set"
+      "and as not set when it is absent (exact — \"not set\" contains \"set\",
+       so a substring check would be vacuous)"
+      (verdict (line-for unset-out "DEEPSEEK_API_KEY")) => "not set"
+      "it sits alongside the other provider keys"
+      (some? (line-for set-out "OLLAMA_API_KEY")) => true
+      (some? (line-for set-out "OPENAI_API_KEY")) => true)))
 
 (specification "resolve-log-level (R4)"
   (component "explicit --log-level wins (case-insensitive)"

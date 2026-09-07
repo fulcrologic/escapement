@@ -870,6 +870,10 @@
      :usage            (turn-usage acc)
      :model            (or (:model acc) (not-empty (str request-model)) "claude-cli")
      :backend-metadata (cond-> {:backend         :claude-cli
+                                ;; The CLI accepts only type:user messages, so a
+                                ;; continuation prefill is dropped on the way in
+                                ;; (see the NN-5 spec in translate_test.clj).
+                                :prefill-unsupported? true
                                 :mechanism       mechanism
                                 :cli/num-turns   (:num_turns result)
                                 :cli/subtype     (:subtype result)

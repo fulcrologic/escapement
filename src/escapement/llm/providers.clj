@@ -14,7 +14,8 @@
    Backend constructors are resolved lazily (require + resolve) so this ns
    stays cheap to load and pulls in only the backends actually used."
   (:require
-    [clojure.string :as str]))
+    [clojure.string :as str]
+    [taoensso.timbre :as log]))
 
 (defn build-api-backend
   "Anthropic-compatible (Messages API) backend: Anthropic, z.ai,
@@ -67,15 +68,35 @@
 (defn opencode-go-anthropic-model? [model]
   (and model (re-find #"^minimax-" model)))
 
+(defn opencode-session-headers
+  "opencode.ai's Zen gateway REJECTS any request without an
+   `x-opencode-session` header — `MissingSessionID`, HTTP 400, on both its
+   OpenAI-shaped and its Anthropic-shaped endpoints (verified 2026-09-07;
+   before this, EVERY opencode-go request through this library failed). The
+   value only has to be a stable id the gateway can route on, so each backend
+   instance gets its own."
+  []
+  {"x-opencode-session" (str "escapement-" (random-uuid))})
+
+(defn opencode-go-quirks
+  "Per-model request-key constraints for the opencode.ai Zen gateway. Resolved
+   lazily so this ns stays cheap to load."
+  []
+  (require 'escapement.llm.model-quirks)
+  @(resolve 'escapement.llm.model-quirks/opencode-go-quirks))
+
 (defn build-opencode-go-backend [{:keys [model api-key base-url] :as opts}]
   (if (opencode-go-anthropic-model? model)
     (build-api-backend {:api-key       api-key
                         :base-url      (or base-url "https://opencode.ai/zen/go")
                         :default-model model
-                        :auth-mode     :x-api-key})
+                        :auth-mode     :x-api-key
+                        :extra-headers (opencode-session-headers)})
     (build-openai-backend {:api-key       api-key
                            :base-url      (or base-url "https://opencode.ai/zen/go/v1")
-                           :default-model (or model (:default-model opts) "glm-5")})))
+                           :default-model (or model (:default-model opts) "glm-5")
+                           :extra-headers (opencode-session-headers)
+                           :model-quirks  (opencode-go-quirks)})))
 
 (defn detect-available-credentials
   "Returns a vector of available credential descriptors (one per env var or
@@ -86,6 +107,7 @@
         zai         (nonblank-env "ZAI_API_KEY")
         openai      (nonblank-env "OPENAI_API_KEY")
         openrouter  (nonblank-env "OPENROUTER_API_KEY")
+        deepseek    (nonblank-env "DEEPSEEK_API_KEY")
         ollama      (nonblank-env "OLLAMA_API_KEY")
         opencode-go (nonblank-env "OPENCODE_GO_API_KEY")
         codex-auth  (try
@@ -112,13 +134,26 @@
       (conj {:kind          :openai :source "OPENAI_API_KEY"
              :api-key       openai :base-url "https://api.openai.com/v1"
              :default-model (or (System/getenv "OPENAI_MODEL") "gpt-4o-mini")
+             :reasoning-dialect :openai
              :route         #"^gpt-"})
 
       openrouter
       (conj {:kind          :openrouter :source "OPENROUTER_API_KEY"
              :api-key       openrouter :base-url "https://openrouter.ai/api/v1"
              :default-model (or (System/getenv "OPENROUTER_MODEL") "openai/gpt-4o-mini")
+             :reasoning-dialect :openrouter
              :route         #".+/.+"})
+
+      ;; DeepSeek's own metered endpoint — OpenAI chat-completions wire at
+      ;; `https://api.deepseek.com/v1`. Listed BEFORE Ollama on purpose: the
+      ;; Ollama descriptor's route also matches `deepseek-*`, so a key for the
+      ;; model's own vendor must win over a gateway that merely resells it.
+      deepseek
+      (conj {:kind          :deepseek :source "DEEPSEEK_API_KEY"
+             :api-key       deepseek :base-url "https://api.deepseek.com/v1"
+             :default-model (or (System/getenv "DEEPSEEK_MODEL") "deepseek-v4-flash")
+             :reasoning-dialect :deepseek
+             :route         #"^deepseek-"})
 
       ;; Keep established provider routes before newer hosted gateways so
       ;; adding Ollama/OpenCode credentials does not steal existing glm-* traffic.
@@ -146,6 +181,7 @@
       (conj {:kind          :opencode-go-openai :source "OPENCODE_GO_API_KEY"
              :api-key       opencode-go :base-url "https://opencode.ai/zen/go/v1"
              :default-model (or (System/getenv "OPENCODE_GO_MODEL") "glm-5")
+             :reasoning-dialect :none
              :route         #"^(glm-|kimi-|mimo-)"})
 
       opencode-go
@@ -157,7 +193,13 @@
       ollama
       (conj {:kind          :ollama :source "OLLAMA_API_KEY"
              :api-key       ollama :base-url "https://ollama.com/v1"
-             :default-model (or (System/getenv "OLLAMA_MODEL") "kimi-k2.5")
+             ;; NOT `kimi-k2.5`: retired upstream 2026-07-31, and the cloud
+             ;; API answers every request for it with an error, so it was a
+             ;; guaranteed failure for anyone taking the default. `glm-5.3-flash`
+             ;; is general-purpose (deliberately not a `-code` model), current,
+             ;; and the cheapest tier here. Confirmed answering 2026-09-07.
+             :default-model (or (System/getenv "OLLAMA_MODEL") "glm-5.3-flash")
+             :reasoning-dialect :ollama
              :route         #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}))))
 
 (defn build-credential-backend
@@ -167,12 +209,26 @@
     :anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
     :zai (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
     :zai-coding-plan (build-codex-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms]))
-    :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
-    :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
-    :ollama (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
-    :opencode-go-openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
-    :opencode-go-anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
-    :codex (build-codex-backend {:default-model (:default-model c)})
+    ;; `:reasoning-dialect` is a STATIC property of the provider, carried on the
+    ;; descriptor/template — never sniffed from the base-url, so pointing a
+    ;; provider at a proxy or a self-hosted gateway cannot silently change the
+    ;; wire format of its reasoning field.
+    :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms]))
+    :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms]))
+    :ollama (build-openai-backend (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms])
+                                    (assoc :prefill-support :unsupported)))
+    :deepseek (build-openai-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms :reasoning-dialect]))
+    ;; Both opencode.ai routes carry the mandatory `x-opencode-session` header;
+    ;; without it the gateway 400s every request, whichever wire format.
+    :opencode-go-openai (build-openai-backend
+                          (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms])
+                            (assoc :extra-headers (opencode-session-headers)
+                              :model-quirks (opencode-go-quirks))))
+    :opencode-go-anthropic (build-api-backend
+                             (-> (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms])
+                               (assoc :extra-headers (opencode-session-headers))))
+    :codex (build-codex-backend (cond-> {:default-model (:default-model c)}
+                                  (:http-timeout-ms c) (assoc :http-timeout-ms (:http-timeout-ms c))))
     :claude-cli (build-claude-cli-backend
                   (select-keys c [:default-model :binary :timeout-ms :max-concurrency
                                   :effort :max-budget-usd]))))
@@ -186,7 +242,9 @@
 ;; constructor, so the provider matrix cannot drift between CLI auto-detection
 ;; and explicit injection: changing a provider's wire shape means changing it
 ;; in BOTH `detect-available-credentials` and here, and the equivalence is
-;; covered by tests. This path NEVER reads `System/getenv` and NEVER touches
+;; covered by tests — see the "the two assembly paths do not drift" spec in
+;; `test/escapement/llm/providers_test.clj`, which compares EVERY provider both
+;; paths describe, not a sample. This path NEVER reads `System/getenv` and NEVER touches
 ;; disk — every value is supplied by the caller's descriptor or the static
 ;; template below.
 (def ^:private provider-templates
@@ -197,14 +255,21 @@
   {:anthropic             {:kind          :anthropic :base-url "https://api.anthropic.com"
                            :default-model "claude-sonnet-5" :auth-mode :x-api-key
                            :route         #"^claude-"}
+   ;; `glm-5.3-flash`, NOT `glm-4.6`: that id is retired and the endpoint
+   ;; silently answers it with `glm-5.3-flash` anyway (verified 2026-09-07), so
+   ;; the old default named a model that never ran. This names the model the
+   ;; endpoint was already delivering — same model, same tier, now stated
+   ;; truthfully. Confirmed directly requestable and self-reporting.
    :z-ai                  {:kind          :zai :base-url "https://api.z.ai/api/anthropic"
-                           :default-model "glm-4.6" :auth-mode :bearer
+                           :default-model "glm-5.3-flash" :auth-mode :bearer
                            :http-timeout-ms 300000
                            :route         #"^glm-"}
    ;; `:z-ai-plan` is the subscription-billed face of z.ai used in
    ;; `default-preferences`; same wire backend as metered `:z-ai`.
    :z-ai-plan             {:kind          :zai :base-url "https://api.z.ai/api/anthropic"
-                           :default-model "glm-4.6" :auth-mode :bearer
+                           ;; See the `:z-ai` note: `glm-4.6` is retired and was
+                           ;; silently served as `glm-5.3-flash`.
+                           :default-model "glm-5.3-flash" :auth-mode :bearer
                            :http-timeout-ms 300000
                            :route         #"^glm-"}
    ;; z.ai coding plan, v1 (legacy) generation — OpenAI Responses wire. Mirrors
@@ -218,16 +283,32 @@
                            :http-timeout-ms 300000
                            :route         #"^glm-"}
    :openai                {:kind          :openai :base-url "https://api.openai.com/v1"
-                           :default-model "gpt-4o-mini"
+                           :default-model "gpt-4o-mini" :reasoning-dialect :openai
                            :route         #"^gpt-"}
    :openrouter            {:kind          :openrouter :base-url "https://openrouter.ai/api/v1"
-                           :default-model "openai/gpt-4o-mini"
+                           :default-model "openai/gpt-4o-mini" :reasoning-dialect :openrouter
                            :route         #".+/.+"}
+   ;; DeepSeek, metered, on its own endpoint. Mirrors the descriptor
+   ;; `detect-available-credentials` emits for DEEPSEEK_API_KEY.
+   :deepseek              {:kind          :deepseek :base-url "https://api.deepseek.com/v1"
+                           :default-model "deepseek-v4-flash" :reasoning-dialect :deepseek
+                           :route         #"^deepseek-"}
+   ;; `:prefill-support :unsupported` — evidence, not caution: this endpoint
+   ;; answers a trailing assistant message with a hard 400,
+   ;; "Expected last role User or Tool (or Assistant with prefix True) for
+   ;; serving but got assistant" (verified 2026-09-07, mistral-large-3). Every
+   ;; other provider keeps today's behaviour and relies on the restart guard in
+   ;; `llm-conversation/continuation-restarted?`; in particular Anthropic proper
+   ;; is deliberately NOT downgraded — its prefill support is documented and was
+   ;; simply not verifiable here, and declaring it unsupported on a guess would
+   ;; remove working behaviour from existing embedders.
    :ollama                {:kind          :ollama :base-url "https://ollama.com/v1"
-                           :default-model "kimi-k2.5"
+                           ;; See the note in `detect-available-credentials`:
+                           ;; `kimi-k2.5` was retired upstream 2026-07-31.
+                           :default-model "glm-5.3-flash" :reasoning-dialect :ollama
                            :route         #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}
    :opencode-go           {:kind          :opencode-go-openai :base-url "https://opencode.ai/zen/go/v1"
-                           :default-model "glm-5"
+                           :default-model "glm-5" :reasoning-dialect :none
                            :route         #"^(glm-|kimi-|mimo-)"}
    :opencode-go-anthropic {:kind          :opencode-go-anthropic :base-url "https://opencode.ai/zen/go"
                            :default-model "minimax-m2.7" :auth-mode :x-api-key
@@ -258,9 +339,26 @@
    `:default-model`, `:model`). Pure: no env, no disk. Returns nil for an
    unknown provider so the caller can drop it cleanly."
   [{:keys [provider] :as desc}]
+  (when-not (contains? provider-templates provider)
+    ;; Dropped, not fatal: tolerating an unknown keyword is real
+    ;; forward-compatibility for a host passing a superset of descriptors across
+    ;; library versions. The DEFECT was the silence — a one-character typo
+    ;; (`:anthropc`) used to remove a provider from the run with no signal
+    ;; anywhere, so the run proceeded on a different provider, with the real key
+    ;; unused. Name the known set the way a good 400 does, so the intended
+    ;; keyword is visible on the same line as the mistake.
+    (log/warn "[llm/credentials] unknown :provider" (pr-str provider)
+      "— descriptor ignored. Known providers:"
+      (pr-str (vec (sort (keys provider-templates))))))
   (when-let [tmpl (get provider-templates provider)]
+    ;; `:http-timeout-ms` is honoured here on purpose: a host-supplied timeout
+    ;; used to be dropped for EVERY provider, so only a template's own value
+    ;; survived — which is why the z.ai entries (which set one) worked and
+    ;; nothing else did. A caller whose generations legitimately run past the
+    ;; 60s default had no way to say so.
     (let [overrides (-> desc
-                      (select-keys [:api-key :base-url :default-model :auth-mode])
+                      (select-keys [:api-key :base-url :default-model :auth-mode :reasoning-dialect
+                                    :http-timeout-ms])
                       (cond-> (:model desc) (assoc :default-model (:model desc))))]
       (merge tmpl (into {} (remove (comp nil? val)) overrides)))))
 

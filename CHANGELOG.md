@@ -1,5 +1,171 @@
 # Changelog
 
+## [unreleased] — hosted-library-slice-2 — 2026-09-07
+
+Hardens the LLM provider layer for a JVM host embedding `escapement.lib`: one
+provider-neutral way to ask for reasoning, a DeepSeek provider, two providers
+that failed on every request repaired, provider defaults that name the model
+that actually runs, and a transcript that is honest about which model
+answered, what a failed turn cost, and which invocation an event belongs to.
+Continuation of a truncated turn is now bounded, detects a provider that
+restarts instead of continuing, and can be switched off on its own.
+
+### Added
+
+- **`:reasoning` — a normalised, provider-neutral reasoning/effort field.** A
+  chart node or `:llm/aliases` target says `{:reasoning {:effort :high}}` (or
+  the sugar `{:reasoning :high}`; `:effort` is one of
+  `:none :minimal :low :medium :high :max`, optional `:budget-tokens`) once,
+  and each backend renders it into its own wire dialect: Anthropic-shaped
+  `thinking` with a derived budget (never more than half the output cap;
+  dropped when the 1024-token floor does not fit), OpenAI `reasoning_effort`,
+  OpenRouter's `reasoning` object, Ollama's `think` flag, DeepSeek's
+  `thinking` + `reasoning_effort`, and the Responses API `reasoning` object.
+  Omitting it emits byte-for-byte what each backend emitted before; an
+  explicit `:thinking` still wins. On the Anthropic-shaped wire enabling
+  reasoning drops `:temperature`/`:top-p`/`:top-k` (which that API rejects
+  alongside thinking) with a once-per-process warning. The dialect is a static
+  per-provider property (`:reasoning-dialect`), never sniffed from the base
+  URL.
+- **DeepSeek provider.** `--backend deepseek`, `DEEPSEEK_API_KEY` (+ optional
+  `DEEPSEEK_MODEL`) auto-detection, a `{:provider :deepseek}` credential
+  template for `escapement.lib`, an `escapement env` doctor line, and catalog
+  coverage. Detected ahead of Ollama so the vendor's own key wins over a
+  gateway whose route also matches `deepseek-*`.
+- **Reasoning-only retry.** A turn whose provider reports empty content plus a
+  non-empty reasoning field (DeepSeek `reasoning_content`, Ollama `reasoning`)
+  is retried under the ordinary `:max-retries`, reported via `:on-retry` /
+  `:llm/retry` as category `:reasoning-only`, instead of being handed back as
+  an empty answer.
+- **Continuation ceilings and an off-switch.**
+  `:resilience {:continuation {:max-segments 64 :max-chars 2000000}}` bound
+  the `:max_tokens` stitch loop (previously unbounded: a model truncating on
+  every segment grew the accumulation until the JVM ran out of memory).
+  Hitting either ends the turn with `:error.llm.unexpected-stop`
+  (`:detail :continuation-limit`) and a `:llm/continuation-limit` event,
+  keeping everything stitched so far. `{:continuation {:enabled? false}}`
+  turns continuation off on its own (one call; the truncation is terminal)
+  without having to buy an `:overrun` rerun.
+- **Continuation restart guard.** When a continuation segment begins with the
+  text already accumulated, the provider restarted instead of continuing
+  (verified live on OpenRouter and z.ai); the worker keeps what it had and
+  fails with `:detail :continuation-restarted` + a
+  `:llm/continuation-restarted` event rather than stitching a document that
+  contains its own prefix twice. Endpoints known to be unable to honour an
+  assistant prefill (Ollama Cloud, `claude-cli`, the Responses wire) declare
+  it, and the worker stops at the truncation with
+  `:detail :continuation-unsupported` + `:llm/continuation-unsupported`
+  instead of spending a doomed call.
+- **Requested-vs-reported model ids.** The `run-turn` envelope carries
+  `:model`, `:model-reported`, `:model-substituted?`; the `Response` carries
+  `:model` (reported) and `:model-requested`; the `:llm/response` row carries
+  both, and a mismatch emits its own `:llm/model-substituted` event. z.ai and
+  DeepSeek were verified to substitute silently behind a normal 200.
+- **Partial usage on failed turns.** A streamed turn that failed, was
+  cancelled, or was abandoned on the latency cap reports what it had already
+  spent as `:partial-usage` on the `:exhausted`/`:interrupted` envelope
+  (summed across failover candidates) and on the `:llm/error` /
+  `:llm/worker-exit` transcript rows. Absent when nothing was observed — no
+  number is invented. This is not cost accounting; nothing prices tokens.
+- **Per-endpoint request-key quirk seam** (`escapement.llm.model-quirks`,
+  `:model-quirks` backend opt): a data table of keys a model rejects, or
+  accepts at one value only, on a given endpoint — applied with a
+  once-per-process warning, and only when the caller actually set the key.
+  First entry: `kimi-k2.7*` is pinned to `temperature 1` on opencode.ai's Zen
+  gateway (the same id accepts 0.7 via Ollama Cloud, which is why quirks are
+  endpoint-scoped).
+- **`:initial-messages` in the `h/llm-conversation` curated key list** — the
+  key for an opening turn that is more than plain text (an `:image` block, a
+  short prior exchange). `:message` is documented as string-only.
+- **Images on the Responses wire.** `:image` blocks in a user message now
+  reach `openai-codex` / `zai-coding-plan` as an `input_image` part in the same
+  message item as the text (verified live on `glm-5v-turbo`). Previously they
+  were silently dropped and the model answered a vision prompt it could not
+  see.
+- **`:http-timeout-ms` per credential descriptor** is now honoured for every
+  provider (it was dropped for all but the z.ai templates, and by four backend
+  branches even from a template). Default 60 s on the OpenAI-shaped backends;
+  it is the only bound on a stalled turn, and a `:timeout` is retried up to
+  `:max-retries`.
+- **Warnings where there used to be silence.** An unknown `:provider` keyword
+  in a credential descriptor is still dropped but now warns, naming the
+  keyword and the known set; a `:transcript-tap` or `:on-env-ready` callback
+  that throws is still swallowed but warns once per run (the transcript file
+  is unaffected).
+- **Catalog coverage for every provider template.** `:openrouter`,
+  `:opencode-go`, `:opencode-go-anthropic`, `:zai-coding-plan` and `:deepseek`
+  models are now surfaced from the models.dev dump (refreshed to 213
+  providers) so `:needs` eligibility can evaluate them; `:codex` /
+  `:openai-codex` / `:claude-cli` stay on the curated overlay by design (see
+  `docs/catalog.md`).
+
+### Changed
+
+- **opencode-go repaired.** The Zen gateway now requires an
+  `x-opencode-session` header on both its wire shapes; the library attaches
+  one per backend instance. Before this every opencode-go request through the
+  library failed with HTTP 400 `MissingSessionID`.
+- **Truthful provider defaults.** Ollama Cloud default `kimi-k2.5` (retired
+  upstream 2026-07-31; every request failed) → `glm-5.3-flash`, on both the
+  library template and the CLI's `--backend ollama` path. z.ai
+  `:z-ai` / `:z-ai-plan` default `glm-4.6` (retired; silently served as
+  `glm-5.3-flash`) → `glm-5.3-flash` — the same model embedders were already
+  getting, now named.
+- **Every invocation-scoped transcript event carries `:invokeid`** (most also
+  `:session-id`): all `:llm/error` sites, `:llm/model-policy-empty`,
+  `:llm/budget-extended`, `:llm/budget-extender-error`, and
+  `:human-input/{cancelled,error,interrupted,validation-failed}` previously
+  did not, so a host tap filtering on `:invokeid` lost exactly the failure
+  events. Run-level events (`:runner/*`, `:checkpoint/*`, `:cli/*`) carry
+  none by definition.
+- **`:reasoning` is accepted on `:llm/aliases` targets** — the closed target
+  schema rejected it even though the resolver read it, so per-target
+  reasoning was unreachable from config.
+- **`:resilience` merges one level deep.** Overriding one key inside
+  `:latency` / `:overrun` / `:continuation` keeps the group's other defaults
+  instead of dropping them.
+- **Unknown content-block types now throw** in the OpenAI chat-completions
+  and Responses translators instead of vanishing (Anthropic-only
+  `:thinking` / `:redacted_thinking` are still dropped on purpose).
+- **Credential descriptors: the honoured keys are stated** —
+  `:provider :api-key :base-url :model :default-model :auth-mode
+  :reasoning-dialect :http-timeout-ms`; any other key validates and is
+  ignored. `:subscription` is documented as accepted-and-inert (nothing reads
+  it; billing mode comes from the catalog) and removed from the Guide's
+  example.
+- `:error.llm.unexpected-stop` now carries a `:detail` of
+  `:no-forward-progress`, `:continuation-restarted`,
+  `:continuation-unsupported` or `:continuation-limit` (previously always
+  `:no-forward-progress`).
+- `openai-codex` Responses `:reasoning`: a keyword `:effort` is the normalised
+  field; a *string* `:effort` is still passed through verbatim (the escape
+  hatch for `xhigh`). `:max` renders as `"high"`.
+
+### Notes
+
+- **Live-provider behaviour is credential-gated and is NOT exercised by
+  `bb test`.** DeepSeek, opencode-go (session header, kimi temperature pin),
+  z.ai (model substitution, Responses `xhigh`, image on the Responses wire),
+  Ollama Cloud (prefill 400, reasoning-only turns) and OpenRouter (restart,
+  `reasoning` object) were probed live by the author on 2026-09-07; the suite
+  covers the wire translation and the loop logic with fake backends. A
+  reviewer wanting end-to-end proof needs the corresponding key.
+- **Recorded as unverified, on purpose:** Anthropic assistant prefill and the
+  thinking/sampling conflict (no Anthropic key — prefill left enabled rather
+  than downgraded; sampling keys dropped-and-warned rather than hard-failed);
+  OpenAI `reasoning_effort` `"none"` / `"minimal"` (`:none` emits nothing,
+  `:minimal` sends `"low"`); Responses `"xhigh"` on OpenAI's own models
+  (confirmed only on z.ai's implementation, so `:max` stays `"high"`); Ollama
+  reasoning models' prefill behaviour.
+- Reasoning and continuation are semantically incompatible: a reasoning model
+  reads the prefill as someone else's turn and starts over (observed with a
+  same-model thinking on/off control). The restart guard turns that into a
+  loud failure; a reasoning-enabled node that must produce a long artifact
+  should raise its output cap or disable reasoning.
+- `:model-quirks` and `:prefill-support` on `openai/new-backend` are
+  library-level seams; the only tables shipped are the ones with live
+  evidence.
+
 ## [unreleased] — feat/durable-resume-and-replay — 2026-07-01
 
 Long-running and looping charts are now durable across process exit: a

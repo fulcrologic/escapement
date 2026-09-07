@@ -47,7 +47,9 @@
     [escapement.llm.needs :as needs]
     [escapement.llm.preferences :as preferences]
     [escapement.llm.prompt-cache :as prompt-cache]
-    [escapement.llm.protocol :as proto]))
+    [escapement.llm.protocol :as proto]
+    [escapement.llm.reasoning :as reasoning]
+    [escapement.llm.types :as types]))
 
 (defn- now-ms [] (System/currentTimeMillis))
 
@@ -90,6 +92,12 @@
      * `:stop-sequences` — vector of strings
      * `:thinking` — `{:type :enabled :budget-tokens N}` to turn on
                      extended thinking. Requires `:max-tokens` > `N`.
+     * `:reasoning` — normalised, provider-neutral reasoning control:
+                     `{:effort :none|:minimal|:low|:medium|:high|:max}`, or
+                     the bare effort keyword as sugar, plus an optional
+                     `:budget-tokens` hint. Each backend translates it into
+                     its own dialect (see `escapement.llm.types/Reasoning`).
+                     Omit it for exactly today's wire output.
      * `:tool-choice` — `:auto` | `:any` | `:none` | `{:type :tool :name \"...\"}`
      * `:metadata` — `{:user-id \"...\"}`
      * `:auto-cache?` — boolean, default `true`. When true, fills in
@@ -116,7 +124,7 @@
        The NEWEST inbound turn is never marked. See `escapement.llm.prompt-cache`.
      * `:conv-id` — conversation correlation id; used as prompt cache key by openai-codex (string/keyword/uuid)"
   [{:keys [system messages tools model max-tokens conv-id
-           temperature top-p top-k stop-sequences thinking tool-choice metadata
+           temperature top-p top-k stop-sequences thinking reasoning tool-choice metadata
            system-cache-control tools-cache-control message-cache-control auto-cache?]
     :or   {auto-cache? true}}]
   ;; Auto-cache defaulting: an absent (== `nil`) cache-control marker
@@ -180,6 +188,8 @@
       (some? top-k) (assoc :top-k top-k)
       (seq stop-sequences) (assoc :stop-sequences (vec stop-sequences))
       thinking (assoc :thinking thinking)
+      ;; Normalise the sugar exactly once, here, so no backend sees two shapes.
+      (some? reasoning) (assoc :reasoning (types/normalize-reasoning reasoning))
       (some? tool-choice) (assoc :tool-choice tool-choice)
       (seq metadata) (assoc :metadata metadata)
       conv-id (assoc :conversation/id conv-id))))
@@ -221,14 +231,14 @@
   "Normalize a validated `:llm/aliases` target map into the uniform candidate
    shape consumed by `run-turn`. `:provider`/`:model` route+identify the
    target; `:params` carries this target's optional generation overrides
-   (`:temperature`/`:top-p`/`:top-k`/`:thinking`/`:max-tokens`) that are merged
+   (`:temperature`/`:top-p`/`:top-k`/`:thinking`/`:reasoning`/`:max-tokens`) that are merged
    UNDER the node's explicit params (node wins) on its attempt."
   ([target] (alias-target->candidate target nil))
   ([{:keys [provider model] :as target} alias]
    {:provider provider
     :model    model
     :alias    alias
-    :params   (select-keys target [:temperature :top-p :top-k :thinking :max-tokens])}))
+    :params   (select-keys target [:temperature :top-p :top-k :thinking :reasoning :max-tokens])}))
 
 (defn- node-alias-vector
   "Normalize a node's model selection into a vector of alias keywords.
@@ -416,22 +426,76 @@
        honored when `:first-token-ms` is set. The cap applies to each candidate;
        if the LAST candidate is slow with nowhere left to switch, the turn rides
        it out (a slow answer beats no answer)."
-  {:max-retries 3 :backoff-ms 500
-   :latency     {:first-token-ms nil :fallback nil}
-   :overrun     {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
-                 :temperature-bump nil :temperature-max 1.0}})
+  {:max-retries  3 :backoff-ms 500
+   :latency      {:first-token-ms nil :fallback nil}
+   :overrun      {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
+                  :temperature-bump nil :temperature-max 1.0}
+   ;; `:enabled? false` turns the automatic continuation OFF on its own, with
+   ;; no other consequence. This is NOT a degraded mode: on a provider that
+   ;; ignores an assistant prefill and restarts, a continuation can silently
+   ;; duplicate content, so accepting a truncated turn as-is is a legitimate
+   ;; correctness choice. It is deliberately independent of `:overrun` — which
+   ;; ALSO suppresses continuation, but buys a full extra generation to do it.
+   ;;
+   ;; Ceilings on the automatic `:max_tokens` continuation stitch (see
+   ;; `escapement.invocation.llm-conversation/drive-turn!`). Continuation is
+   ;; otherwise unbounded — "just finish reading the message" — and a model that
+   ;; truncates EVERY segment makes genuine forward progress every round, so the
+   ;; no-progress guard never trips and the accumulation grows until the JVM
+   ;; dies. Both defaults sit far above any legitimate answer and far below an
+   ;; OOM; raise them for a deliberately enormous artifact.
+   :continuation {:enabled? true :max-segments 64 :max-chars 2000000}})
+
+(defn sum-usage
+  "Sum numeric usage fields across two usage maps; non-numeric fields take the
+   latest non-nil value. Used to total the tokens a turn spent across its
+   attempts, and by the continuation stitcher."
+  [a b]
+  (merge-with (fn [x y]
+                (if (and (number? x) (number? y)) (+ x y) (or y x)))
+    (or a {}) (or b {})))
+
+(defn model-substituted?
+  "True when the provider answered with a DIFFERENT model than the one asked
+   for. Servers do this silently — z.ai answers a retired `glm-4.6` request
+   with `glm-5.3-flash`, DeepSeek answers `deepseek-chat` with
+   `deepseek-v4-flash` (both verified live 2026-09-07) — and downstream a run
+   priced or compared by the REQUESTED id is then confidently wrong about what
+   actually ran. The two ids are never collapsed into one field; a mismatch is
+   an observable, not an anomaly to smooth over."
+  [requested response]
+  (let [reported (:model response)]
+    (boolean (and requested reported (not= (str requested) (str reported))))))
 
 (def transient-error-categories
   "Backend error categories that warrant a bounded automatic retry of the same
    model. The remaining categories (`:auth` `:invalid-request`
    `:context-length`) are terminal: they fail fast and are never retried, so a
-   bad key or oversized prompt cannot burn quota in a retry loop."
+   bad key or oversized prompt cannot burn quota in a retry loop.
+
+   `run-turn` additionally retries two NON-error conditions, each bounded and
+   each reported through `:on-retry` under its own category: `:overrun` (a
+   `:max_tokens` stop, bounded by `:overrun`'s own `:max-retries`) and
+   `:reasoning-only` (a turn that returned reasoning and no usable content,
+   bounded by the ordinary `:max-retries`)."
   #{:rate-limited :overloaded :timeout :transport})
 
 (defn params->resilience
-  "Merge a caller's `:resilience` over `default-resilience`."
+  "Merge a caller's `:resilience` over `default-resilience`, ONE LEVEL DEEP:
+   overriding a single key inside `:latency` / `:overrun` / `:continuation`
+   keeps that group's other defaults rather than replacing the whole group.
+
+   Deep by necessity, not taste — with a shallow merge,
+   `{:continuation {:max-segments 3}}` silently dropped the sibling ceiling and
+   the code that reads it got nil. A caller tuning one dial should never have to
+   restate the others to avoid that."
   [params]
-  (merge default-resilience (:resilience params)))
+  (reduce-kv (fn [acc k v]
+               (if (and (map? v) (map? (get acc k)))
+                 (assoc acc k (merge (get acc k) v))
+                 (assoc acc k v)))
+    default-resilience
+    (or (:resilience params) {})))
 
 (defn backoff-delay-ms
   "Exponential backoff for retry `attempt` (0-based) off `base` ms, honoring an
@@ -584,7 +648,12 @@
       :else
       (let [latency-fallbacks (when (and ttft-cap-ms (not pinned) (seq (:fallback latency)))
                                 (mapv alias-target->candidate (:fallback latency)))
-            candidates (into (vec (:candidates resolution)) latency-fallbacks)]
+            candidates (into (vec (:candidates resolution)) latency-fallbacks)
+            ;; Tokens already burned by attempts that did NOT return a response
+            ;; (failed, cancelled, or abandoned on the latency cap). Summed
+            ;; across candidates so a failover reports what the whole turn cost,
+            ;; not just its last leg.
+            spent      (atom nil)]
         (loop [[cand & more] candidates
                attempts      []]
           (let [m        (:model cand)
@@ -608,6 +677,7 @@
                                     :top-k                (:top-k eff)
                                     :stop-sequences       (:stop-sequences params)
                                     :thinking             (:thinking eff)
+                                    :reasoning            (:reasoning eff)
                                     :tool-choice          (:tool-choice params)
                                     :metadata             (:metadata params)
                                     :system-cache-control (:system-cache-control params)
@@ -621,6 +691,13 @@
                            (:provider cand) (assoc :provider (:provider cand)))
                 _        (before-send request m (:provider cand))
                 on-delta (delta-sink m (:provider cand))
+                ;; Usage seen on the wire BEFORE the turn ended. A streamed turn
+                ;; that fails, is cancelled, or is abandoned on a latency cap
+                ;; still burned tokens, and a cancelled run is exactly when
+                ;; someone wants to know what it cost — so the running total
+                ;; from the deltas is kept and reported on the failure envelope
+                ;; instead of being thrown away with the stream.
+                partial-usage (atom nil)
                 ;; A deterministic model re-truncates on an identical rerun, so
                 ;; an overrun rerun can bump temperature to force sampling
                 ;; variance (clamped to `:temperature-max`, default 1.0). Off
@@ -660,6 +737,11 @@
                                  on-delta* (when on-delta
                                              (fn [& args]
                                                (when (nil? @first-tok) (reset! first-tok (now-ms)))
+                                               ;; Backends put a running cumulative
+                                               ;; `:usage` on deltas; keep the last
+                                               ;; non-empty one we saw.
+                                               (when-let [u (some-> (first args) :usage not-empty)]
+                                                 (reset! partial-usage u))
                                                ;; Drop stragglers from a stream
                                                ;; abandoned on a TTFT breach so
                                                ;; they never interleave with the
@@ -689,6 +771,23 @@
                                  (sleep-while-alive! (backoff-delay-ms backoff-ms retry t) alive?)
                                  (recur (inc retry) over))
 
+                               ;; A turn that returned ONLY reasoning: the model
+                               ;; spent the whole output cap thinking and handed
+                               ;; back nothing usable. The provider states both
+                               ;; halves on the wire, so this is not a guess.
+                               ;; Bounded by the SAME `:max-retries` as any
+                               ;; transient error, so a model that does this
+                               ;; every single time cannot loop on our quota.
+                               (and (not t)
+                                 (reasoning/reasoning-only-response? r)
+                                 (< retry (long max-retries))
+                                 (alive?))
+                               (do
+                                 (on-retry {:model m :category :reasoning-only
+                                            :attempt (inc retry) :max-retries max-retries})
+                                 (sleep-while-alive! (backoff-delay-ms backoff-ms retry nil) alive?)
+                                 (recur (inc retry) over))
+
                                (and (not t)
                                  (pos? overrun-max)
                                  (= :max_tokens (:stop-reason r))
@@ -699,7 +798,15 @@
                                             :attempt (inc over) :max-retries overrun-max})
                                  (recur retry (inc over)))
 
-                               :else r)))]
+                               :else r)))
+                ;; Both ids ride on the Response, so anything that records a
+                ;; turn — transcript, usage, host accounting — has the model
+                ;; asked for AND the model the provider says answered.
+                response (if (and (map? response) (not (:_throw response)) (not (:_too-slow response)))
+                           (cond-> response
+                             m (assoc :model-requested m)
+                             (model-substituted? m response) (assoc :model-substituted? true))
+                           response)]
             (cond
               ;; TTFT-cap breach: fail over to the next candidate WITHOUT marking
               ;; the slow model `:down` (slowness is transient, not a fault) and
@@ -713,18 +820,24 @@
                                          :message  (str "no first token within " cap "ms")}})]
                 (on-latency-switch {:model m :provider (:provider cand)
                                     :first-token-ms cap :remaining (vec more)})
+                (swap! spent sum-usage @partial-usage)
                 (if (and (seq more) (alive?))
                   (recur more attempts')
-                  {:status :exhausted
-                   :error  {:category :too-slow
-                            :message  (str "no first token within " cap "ms")
-                            :attempts attempts'}}))
+                  (cond-> {:status :exhausted
+                           :error  {:category :too-slow
+                                    :message  (str "no first token within " cap "ms")
+                                    :attempts attempts'}}
+                    (seq @spent) (assoc :partial-usage @spent))))
 
               (and (:_throw response)
                 (or (instance? InterruptedException (:_throw response))
                   (instance? InterruptedException (ex-cause (:_throw response)))
                   (not (alive?))))
-              {:status :interrupted :error {:throwable (:_throw response)}}
+              (do
+                (swap! spent sum-usage @partial-usage)
+                (cond-> {:status :interrupted :error {:throwable (:_throw response)}}
+                  ;; A cancelled run still cost something; say what.
+                  (seq @spent) (assoc :partial-usage @spent)))
 
               (:_throw response)
               (let [^Throwable t (:_throw response)
@@ -740,11 +853,13 @@
                     attempts'    (conj attempts {:model m
                                                  :error {:message message
                                                          :class   (.getName (class t))}})]
+                (swap! spent sum-usage @partial-usage)
                 (if (seq more)
                   (recur more attempts')
-                  {:status :exhausted
-                   :error  {:category category :message message :attempts attempts'}
-                   :last-throwable t}))
+                  (cond-> {:status :exhausted
+                           :error  {:category category :message message :attempts attempts'}
+                           :last-throwable t}
+                    (seq @spent) (assoc :partial-usage @spent))))
 
               ;; Overrun retries spent and still truncated, with
               ;; `:on-exhausted :fail` — surface a failure envelope instead of
@@ -754,6 +869,8 @@
                 (pos? overrun-max)
                 (= :max_tokens (:stop-reason response)))
               {:status :overrun :response response :model m
+               :model-reported (:model response)
+               :model-substituted? (model-substituted? m response)
                :usage  (:usage response) :candidate cand
                :error  {:category :overrun
                         :message  (str "output truncated at the token cap after "
@@ -762,6 +879,8 @@
 
               :else
               {:status :ok :response response :model m
+               :model-reported (:model response)
+               :model-substituted? (model-substituted? m response)
                :usage  (:usage response) :candidate cand})))))))
 
 ;; ===========================================================================

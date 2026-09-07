@@ -113,6 +113,61 @@
    [:type [:enum :enabled :disabled]]
    [:budget-tokens {:optional true} [:int {:min 1024}]]])
 
+(def effort-levels
+  "The normalised reasoning-effort ordinal, weakest first. `:none` means
+   \"explicitly do not reason\" — a real request, distinct from saying nothing
+   at all (which leaves the provider's own default in place)."
+  [:none :minimal :low :medium :high :max])
+
+(def effort-rank
+  "effort keyword → its position in `effort-levels`. Backends use this to
+   collapse the ordinal onto whatever coarser scale their wire format has."
+  (zipmap effort-levels (range)))
+
+(def Reasoning
+  "Normalised, provider-neutral reasoning control. ONE request-level field
+   that every backend translates into its own dialect on the way out —
+   Anthropic `thinking`, OpenAI `reasoning_effort`, OpenRouter's `reasoning`
+   object, Ollama's `think` flag, DeepSeek's `thinking` + `reasoning_effort`.
+   A caller never writes a provider's word.
+
+   - `:effort`        — the ordinal above. The normal thing to set.
+   - `:budget-tokens` — optional numeric hint for the dialects that take one
+                        (Anthropic `thinking.budget_tokens`, OpenRouter
+                        `reasoning.max_tokens`). Ignored — never an error —
+                        where the provider has no numeric dial. When absent
+                        and a dialect needs a number, the backend derives one
+                        from `:effort`.
+
+   Absent `:reasoning` on a Request means today's behaviour, byte for byte:
+   no reasoning field is emitted on any wire."
+  [:map {:closed true}
+   [:effort {:optional true} (into [:enum] effort-levels)]
+   [:budget-tokens {:optional true} [:int {:min 1024}]]])
+
+(def ReasoningPassthrough
+  "The pre-normalisation escape hatch on the OpenAI **Responses** wire
+   (`escapement.llm.openai-codex`), where `:reasoning` was already a raw
+   passthrough of that API's own object — `{:effort \"medium\" :summary \"auto\"}`.
+   A STRING `:effort` marks it as that shape and it is sent verbatim, which is
+   how a caller reaches a provider-specific level the normalised ordinal has no
+   name for (e.g. Codex's `\"xhigh\"`).
+
+   Deliberately open, and deliberately NOT unified with `Reasoning`: the two
+   shapes are told apart by whether `:effort` is a string or a keyword, and
+   collapsing them would either lose the escape hatch or leak provider
+   vocabulary into the normalised field."
+  [:map
+   [:effort :string]])
+
+(defn normalize-reasoning
+  "Widen the accepted sugar to the canonical map, ONCE, so no backend ever
+   sees two shapes: a bare effort keyword (`:reasoning :high`) becomes
+   `{:effort :high}`. Anything else is returned unchanged for the schema to
+   accept or reject."
+  [r]
+  (if (contains? effort-rank r) {:effort r} r))
+
 (def ToolChoice
   "Anthropic tool_choice. Three short forms plus a named-tool form."
   [:or
@@ -146,6 +201,10 @@
    ;; Extended thinking. When :type is :enabled, :budget-tokens is required
    ;; AND :max-tokens on the Request must be > :budget-tokens.
    [:thinking {:optional true} Thinking]
+   ;; Normalised reasoning control; each backend translates it into its own
+   ;; dialect. An explicit `:thinking` wins over a `:reasoning`-derived one on
+   ;; the Anthropic-shaped backend, so nothing that works today changes.
+   [:reasoning {:optional true} [:or Reasoning ReasoningPassthrough]]
    ;; Tool-choice forcing.
    [:tool-choice {:optional true} ToolChoice]
    ;; Optional audit/metadata.

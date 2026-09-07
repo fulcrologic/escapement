@@ -35,6 +35,11 @@
      is assembled from these via
      `escapement.llm.providers/build-injected-credentials-backend` (no env, no
      disk). An explicit `:backend` is an escape hatch that wins verbatim.
+     Honoured descriptor keys are `:provider` `:api-key` `:base-url` `:model`
+     `:default-model` `:auth-mode` `:reasoning-dialect` `:http-timeout-ms`; the
+     descriptor map is
+     open, so any OTHER key validates and is then ignored. `:subscription` is
+     accepted but inert (see the schema note below).
    * `:config` — optional: the `.escapement.edn`-shaped map
      (`:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`). Absent
      ⇒ an empty ratings table (`{}`) and the built-in
@@ -88,6 +93,12 @@
       [:model {:optional true} [:maybe :string]]
       [:default-model {:optional true} [:maybe :string]]
       [:auth-mode {:optional true} :any]
+      ;; ACCEPTED AND INERT. Nothing in `src/` reads this key; whether a
+      ;; provider bills a subscription is a fact about the provider, read from
+      ;; the model catalog's `:auth`. It stays in this CLOSED schema only so
+      ;; hosts already passing it (our own older examples taught it) keep
+      ;; validating. Do not teach it, and do not start reading it here —
+      ;; ask the catalog.
       [:subscription {:optional true} :any]]]]
    ;; --- optional: hermetic config (`.escapement.edn`-shaped map) ---
    ;; `:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`. Kept
