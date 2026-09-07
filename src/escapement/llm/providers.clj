@@ -351,14 +351,14 @@
       "— descriptor ignored. Known providers:"
       (pr-str (vec (sort (keys provider-templates))))))
   (when-let [tmpl (get provider-templates provider)]
+    ;; `:http-timeout-ms` is honoured here on purpose: a host-supplied timeout
+    ;; used to be dropped for EVERY provider, so only a template's own value
+    ;; survived — which is why the z.ai entries (which set one) worked and
+    ;; nothing else did. A caller whose generations legitimately run past the
+    ;; 60s default had no way to say so.
     (let [overrides (-> desc
                       (select-keys [:api-key :base-url :default-model :auth-mode :reasoning-dialect
-                    ;; A host-supplied HTTP timeout used to be dropped here for
-                    ;; EVERY provider, so only a template's own value survived —
-                    ;; which is why the z.ai entries (which set one) worked and
-                    ;; nothing else did. A caller whose generations legitimately
-                    ;; run past the 60s default had no way to say so.
-                    :http-timeout-ms])
+                                    :http-timeout-ms])
                       (cond-> (:model desc) (assoc :default-model (:model desc))))]
       (merge tmpl (into {} (remove (comp nil? val)) overrides)))))
 

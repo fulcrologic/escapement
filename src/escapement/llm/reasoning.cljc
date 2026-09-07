@@ -131,6 +131,7 @@
           {:type :enabled :budget-tokens budget})))))
 
 (defn thinking-enabled?
+  "True when an Anthropic-shaped `:thinking` map turns extended thinking on."
   [thinking]
   (= :enabled (:type thinking)))
 
@@ -241,6 +242,8 @@
     nil))
 
 (defn valid-effort?
+  "True when `e` is one of the normalised effort levels in
+   `escapement.llm.types/effort-levels`."
   [e]
   (contains? types/effort-rank e))
 

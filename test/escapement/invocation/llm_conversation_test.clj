@@ -1521,7 +1521,7 @@
                     :aliases         {:small [{:provider :openai :model "gpt-4o-mini"}]}
                     :preferences     [:small]
                     :catalog-ratings {}
-                    :parent-ctx      {:invokeid "iv"}}
+                    :parent-ctx      {:invokeid "iv" :parent-session-id "sess-1"}}
                    {:needs {:context-tokens [:>= 999999999]}}
                    [{:role :user :content [{:type :text :text "hi"}]}]
                    [])
@@ -1529,6 +1529,8 @@
     (assertions
       "the event was emitted"
       (some? ev) => true
+      "it names the invocation and session it belongs to"
+      (select-keys (:data ev) [:invokeid :session-id]) => {:invokeid "iv" :session-id "sess-1"}
       "it carries the resolved (canonical) policy"
       (get-in ev [:data :policy]) => {:require {} :min {:context-tokens 999999999} :max {}}
       "strict? is false by default"
@@ -1549,7 +1551,7 @@
                     :preferences         [:small]
                     :catalog-ratings     {}
                     :eligibility-strict? true
-                    :parent-ctx          {:invokeid "iv"}}
+                    :parent-ctx          {:invokeid "iv" :parent-session-id "sess-1"}}
                    {:needs {:context-tokens [:>= 999999999]}}
                    [{:role :user :content [{:type :text :text "hi"}]}]
                    [])
@@ -1557,6 +1559,8 @@
     (assertions
       "the gap event still records strict?=true"
       (get-in ev [:data :strict?]) => true
+      "and names the invocation and session it belongs to"
+      (select-keys (:data ev) [:invokeid :session-id]) => {:invokeid "iv" :session-id "sess-1"}
       "no turn was issued (fail-closed)"
       (:ok result) => nil
       "the :eligibility-empty shape is returned for the caller to fail the node"
@@ -2266,3 +2270,367 @@
           (:messages base-request)))
       => false)))
 
+
+;; ---------------------------------------------------------------------------
+;; Model identity: requested vs reported ids on the transcript
+;; ---------------------------------------------------------------------------
+
+(defn- events-named [transcript event-kw]
+  (filterv #(= event-kw (:event %)) transcript))
+
+(defn- run-aliased-chart!
+  "Run a one-turn chart whose worker resolves `:primary` → provider :a /
+   model \"asked-for\" and answers with `backend`. Returns the captured
+   transcript once the chart has parked on :llm.idle (or `max-ms` elapsed)."
+  [backend]
+  (let [captured  (atom [])
+        chart     (chart/statechart
+                    {:initial :wrap}
+                    (state {:id :wrap :initial :work}
+                      (state {:id :work}
+                        (h/llm-conversation {:id "p" :message "go"})
+                        (transition {:event :llm.idle :target :done})
+                        (transition {:event :error.llm.* :target :failed}))
+                      (final {:id :done})
+                      (final {:id :failed})))
+        processor (llmc/new-processor
+                    {:backend       backend
+                     :tool-registry (tp/new-registry)
+                     :transcript-fn (fn [ev] (swap! captured conj ev))
+                     :aliases       {:primary [{:provider :a :model "asked-for"}]}
+                     :preferences   [:primary]})
+        t         (-> (dct/new-testing-env {:statechart chart} processor)
+                    (dct/start!))
+        t         (await-config! t :done 3000)]
+    {:in-done? (dct/in? t :done) :transcript @captured}))
+
+(specification "a silent model substitution is recorded on the transcript"
+  ;; Providers substitute silently (a retired id answered by its successor)
+  ;; and return a normal 200. The transcript keeps BOTH ids on the response
+  ;; row and emits a dedicated :llm/model-substituted row so anything pricing
+  ;; or comparing the run by the id it ASKED for can see it was wrong.
+
+  (component "the provider answers with a different model than requested"
+    (let [{:keys [in-done? transcript]}
+          (run-aliased-chart!
+            (mock-backend [(assoc (end-turn-response "ok") :model "answered-with")]))
+          resp (first (events-named transcript :llm/response))
+          subs (events-named transcript :llm/model-substituted)]
+      (assertions
+        "the turn still completes — a substitution is not an error"
+        in-done? => true
+
+        "the :llm/response row keeps the id the provider reported"
+        (get-in resp [:data :model]) => "answered-with"
+
+        "AND the id that was asked for, never collapsed into one field"
+        (get-in resp [:data :model-requested]) => "asked-for"
+
+        "and flags the mismatch"
+        (get-in resp [:data :model-substituted?]) => true
+
+        "exactly one :llm/model-substituted row is emitted"
+        (count subs) => 1
+
+        "carrying both ids"
+        (select-keys (:data (first subs)) [:requested :reported])
+        => {:requested "asked-for" :reported "answered-with"}
+
+        "and attributable to the invocation and its session"
+        (select-keys (:data (first subs)) [:invokeid :session-id])
+        => {:invokeid "p" :session-id :dcch.test/session})))
+
+  (component "the provider answers with the model requested"
+    (let [{:keys [in-done? transcript]}
+          (run-aliased-chart!
+            (mock-backend [(assoc (end-turn-response "ok") :model "asked-for")]))
+          resp (first (events-named transcript :llm/response))]
+      (assertions
+        "the turn completes"
+        in-done? => true
+
+        "the response row still records what was asked for"
+        (get-in resp [:data :model-requested]) => "asked-for"
+
+        "nothing is flagged"
+        (contains? (:data resp) :model-substituted?) => false
+
+        "and no substitution row is emitted"
+        (events-named transcript :llm/model-substituted) => []))))
+
+;; ---------------------------------------------------------------------------
+;; :partial-usage — what a turn burned before it failed or was cancelled
+;; ---------------------------------------------------------------------------
+
+(defrecord FailingStreamBackend [usages throw-fn]
+  ;; Streams a delta per entry in `usages` — each carrying the running
+  ;; cumulative `:usage`, exactly as the real streaming backends do — and
+  ;; THEN dies with `(throw-fn)`.
+  llm/LLMBackend
+  (send-turn [_ _] (p/do! (end-turn-response "unreachable")))
+  llm/StreamingLLMBackend
+  (stream-turn [_ _ on-delta]
+    (p/do!
+      (doseq [u usages]
+        (on-delta {:type :text-delta :text "tok" :usage u}))
+      (throw (throw-fn)))))
+
+(defn- streaming-error-ctx
+  "`error-ctx` with streaming on, so the delta-sink (and therefore the
+   partial-usage accounting) is engaged."
+  [backend captured]
+  (assoc (error-ctx backend captured)
+    :params {:stream? true :resilience {:max-retries 0 :backoff-ms 0}}))
+
+(specification "a turn that did not complete still reports what it burned"
+  ;; The running usage from a streamed turn's deltas used to die with the
+  ;; stream. A cancelled run is exactly when someone wants to know what it
+  ;; cost, so the LAST cumulative usage seen rides on the failure rows.
+
+  (component "a streamed turn that errors → :llm/error carries :partial-usage"
+    (let [captured (atom [])
+          backend  (->FailingStreamBackend
+                     [{:input-tokens 10 :output-tokens 1}
+                      {:input-tokens 10 :output-tokens 4}]
+                     (fn [] (llm/llm-error :overloaded "503" {})))
+          _        (#'llmc/handle-running-turn!
+                     (streaming-error-ctx backend captured)
+                     (fn [_ _] nil) :on-end)
+          err      (first (events-named @captured :llm/error))]
+      (assertions
+        "the error row was emitted"
+        (some? err) => true
+
+        "it carries the usage seen on the wire before the failure"
+        (get-in err [:data :partial-usage]) => {:input-tokens 10 :output-tokens 4}
+
+        "and is still attributable"
+        (get-in err [:data :invokeid]) => "design-node")))
+
+  (component "a streamed turn that is cancelled → :llm/worker-exit carries :partial-usage"
+    (let [captured (atom [])
+          backend  (->FailingStreamBackend
+                     [{:input-tokens 10 :output-tokens 4}]
+                     (fn [] (InterruptedException. "cancelled")))
+          _        (#'llmc/handle-running-turn!
+                     (streaming-error-ctx backend captured)
+                     (fn [_ _] nil) :on-end)
+          exit     (first (events-named @captured :llm/worker-exit))]
+      (assertions
+        "the worker-exit row was emitted for the mid-turn interrupt"
+        (get-in exit [:data :reason]) => :interrupted-mid-turn
+
+        "it carries the usage burned before the cancel"
+        (get-in exit [:data :partial-usage]) => {:input-tokens 10 :output-tokens 4}
+
+        "and is attributable to the invocation and its session"
+        (select-keys (:data exit) [:invokeid :session-id])
+        => {:invokeid "design-node" :session-id "sess-1"})))
+
+  (component "nothing is invented when nothing was seen"
+    ;; The non-streaming backend fails before any usage reaches the wire;
+    ;; the error row must not claim otherwise.
+    (let [captured (atom [])
+          _        (#'llmc/handle-running-turn!
+                     (error-ctx (->AlwaysFailingBackend) captured)
+                     (fn [_ _] nil) :on-end)
+          err      (first (events-named @captured :llm/error))]
+      (assertions
+        "the error row was emitted"
+        (some? err) => true
+
+        "with no :partial-usage key at all"
+        (contains? (:data err) :partial-usage) => false))))
+
+;; ---------------------------------------------------------------------------
+;; :invokeid on the resolution-failure and budget events
+;; ---------------------------------------------------------------------------
+
+(specification "resolution failures are attributable :llm/error rows"
+  ;; These fail BEFORE a request is built (nothing ever reaches a backend),
+  ;; so the :llm/error row is the only evidence the invocation produced.
+
+  (component "fail-closed :needs gate → :eligibility-empty-strict"
+    (let [captured (atom [])
+          ctx      (assoc (error-ctx (mock-backend [(end-turn-response "never")]) captured)
+                     :aliases             {:small [{:provider :openai :model "gpt-4o-mini"}]}
+                     :preferences         [:small]
+                     :catalog-ratings     {}
+                     :eligibility-strict? true
+                     :params              {:needs {:context-tokens [:>= 999999999]}})
+          _        (#'llmc/handle-running-turn! ctx (fn [_ _] nil) :on-end)
+          err      (first (events-named @captured :llm/error))]
+      (assertions
+        "the error row is the strict eligibility failure"
+        (select-keys (:data err) [:reason :detail])
+        => {:reason :invalid-request :detail :eligibility-empty-strict}
+
+        "and is attributable to the invocation and its session"
+        (select-keys (:data err) [:invokeid :session-id])
+        => {:invokeid "design-node" :session-id "sess-1"})))
+
+  (component "a keyword :model naming no configured alias → :unknown-alias"
+    (let [captured (atom [])
+          ctx      (assoc (error-ctx (mock-backend [(end-turn-response "never")]) captured)
+                     :aliases {:known [{:provider :a :model "m"}]}
+                     :params  {:model :nope})
+          _        (#'llmc/handle-running-turn! ctx (fn [_ _] nil) :on-end)
+          err      (first (events-named @captured :llm/error))]
+      (assertions
+        "the error row is the unknown-alias failure, naming the alias"
+        (select-keys (:data err) [:reason :detail :alias :known])
+        => {:reason :invalid-request :detail :unknown-alias :alias :nope :known [:known]}
+
+        "and is attributable to the invocation and its session"
+        (select-keys (:data err) [:invokeid :session-id])
+        => {:invokeid "design-node" :session-id "sess-1"})))
+
+  (component "a STRING :model → :string-model"
+    (let [captured (atom [])
+          ctx      (assoc (error-ctx (mock-backend [(end-turn-response "never")]) captured)
+                     :params {:model "some-string"})
+          _        (#'llmc/handle-running-turn! ctx (fn [_ _] nil) :on-end)
+          err      (first (events-named @captured :llm/error))]
+      (assertions
+        "the error row is the string-model failure, carrying the offending string"
+        (select-keys (:data err) [:reason :detail :model])
+        => {:reason :invalid-request :detail :string-model :model "some-string"}
+
+        "and is attributable to the invocation and its session"
+        (select-keys (:data err) [:invokeid :session-id])
+        => {:invokeid "design-node" :session-id "sess-1"}))))
+
+(defn- run-budget-chart!
+  "Run the :max-turns 2 looping-tool chart from the max-turns spec with a
+   `:budget-extender`. `n-responses` tool_use turns are canned. Returns the
+   captured transcript, the :error.llm.* event the chart saw, and the calls
+   the extender received."
+  [budget-extender n-responses]
+  (let [always-tool (tool-use-response [{:id "u1" :name "test_noop" :input {}}])
+        backend     (mock-backend (vec (repeat n-responses always-tool)))
+        registry    (tp/new-registry [(->AlwaysOkTool)])
+        captured    (atom [])
+        err-seen    (atom nil)
+        chart       (chart/statechart
+                      {:initial :wrap}
+                      (state {:id :wrap :initial :work}
+                        (state {:id :work}
+                          (h/llm-conversation
+                            {:id              "p"
+                             :max-turns       2
+                             :budget-extender budget-extender
+                             :real-tools      [:test/noop]
+                             :message         "go"})
+                          (transition {:event :error.llm.* :target :failed}
+                            (script {:expr (fn [_ d] (reset! err-seen (:_event d)) nil)})))
+                        (final {:id :failed})))
+        t           (new-llm-test-env {:statechart    chart
+                                       :backend       backend
+                                       :tool-registry registry
+                                       :transcript-fn (fn [ev] (swap! captured conj ev))})
+        t           (await-config! t :failed 3000)]
+    {:in-failed? (dct/in? t :failed)
+     :event      @err-seen
+     :transcript @captured
+     :n-calls    (count @(:call-log backend))}))
+
+(specification ":budget-extender at the turn cap"
+  ;; :max-turns is a SOFT cap when a :budget-extender is supplied: the worker
+  ;; asks it, once, each time the cap is reached. Either answer is recorded
+  ;; on the transcript, attributed to the invocation.
+
+  (component "an extender that grants more turns → :llm/budget-extended, and the run continues"
+    (let [calls    (atom [])
+          extender (fn [{:keys [max-turns] :as call}]
+                     (swap! calls conj call)
+                     ;; Grant once (2 → 4); decline the second time.
+                     (when (= 2 max-turns) 4))
+          {:keys [in-failed? event transcript n-calls]} (run-budget-chart! extender 4)
+          ext      (events-named transcript :llm/budget-extended)]
+      (assertions
+        "the extender was consulted at the original cap and again at the raised one"
+        (mapv #(select-keys % [:turn-count :max-turns]) @calls)
+        => [{:turn-count 2 :max-turns 2} {:turn-count 4 :max-turns 4}]
+
+        "the extender's call carries the conversation so far and the elapsed time"
+        (every? #(and (vector? (:messages %)) (number? (:elapsed-ms %))) @calls) => true
+
+        "exactly one :llm/budget-extended row was emitted"
+        (count ext) => 1
+
+        "recording the raise"
+        (select-keys (:data (first ext)) [:from :to :turns]) => {:from 2 :to 4 :turns 2}
+
+        "and attributable to the invocation and its session"
+        (select-keys (:data (first ext)) [:invokeid :session-id])
+        => {:invokeid "p" :session-id :dcch.test/session}
+
+        "the model was driven for all four turns — the raised cap was honoured"
+        n-calls => 4
+
+        "then the (raised) cap bit: chart reached :failed on :error.llm.max-turns with the raised limit"
+        [in-failed? (:name event) (get-in event [:data :limit])] => [true :error.llm.max-turns 4])))
+
+  (component "an extender that throws → :llm/budget-extender-error, and the cap stands"
+    (let [extender (fn [_] (throw (ex-info "extender exploded" {})))
+          {:keys [in-failed? event transcript n-calls]} (run-budget-chart! extender 2)
+          errs     (events-named transcript :llm/budget-extender-error)]
+      (assertions
+        "exactly one :llm/budget-extender-error row was emitted"
+        (count errs) => 1
+
+        "carrying the throwable's message"
+        (get-in (first errs) [:data :message]) => "extender exploded"
+
+        "and attributable to the invocation and its session"
+        (select-keys (:data (first errs)) [:invokeid :session-id])
+        => {:invokeid "p" :session-id :dcch.test/session}
+
+        "no :llm/budget-extended row was emitted"
+        (events-named transcript :llm/budget-extended) => []
+
+        "the original cap stood: two turns, then :error.llm.max-turns with the original limit"
+        [n-calls in-failed? (:name event) (get-in event [:data :limit])]
+        => [2 true :error.llm.max-turns 2]
+
+        "and the :max-turns :llm/error row is attributable to the invocation"
+        (let [err (first (filter #(= :max-turns (get-in % [:data :reason]))
+                                 (events-named transcript :llm/error)))]
+          (select-keys (:data err) [:reason :limit :invokeid :session-id]))
+        => {:reason :max-turns :limit 2 :invokeid "p" :session-id :dcch.test/session}))))
+
+(specification ":max-conversation-duration-ms budget — the :timeout :llm/error row is attributable"
+  ;; A looping real tool with a 1 ms wall-clock budget: the first turn always
+  ;; exhausts it, so the worker emits :llm/error {:reason :timeout} and dies.
+  ;; Like every sibling error row it must carry :invokeid/:session-id.
+  (let [always-tool (tool-use-response [{:id "u1" :name "test_noop" :input {}}])
+        backend     (mock-backend (vec (repeat 4 always-tool)))
+        registry    (tp/new-registry [(->AlwaysOkTool)])
+        captured    (atom [])
+        err-seen    (atom nil)
+        chart       (chart/statechart
+                      {:initial :wrap}
+                      (state {:id :wrap :initial :work}
+                        (state {:id :work}
+                          (h/llm-conversation
+                            {:id                           "p"
+                             :max-turns                    50
+                             :max-conversation-duration-ms 1
+                             :real-tools                   [:test/noop]
+                             :message                      "go"})
+                          (transition {:event :error.llm.* :target :failed}
+                            (script {:expr (fn [_ d] (reset! err-seen (:_event d)) nil)})))
+                        (final {:id :failed})))
+        t           (new-llm-test-env {:statechart    chart
+                                       :backend       backend
+                                       :tool-registry registry
+                                       :transcript-fn (fn [ev] (swap! captured conj ev))})
+        t           (await-config! t :failed 3000)
+        err         (first (filter #(= :timeout (get-in % [:data :reason]))
+                                   (events-named @captured :llm/error)))]
+    (assertions
+      "chart reached :failed on :error.llm.timeout"
+      [(dct/in? t :failed) (:name @err-seen)] => [true :error.llm.timeout]
+      "the :timeout :llm/error row carries the limit and the invocation identity"
+      (select-keys (:data err) [:limit-ms :invokeid :session-id])
+      => {:limit-ms 1 :invokeid "p" :session-id :dcch.test/session})))

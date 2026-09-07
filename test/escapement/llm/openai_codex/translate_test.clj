@@ -285,7 +285,10 @@
         "cache-creation is always 0"
         (get-in resp [:usage :cache-creation-input-tokens]) => 0
         "backend-metadata identifies openai-codex"
-        (get-in resp [:backend-metadata :backend]) => :openai-codex)))
+        (get-in resp [:backend-metadata :backend]) => :openai-codex
+        "the Responses API has no assistant prefill to continue (a trailing
+         assistant turn is just another input item), so the Response says so"
+        (get-in resp [:backend-metadata :prefill-unsupported?]) => true)))
 
   (component "empty/missing usage does not blow up"
     (let [stream-result {:items [] :usage {} :stop-reason :end_turn :model nil}

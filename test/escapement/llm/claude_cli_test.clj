@@ -371,6 +371,52 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Invariants of the adapter skeleton
 
+(specification "claude-cli — effort mapping onto --effort"
+  ;; Pure: `effort-for` is the only seam between a Request's normalised
+  ;; `:reasoning` directive and the CLI's `--effort` vocabulary. No process.
+  (let [effort-for (fn [request opts] (#'cc/effort-for request opts))
+        with-effort (fn [e] {:reasoning {:effort e}})]
+    (component "each normalised effort level maps onto the CLI's own vocabulary"
+      (assertions
+        ":minimal collapses onto low (the CLI has nothing lower)"
+        (effort-for (with-effort :minimal) {}) => "low"
+        ":low"
+        (effort-for (with-effort :low) {}) => "low"
+        ":medium"
+        (effort-for (with-effort :medium) {}) => "medium"
+        ":high"
+        (effort-for (with-effort :high) {}) => "high"
+        ":max collapses onto high (the CLI has nothing higher)"
+        (effort-for (with-effort :max) {}) => "high"
+        ":none yields no flag — the CLI has no \"do not think\" switch, so the
+         directive is dropped rather than guessed at"
+        (effort-for (with-effort :none) {}) => nil))
+
+    (component "precedence"
+      (assertions
+        "an explicit backend :effort wins over the Request's :reasoning"
+        (effort-for (with-effort :low) {:effort "high"}) => "high"
+        "a backend :effort applies even when the Request says nothing"
+        (effort-for {} {:effort "medium"}) => "medium"
+        "a legacy :thinking directive is the last resort"
+        (effort-for {:thinking {:type :enabled}} {}) => "high"
+        "…but :reasoning outranks it"
+        (effort-for (assoc (with-effort :low) :thinking {:type :enabled}) {}) => "low"
+        "nothing set anywhere → no flag"
+        (effort-for {} {}) => nil))
+
+    (component "the mapped value reaches argv"
+      (let [argv-for (fn [request opts]
+                       (t/build-argv {:binary "claude" :system-prompt-file "/x"
+                                      :effort (effort-for request opts)}))
+            flag-of  (fn [argv] (let [i (.indexOf ^java.util.List argv "--effort")]
+                                  (when-not (neg? i) (nth argv (inc i)))))]
+        (assertions
+          "--effort carries the mapped level"
+          (flag-of (argv-for (with-effort :medium) {})) => "medium"
+          "no --effort at all when neither side set one"
+          (flag-of (argv-for {} {})) => nil)))))
+
 (specification "claude-cli — adapter invariants"
   (component "default model fill"
     (let [rec (io/file (temp-dir! "cc-rec") "rec.edn")

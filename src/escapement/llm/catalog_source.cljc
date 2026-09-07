@@ -47,8 +47,7 @@
     :deepseek {:source "deepseek" :auth :metered}
     :openrouter {:source "openrouter" :auth :metered}
     :opencode-go {:source "opencode-go" :auth :subscription}
-    :opencode-go-anthropic {:source "opencode-go" :auth :subscription}
-    ))
+    :opencode-go-anthropic {:source "opencode-go" :auth :subscription}))
 
 ;; DELIBERATELY NOT in this allowlist, though escapement has templates for
 ;; them: `:codex`, `:openai-codex` and `:claude-cli`. They are served instead

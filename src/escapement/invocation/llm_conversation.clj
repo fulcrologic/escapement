@@ -1573,7 +1573,9 @@
                   (do
                     (transcript! transcript-fn
                       {:event :llm/error :ts (now-ms)
-                       :data  {:reason :max-turns :limit @eff-max-turns}})
+                       :data  {:reason     :max-turns :limit @eff-max-turns
+                               :invokeid   (:invokeid parent-ctx)
+                               :session-id (:parent-session-id parent-ctx)}})
                     (post-error! :max-turns {:limit @eff-max-turns :turns @turn-count})
                     (reset! worker-state :dying)
                     (recur))))
@@ -1585,7 +1587,9 @@
                   {:event :llm/error :ts (now-ms)
                    :data  {:reason     :timeout
                            :elapsed-ms elapsed
-                           :limit-ms   max-conversation-duration-ms}})
+                           :limit-ms   max-conversation-duration-ms
+                           :invokeid   (:invokeid parent-ctx)
+                           :session-id (:parent-session-id parent-ctx)}})
                 (post-error! :timeout {:elapsed-ms elapsed
                                        :limit-ms   max-conversation-duration-ms})
                 (reset! worker-state :dying)

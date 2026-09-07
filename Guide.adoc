@@ -60,7 +60,7 @@ cd escapement
 
 # Any one of these works; z.ai and OpenRouter are cheap for dev.
 export ANTHROPIC_API_KEY=...        # claude-sonnet-4-6 by default
-export ZAI_API_KEY=...              # glm-4.6 (Anthropic-compat endpoint)
+export ZAI_API_KEY=...              # glm-5.3-flash (Anthropic-compat endpoint)
 export OPENAI_API_KEY=...           # gpt-4o-mini default; OPENAI_MODEL overrides
 export OPENROUTER_API_KEY=...       # openai/gpt-4o-mini default; OPENROUTER_MODEL overrides
 
@@ -130,7 +130,7 @@ escapement run escapement.examples.hello/agent \
    --backend api \
    --api-base-url https://api.z.ai/api/anthropic \
    --api-key-env ZAI_API_KEY \
-   --model glm-4.6
+   --model glm-5.3-flash
 ----
 
 Expected output:
@@ -1000,11 +1000,11 @@ This model deliberately **reverses** the earlier additive aliases feature: the o
 ----
 ;; OLD
 :llm/preferences [{:provider :anthropic :model "claude-opus-4-7"}
-                  {:provider :z-ai      :model "glm-4.6"}]
+                  {:provider :z-ai      :model "glm-5.3-flash"}]
 
 ;; NEW
 :llm/aliases     {:opus [{:provider :anthropic :model "claude-opus-4-7"}]
-                  :glm  [{:provider :z-ai      :model "glm-4.6"}]}
+                  :glm  [{:provider :z-ai      :model "glm-5.3-flash"}]}
 :llm/preferences [:opus :glm]            ; ordered vector of alias keywords
 ----
 A non-keyword preference entry is rejected at config load.
@@ -1015,7 +1015,7 @@ A non-keyword preference entry is rejected at config load.
 ----
 ;; OLD                          ;; NEW
 {:model "claude-opus-4-7"}      {:model :opus}
-{:models ["glm-4.6" "gpt-5"]}   {:models [:glm :gpt5]}
+{:models ["glm-5.3-flash" "gpt-5"]}   {:models [:glm :gpt5]}
 ----
 A string `:model` raises `:error.llm.invalid-request` (`:detail :string-model`); a string in `:models` raises `:detail :string-models`.
 
@@ -2809,7 +2809,7 @@ Works against any service that speaks that wire format.
 ;; z.ai (Anthropic-compatible endpoint, cheap dev option)
 (api/new-backend {:base-url      "https://api.z.ai/api/anthropic"
                   :api-key       (System/getenv "ZAI_API_KEY")
-                  :default-model "glm-4.6"})
+                  :default-model "glm-5.3-flash"})
 ----
 
 The auth mode is auto-sniffed from the base URL: `z.ai` → `Authorization:
@@ -2903,6 +2903,21 @@ Translation rules:
 * `:max-tokens` flips to `max_completion_tokens` for newer models (`gpt-5*`, `gpt-4.1*`, `o*`) and stays as `max_tokens` for legacy (`gpt-3.5*`, `gpt-4-*`, `gpt-4o*`).
 * OpenAI's `usage.prompt_tokens_details.cached_tokens` is surfaced as
 `:cache-read-input-tokens` for transcript parity with the Anthropic backend.
+* The normalised `:reasoning` field (see <<params-fn>>) is rendered according to the backend's `:reasoning-dialect` opt: `:openai` (default; `reasoning_effort`), `:openrouter` (a `reasoning` object), `:ollama` (the `think` flag), `:deepseek` (`thinking` + `reasoning_effort`), or `:none` to emit nothing.
+The dialect is a static property of the provider — `escapement.llm.providers` sets it per template and it is never sniffed from the base URL — so set it yourself only for an endpoint the library does not know.
+A request without `:reasoning` is unaffected by it.
+* A user-content block type the wire has no encoding for is an **error**, not a silent drop (the `:thinking` / `:redacted_thinking` drop above is the deliberate, listed exception).
+* A response carrying empty content plus a non-empty `reasoning_content` / `reasoning` field is flagged as reasoning-only, and `run-turn` retries it once per `:max-retries` (`:on-retry` category `:reasoning-only`).
+
+Further constructor opts, all optional:
+
+* `:model-quirks` — a vector of per-model request-key constraints for *this endpoint* (see `escapement.llm.model-quirks`): `{:match #"^kimi-k2\.7" :pin {:temperature 1}}` forces a key to the one value the endpoint accepts, `:drop #{…}` removes keys it rejects outright.
+A pin fires only when the caller actually set the key, and each distinct adjustment is warned once per process.
+Quirks hang off the backend instance on purpose: the same model id accepts a key through one gateway and rejects it through another, so a table keyed by model alone would be wrong.
+* `:prefill-support :unsupported` — declares that this endpoint cannot honour an assistant-prefill continuation, so the continuation loop stops at a truncation (`:detail :continuation-unsupported`) instead of spending a call to find out; see <<continuation>>.
+Set from evidence only; absent, continuation is attempted as before.
+* `:http-timeout-ms` — request timeout, default `60000`.
+It is the only bound on a stalled turn, and a `:timeout` is a transient category retried up to `:max-retries`.
 
 CLI auto-detect: `OPENAI_API_KEY` routes to the OpenAI base URL,
 `OPENROUTER_API_KEY` routes through the OpenAI backend at OpenRouter's endpoint. `OPENAI_MODEL` / `OPENROUTER_MODEL` env vars override the default model strings.
@@ -2975,15 +2990,19 @@ Anthropic-style names map by family: `claude-opus-*` / `claude-fable-*` →
 
 ==== Reasoning effort
 
-Pass a `:reasoning` key in the params map (value overrides the default):
+The normalised `:reasoning` field (see <<params-fn>>) is rendered into the Responses API's `reasoning` object: `{:reasoning :high}` becomes `{:effort "high" :summary "auto"}`.
+`:none` omits the field (the provider default applies) and `:max` renders as `"high"`, not `"xhigh"` — that level is model-dependent and has been confirmed only on z.ai's implementation of this wire, not on OpenAI's own Responses models.
+
+A map with a *string* `:effort` is the pre-normalisation escape hatch and is passed through verbatim, which is how a caller reaches a level the ordinal has no name for:
 
 [source,clojure]
 ----
-{:reasoning {:effort "high" :summary "auto"}}
+{:reasoning {:effort "xhigh" :summary "auto"}}
 ----
 
-Valid effort values: `none` (gpt-5.1/gpt-5.2 general only), `low`,
+Valid wire values: `none` (gpt-5.1/gpt-5.2 general only), `low`,
 `medium` (default), `high`, `xhigh` (gpt-5.2/codex-max only).
+With neither form present, `{:effort "medium" :summary "auto"}` is sent, as before.
 
 ==== Subscription billing
 
@@ -3195,8 +3214,10 @@ Anthropic-shaped for `minimax-*` models, OpenAI-shaped for
 `glm-*`/`kimi-*`/`mimo-*`.
 Credential: `OPENCODE_GO_API_KEY`.
 `--api-base-url` overrides the endpoint.
+The Zen gateway rejects any request without an `x-opencode-session` header (`MissingSessionID`, HTTP 400) on both wire shapes; the library attaches one per backend instance.
+It also refuses any temperature other than 1 for `kimi-k2.7*` models, so on this endpoint that key is pinned to 1 (warned once per process — the `:model-quirks` seam described under `escapement.llm.openai`); the same models accept other temperatures through Ollama Cloud.
 
-Both are auto-detected from their env vars for the default multi-backend and reported by `escapement info`.
+All three are auto-detected from their env vars for the default multi-backend and reported by `escapement info`.
 A blank/empty credential env var is treated as unset (it no longer registers a dead route).
 
 === `escapement.llm.cache` — content-addressed disk cache
@@ -3453,7 +3474,8 @@ The events emitted across the codebase:
 `:runner/aborted`, `:runner/event-processed`
 * `:checkpoint/written`
 * `:llm/start`, `:llm/request`, `:llm/response`, `:llm/error`,
-`:llm/user-message`, `:llm/worker-exit`, `:llm/context-warning`
+`:llm/user-message`, `:llm/worker-exit`, `:llm/context-warning`.
+`:llm/error` (and an `:interrupted-mid-turn` `:llm/worker-exit`) carries `:partial-usage` — the tokens a failed or cancelled streamed turn had already spent, summed across failover candidates — whenever any usage was observed on the wire; the key is absent otherwise.
 * `:llm/event-posted` — a chart event the conversation fired at the LLM's
 request (an `:allowed-events` / event-tool call). `:data` is
 `{:invokeid … :event-name <kw> :event-data <decoded input>}`, and the row
@@ -3469,8 +3491,13 @@ Relay these off the transcript tap for live UI output; the final `:llm/response`
 `:resilience`. `:data` is `{:model … :category … :attempt N
 :max-retries M :invokeid …}`.
 Fired before each backoff sleep.
+Besides the transient error categories, `:category` may be `:overrun` (a `:max_tokens` rerun under the `:overrun` primitive) or `:reasoning-only` (the turn returned reasoning and no usable content).
 * `:llm/continuation` — a `:max_tokens`-truncated turn is being continued. `:data` is `{:segment N :blocks K :usage {…} :invokeid …}`.
 The final stitched turn still arrives as one ordinary `:llm/response`.
+* `:llm/continuation-restarted`, `:llm/continuation-unsupported`, `:llm/continuation-limit` — the continuation stopped: the provider restarted the message instead of continuing it, the endpoint is declared unable to honour a prefill, or a ceiling (`:max-segments` / `:max-chars`) was reached.
+Each is followed by an `:llm/error` (`:reason :unexpected-stop`) whose `:detail` names the same cause; see <<continuation>>.
+* `:llm/model-substituted` — the provider answered with a different model id than the one requested. `:data` is `{:requested … :reported … :invokeid … :session-id …}`.
+The `:llm/response` row carries the same pair as `:model` (reported) / `:model-requested`.
 * `:llm/latency-switch` — a time-to-first-token cap (`:resilience {:latency
 {:first-token-ms N}}`) breached and the turn failed over to another candidate.
 `:data` is `{:model … :provider … :first-token-ms N :remaining [<candidates>]
@@ -3498,8 +3525,9 @@ The trailing user message blocks (truncated at 8 KB per block) and a
 system-prompt preview only.
 The full prior conversation is in `messages-atom` in memory, not on disk.
 * `:llm/response.data` — `{:stop-reason :end_turn :n-blocks N
-:usage {...} :content [...] :model ... :context-window ...
+:usage {...} :content [...] :model ... :model-requested ... :context-window ...
 :context-used-frac ... :invokeid ...}`.
+`:model` is the id the provider **reported**; `:model-requested` is the id asked for, and `:model-substituted? true` is present when they differ (see <<known-limitations>>).
 **The `:content` array carries the assistant's text and thinking blocks**
 (each truncated at 8 KB) alongside `tool_use` blocks.
 If you only saw tool-uses, you were looking at `tool_use` entries and missing the sibling `text` entries in the same `:content` array.
@@ -3717,6 +3745,7 @@ LLM backend selection:
 | `OPENAI_API_KEY`         | `openai`          | `+#"^gpt-"+`
 | `OPENROUTER_API_KEY`     | `openai` (router) | `+#".+/.+"+`
 | `ZAI_API_KEY`            | `api` (z.ai)      | `+#"^glm-"+`
+| `DEEPSEEK_API_KEY`       | `openai` (DeepSeek) | `+#"^deepseek-"+` (listed before Ollama, whose route also matches it)
 | `OLLAMA_API_KEY`         | `openai` (Ollama Cloud) | Ollama model ids
 | `OPENCODE_GO_API_KEY`    | `api`/`openai` (OpenCode Go) | `minimax-*` → Anthropic shape; `glm-*`/`kimi-*`/`mimo-*` → OpenAI shape
 |===
@@ -3858,7 +3887,7 @@ Schema (validated with Malli on load; unknown keys are rejected):
  :d2            {:command "d2" :layout "elk"} ;; chart rendering (see Viz)
  :debug         {:auto-pause? true}           ;; --debug pause-on-start
  :llm/aliases   {:opus [{:provider :anthropic :model "claude-opus-4-7"}]
-                 :glm  [{:provider :z-ai      :model "glm-4.6"}]}
+                 :glm  [{:provider :z-ai      :model "glm-5.3-flash"}]}
  ;; ^ the ONLY target definition: alias keyword → ordered, non-empty
  ;;   vector of {:provider :model & optional params} targets (failover).
  ;;   Built-in default alias set is used when unset.

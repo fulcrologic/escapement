@@ -170,10 +170,11 @@
 
 (defn- drop-sampling-for-thinking
   "Anthropic rejects a request that enables extended thinking while also
-   setting `temperature` / `top_p` / `top_k`. Enabling `:reasoning` therefore
-   turns a chart that works today into a 400 on the identical request, so the
-   backend drops the conflicting keys and says so once, rather than passing
-   through a request it already knows the API will reject."
+   setting `temperature` / `top_p` / `top_k`. Enabling `:reasoning` (or an
+   explicit `:thinking`) alongside a sampling parameter would therefore turn a
+   chart that works today into a 400 on the identical request, so the backend
+   drops the conflicting keys and says so once, rather than passing through a
+   request it already knows the API will reject."
   [wire request]
   (let [present (filterv #(some? (get request %))
                   reasoning/sampling-keys-thinking-forbids)]

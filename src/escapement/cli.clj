@@ -444,7 +444,7 @@
          :default-models [m]})
 
       "ollama"
-      (let [m (or model "kimi-k2.5")]
+      (let [m (or model "glm-5.3-flash")]
         {:backend        (build-openai-backend (cond-> {:base-url      (or api-base-url "https://ollama.com/v1")
                                                         :default-model m
                                                         :reasoning-dialect :ollama}

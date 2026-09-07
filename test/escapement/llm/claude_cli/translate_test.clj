@@ -579,7 +579,12 @@
 
       "backend is identified"
       (get-in resp [:backend-metadata :backend]) => :claude-cli
-      (get-in resp [:backend-metadata :mechanism]) => :json-schema))
+      (get-in resp [:backend-metadata :mechanism]) => :json-schema
+
+      "the CLI accepts only user messages, so an assistant prefill is silently
+       dropped on the way in — the Response says so, and the continuation loop
+       declines to try rather than spend a turn discovering it"
+      (get-in resp [:backend-metadata :prefill-unsupported?]) => true))
 
   (component "NN-10: tool_use ids are globally unique"
     ;; handle-tool-use-block keys retry-counts by tool_use_id and treats a SECOND

@@ -258,7 +258,7 @@
               (post-event-to-parent! parent-ctx on-answer-event {:answer answer})))))
       (catch InterruptedException _
         (transcript! transcript-fn {:event :human-input/interrupted :ts (now-ms)
-                                                   :data  {:invokeid (:invokeid parent-ctx)}}))
+                                    :data  {:invokeid (:invokeid parent-ctx)}}))
       (catch Throwable t
         (if (= :cancelled (:reason (ex-data t)))
           (do

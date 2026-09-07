@@ -137,11 +137,12 @@
    here, `:reasoning` on an alias target fails validation even though
    `escapement.llm/alias-target->candidate` reads it, which made per-target
    reasoning unreachable through config."
-  [:or
-   [:enum :none :minimal :low :medium :high :max]
-   [:map {:closed true}
-    [:effort {:optional true} [:enum :none :minimal :low :medium :high :max]]
-    [:budget-tokens {:optional true} [:int {:min 1024}]]]])
+  (let [effort [:enum :none :minimal :low :medium :high :max]]
+    [:or
+     effort
+     [:map {:closed true}
+      [:effort {:optional true} effort]
+      [:budget-tokens {:optional true} [:int {:min 1024}]]]]))
 
 (def alias-target-schema
   "One alias target: a concrete `{:provider :model …}` bundle. `:provider`

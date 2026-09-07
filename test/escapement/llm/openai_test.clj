@@ -393,7 +393,40 @@
             (p/await! (proto/send-turn* b req #(swap! d2 conj %)))
             (count @d2)) => 2)))))
 
+(specification "tag-prefill-support — a declared :prefill-support :unsupported marks the Response"
+  (let [resp (oai/openai-json->response sample-openai-response "gpt-5")]
+    (component "the pure tag"
+      (assertions
+        "an endpoint declared :unsupported gets the flag"
+        (get-in (oai/tag-prefill-support resp {:prefill-support :unsupported})
+          [:backend-metadata :prefill-unsupported?]) => true
+        "the rest of the metadata is untouched"
+        (get-in (oai/tag-prefill-support resp {:prefill-support :unsupported})
+          [:backend-metadata :backend]) => :openai
+        "no declaration → the Response is returned as-is (continuation is attempted)"
+        (oai/tag-prefill-support resp {}) => resp
+        (contains? (:backend-metadata (oai/tag-prefill-support resp {})) :prefill-unsupported?) => false
+        "any other declared value is not :unsupported"
+        (contains? (:backend-metadata (oai/tag-prefill-support resp {:prefill-support :supported}))
+          :prefill-unsupported?) => false))
 
+    (component "end-to-end through send-turn (buffered path)"
+      (let [req       {:model      "gpt-5"
+                       :messages   [{:role :user :content [{:type :text :text "hi"}]}]
+                       :max-tokens 64}
+            fake-post (fn [_url _opts]
+                        {:status 200
+                         :body   (json/generate-string sample-openai-response)})
+            send      (fn [opts]
+                        (with-redefs [babashka.http-client/post fake-post]
+                          (p/await! (proto/send-turn (oai/new-backend opts) req))))]
+        (assertions
+          "a backend built with :prefill-support :unsupported tags its Responses"
+          (get-in (send {:api-key "k" :base-url "http://x/v1" :prefill-support :unsupported})
+            [:backend-metadata :prefill-unsupported?]) => true
+          "a backend built without the declaration does not"
+          (contains? (:backend-metadata (send {:api-key "k" :base-url "http://x/v1"}))
+            :prefill-unsupported?) => false)))))
 
 (specification "status->category — error categorization parity with Anthropic backend"
   (let [c (fn [s b] (#'oai/status->category s b))]

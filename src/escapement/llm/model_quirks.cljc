@@ -35,7 +35,6 @@
    Absent a matching quirk the request is returned untouched, so a backend with
    no quirk table behaves exactly as it did before."
   (:require
-    [clojure.string :as str]
     [taoensso.timbre :as log]))
 
 (defn matches?
@@ -45,8 +44,7 @@
     (cond
       (nil? match) false
       (string? match) (= match m)
-      :else #?(:clj (boolean (re-find match m))
-               :cljs (boolean (re-find match m))))))
+      :else (boolean (re-find match m)))))
 
 (defn for-model
   "Every quirk in `quirks` that applies to `model`, in table order."
@@ -108,13 +106,3 @@
   [{:match #"^kimi-k2\.7"
     :pin   {:temperature 1}
     :why   "the upstream answers \"invalid temperature: only 1 is allowed for this model\""}])
-
-(defn describe
-  "One human line per quirk, for `--doctor`-style output and docs."
-  [quirks]
-  (mapv (fn [{:keys [match drop pin why]}]
-          (str (if (string? match) match (str match))
-            (when (seq drop) (str " drops " (str/join ", " (map name drop))))
-            (when (seq pin) (str " pins " (str/join ", " (map (fn [[k v]] (str (name k) "=" v)) pin))))
-            (when why (str " — " why))))
-    quirks))

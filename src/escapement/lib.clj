@@ -36,7 +36,8 @@
      `escapement.llm.providers/build-injected-credentials-backend` (no env, no
      disk). An explicit `:backend` is an escape hatch that wins verbatim.
      Honoured descriptor keys are `:provider` `:api-key` `:base-url` `:model`
-     `:default-model` `:auth-mode` `:reasoning-dialect`; the descriptor map is
+     `:default-model` `:auth-mode` `:reasoning-dialect` `:http-timeout-ms`; the
+     descriptor map is
      open, so any OTHER key validates and is then ignored. `:subscription` is
      accepted but inert (see the schema note below).
    * `:config` — optional: the `.escapement.edn`-shaped map
