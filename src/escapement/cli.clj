@@ -465,9 +465,14 @@
 
       "ollama"
       (let [m (or model "glm-5.3-flash")]
+        ;; `:prefill-support :unsupported` must match the credential route in
+        ;; `providers/build-credential-backend` — the endpoint rejects an
+        ;; assistant prefill, so continuation is a property of the ENDPOINT,
+        ;; not of how the backend happened to be constructed.
         {:backend        (build-openai-backend (cond-> {:base-url      (or api-base-url "https://ollama.com/v1")
                                                         :default-model m
-                                                        :reasoning-dialect :ollama}
+                                                        :reasoning-dialect :ollama
+                                                        :prefill-support :unsupported}
                                                  api-key-env (assoc :api-key (System/getenv api-key-env))
                                                  (not api-key-env) (assoc :api-key (System/getenv "OLLAMA_API_KEY"))))
          :default-models [m]})

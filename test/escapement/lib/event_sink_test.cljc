@@ -157,7 +157,7 @@
                                  :content-preview "..."
                                  :invokeid        :inv9}})
         [call result] tr-events
-        ;; a tool-attributed error: same invokeid as a seen tool result
+        ;; a tool-attributed error: its own :reason names bad tool use
         vf        (feed {:event :llm/error :ts 11
                          :data  {:reason :bad-tool-use :invokeid :inv9}})
         ;; explicit bad-tool-use reason without a prior pending tool also splits
@@ -183,13 +183,70 @@
         {:session-id "sid-1"
          :run-id     "11111111-2222-3333-4444-555555555555"})
       => true
-      "tool-attributed :llm/error -> :tool-validation-failure linked by invokeid"
+      "an :llm/error whose :reason names bad tool use -> :tool-validation-failure, :tool resolved via invokeid"
       (select-keys (first vf) [:type :tool :invokeid])
       => {:type :tool-validation-failure :tool :search :invokeid :inv9}
       ":llm/retry with bad-tool-use reason -> :tool-validation-failure"
       (:type (first vf2)) => :tool-validation-failure
       "all synthesized tool events conform to public schema"
       (all-conform? (concat tr-events vf vf2)) => true)))
+
+(specification "a provider failure in a tool-using invocation stays an :llm-error"
+  ;; REGRESSION GUARD. `:llm/error` rows gained an `:invokeid` (every
+  ;; invocation-scoped event is now attributable). The classifier used to
+  ;; treat "carries an invokeid we have seen a tool result for" as proof of a
+  ;; tool failure — but `:pending-tools` is keyed by the INVOCATION's
+  ;; invokeid and is never cleared, so that clause matched EVERY later error
+  ;; in a node that had ever run a tool. An :overloaded / :timeout /
+  ;; :unexpected-stop row was reported to embedders as a
+  ;; :tool-validation-failure blaming an unrelated tool, and real LLM errors
+  ;; vanished from the public stream. Classification must come from the row's
+  ;; own :reason, never from invocation-level tool history.
+  (let [a       (es/make-adapter)
+        _       ((:feed a) started-row)
+        feed    #((:feed a) %)
+        ;; the invocation runs a tool successfully...
+        _       (feed {:event :llm/tool-result :ts 10
+                       :data  {:tool_use_id "tu-1" :tool :search :input {:q "x"}
+                               :is-error false :content-preview "..."
+                               :invokeid :inv9}})
+        ;; ...then, later, the PROVIDER fails. Same invokeid, nothing to do
+        ;; with any tool.
+        overl   (feed {:event :llm/error :ts 11
+                       :data  {:reason :backend :category :overloaded
+                               :message "provider 529" :invokeid :inv9}})
+        stop    (feed {:event :llm/error :ts 12
+                       :data  {:reason :unexpected-stop :detail :continuation-limit
+                               :invokeid :inv9}})
+        tmo     (feed {:event :llm/error :ts 13
+                       :data  {:reason :timeout :elapsed-ms 5 :limit-ms 1
+                               :invokeid :inv9}})
+        budget  (feed {:event :llm/error :ts 14
+                       :data  {:reason :max-turns :limit 3 :invokeid :inv9}})
+        ;; a genuine tool-reason error in the SAME invocation still splits out
+        real-tf (feed {:event :llm/error :ts 15
+                       :data  {:reason :tool-validation-failed :tool :search
+                               :tool_use_id "tu-1" :invokeid :inv9}})]
+    (assertions
+      "an :overloaded backend failure is an :llm-error, not a tool failure"
+      (mapv :type overl) => [:llm-error]
+      "it names no tool"
+      (:tool (first overl)) => nil
+      "and it keeps the reason the producer gave it"
+      (:reason (first overl)) => :backend
+      "an :unexpected-stop is an :llm-error"
+      (mapv :type stop) => [:llm-error]
+      "a :timeout is an :llm-error"
+      (mapv :type tmo) => [:llm-error]
+      "a :max-turns budget stop is an :llm-error"
+      (mapv :type budget) => [:llm-error]
+      "a row whose own :reason names tool validation IS still a tool failure"
+      (select-keys (first real-tf) [:type :tool]) => {:type :tool-validation-failure :tool :search}
+      "every error stays correlated to its invocation"
+      (mapv :invokeid (concat overl stop tmo budget real-tf))
+      => [:inv9 :inv9 :inv9 :inv9 :inv9]
+      "all conform to the public schema"
+      (all-conform? (concat overl stop tmo budget real-tf)) => true)))
 
 (specification "unmapped/internal rows are dropped (no spurious events)"
   (let [a    (es/make-adapter)

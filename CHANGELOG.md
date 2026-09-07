@@ -1,5 +1,29 @@
 # Changelog
 
+## [unreleased] — fix/llm-error-attribution — 2026-09-08
+
+### Fixed
+
+- **Provider failures are reported as LLM errors again, not as tool
+  failures.** Stamping `:invokeid` onto every invocation-scoped event (1.0.3)
+  woke up a latent rule in the `escapement.lib` public event stream: an
+  `:llm/error` was classified as a `:tool-validation-failure` whenever it
+  carried an invokeid that had been seen on a tool result. That map is keyed
+  by the INVOCATION's invokeid and is never cleared, so the rule really asked
+  "has this node ever run a tool?" — and every later `:overloaded`,
+  `:timeout`, `:unexpected-stop` or `:max-turns` failure in a tool-using node
+  reached embedders as a validation failure blaming whichever tool happened to
+  run last, while genuine `:llm-error` events disappeared from the stream.
+  Classification now comes from the row's own `:reason`; `:invokeid` is still
+  used to resolve the `:tool` NAME once the reason has decided. Charts, the
+  CLI and the TUI were unaffected — this only ever reached hosts consuming the
+  library's public event stream.
+- **The CLI's `--backend ollama` route now declares `:prefill-support
+  :unsupported`,** matching the credential route. Ollama Cloud rejects an
+  assistant prefill, so a truncated turn must skip continuation there; with
+  only one of the two construction routes declaring it, the same provider
+  continued on one path and errored on the other.
+
 ## [unreleased] — hosted-library-slice-2 — 2026-09-07
 
 Hardens the LLM provider layer for a JVM host embedding `escapement.lib`: one
