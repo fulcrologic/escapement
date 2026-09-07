@@ -33,9 +33,28 @@
     [escapement.tui.inspector :as inspector]
     [com.fulcrologic.statecharts.promise :as p])
   (:import
-    (java.io Reader)
-    (org.jline.terminal Terminal TerminalBuilder)
-    (org.jline.utils NonBlockingReader)))
+    (java.io Reader)))
+
+;; ---------------------------------------------------------------------------
+;; JLine interop — resolved lazily, never at load time
+;; ---------------------------------------------------------------------------
+;; Every reference to a JLine class lives in `escapement.tui.jline`, reached
+;; through `requiring-resolve` so it is loaded only when a real TUI starts.
+;; Babashka is a GraalVM native image: it bundles no JLine and cannot load Java
+;; classes from jars, and SCI resolves class names during ANALYSIS (type hints
+;; included). A lexical JLine reference here would therefore make this namespace
+;; — and `escapement.cli`, which requires it at the top of its `ns` form —
+;; impossible to LOAD under bb, long before `--no-tui` could be parsed. Keeping
+;; it behind a runtime resolve lets the CLI load and run headless under bb while
+;; the JVM keeps the fully-hinted, reflection-free implementation.
+
+(defn jline-available?
+  "True when the JLine TUI can actually be started — i.e. `escapement.tui.jline`
+   loads, which needs a JVM with JLine on the classpath. False under babashka,
+   which bundles no JLine. A TTY is necessary but NOT sufficient for a TUI; see
+   `interactive-terminal?` for the other half."
+  []
+  (try (some? (requiring-resolve 'escapement.tui.jline/system-terminal)) (catch Throwable _ false)))
 
 ;; ---------------------------------------------------------------------------
 ;; TTY detection
@@ -761,8 +780,10 @@
 (defn- render-frame!
   [{:keys [state lock terminal] :as h}]
   (locking lock
-    (let [term-h        (if terminal (.getHeight ^Terminal terminal) 24)
-          term-w        (if terminal (.getWidth ^Terminal terminal) 80)
+    ;; Resolve INSIDE the `terminal` guard: a disabled/headless handle has no
+    ;; terminal, and must never load the JLine module (bb cannot).
+    (let [term-h        (if terminal ((requiring-resolve 'escapement.tui.jline/height) terminal) 24)
+          term-w        (if terminal ((requiring-resolve 'escapement.tui.jline/width) terminal) 80)
           ;; Restore an auto-suspended overlay once the modal has cleared.
           ;; Also bump :tick per frame so the LIVE-pane shimmer animates (003).
           _             (swap! state
@@ -1049,12 +1070,12 @@
    Thin adapter: delegates the actual decode to `key-from-bytes`, supplying a
    `read!` backed by the reader (blocking for the first byte, timed for the
    inter-byte ESC disambiguation)."
-  [^NonBlockingReader rdr]
+  [rdr]
   (key-from-bytes
     (fn [timeout-ms]
       (if (pos? timeout-ms)
-        (.read rdr (long timeout-ms))
-        (.read rdr)))))
+        ((requiring-resolve 'escapement.tui.jline/read-char) rdr timeout-ms)
+        ((requiring-resolve 'escapement.tui.jline/read-char) rdr)))))
 
 (defn- complete-modal!
   "Deliver the modal's promise with `value` and clear the modal."
@@ -1138,7 +1159,7 @@
    true if the terminal indicates support (response values 1-4), false on
    timeout or an indication of no support. Must run AFTER raw mode is entered
    AND BEFORE the main input loop starts consuming bytes from the reader."
-  [^NonBlockingReader rdr]
+  [rdr]
   (try
     (emit! sync-output-query-s)
     ;; Drain up to ~120 ms looking for `\e[?2026;<n>$y`. Some terminals never
@@ -1154,7 +1175,7 @@
         (when-not (or (>= (System/currentTimeMillis) deadline)
                     (>= (.length sb) 32)
                     (str/includes? (.toString sb) "$y"))
-          (let [c (.read rdr (long 20))]
+          (let [c ((requiring-resolve 'escapement.tui.jline/read-char) rdr 20)]
             (when (>= c 0) (.append sb (char c)))
             (recur))))
       (let [s (.toString sb)]
@@ -1380,9 +1401,9 @@
 (defn- input-loop!
   [{:keys [terminal raw-mode? state sync-output?] :as h}]
   (try
-    (.enterRawMode ^Terminal terminal)
+    ((requiring-resolve 'escapement.tui.jline/enter-raw-mode!) terminal)
     (reset! raw-mode? true)
-    (let [rdr ^NonBlockingReader (.reader ^Terminal terminal)]
+    (let [rdr ((requiring-resolve 'escapement.tui.jline/reader) terminal)]
       (reset! sync-output? (detect-sync-output! rdr))
       ;; A render after detection so the first 2026-wrapped frame appears.
       (render-frame! h)
@@ -1514,20 +1535,20 @@
 
 (defn start!
   "Start the TUI. Returns a handle that can be passed to `event!`, `renderer`,
-   `attach-session!`, and `stop!`. If the current terminal is non-interactive,
-   returns a disabled handle (every method becomes a no-op).
+   `attach-session!`, and `stop!`. If the current terminal is non-interactive —
+   or JLine is unavailable, as under babashka (see `jline-available?`) — returns
+   a disabled handle (every method becomes a no-op) so the caller degrades to a
+   headless run rather than failing.
 
    `opts`:
     * `:chart-sym`     — display label for the header
     * `:session-short` — short session id for the header"
   [{:keys [chart-sym session-short debug? debug-controller debug-config]}]
-  (if-not (interactive-terminal?)
+  (if-not (and (interactive-terminal?) (jline-available?))
     (->TuiHandle false (atom {}) (Object.) nil (atom false) nil (atom nil) (atom nil)
       (str chart-sym) (str session-short) (atom false) (atom false)
       false (boolean debug?) debug-controller debug-config (atom nil) (atom false))
-    (let [terminal (-> (TerminalBuilder/builder)
-                     (.system true)
-                     (.build))
+    (let [terminal ((requiring-resolve 'escapement.tui.jline/system-terminal))
           state    (atom {:config          []
                           :start-ts        (System/currentTimeMillis)  ;; session-start stamp for the header clock
                           :scrollback      []
@@ -1980,8 +2001,8 @@
              (catch Throwable _ nil))
         (try
           (when (and (:terminal h) @(:raw-mode? h))
-            (when-let [^Terminal term (:terminal h)]
-              (.close term)))
+            (when-let [term (:terminal h)]
+              ((requiring-resolve 'escapement.tui.jline/close!) term)))
           (catch Throwable _ nil))
         (run-tput-cnorm!))))
   h)
