@@ -43,6 +43,22 @@
       "and the canonical form validates against the Request schema"
       (types/validate-request (llm/build-request (assoc base :reasoning :max))) => nil))
 
+  (component "the Responses passthrough shape still validates"
+    ;; Caught live: a CLOSED schema silently made the openai-codex escape hatch
+    ;; unreachable — `send-turn` validates the request, so the passthrough map
+    ;; failed before it ever got to the translator, and the translator-level
+    ;; tests could not see it.
+    (assertions
+      "a string :effort is the passthrough shape and is accepted"
+      (types/validate-request
+        (assoc base :reasoning {:effort "xhigh" :summary "auto"})) => nil
+
+      "the normalised keyword shape is accepted too"
+      (types/validate-request (assoc base :reasoning {:effort :high})) => nil
+
+      "an unknown keyword effort is still rejected"
+      (some? (types/validate-request (assoc base :reasoning {:effort :normal}))) => true))
+
   (component "the sugar never reaches a backend as a second shape"
     (assertions
       "normalize-reasoning is idempotent"

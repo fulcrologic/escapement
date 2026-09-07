@@ -67,15 +67,27 @@
 (defn opencode-go-anthropic-model? [model]
   (and model (re-find #"^minimax-" model)))
 
+(defn opencode-session-headers
+  "opencode.ai's Zen gateway REJECTS any request without an
+   `x-opencode-session` header — `MissingSessionID`, HTTP 400, on both its
+   OpenAI-shaped and its Anthropic-shaped endpoints (verified 2026-09-07;
+   before this, EVERY opencode-go request through this library failed). The
+   value only has to be a stable id the gateway can route on, so each backend
+   instance gets its own."
+  []
+  {"x-opencode-session" (str "escapement-" (random-uuid))})
+
 (defn build-opencode-go-backend [{:keys [model api-key base-url] :as opts}]
   (if (opencode-go-anthropic-model? model)
     (build-api-backend {:api-key       api-key
                         :base-url      (or base-url "https://opencode.ai/zen/go")
                         :default-model model
-                        :auth-mode     :x-api-key})
+                        :auth-mode     :x-api-key
+                        :extra-headers (opencode-session-headers)})
     (build-openai-backend {:api-key       api-key
                            :base-url      (or base-url "https://opencode.ai/zen/go/v1")
-                           :default-model (or model (:default-model opts) "glm-5")})))
+                           :default-model (or model (:default-model opts) "glm-5")
+                           :extra-headers (opencode-session-headers)})))
 
 (defn detect-available-credentials
   "Returns a vector of available credential descriptors (one per env var or
@@ -172,7 +184,12 @@
       ollama
       (conj {:kind          :ollama :source "OLLAMA_API_KEY"
              :api-key       ollama :base-url "https://ollama.com/v1"
-             :default-model (or (System/getenv "OLLAMA_MODEL") "kimi-k2.5")
+             ;; NOT `kimi-k2.5`: retired upstream 2026-07-31, and the cloud
+             ;; API answers every request for it with an error, so it was a
+             ;; guaranteed failure for anyone taking the default. `glm-5.3-flash`
+             ;; is general-purpose (deliberately not a `-code` model), current,
+             ;; and the cheapest tier here. Confirmed answering 2026-09-07.
+             :default-model (or (System/getenv "OLLAMA_MODEL") "glm-5.3-flash")
              :reasoning-dialect :ollama
              :route         #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}))))
 
@@ -191,8 +208,14 @@
     :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
     :ollama (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
     :deepseek (build-openai-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms :reasoning-dialect]))
-    :opencode-go-openai (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
-    :opencode-go-anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
+    ;; Both opencode.ai routes carry the mandatory `x-opencode-session` header;
+    ;; without it the gateway 400s every request, whichever wire format.
+    :opencode-go-openai (build-openai-backend
+                          (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect])
+                            (assoc :extra-headers (opencode-session-headers))))
+    :opencode-go-anthropic (build-api-backend
+                             (-> (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms])
+                               (assoc :extra-headers (opencode-session-headers))))
     :codex (build-codex-backend {:default-model (:default-model c)})
     :claude-cli (build-claude-cli-backend
                   (select-keys c [:default-model :binary :timeout-ms :max-concurrency
@@ -250,7 +273,9 @@
                            :default-model "deepseek-v4-flash" :reasoning-dialect :deepseek
                            :route         #"^deepseek-"}
    :ollama                {:kind          :ollama :base-url "https://ollama.com/v1"
-                           :default-model "kimi-k2.5" :reasoning-dialect :ollama
+                           ;; See the note in `detect-available-credentials`:
+                           ;; `kimi-k2.5` was retired upstream 2026-07-31.
+                           :default-model "glm-5.3-flash" :reasoning-dialect :ollama
                            :route         #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}
    :opencode-go           {:kind          :opencode-go-openai :base-url "https://opencode.ai/zen/go/v1"
                            :default-model "glm-5" :reasoning-dialect :none

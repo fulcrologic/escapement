@@ -145,6 +145,21 @@
    [:effort {:optional true} (into [:enum] effort-levels)]
    [:budget-tokens {:optional true} [:int {:min 1024}]]])
 
+(def ReasoningPassthrough
+  "The pre-normalisation escape hatch on the OpenAI **Responses** wire
+   (`escapement.llm.openai-codex`), where `:reasoning` was already a raw
+   passthrough of that API's own object — `{:effort \"medium\" :summary \"auto\"}`.
+   A STRING `:effort` marks it as that shape and it is sent verbatim, which is
+   how a caller reaches a provider-specific level the normalised ordinal has no
+   name for (e.g. Codex's `\"xhigh\"`).
+
+   Deliberately open, and deliberately NOT unified with `Reasoning`: the two
+   shapes are told apart by whether `:effort` is a string or a keyword, and
+   collapsing them would either lose the escape hatch or leak provider
+   vocabulary into the normalised field."
+  [:map
+   [:effort :string]])
+
 (defn normalize-reasoning
   "Widen the accepted sugar to the canonical map, ONCE, so no backend ever
    sees two shapes: a bare effort keyword (`:reasoning :high`) becomes
@@ -189,7 +204,7 @@
    ;; Normalised reasoning control; each backend translates it into its own
    ;; dialect. An explicit `:thinking` wins over a `:reasoning`-derived one on
    ;; the Anthropic-shaped backend, so nothing that works today changes.
-   [:reasoning {:optional true} Reasoning]
+   [:reasoning {:optional true} [:or Reasoning ReasoningPassthrough]]
    ;; Tool-choice forcing.
    [:tool-choice {:optional true} ToolChoice]
    ;; Optional audit/metadata.

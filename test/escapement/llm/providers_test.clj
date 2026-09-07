@@ -272,3 +272,47 @@
 
         ":deepseek is ordered before :ollama"
         (< (.indexOf kinds :deepseek) (.indexOf kinds :ollama)) => true))))
+
+(specification "opencode.ai Zen requires a session header on every request"
+  ;; Verified live 2026-09-07: without `x-opencode-session` the gateway answers
+  ;; `MissingSessionID` / HTTP 400 on BOTH its wire formats, so every
+  ;; opencode-go request through this library used to fail.
+
+  (component "the header is attached on the OpenAI-shaped route"
+    (let [b (-> (providers/build-injected-credentials-backend
+                  [{:provider :opencode-go :api-key "k"}] [])
+              :default-backend)]
+      (assertions
+        "a session header is present"
+        (some? (get (-> b :opts :extra-headers) "x-opencode-session")) => true)))
+
+  (component "and on the Anthropic-shaped route"
+    (let [b (-> (providers/build-injected-credentials-backend
+                  [{:provider :opencode-go-anthropic :api-key "k"}] [])
+              :default-backend)]
+      (assertions
+        "a session header is present here too"
+        (some? (get (-> b :opts :extra-headers) "x-opencode-session")) => true)))
+
+  (component "each backend instance gets its own id"
+    (assertions
+      "two instances do not share a session id"
+      (= (get (providers/opencode-session-headers) "x-opencode-session")
+        (get (providers/opencode-session-headers) "x-opencode-session")) => false)))
+
+(specification "provider default models are live, not stale"
+  ;; `kimi-k2.5` was retired upstream on 2026-07-31 while it was still this
+  ;; library's Ollama default, so every run taking that default failed. This
+  ;; pins the replacement and documents the sweep.
+
+  (component "the Ollama default is the current general-purpose model"
+    (let [tmpl @(resolve 'escapement.llm.providers/provider-templates)]
+      (assertions
+        "not the retired kimi-k2.5"
+        (get-in tmpl [:ollama :default-model]) =fn=> #(not= "kimi-k2.5" %)
+
+        "and confirmed answering 2026-09-07"
+        (get-in tmpl [:ollama :default-model]) => "glm-5.3-flash"
+
+        "deliberately general-purpose, not a task-specialised -code model"
+        (clojure.string/includes? (get-in tmpl [:ollama :default-model]) "-code") => false))))
