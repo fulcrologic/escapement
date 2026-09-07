@@ -79,7 +79,7 @@ bb -m escapement.cli run escapement.examples.hello/agent
 
 Two ways to supply credentials (no shell `source` needed either way):
 
-* **Env vars** — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ZAI_API_KEY`, `OLLAMA_API_KEY`, `OPENCODE_GO_API_KEY`. Auto-detected when no `--backend` flag is given.
+* **Env vars** — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ZAI_API_KEY`, `DEEPSEEK_API_KEY`, `OLLAMA_API_KEY`, `OPENCODE_GO_API_KEY`. Auto-detected when no `--backend` flag is given. (`DEEPSEEK_API_KEY` is listed before `OLLAMA_API_KEY` on purpose: the Ollama route also matches `deepseek-*` models, and the vendor's own endpoint should win over a gateway that resells them.)
 * **`:llm/credentials` in `.escapement.edn`** — escapement reads it at startup and assembles the backend (same hermetic path the embeddable lib uses). To keep secrets out of the file, declare external JSON key stores under `:llm/credential-sources` and pull each key with `:key-from [<source> <path…>]`:
 
 [source,clojure]
@@ -728,6 +728,38 @@ The model emits one or more `:thinking` (and possibly `:redacted_thinking`) cont
 They are recorded in the message history so the model can build on them across turns; the chart never sees them — they pass through transparently.
 Set
 `:budget-tokens` low enough to leave room, within the model's catalog output cap, for the actual answer (select a model with a large enough output limit when enabling deep thinking).
+
+`:reasoning`::
+Optional. The **provider-neutral** way to ask for reasoning effort. Say how
+hard to think once, as an ordinal, and each backend renders it into its own
+wire dialect:
++
+[source,clojure]
+----
+{:reasoning {:effort :high}}    ; or the sugar {:reasoning :high}
+{:reasoning {:effort :none}}    ; explicitly do NOT reason
+{:reasoning {:effort :low :budget-tokens 4096}}
+----
++
+`:effort` is one of `:none :minimal :low :medium :high :max`, weakest first.
+`:budget-tokens` is an optional numeric hint for the dialects that take one; it
+is ignored, never an error, where a provider has no numeric dial.
++
+What each backend emits: Anthropic-shaped — `thinking` with a derived budget
+(never more than half the output cap, and dropped entirely when there is no room
+for the 1024-token floor); OpenAI — `reasoning_effort`; OpenRouter — its
+`reasoning` object; Ollama — the `think` flag; DeepSeek — `thinking` plus
+`reasoning_effort`; the Responses wire — its `reasoning` object.
++
+Omitting `:reasoning` produces exactly the wire body it always did — the field
+adds nothing to a request that does not ask for it. An explicit `:thinking`
+always wins over a `:reasoning`-derived one.
++
+CAUTION: Enabling reasoning on the Anthropic-shaped wire drops `:temperature` /
+`:top-p` / `:top-k`, which that API refuses to accept alongside extended
+thinking; the backend says so once per process rather than sending a request it
+knows will be rejected. Reasoning also interacts badly with continuation — see
+<<continuation>>.
 
 `:tool-choice`::
 Optional.
@@ -1610,6 +1642,70 @@ The sole stop condition besides a terminal
 `stop_reason` is *no forward progress*: if a continuation segment adds no new content, the worker stops and fires `:error.llm.unexpected-stop`
 (`:detail :no-forward-progress`) rather than loop and drain quota.
 Each continuation emits a `:llm/continuation` transcript event (`{:segment N :blocks K :usage {…}}`) for observability.
+
+===== Continuation only works where the provider honours a prefill
+
+Continuation is an *assistant prefill*: the partial content is sent back as a
+trailing assistant message and the model is asked to carry on from it. Whether
+that works is a property of the provider **and of the model**, not of the wire
+format, and it is not universal. Probed with a generic "count from 1 to 30"
+prompt prefilled with a partial answer (2026-09-07):
+
+[cols="2,3"]
+|===
+| Endpoint / model | Behaviour with a prefilled partial turn
+
+| DeepSeek (`deepseek-v4-flash`)
+| Continues correctly — resumes where the prefill stopped.
+
+| opencode.ai Zen (`glm-5`)
+| Continues correctly.
+
+| OpenRouter (`openai/gpt-4o-mini`)
+| **Silently restarts** — replies from the beginning, ignoring the prefill.
+
+| z.ai Anthropic-compatible endpoint (`glm-5.3-flash`)
+| **Silently restarts.**
+
+| Ollama Cloud (`mistral-large-3`)
+| **Hard 400**: `Expected last role User or Tool (or Assistant with prefix True) for serving but got assistant`.
+
+| Anthropic proper
+| Documented prefill support; **not verified here** (no key was available on the machine where this was probed).
+
+| `claude-cli`, `openai-codex`
+| Cannot prefill by construction — the CLI accepts only `type:user` messages, and the Responses wire turns an assistant message into an input item and starts a new one.
+|===
+
+Two guards follow from that, and both are on by default:
+
+**A restart is detected and never stitched.** If a continuation segment *begins
+with* what has already been accumulated, the provider restarted rather than
+continued; merging it would produce a document containing its own prefix twice —
+with no error and a plausible-looking transcript. The worker keeps what it had,
+fires `:error.llm.unexpected-stop` (`:detail :continuation-restarted`) and emits
+a `:llm/continuation-restarted` transcript event. This check is purely textual,
+so it works on providers nobody has probed. Note that a restart usually arrives
+as a *clean* `:end_turn` — it looks like a successful turn, which is precisely
+why it is checked first.
+
+**Where prefill is known to be impossible, it is not attempted.** Providers with
+evidence of breakage declare it, and the worker stops at the truncation with
+`:detail :continuation-unsupported` and a `:llm/continuation-unsupported` event
+rather than spending a doomed call. Providers that have *not* been shown to
+break are left alone: declaring "unsupported" removes working behaviour, so it
+is asserted only from evidence, never from an untested guess.
+
+WARNING: **Reasoning and continuation are semantically incompatible.** With
+reasoning enabled, models read the prefilled text as *someone else's earlier
+turn* rather than as their own unfinished words. Observed on two providers, and
+with a clean control: the same DeepSeek model continues perfectly with thinking
+off, while with thinking on its reasoning trace says the assistant "previously
+responded … which is incomplete" and it starts over. A reasoning-enabled node
+that hits its output cap therefore cannot rely on continuation on any provider.
+The restart guard turns this into a loud failure rather than a corrupt document,
+but if a node must produce a long artifact, either leave reasoning off for that
+node or raise its output cap so truncation does not happen.
 
 The one knob that changes this is the **`:overrun` resilience primitive**
 (opt-in, OFF by default). When `:resilience {:overrun {:max-retries N …}}`
@@ -3039,13 +3135,16 @@ If a mixed route set has any non-streaming sub-backend the dispatcher is non-str
 
 The CLI assembles this dispatcher automatically when more than one credential is available — see <<cli>> for the default route table.
 
-=== Ollama Cloud and OpenCode Go
+=== Ollama Cloud, DeepSeek and OpenCode Go
 
-Two further provider wirings are selectable without a new protocol implementation — both reuse the `api`/`openai` backends above against provider-specific endpoints:
+Three further provider wirings are selectable without a new protocol implementation — all reuse the `api`/`openai` backends above against provider-specific endpoints:
 
 * **Ollama Cloud** — `escapement run --backend ollama`, served via the OpenAI-compatible backend at `https://ollama.com/v1`.
 Credential:
 `OLLAMA_API_KEY`.
+* **DeepSeek** — `escapement run --backend deepseek`, served via the OpenAI-compatible backend at `https://api.deepseek.com/v1`.
+Credential: `DEEPSEEK_API_KEY` (optional `DEEPSEEK_MODEL`).
+Listed ahead of Ollama in credential detection, since Ollama's route also matches `deepseek-*` and the vendor's own endpoint should win over a gateway reselling the same models.
 * **OpenCode Go** — `escapement run --backend opencode-go`, served at
 `https://opencode.ai/zen/go`.
 The wire shape is chosen per model:
@@ -3540,7 +3639,7 @@ Numbers, keywords, booleans, and collections parse natively.
 
 LLM backend selection:
 
-* `--backend (api|codex|claude-cli|openai|ollama|opencode-go)` — explicit single backend.
+* `--backend (api|codex|claude-cli|openai|ollama|deepseek|opencode-go)` — explicit single backend.
 * Without `--backend`, the CLI scans available credentials and auto-assembles a backend:
 +
 [options="header"]
@@ -4434,10 +4533,28 @@ There is currently no policy layer.
 * **LLM token budgets are per-turn, not per-session.** Long iterative runs accumulate context.
 The per-turn output cap is catalog-driven (not a param); prompt for brevity, pick an appropriately-sized model, and watch the `:context-used-frac` field on `:llm/response` transcript events (see <<context-tracking>>).
 
-* **Billing on successful turns only.** Token usage is authoritative only from the **final** `Response` of a completed turn.
-Usage from a partial, failed, or cancelled streamed turn is **discarded** — out of slice scope.
-The optional cumulative-usage delta field on streamed deltas is for live UX only and is **not** a billing source.
-Bill on successful turns only.
+* **There is no cost accounting.** The library reports token usage; it does not price it. The catalog carries per-model pricing (see `escapement.llm.catalog`) but nothing multiplies one by the other, and no per-run total is maintained. A host that needs spend does its own arithmetic.
++
+Usage from a turn that did *not* complete is no longer discarded, though: a streamed turn that failed, was cancelled, or was abandoned on the latency cap reports what it had already burned as `:partial-usage` on the `:exhausted` / `:interrupted` envelope, summed across candidates when a turn failed over, and it reaches the transcript on the `:llm/error` and `:llm/worker-exit` rows. Where nothing was observed on the wire the key is simply absent — no number is invented. Usage from a **completed** turn remains authoritative from the final `Response`.
+
+* **Providers may silently substitute a different model, and two of them do.** A request for a retired or aliased id can be answered by a different model with a normal `200` and no warning field anywhere in the response. Verified 2026-09-07: z.ai's Anthropic-compatible endpoint answers `glm-4.6` (and `glm-4.5`) with `glm-5.3-flash`, and DeepSeek answers `deepseek-chat` — the id in its own public docs — with `deepseek-v4-flash`. Ollama, OpenRouter and opencode.ai did not substitute in the same sweep.
++
+Escapement therefore never collapses the two ids. The requested id and the id the provider reported are both carried on the `run-turn` envelope (`:model`, `:model-reported`, `:model-substituted?`), on the `Response` itself (`:model` is the *reported* one, `:model-requested` the asked-for one), and on the `:llm/response` transcript row; a mismatch also emits its own `:llm/model-substituted` event. **Anything that prices a run, or compares two runs believing they used the same model, must read the reported id** — reading the requested one is wrong with no sign of trouble.
+
+* **A truncated turn cannot always be continued.** See <<continuation>> for the per-provider prefill matrix, the restart guard, and the reasoning/continuation incompatibility. The short version: continuation works on some providers, is impossible on others, and is unreliable on *any* provider when reasoning is enabled.
+
+* **Provider defaults and quirks are a moving target, and the library only knows what has been probed.** Model ids are retired without notice (a default model in this library was retired upstream while it was the default, and every run taking it failed), gateways add mandatory headers (one did, breaking a provider entirely until it was fixed), and individual models reject request keys their endpoint otherwise accepts — the same model id was verified to reject any temperature other than 1 through one gateway while accepting 0.7 through another. Per-endpoint constraints live in `escapement.llm.model-quirks`; if you hit a `400` that names a request key, that table is where the fix goes.
+
+* **Some provider behaviour is recorded as unverified, and says so.** These were not testable on the machine where the matrix was built, for want of a credential — not because they were skipped:
++
+--
+** **Anthropic assistant prefill** — documented by Anthropic, unverified here; deliberately left enabled rather than downgraded on a guess.
+** **OpenAI `reasoning_effort` `"none"` and `"minimal"`** — no `OPENAI_API_KEY` was available. `:effort :none` therefore emits *nothing* on the OpenAI dialect (the provider default applies) rather than a guessed wire value, and `:minimal` is sent as `"low"`.
+** **The Responses API `"xhigh"` effort level** — model-dependent and unconfirmed, so `:effort :max` renders as `"high"`. A caller who needs `xhigh` specifically can pass it through by supplying `:reasoning` with a *string* `:effort`, which is sent verbatim on that wire.
+** **Ollama reasoning models and prefill** — inconclusive: they returned reasoning and no content under every output cap tried, so their prefill behaviour was never established. The hard `400` recorded above came from a non-reasoning model on the same endpoint.
+--
+
+* **A thinking model can spend a whole turn reasoning and return nothing usable.** Under a tight output cap this is routine, and it raises no error — the turn simply comes back empty. Where the wire states both halves (empty content plus a non-empty reasoning field: verified on DeepSeek's `reasoning_content` and Ollama's `reasoning`) escapement retries the turn once per `:max-retries`, reported through `:on-retry` as the `:reasoning-only` category. Where the wire does *not* carry the distinction, an empty answer is still just an empty answer.
 
 [[contributing]]
 == Contributing and running tests
