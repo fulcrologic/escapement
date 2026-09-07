@@ -17,7 +17,8 @@
     [escapement.invocation.human-input :as human-input]
     [escapement.invocation.llm-conversation :as llm-conv]
     [escapement.storage.disk :as disk]
-    [escapement.transcript :as transcript]))
+    [escapement.transcript :as transcript]
+    [taoensso.timbre :as log]))
 
 (defn- now-ms [] (System/currentTimeMillis))
 
@@ -330,10 +331,24 @@
         ;; fresh start so a reused session id begins cleanly.
         sink          (transcript/open-transcript {:path transcript-path :append? (boolean resume?)})
         jsonl-fn      (transcript/make-transcript-fn sink)
+        ;; A host callback must never take down the runner, so its throws are
+        ;; swallowed — but the swallow used to be TOTAL: a tap whose sink was
+        ;; misconfigured or whose database was down received nothing and was
+        ;; told nothing, for the whole run, while the transcript file itself
+        ;; stayed healthy so nothing else looked wrong. Warn ONCE (every event
+        ;; carries the same broken tap; a line per event would bury the run) and
+        ;; keep going.
+        tap-warned    (atom false)
         transcript-fn (if transcript-tap
                         (fn [ev]
                           (jsonl-fn ev)
-                          (try (transcript-tap ev) (catch Throwable _ nil)))
+                          (try (transcript-tap ev)
+                               (catch Throwable t
+                                 (when (compare-and-set! tap-warned false true)
+                                   (log/warn t "[runner] :transcript-tap threw; its events are being"
+                                     "dropped for the rest of this run. The transcript FILE is"
+                                     "unaffected. This is logged once per run."))
+                                 nil)))
                         jsonl-fn)
         ;; When a debug controller is supplied, the event queue becomes an
         ;; instrumented queue that applies the pause/step gate per event (and
@@ -378,7 +393,12 @@
     ;; the callback are caught so they don't take down the runner.
     (when on-env-ready
       (try (on-env-ready env)
-           (catch Throwable _ nil)))
+           (catch Throwable t
+             ;; Same shape as the tap: the callback must not take down the
+             ;; runner, but a host whose setup hook failed should not have to
+             ;; infer it from later symptoms.
+             (log/warn t "[runner] :on-env-ready threw; the run continues without whatever"
+               "it was supposed to set up."))))
     (doseq [ev prelude-events]
       (transcript-fn ev))
     (transcript-fn {:event :runner/started
