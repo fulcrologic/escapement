@@ -4,7 +4,7 @@
    They also assert the path is hermetic: zero `System/getenv` reads, zero
    disk access."
   (:require
-    [clojure.string]
+    [clojure.string :as str]
     [escapement.llm.providers :as providers]
     [fulcro-spec.core :refer [=> assertions component specification]]))
 
@@ -212,7 +212,33 @@
         (count (:routes mb)) => 1
 
         "surviving route is the known provider"
-        (-> (route-classes mb) first) => ["^claude-" "AnthropicAPIBackend"]))))
+        (-> (route-classes mb) first) => ["^claude-" "AnthropicAPIBackend"])))
+
+  (component "an unknown provider is dropped LOUDLY"
+    ;; The drop is deliberate — tolerating an unknown keyword is
+    ;; forward-compatibility for a host passing a superset of descriptors across
+    ;; versions. The defect was that it happened in total silence: a
+    ;; one-character typo removed a provider from the run and it proceeded on a
+    ;; different one, with the intended key unused.
+    (let [warned (with-out-str
+                   (providers/build-injected-credentials-backend
+                     [{:provider :anthropc :api-key "k"}] []))]
+      (assertions
+        "something was said at all"
+        (boolean (seq warned)) => true
+
+        "the unrecognised keyword is named"
+        (str/includes? warned ":anthropc") => true
+
+        "and so is the one the caller almost certainly meant"
+        (str/includes? warned ":anthropic") => true)))
+
+  (component "a known provider is never warned about"
+    (assertions
+      "assembly of a valid descriptor is silent"
+      (with-out-str
+        (providers/build-injected-credentials-backend
+          [{:provider :anthropic :api-key "k"}] [])) => "")))
 
 (specification ":deepseek provider template"
 

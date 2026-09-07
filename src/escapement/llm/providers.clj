@@ -14,7 +14,8 @@
    Backend constructors are resolved lazily (require + resolve) so this ns
    stays cheap to load and pulls in only the backends actually used."
   (:require
-    [clojure.string :as str]))
+    [clojure.string :as str]
+    [taoensso.timbre :as log]))
 
 (defn build-api-backend
   "Anthropic-compatible (Messages API) backend: Anthropic, z.ai,
@@ -335,6 +336,17 @@
    `:default-model`, `:model`). Pure: no env, no disk. Returns nil for an
    unknown provider so the caller can drop it cleanly."
   [{:keys [provider] :as desc}]
+  (when-not (contains? provider-templates provider)
+    ;; Dropped, not fatal: tolerating an unknown keyword is real
+    ;; forward-compatibility for a host passing a superset of descriptors across
+    ;; library versions. The DEFECT was the silence — a one-character typo
+    ;; (`:anthropc`) used to remove a provider from the run with no signal
+    ;; anywhere, so the run proceeded on a different provider, with the real key
+    ;; unused. Name the known set the way a good 400 does, so the intended
+    ;; keyword is visible on the same line as the mistake.
+    (log/warn "[llm/credentials] unknown :provider" (pr-str provider)
+      "— descriptor ignored. Known providers:"
+      (pr-str (vec (sort (keys provider-templates))))))
   (when-let [tmpl (get provider-templates provider)]
     (let [overrides (-> desc
                       (select-keys [:api-key :base-url :default-model :auth-mode :reasoning-dialect])
