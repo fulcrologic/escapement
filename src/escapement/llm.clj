@@ -430,6 +430,13 @@
    :latency      {:first-token-ms nil :fallback nil}
    :overrun      {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
                   :temperature-bump nil :temperature-max 1.0}
+   ;; `:enabled? false` turns the automatic continuation OFF on its own, with
+   ;; no other consequence. This is NOT a degraded mode: on a provider that
+   ;; ignores an assistant prefill and restarts, a continuation can silently
+   ;; duplicate content, so accepting a truncated turn as-is is a legitimate
+   ;; correctness choice. It is deliberately independent of `:overrun` — which
+   ;; ALSO suppresses continuation, but buys a full extra generation to do it.
+   ;;
    ;; Ceilings on the automatic `:max_tokens` continuation stitch (see
    ;; `escapement.invocation.llm-conversation/drive-turn!`). Continuation is
    ;; otherwise unbounded — "just finish reading the message" — and a model that
@@ -437,7 +444,7 @@
    ;; no-progress guard never trips and the accumulation grows until the JVM
    ;; dies. Both defaults sit far above any legitimate answer and far below an
    ;; OOM; raise them for a deliberately enormous artifact.
-   :continuation {:max-segments 64 :max-chars 2000000}})
+   :continuation {:enabled? true :max-segments 64 :max-chars 2000000}})
 
 (defn sum-usage
   "Sum numeric usage fields across two usage maps; non-numeric fields take the
@@ -474,9 +481,21 @@
   #{:rate-limited :overloaded :timeout :transport})
 
 (defn params->resilience
-  "Merge a caller's `:resilience` over `default-resilience`."
+  "Merge a caller's `:resilience` over `default-resilience`, ONE LEVEL DEEP:
+   overriding a single key inside `:latency` / `:overrun` / `:continuation`
+   keeps that group's other defaults rather than replacing the whole group.
+
+   Deep by necessity, not taste — with a shallow merge,
+   `{:continuation {:max-segments 3}}` silently dropped the sibling ceiling and
+   the code that reads it got nil. A caller tuning one dial should never have to
+   restate the others to avoid that."
   [params]
-  (merge default-resilience (:resilience params)))
+  (reduce-kv (fn [acc k v]
+               (if (and (map? v) (map? (get acc k)))
+                 (assoc acc k (merge (get acc k) v))
+                 (assoc acc k v)))
+    default-resilience
+    (or (:resilience params) {})))
 
 (defn backoff-delay-ms
   "Exponential backoff for retry `attempt` (0-based) off `base` ms, honoring an

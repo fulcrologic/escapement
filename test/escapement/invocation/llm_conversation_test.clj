@@ -1621,13 +1621,20 @@
         :latency {:first-token-ms nil :fallback nil}
         :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
                   :temperature-bump nil :temperature-max 1.0}
-        :continuation {:max-segments 64 :max-chars 2000000}}
+        :continuation {:enabled? true :max-segments 64 :max-chars 2000000}}
     (#'llmc/params->resilience {:resilience {:max-retries 0}})
     => {:max-retries 0 :backoff-ms 500
         :latency {:first-token-ms nil :fallback nil}
         :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
                   :temperature-bump nil :temperature-max 1.0}
-        :continuation {:max-segments 64 :max-chars 2000000}}
+        :continuation {:enabled? true :max-segments 64 :max-chars 2000000}}
+    "a nested override keeps that group's other defaults (a shallow merge dropped them)"
+    (:continuation (#'llmc/params->resilience {:resilience {:continuation {:max-segments 3}}}))
+    => {:enabled? true :max-segments 3 :max-chars 2000000}
+    "and the same holds for the other resilience groups"
+    (:overrun (#'llmc/params->resilience {:resilience {:overrun {:max-retries 2}}}))
+    => {:max-output-tokens nil :max-retries 2 :on-exhausted :truncate
+        :temperature-bump nil :temperature-max 1.0}
     "merge-segment-content stitches text across a truncation boundary"
     (#'llmc/merge-segment-content [{:type :text :text "Hel"}]
       [{:type :text :text "lo"}])
@@ -1855,6 +1862,85 @@
 
         "and no limit event fires"
         (count (filter #(= :llm/continuation-limit (:event %)) @captured)) => 0))))
+
+(defrecord CountingTruncatingBackend [counter]
+  ;; Always truncates, and counts the calls. Call COUNT is the whole point: the
+  ;; cost of each configuration is what distinguishes them.
+  llm/LLMBackend
+  (send-turn [_ _]
+    (p/do!
+      (let [n (swap! counter inc)]
+        {:stop-reason :max_tokens
+         ;; distinct per call — identical text would trip the restart guard
+         :content     [{:type :text :text (str "segment-" n " ")}]
+         :usage       {:input-tokens 1 :output-tokens 1}
+         :model       "mock"}))))
+
+(specification "continuation off and bounded reruns are independent"
+  ;; These two were once welded together: continuation was skipped ONLY when
+  ;; `:overrun :max-retries` was positive, so a caller who wanted "do not
+  ;; continue a truncated turn" had to buy a full extra generation on every
+  ;; truncation. Measured, not theorised — the rerun fires with no
+  ;; `:max-output-tokens` ceiling configured. All three combinations must now be
+  ;; selectable on their own, and the call count is what proves it.
+
+  (component "continuation OFF, no reruns — one call, and that is all"
+    (let [counter (atom 0)
+          result  (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend counter) (atom []))
+                    {:resilience {:continuation {:enabled? false}}}
+                    [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "exactly one call — no continuation, and no rerun it never asked for"
+        @counter => 1
+
+        "the truncated turn is returned as-is"
+        (get-in result [:ok :stop-reason]) => :max_tokens
+
+        "with its partial content intact"
+        (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+        => "segment-1 ")))
+
+  (component "continuation OFF, WITH reruns — the rerun is still available"
+    ;; Deliberately preserved: a second attempt can land a complete answer where
+    ;; the first was cut off, so this is a retry with a real success rate, not a
+    ;; no-op. A caller trading correctness against cost should choose it.
+    (let [counter (atom 0)]
+      (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend counter) (atom []))
+        {:resilience {:overrun {:max-retries 1 :on-exhausted :truncate}}}
+        [{:role :user :content [{:type :text :text "hi"}]}] [])
+      (assertions
+        "the initial call plus one rerun"
+        @counter => 2)))
+
+  (component "continuation ON — the default, unchanged"
+    (let [counter (atom 0)
+          result  (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend counter) (atom []))
+                    {:resilience {:continuation {:max-segments 3}}}
+                    [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "it continues, stitching until the ceiling"
+        @counter => 3
+
+        "and the segments are stitched, not discarded"
+        (->> (get-in result [:no-progress :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+        => "segment-1 segment-2 segment-3 ")))
+
+  (component "turning continuation off costs nothing extra"
+    ;; The bug, stated as a comparison: the same intent, at two different prices.
+    (let [off-only (atom 0)
+          via-overrun (atom 0)]
+      (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend off-only) (atom []))
+        {:resilience {:continuation {:enabled? false}}}
+        [{:role :user :content [{:type :text :text "hi"}]}] [])
+      (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend via-overrun) (atom []))
+        {:resilience {:overrun {:max-retries 1 :on-exhausted :truncate}}}
+        [{:role :user :content [{:type :text :text "hi"}]}] [])
+      (assertions
+        "the explicit off-switch spends one generation"
+        @off-only => 1
+
+        "reaching the same suppression through :overrun spends two"
+        @via-overrun => 2))))
 
 (specification "try-models!: transient category is retried (bounded) then succeeds"
   (let [captured (atom [])

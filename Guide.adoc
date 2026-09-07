@@ -1716,6 +1716,40 @@ The restart guard turns this into a loud failure rather than a corrupt document,
 but if a node must produce a long artifact, either leave reasoning off for that
 node or raise its output cap so truncation does not happen.
 
+===== Turning continuation off
+
+`:resilience {:continuation {:enabled? false}}` suppresses the automatic
+continuation on its own, and costs nothing: one call, and a `:max_tokens` stop
+is terminal.
+
+This is **not a degraded mode**. Given that a continuation can silently
+duplicate content on any provider that ignores a prefill and restarts — and is
+unreliable on every provider once reasoning is enabled — accepting a truncated
+turn as-is is a legitimate correctness choice, not a feature you are giving up.
+
+It is deliberately independent of `:overrun` below, which ALSO suppresses
+continuation but buys a bounded rerun to do it. Both remain available, and all
+three combinations are selectable on their own:
+
+[cols="2,3"]
+|===
+| Configuration | Behaviour on a truncated turn
+
+| (default)
+| Continue and stitch, up to the ceilings above.
+
+| `{:continuation {:enabled? false}}`
+| One call. The truncation is terminal — no continuation, no rerun.
+
+| `{:overrun {:max-retries N …}}`
+| No continuation, but the turn is re-run up to N times first.
+|===
+
+The rerun is a real retry with a real success rate — a second attempt can land
+a complete answer where the first was cut off — so it is worth having. It is
+simply no longer the price of turning continuation off; a caller trading
+correctness against cost should be making that trade explicitly.
+
 The one knob that changes this is the **`:overrun` resilience primitive**
 (opt-in, OFF by default). When `:resilience {:overrun {:max-retries N …}}`
 is set with `N > 0`, a `:max_tokens` stop is treated as a truncation trip

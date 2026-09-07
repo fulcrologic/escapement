@@ -858,15 +858,30 @@
    forward progress and is surfaced via `:no-progress` rather than a malformed
    tool call ever being dispatched."
   [{:keys [transcript-fn parent-ctx] :as ctx} params base-messages tools]
-  ;; Overrun primitive (escapement.llm `:resilience :overrun`): when a per-turn
-  ;; output ceiling with reruns is configured, a `:max_tokens` stop is the
-  ;; truncation trip wire — NOT an invitation to stitch an unbounded
-  ;; continuation. `run-turn` already reran the identical turn up to
-  ;; `:max-retries`; we must therefore SKIP continuation here, or it would undo
-  ;; the cap by resuming the runaway. The single returned turn is terminal:
-  ;; `:ok` (truncate accepted) or `:overrun` (`:on-exhausted :fail`).
-  (let [{:keys [max-segments max-chars]} (:continuation (params->resilience params))]
-   (if (pos? (long (or (:max-retries (:overrun (params->resilience params))) 0)))
+  ;; Continuation is skipped for either of two INDEPENDENT reasons:
+  ;;
+  ;; 1. `:continuation {:enabled? false}` — the caller simply does not want a
+  ;;    truncated turn continued. Costs nothing extra: one call, and the
+  ;;    truncation is terminal. Not a degraded mode — on a provider that
+  ;;    ignores an assistant prefill and restarts, continuing can silently
+  ;;    duplicate content, so taking the truncation is a correctness choice.
+  ;;
+  ;; 2. The overrun primitive (`escapement.llm` `:resilience :overrun`) is
+  ;;    configured with reruns: a `:max_tokens` stop is then the truncation trip
+  ;;    wire, NOT an invitation to stitch an unbounded continuation, and
+  ;;    `run-turn` has already RERUN the identical turn up to `:max-retries`.
+  ;;    Continuing here would undo the cap by resuming the runaway. The single
+  ;;    returned turn is terminal: `:ok` (truncate accepted) or `:overrun`
+  ;;    (`:on-exhausted :fail`).
+  ;;
+  ;; They are kept separate on purpose. These two were once welded together, so
+  ;; a caller who wanted only (1) had to buy (2) — an extra full generation on
+  ;; every truncation, measured, not theorised. A rerun is a real retry with a
+  ;; real success rate, so it is still available; it is just no longer the
+  ;; price of turning continuation off.
+  (let [{:keys [enabled? max-segments max-chars]} (:continuation (params->resilience params))]
+   (if (or (false? enabled?)
+         (pos? (long (or (:max-retries (:overrun (params->resilience params))) 0))))
     (try-models! ctx params (vec base-messages) tools)
     (loop [acc-content nil
          acc-usage   {}
