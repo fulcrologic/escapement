@@ -226,7 +226,13 @@ Response map."
   (let [choice  (first (get parsed "choices"))
         msg     (get choice "message")
         finish  (get choice "finish_reason")
-        content (message->content-blocks msg)]
+        content (message->content-blocks msg)
+        ;; A turn that spent itself reasoning and returned nothing usable. The
+        ;; provider tells us both halves (empty content + a non-empty
+        ;; `reasoning_content`/`reasoning`), so this is a wire fact, not a
+        ;; guess; `escapement.llm/run-turn` gives such a turn one more bounded
+        ;; attempt instead of handing back an empty answer.
+        reasoning-only? (reasoning/reasoning-only-message? msg)]
     {:stop-reason      (parse-finish-reason finish)
      ;; Our Response schema requires at least an empty content vector. Some
      ;; pure-tool-call turns have no text — that's fine, the :tool_use blocks
@@ -235,7 +241,8 @@ Response map."
      :usage            (usage->ours (get parsed "usage" {}))
      :model            (or (get parsed "model") request-model)
      :backend-metadata (cond-> {:backend :openai}
-                         (get parsed "id") (assoc :message-id (get parsed "id")))}))
+                         (get parsed "id") (assoc :message-id (get parsed "id"))
+                         reasoning-only? (assoc :reasoning-only? true))}))
 
 ;;; ---------------------------------------------------------------------------
 ;;; HTTP

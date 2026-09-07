@@ -48,6 +48,7 @@
     [escapement.llm.preferences :as preferences]
     [escapement.llm.prompt-cache :as prompt-cache]
     [escapement.llm.protocol :as proto]
+    [escapement.llm.reasoning :as reasoning]
     [escapement.llm.types :as types]))
 
 (defn- now-ms [] (System/currentTimeMillis))
@@ -434,7 +435,13 @@
   "Backend error categories that warrant a bounded automatic retry of the same
    model. The remaining categories (`:auth` `:invalid-request`
    `:context-length`) are terminal: they fail fast and are never retried, so a
-   bad key or oversized prompt cannot burn quota in a retry loop."
+   bad key or oversized prompt cannot burn quota in a retry loop.
+
+   `run-turn` additionally retries two NON-error conditions, each bounded and
+   each reported through `:on-retry` under its own category: `:overrun` (a
+   `:max_tokens` stop, bounded by `:overrun`'s own `:max-retries`) and
+   `:reasoning-only` (a turn that returned reasoning and no usable content,
+   bounded by the ordinary `:max-retries`)."
   #{:rate-limited :overloaded :timeout :transport})
 
 (defn params->resilience
@@ -697,6 +704,23 @@
                                  (on-retry {:model m :category cat
                                             :attempt (inc retry) :max-retries max-retries})
                                  (sleep-while-alive! (backoff-delay-ms backoff-ms retry t) alive?)
+                                 (recur (inc retry) over))
+
+                               ;; A turn that returned ONLY reasoning: the model
+                               ;; spent the whole output cap thinking and handed
+                               ;; back nothing usable. The provider states both
+                               ;; halves on the wire, so this is not a guess.
+                               ;; Bounded by the SAME `:max-retries` as any
+                               ;; transient error, so a model that does this
+                               ;; every single time cannot loop on our quota.
+                               (and (not t)
+                                 (reasoning/reasoning-only-response? r)
+                                 (< retry (long max-retries))
+                                 (alive?))
+                               (do
+                                 (on-retry {:model m :category :reasoning-only
+                                            :attempt (inc retry) :max-retries max-retries})
+                                 (sleep-while-alive! (backoff-delay-ms backoff-ms retry nil) alive?)
                                  (recur (inc retry) over))
 
                                (and (not t)

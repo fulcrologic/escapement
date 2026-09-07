@@ -229,3 +229,43 @@
 (defn valid-effort?
   [e]
   (contains? types/effort-rank e))
+
+;;; ---------------------------------------------------------------------------
+;;; Reasoning-only turns
+
+(def reasoning-sibling-keys
+  "The wire fields that carry a turn's reasoning ALONGSIDE its content on the
+   OpenAI-shaped assistant message. Verified live 2026-09-07: DeepSeek uses
+   `reasoning_content`, Ollama uses `reasoning`. A provider that carries no
+   such field simply never matches, which is why this check is safe to run on
+   every OpenAI-shaped response."
+  ["reasoning_content" "reasoning"])
+
+(defn reasoning-only-message?
+  "True when an OpenAI-shaped assistant `message` spent the whole turn
+   reasoning and produced NOTHING usable: no text content, no tool calls, and
+   a non-empty reasoning sibling field.
+
+   This is a wire-level fact, not a heuristic — the provider told us both
+   halves. A thinking model under a tight output cap does this routinely, and
+   the turn is worth one more attempt rather than being handed to the caller
+   as an empty answer.
+
+   Deliberately narrow: absent a reasoning sibling field it returns false, so
+   an ordinary empty response (which may be legitimate) is untouched."
+  [message]
+  (let [content   (get message "content")
+        tool-calls (get message "tool_calls")
+        reasoning (some (fn [k] (let [v (get message k)]
+                                  (when (and (string? v) (seq v)) v)))
+                    reasoning-sibling-keys)]
+    (boolean (and (empty? (str content))
+               (empty? tool-calls)
+               reasoning))))
+
+(defn reasoning-only-response?
+  "True when a Response was flagged as a reasoning-only turn by the backend
+   that produced it. Only backends whose wire format carries the distinction
+   ever set the flag."
+  [response]
+  (boolean (get-in response [:backend-metadata :reasoning-only?])))
