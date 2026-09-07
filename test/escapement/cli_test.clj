@@ -132,6 +132,27 @@
           "reasoning dialect"
           (get-in result [:backend :reasoning-dialect]) => :ollama))))
 
+  (component "the CLI's Ollama route declares the same prefill support as the credential route"
+    ;; Ollama Cloud rejects an assistant prefill, so `:max_tokens` continuation
+    ;; must be skipped there. That is a property of the ENDPOINT, so it cannot
+    ;; depend on whether the backend was built by the CLI or from a credential
+    ;; descriptor — the two routes drifting is how a chart ends up continuing
+    ;; on one path and erroring on the other.
+    (with-redefs [cli/build-openai-backend       identity
+                  providers/build-openai-backend identity]
+      (let [cli-route  (#'cli/make-backend {:backend "ollama"})
+            cred-route (providers/build-credential-backend
+                         {:kind :ollama :api-key "k" :base-url "https://ollama.com/v1"
+                          :default-model "glm-5.3-flash" :reasoning-dialect :ollama})]
+        (assertions
+          "the CLI route declares prefill unsupported"
+          (get-in cli-route [:backend :prefill-support]) => :unsupported
+          "the credential route declares prefill unsupported"
+          (:prefill-support cred-route) => :unsupported
+          "and the two agree"
+          (= (get-in cli-route [:backend :prefill-support])
+             (:prefill-support cred-route)) => true))))
+
   (component "explicit Ollama backend with no --model falls back to glm-5.3-flash"
     (with-redefs [cli/build-openai-backend       identity
                   providers/build-openai-backend identity]

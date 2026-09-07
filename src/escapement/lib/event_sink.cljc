@@ -133,9 +133,10 @@
   "An adapter correlation context before `:runner/started` has been seen."
   {:session-id    nil
    :run-id        nil
-   ;; invokeid -> last tool meta seen for that invocation, used so a
-   ;; tool-attributed :llm/error or :llm/retry can be turned into a
-   ;; :tool-validation-failure linked by :invokeid.
+   ;; invokeid -> last tool meta seen for that invocation. Used ONLY to look
+   ;; up the :tool name for a row whose :reason already names bad tool use —
+   ;; never to decide that a row IS a tool failure (see
+   ;; `tool-attributed-error?`).
    :pending-tools {}})
 
 (defn- with-corr
@@ -157,16 +158,28 @@
 ;; and delegates the mapping to this fn.
 
 (defn- tool-attributed-error?
-  "An :llm/error / :llm/retry row counts as a *tool* validation failure when
-  it carries an :invokeid that we have seen a tool result for, or when its
-  reason explicitly names bad/invalid tool use."
-  [ctx data]
-  (let [reason (:reason data)]
-    (or (contains? #{:bad-tool-use :invalid-tool-use :tool-validation
-                     :tool-error :tool-input-invalid}
-          reason)
-      (and (some? (:invokeid data))
-        (contains? (:pending-tools ctx) (:invokeid data))))))
+  "An :llm/error / :llm/retry row counts as a *tool* validation failure only
+  when its own :reason names bad/invalid tool use.
+
+  It is deliberately NOT enough that the row carries an :invokeid we have seen
+  a tool result for. `:pending-tools` is keyed by the INVOCATION's invokeid
+  (`:llm/tool-result` stamps `(:invokeid parent-ctx)`; the tool call's own id
+  is the separate `:tool_use_id`) and is never cleared, so that test really
+  asks \"has this invocation ever run a tool?\" — which is true of every
+  later provider failure in a tool-using node. It was harmless only while
+  `:llm/error` rows carried no :invokeid at all; once they did, an
+  :overloaded/:timeout row started being reported as a
+  :tool-validation-failure blaming whichever tool happened to run last.
+
+  A genuinely fatal tool validation never reaches here anyway: it posts a
+  chart event and is surfaced as `:llm/tool-result` with `:is-error true`,
+  not as an `:llm/error` transcript row. `:invokeid` is still used to look up
+  the `:tool` NAME once the reason has decided the classification."
+  [_ctx data]
+  (contains? #{:tool-validation-failed :unknown-tool :bad-tool-use
+               :invalid-tool-use :tool-validation :tool-error
+               :tool-input-invalid}
+    (:reason data)))
 
 (>defn normalize
   "Pure transform: `(normalize ctx row) => [public-event ...]`.
