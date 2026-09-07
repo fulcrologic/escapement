@@ -467,3 +467,34 @@
 
         "no --backend flag yields nil, leaving routing to the model matcher"
         (#'cli/backend-flag->provider nil) => nil))))
+
+(specification "session-id-keyword — the checkpoint must be EDN-readable"
+  (let [round-trip (fn [s] (clojure.edn/read-string (pr-str (#'cli/session-id-keyword s))))]
+    (component "digit-leading ids (≈62% of random UUIDs) survive pr → read"
+      (assertions
+        "a real UUID that used to poison its checkpoint now round-trips.
+         Before the fix `(keyword \"session\" \"7d34d4c2-…\")` printed a keyword
+         whose name starts with a digit, which `edn/read-string` rejects with
+         `Invalid token:` — so --resume could never re-read the checkpoint."
+        (round-trip "7d34d4c2-1ca7-4bc9-9c9a-bd6b81e631a9")
+        => :session/s7d34d4c2-1ca7-4bc9-9c9a-bd6b81e631a9
+
+        "the unsanitized form really is unreadable (the bug, pinned)"
+        (try (clojure.edn/read-string ":session/7d34d4c2-1ca7-4bc9")
+             :read-ok
+             (catch Exception _ :invalid-token))
+        => :invalid-token
+
+        "reader-hostile characters are replaced, not just digits"
+        (round-trip "my run #1") => :session/my-run--1))
+
+    (component "already-safe ids are returned UNCHANGED (the back-compat contract)"
+      (assertions
+        "every session on disk that ever resumed keeps resolving to the same
+         checkpoint path — the fix must not move them"
+        [(#'cli/session-id-keyword "brain-run1")
+         (#'cli/session-id-keyword "codex-matrix-demo")
+         (#'cli/session-id-keyword "abe7c2d9-1111-2222-3333-444455556666")]
+        => [:session/brain-run1
+            :session/codex-matrix-demo
+            :session/abe7c2d9-1111-2222-3333-444455556666]))))

@@ -17,7 +17,7 @@
     * routes incoming tool requests to the specialist as
       `:llm.user-message` (targeted)
     * waits for the specialist's `:llm.idle` event carrying `:verdict`
-      (produced by the specialist's `:verdict-schema` wrap-up inference)
+      (produced by the specialist's `:verdict-schema` submit_verdict tool)
     * replies to the asker by encoding the verdict as JSON and calling
       `post-reply` with the correlation ids captured from the request
 
@@ -82,8 +82,9 @@
      * `:input-schema`        (required, Malli) — validates the asker's
        tool input.
      * `:verdict-schema`      (required, Malli) — the specialist's
-       `:verdict-schema`. The specialist's idle-time wrap-up inference
-       forces a `submit_verdict` call against this schema; the resulting
+       `:verdict-schema`. The specialist is offered a `submit_verdict` tool
+       against this schema on every turn (with a forced wrap-up inference as
+       the fallback when a turn ends without one); the resulting
        payload is what becomes the asker's tool_result content.
      * `:system`              (optional, string) — system prompt for the
        specialist conversation.
@@ -150,7 +151,7 @@
 
       ;; The specialist conversation — owned by this state, so its
       ;; lifecycle is the consult state's lifecycle. The verdict-schema
-      ;; on the specialist's params drives the submit_verdict wrap-up
+      ;; on the specialist's params drives the submit_verdict
       ;; inference that produces the typed answer this helper forwards
       ;; back to the asker as tool_result. `specialist-params'` is a
       ;; runtime-computed map of literal values; merge it as flat keys

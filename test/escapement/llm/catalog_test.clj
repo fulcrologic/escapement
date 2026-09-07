@@ -179,3 +179,28 @@
 
       "and there really are targets being checked"
       (pos? (count targets)) => true)))
+
+(specification "glm-5.3 1M variant — the suffixed id is a SEPARATE row"
+  (assertions
+    "the [1m] id reports the long window"
+    (catalog/context-window "glm-5.3[1m]") => 1000000
+
+    "and the bare id still reports 200K — the regression guard that matters:
+     `catalog/info` is a LONGEST-PREFIX lookup, so a missing [1m] row would make
+     the suffixed id silently resolve to this one and under-report the window to
+     the `:needs` gate and to context-usage telemetry"
+    (catalog/context-window "glm-5.3") => 200000
+
+    "output cap is unchanged by the suffix"
+    (catalog/max-output-tokens "glm-5.3[1m]") => 131072
+
+    "MEASURED 2026-08-26: the Coding Plan does NOT serve the [1m] id — both
+     faces reject it with `1214 [modelCode: does not exist]`. Pinned so the row
+     is not casually added back; `serves?` is exact-match, so claiming it here
+     would route a target at a model the provider will refuse."
+    [(catalog/serves? :z-ai-plan "glm-5.3[1m]")
+     (catalog/serves? :zai-coding-plan "glm-5.3[1m]")] => [false false]
+
+    "the bare id IS served, on both faces"
+    [(catalog/serves? :z-ai-plan "glm-5.3")
+     (catalog/serves? :zai-coding-plan "glm-5.3")] => [true true]))

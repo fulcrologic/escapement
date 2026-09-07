@@ -322,10 +322,16 @@
 
 ;;; --- Live tests (gated on env vars) -----------------------------------------
 
-(defn- short-prompt []
-  {:messages   [{:role    :user
-                 :content [{:type :text :text "Reply with exactly: OK"}]}]
-   :max-tokens 32})
+(defn- short-prompt
+  "A minimal live-API probe. `max-tokens` defaults to 32, which is fine for a
+   model that answers directly — but see the z.ai spec below: a model that
+   reasons by default needs headroom for the thinking block BEFORE it can emit
+   any text, and a starved budget returns `:max_tokens` with empty text."
+  ([] (short-prompt 32))
+  ([max-tokens]
+   {:messages   [{:role    :user
+                  :content [{:type :text :text "Reply with exactly: OK"}]}]
+    :max-tokens max-tokens}))
 
 (specification "live Anthropic API (gated on ANTHROPIC_API_KEY)"
   (if-let [key (System/getenv "ANTHROPIC_API_KEY")]
@@ -342,17 +348,34 @@
         (assertions "skipped" true => true))))
 
 (specification "live z.ai Anthropic-compat API (gated on ZAI_API_KEY)"
+  ;; This spec was PERMANENTLY RED. It sent the shared 32-token `short-prompt`:
+  ;; glm-4.6 now emits a `thinking` block by default, spends the entire 32-token
+  ;; budget reasoning, and returns `:stop-reason :max_tokens` with an EMPTY text
+  ;; block — so "has at least one non-empty text block" could never hold. A test
+  ;; that can never pass is a test nobody reads, which is worse than no test.
+  ;;
+  ;; The fix is a budget that clears the reasoning, plus an explicit assertion
+  ;; that the turn was NOT cut off at the ceiling — so if this regresses again it
+  ;; names its own cause instead of masquerading as "the model produced no text".
   (if-let [key (System/getenv "ZAI_API_KEY")]
     (let [backend (api/new-backend {:base-url      "https://api.z.ai/api/anthropic"
                                     :api-key       key
                                     :default-model "glm-4.6"})
-          resp    (p/await! (proto/send-turn backend (short-prompt)))]
+          resp    (p/await! (proto/send-turn backend (short-prompt 1024)))
+          texts   (->> (:content resp)
+                    (filter #(= :text (:type %)))
+                    (map :text)
+                    (remove str/blank?))]
       (assertions
         "live z.ai response is Malli-valid"
         (types/validate-response resp) => nil
-        "has at least one non-empty text block"
-        (boolean (some #(and (= :text (:type %))
-                          (seq (:text %))) (:content resp))) => true))
+        "the turn finished on its own — a :max_tokens stop here means the budget no longer
+         clears glm's default thinking block, NOT that the endpoint is broken"
+        (= :max_tokens (:stop-reason resp)) => false
+        "the response carries content blocks"
+        (pos? (count (:content resp))) => true
+        "including a non-empty text block"
+        (boolean (seq texts)) => true))
     (do (println "[skip] ZAI_API_KEY not set; skipping live z.ai test")
         (assertions "skipped" true => true))))
 

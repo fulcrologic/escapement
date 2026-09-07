@@ -208,9 +208,19 @@
          :or   {on-answer-event :human.answer
                 on-cancel-event :human.cancelled}} params
         env         (:env parent-ctx)
+        ;; Same attribution contract as `:error.llm.*` — an `:error.human.*` rail
+        ;; must be able to guard on which human-input invoke failed. Normalized
+        ;; the same way `llm-conversation/->id-str` does (chart authors may write
+        ;; `:id :ask-name` or `:id "ask-name"`); inlined rather than required to
+        ;; keep this processor independent of the llm-conversation namespace.
         post-error! (fn [reason data]
-                      (post-event-to-parent! parent-ctx (error-event reason)
-                        (assoc data :reason reason)))]
+                      (let [iid (:invokeid parent-ctx)]
+                        (post-event-to-parent! parent-ctx (error-event reason)
+                          (assoc data
+                            :reason reason
+                            :from   (cond (keyword? iid) (name iid)
+                                          (nil? iid)     nil
+                                          :else          (str iid))))))]
     (try
       (transcript! transcript-fn
         {:event :human-input/start

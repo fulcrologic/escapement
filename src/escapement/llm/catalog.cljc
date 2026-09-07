@@ -126,7 +126,24 @@
    "glm-5.3"           {:context-tokens  200000 :max-output-tokens 131072
                         :vision?         false :tool-call? true :reasoning? true
                         :family          "glm" :company "Zhipu"
-                        :name            "GLM-5.3"}})
+                        :name            "GLM-5.3"}
+   ;; The 1M-context variant. z.ai gates the long window behind a `[1m]` SUFFIX on
+   ;; the model id (their own Claude Code config example uses `glm-5.2[1m]`); the
+   ;; bare id is 200K. Both ids are valid and BOTH must exist here, because the
+   ;; suffixed id would otherwise longest-prefix-match the row above and silently
+   ;; report a 200K window to the `:needs` gate and the context-usage telemetry.
+   ;; `serves?` + `pricing` are EXACT-match (no prefix fallback), so a provider
+   ;; that serves it needs the suffixed id in its own row.
+   ;;
+   ;; MEASURED 2026-08-26: the Coding Plan does NOT serve it. Both faces reject
+   ;; `glm-5.3[1m]` with `1214 [modelCode: does not exist]`, so NO subscription
+   ;; provider row lists it — the plan is 200K only. The row stays because the
+   ;; id is real on z.ai's metered API, and because without it a future
+   ;; `glm-5.3[1m]` target would silently prefix-match the 200K row above.
+   "glm-5.3[1m]"       {:context-tokens  1000000 :max-output-tokens 131072
+                        :vision?         false :tool-call? true :reasoning? true
+                        :family          "glm" :company "Zhipu"
+                        :name            "GLM-5.3 (1M)"}})
 
 (def ^:private codex-subscription-models
   "The ChatGPT-account Codex model set, zero-priced (flat-fee subscription).

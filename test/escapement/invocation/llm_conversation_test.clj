@@ -2190,6 +2190,8 @@
       (dct/in? t :done) => true
       "backend was called exactly once (no wrap-up inference)"
       (count @(:call-log backend)) => 1
+      "and submit_verdict is NOT offered — the tool only appears when a schema declares it"
+      (mapv :name (:tools (first @(:call-log backend)))) => []
       ":on-end-turn-event data carries the free text but no :verdict"
       (get-in @seen-idle [:data :text]) => "free text"
       "no :verdict key on idle event"
@@ -2222,7 +2224,13 @@
       "error data includes :reason :verdict-validation"
       (get-in @seen-err [:data :reason]) => :verdict-validation
       "error data includes humanized :errors"
-      (string? (get-in @seen-err [:data :errors])) => true)))
+      (string? (get-in @seen-err [:data :errors])) => true
+      "error data is ATTRIBUTED to the originating invoke, exactly as :llm.idle
+       is. Without this an error rail keyed on invoke-id silently misses the
+       event; a phase teardown then lands a stale error on the NEXT phase. The
+       asymmetry — :from asserted on every success event and on no error event —
+       is how the bug survived."
+      (get-in @seen-err [:data :from]) => "judge")))
 
 (specification "verdict-schema also fires on glm batched-event-tool turn-end"
   ;; The glm-class path posts an end-turn event from the :tool_use branch
@@ -2634,3 +2642,296 @@
       "the :timeout :llm/error row carries the limit and the invocation identity"
       (select-keys (:data err) [:limit-ms :invokeid :session-id])
       => {:limit-ms 1 :invokeid "p" :session-id :dcch.test/session})))
+
+;; ---------------------------------------------------------------------------
+;; #11b: the verdict tool rides the OPENING turn (one request, not two)
+;;
+;; Measured on z.ai's Anthropic-compat endpoint, 8 trials each, identical
+;; prompt/model/schema:
+;;   tool retro-fitted onto a 2nd turn : tool_use 5/8  (~62%)
+;;   tool offered on the 1st turn      : tool_use 8/8  (100%; text alongside 8/8)
+;; Forcing :tool-choice is NOT a fix — that endpoint ignores tool_choice (4/8).
+;; So the turn STRUCTURE is the fix, and these specs pin it.
+;; ---------------------------------------------------------------------------
+
+(defn- text+verdict-response
+  "One assistant message carrying BOTH prose text and a submit_verdict tool_use —
+   the shape offering the tool up front is designed to produce."
+  ([input] (text+verdict-response "prose answer" input "v1"))
+  ([text input] (text+verdict-response text input "v1"))
+  ([text input id]
+   {:stop-reason :tool_use
+    :content     [{:type :text :text text}
+                  {:type :tool_use :id id :name "submit_verdict" :input input}]
+    :usage       {:input-tokens 1 :output-tokens 1}
+    :model       "mock"}))
+
+(specification "submit_verdict is offered on the OPENING turn, unforced, alongside the node's own tools"
+  (let [backend (mock-backend [(text+verdict-response {:status :ok :note "n"})])
+        chart   (chart/statechart
+                  {:initial :wrap}
+                  (state {:id :wrap :initial :work}
+                    (state {:id :work}
+                      (h/llm-conversation
+                        {:id             "judge"
+                         :message        "go"
+                         :allowed-events [{:event :finish :data-schema [:map]}]
+                         :verdict-schema [:map [:status :keyword] [:note :string]]})
+                      (transition {:event :llm.idle :target :done}))
+                    (final {:id :done})))
+        t       (new-llm-test-env {:statechart chart :backend backend})
+        t       (await-config! t :done 3000)
+        log     @(:call-log backend)
+        req1    (first log)]
+    (assertions
+      "chart reached :done"
+      (dct/in? t :done) => true
+      "the VERY FIRST request already carries submit_verdict, alongside the node's event tools.
+       Before this fix `:tools` on turn 1 was empty and the verdict tool was retro-fitted onto a
+       follow-up turn the model had no reason to comply with."
+      (set (mapv :name (:tools req1))) => #{"event__finish" "submit_verdict"}
+      "the working turn does NOT force tool-choice — z.ai's Anthropic-compat endpoint ignores
+       tool_choice entirely (measured 4/8, no better than unforced), so forcing buys nothing and
+       would suppress the real tools"
+      (:tool-choice req1) => nil
+      "ONE request for the whole organ turn — the wrap-up inference, which re-sent the entire
+       conversation, never ran"
+      (count log) => 1)))
+
+(specification "a verdict submitted during the working turn ends the turn and skips the wrap-up"
+  (let [verdict   {:status :ok :note "all-clear"}
+        backend   (mock-backend [(text+verdict-response "here is my prose" verdict)])
+        seen-idle (atom nil)
+        captured  (atom [])
+        chart     (chart/statechart
+                    {:initial :wrap}
+                    (state {:id :wrap :initial :work}
+                      (state {:id :work}
+                        (h/llm-conversation
+                          {:id             "judge"
+                           :message        "go"
+                           :verdict-schema [:map [:status :keyword] [:note :string]]})
+                        (transition {:event :llm.idle :target :done}
+                          (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
+                      (final {:id :done})))
+        t         (new-llm-test-env {:statechart    chart
+                                     :backend       backend
+                                     :transcript-fn (fn [ev] (swap! captured conj ev))})
+        t         (await-config! t :done 3000)
+        log       @(:call-log backend)
+        nudge     @#'llmc/wrap-up-nudge-text]
+    (assertions
+      "chart reached :done"
+      (dct/in? t :done) => true
+      "exactly one backend call"
+      (count log) => 1
+      "the idle event carries the validated verdict"
+      (get-in @seen-idle [:data :verdict]) => verdict
+      "AND the prose text from the same message — callers want both, and prompts already ask
+       for both"
+      (get-in @seen-idle [:data :text]) => "here is my prose"
+      "the wrap-up nudge was never sent to any request"
+      (boolean
+        (some (fn [req]
+                (some (fn [m] (some #(= nudge (:text %)) (:content m))) (:messages req)))
+          log))
+      => false
+      ":llm/verdict transcript event is labelled with the path that produced it"
+      (->> @captured (filter #(= :llm/verdict (:event %))) first :data :source)
+      => :turn-tool-call)))
+
+(specification "prose-only turn still falls back to the wrap-up inference"
+  ;; The fallback is KEPT on purpose: it costs nothing when unused (it does not
+  ;; run at all if the turn already carried a verdict) and it is the only thing
+  ;; that rescues a model which answered in prose only.
+  (let [verdict   {:status :ok :note "recovered"}
+        backend   (mock-backend [(end-turn-response "prose only, no tool call")
+                                 (verdict-tool-use-response verdict)])
+        seen-idle (atom nil)
+        captured  (atom [])
+        chart     (chart/statechart
+                    {:initial :wrap}
+                    (state {:id :wrap :initial :work}
+                      (state {:id :work}
+                        (h/llm-conversation
+                          {:id             "judge"
+                           :message        "go"
+                           :verdict-schema [:map [:status :keyword] [:note :string]]})
+                        (transition {:event :llm.idle :target :done}
+                          (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
+                      (final {:id :done})))
+        t         (new-llm-test-env {:statechart    chart
+                                     :backend       backend
+                                     :transcript-fn (fn [ev] (swap! captured conj ev))})
+        t         (await-config! t :done 3000)
+        log       @(:call-log backend)]
+    (assertions
+      "chart reached :done — the fallback rescued the turn"
+      (dct/in? t :done) => true
+      "turn 1 DID offer the tool (the model simply declined it)"
+      (mapv :name (:tools (first log))) => ["submit_verdict"]
+      "turn 2 is the fallback: submit_verdict alone, forced"
+      (:tool-choice (second log)) => {:type :tool :name "submit_verdict"}
+      "verdict still lands on the idle event"
+      (get-in @seen-idle [:data :verdict]) => verdict
+      ":llm/verdict is labelled as the fallback path, so a run's cost profile is auditable
+       from the transcript alone"
+      (->> @captured (filter #(= :llm/verdict (:event %))) first :data :source)
+      => :wrap-up-inference)))
+
+(specification "an invalid up-front verdict gets one corrective retry inside the turn"
+  ;; Unlike the wrap-up inference (which has no room to correct), the model is
+  ;; still mid-turn here: hand back the humanized errors as a tool_result and
+  ;; let it fix them.
+  (let [good      {:status :ok :note "fixed"}
+        backend   (mock-backend [(text+verdict-response "try 1" {:status :ok} "v1")
+                                 (text+verdict-response "try 2" good "v2")])
+        seen-idle (atom nil)
+        captured  (atom [])
+        chart     (chart/statechart
+                    {:initial :wrap}
+                    (state {:id :wrap :initial :work}
+                      (state {:id :work}
+                        (h/llm-conversation
+                          {:id             "judge"
+                           :message        "go"
+                           :verdict-schema [:map [:status :keyword] [:note :string]]})
+                        (transition {:event :llm.idle :target :done}
+                          (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
+                      (final {:id :done})))
+        t         (new-llm-test-env {:statechart    chart
+                                     :backend       backend
+                                     :transcript-fn (fn [ev] (swap! captured conj ev))})
+        t         (await-config! t :done 3000)]
+    (assertions
+      "chart reached :done on the corrected attempt"
+      (dct/in? t :done) => true
+      "the corrected verdict is what reaches the chart"
+      (get-in @seen-idle [:data :verdict]) => good
+      "the bad attempt came back as an is-error tool_result carrying the schema errors"
+      (boolean
+        (some #(and (= :llm/tool-result (:event %))
+                 (= "submit_verdict" (get-in % [:data :tool]))
+                 (true? (get-in % [:data :is-error])))
+          @captured))
+      => true)))
+
+(specification "two invalid up-front verdicts post :error.llm.verdict-validation"
+  (let [backend  (mock-backend [(text+verdict-response "try 1" {:status :ok} "v1")
+                                (text+verdict-response "try 2" {:status :ok} "v2")])
+        seen-err (atom nil)
+        chart    (chart/statechart
+                   {:initial :wrap}
+                   (state {:id :wrap :initial :work}
+                     (state {:id :work}
+                       (h/llm-conversation
+                         {:id             "judge"
+                          :message        "go"
+                          :verdict-schema [:map [:status :keyword] [:note :string]]})
+                       (transition {:event :error.llm.verdict-validation :target :failed}
+                         (script {:expr (fn [_ d] (reset! seen-err (:_event d)) nil)})))
+                     (final {:id :failed})))
+        t        (new-llm-test-env {:statechart chart :backend backend})
+        t        (await-config! t :failed 3000)]
+    (assertions
+      "chart reached :failed via :error.llm.verdict-validation — NOT the generic
+       :error.llm.tool-validation the other tool kinds raise"
+      (dct/in? t :failed) => true
+      "error data names the verdict reason"
+      (get-in @seen-err [:data :reason]) => :verdict-validation
+      "error data carries the humanized schema errors"
+      (string? (get-in @seen-err [:data :errors])) => true
+      "and is attributed to the originating invoke, like every other :error.llm.*"
+      (get-in @seen-err [:data :from]) => "judge")))
+
+(specification "submit_verdict batched with an event-tool: the verdict wins, no wrap-up runs"
+  (let [verdict   {:done? true}
+        backend   (mock-backend
+                    [{:stop-reason :tool_use
+                      :content     [{:type :text :text "both"}
+                                    {:type :tool_use :id "e1" :name "event__finish" :input {}}
+                                    {:type :tool_use :id "v1" :name "submit_verdict"
+                                     :input {:done? true}}]
+                      :usage       {:input-tokens 1 :output-tokens 1}
+                      :model       "mock"}])
+        seen-idle (atom nil)
+        chart     (chart/statechart
+                    {:initial :wrap}
+                    (state {:id :wrap :initial :work}
+                      (state {:id :work}
+                        (h/llm-conversation
+                          {:id             "glm"
+                           :message        "go"
+                           :allowed-events [{:event :finish :data-schema [:map]}]
+                           :verdict-schema [:map [:done? :boolean]]})
+                        (transition {:event :llm.idle :target :done}
+                          (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
+                      (final {:id :done})))
+        t         (new-llm-test-env {:statechart chart :backend backend})
+        t         (await-config! t :done 3000)]
+    (assertions
+      "chart reached :done"
+      (dct/in? t :done) => true
+      "one request — the glm-class batched turn no longer pays for a wrap-up either"
+      (count @(:call-log backend)) => 1
+      "verdict attached to the idle event"
+      (get-in @seen-idle [:data :verdict]) => verdict)))
+
+(specification "node-tool-defs replays the verdict tool with the rest of the palette"
+  (assertions
+    "a node declaring :verdict-schema replays WITH submit_verdict — otherwise a refined
+     replay would drive a turn whose tool palette differs from the one captured"
+    (mapv :name (llmc/node-tool-defs nil {:allowed-events [{:event :finish :data-schema [:map]}]
+                                          :verdict-schema [:map [:done? :boolean]]}))
+    => ["event__finish" "submit_verdict"]
+    "a node without one is unchanged"
+    (mapv :name (llmc/node-tool-defs nil {:allowed-events [{:event :finish :data-schema [:map]}]}))
+    => ["event__finish"]))
+
+(specification "a verdict batched with unfinished real-tool work is DEFERRED, not accepted"
+  ;; The verdict is the turn terminator. Accepting one that arrived alongside a
+  ;; real tool call whose result the model has not seen would end the turn early
+  ;; and silently truncate the model's own plan — an organ that emitted one
+  ;; fs_write plus a verdict would stop after that single write. Hand it back
+  ;; instead; the turn was continuing anyway to deliver the tool result.
+  (let [good      {:status :ok :note "actually done"}
+        backend   (mock-backend
+                    [{:stop-reason :tool_use
+                      :content     [{:type :tool_use :id "t1" :name "test_noop" :input {}}
+                                    {:type :tool_use :id "v1" :name "submit_verdict"
+                                     :input {:status :ok :note "premature"}}]
+                      :usage       {:input-tokens 1 :output-tokens 1}
+                      :model       "mock"}
+                     (text+verdict-response "now I am done" good "v2")])
+        registry  (tp/new-registry [(->AlwaysOkTool)])
+        seen-idle (atom nil)
+        chart     (chart/statechart
+                    {:initial :wrap}
+                    (state {:id :wrap :initial :work}
+                      (state {:id :work}
+                        (h/llm-conversation
+                          {:id             "worker"
+                           :message        "go"
+                           :real-tools     [:test/noop]
+                           :verdict-schema [:map [:status :keyword] [:note :string]]})
+                        (transition {:event :llm.idle :target :done}
+                          (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
+                      (final {:id :done})))
+        t         (new-llm-test-env {:statechart    chart
+                                     :backend       backend
+                                     :tool-registry registry})
+        t         (await-config! t :done 3000)
+        log       @(:call-log backend)]
+    (assertions
+      "chart reached :done — the turn was NOT cut short by the premature verdict"
+      (dct/in? t :done) => true
+      "the tool result WAS delivered, so the model got its second turn"
+      (count log) => 2
+      "the premature verdict was refused, not silently recorded"
+      (get-in @seen-idle [:data :verdict]) => good
+      "the refusal explains itself in the tool_result the model receives"
+      (let [msgs (:messages (second log))]
+        (boolean
+          (some (fn [m] (some #(= @#'llmc/verdict-deferred-text (:content %)) (:content m)))
+            msgs)))
+      => true)))

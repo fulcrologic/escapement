@@ -17,6 +17,17 @@
   parent and parks until either `:llm.user-message` arrives via `forward-event!` (continues
   the conversation with a new user message) or the invocation is stopped.
 
+  ## Verdicts
+
+  A node that declares a `:verdict-schema` gets a `submit_verdict` tool offered
+  **on every working turn, starting with the first** — so the model writes its prose
+  answer and submits the structured verdict in ONE round-trip, and that tool call is
+  what ends the turn. A wrap-up inference (a second request carrying the whole
+  conversation plus a nudge, with `submit_verdict` forced) remains as a **fallback**
+  for the turn that ends without one. That ordering is deliberate; it was previously
+  reversed, which cost every organ two requests and lost the verdict ~38% of the time.
+  See `verdict-tool-defs` for the measurement.
+
   See `plan.md` for the design."
   (:require
     [cheshire.core :as json]
@@ -120,19 +131,9 @@
     [[] {}]
     allowed-events))
 
-(defn node-tool-defs
-  "Assemble the Anthropic tool-definition list a node invocation exposes, from its seed `params` and a
-   `tool-registry`: the real tools (`:real-tools` selector) plus the event tools (`:allowed-events`).
-   Region tools are omitted — they require a live chart's service registry, which a headless replay has
-   no access to. Used by `escapement.replay/refine-node` to re-issue a node's turn with (most of) its
-   original tool palette. A `nil` `tool-registry` yields only the event tools."
-  [tool-registry {:keys [real-tools allowed-events]}]
-  (let [[real-defs _]  (if tool-registry (resolve-real-tools tool-registry real-tools) [[] {}])
-        [event-defs _] (event-tool-defs (or allowed-events []))]
-    (into [] (concat real-defs event-defs))))
-
 ;; ---------------------------------------------------------------------------
-;; Verdict wrap-up (submit_verdict forced-tool inference at idle boundary)
+;; Verdict (submit_verdict tool on every working turn; forced wrap-up inference
+;; at the idle boundary as the fallback)
 ;; ---------------------------------------------------------------------------
 
 (def ^:const submit-verdict-tool-name
@@ -149,15 +150,68 @@
   "Please summarize your conclusions for this turn by calling submit_verdict.")
 
 (defn- submit-verdict-tool-def
-  "Build the Anthropic tool definition for the wrap-up `submit_verdict` call.
+  "Build the Anthropic tool definition for the `submit_verdict` call.
    `verdict-schema` is the chart-supplied Malli schema describing the
-   structured payload the LLM must produce."
+   structured payload the LLM must produce.
+
+   The SAME def is offered two ways (see `verdict-tool-defs`):
+     1. alongside the node's own tools on every working turn, so the model can
+        answer in prose AND submit the verdict in one round-trip, and
+     2. alone, with a forced `:tool-choice`, by the wrap-up fallback inference
+        when a turn ended without one.
+   The description therefore has to read correctly mid-conversation, which is
+   why it states the end-of-turn contract explicitly."
   [verdict-schema]
   {:name         submit-verdict-tool-name
    :description  (str "Submit your final structured verdict for this turn. "
-                   "Call this tool exactly once. Your input becomes the "
-                   "chart's typed verdict payload.")
+                   "Write your prose answer as text in the same message, then "
+                   "call this tool exactly once — calling it ENDS your turn, so "
+                   "do not call it until you are finished. Your input becomes "
+                   "the chart's typed verdict payload.")
    :input-schema (llm-types/malli->json-schema (or verdict-schema [:map]))})
+
+(defn- verdict-tool-defs
+  "The `submit_verdict` tool def to append to a node's working-turn tool
+   palette, as a (possibly empty) vector. Empty unless the node declares a
+   `:verdict-schema`.
+
+   Offering the verdict tool on the OPENING turn — rather than retro-fitting it
+   onto a follow-up inference after the model has already answered in prose — is
+   what makes the verdict reliable AND halves the request count per organ turn.
+   Measured on z.ai's Anthropic-compat `glm-4.6`/`glm-5.3` endpoint, 8 trials
+   each, identical prompt/model/schema:
+
+     tool retro-fitted on a 2nd turn   tool_use 5/8   (~62%)
+     tool offered on the 1st turn      tool_use 8/8   (100%, text alongside 8/8)
+
+   Forcing `:tool-choice {:type :tool ...}` is NOT an available fix on that
+   endpoint — it ignores `tool_choice` (4/8, no better than unforced). Turn
+   structure is the only lever."
+  [verdict-schema]
+  (if verdict-schema [(submit-verdict-tool-def verdict-schema)] []))
+
+(def ^:private verdict-deferred-text
+  "`tool_result` for a `submit_verdict` call the model batched alongside real-tool
+   work whose results it has not seen yet. Accepting it there would END the turn
+   (the verdict is the terminator) and silently truncate the model's own plan —
+   e.g. an organ that emitted one `fs_write` plus a verdict would stop after that
+   single write. Rejecting it costs nothing: the turn was continuing anyway to
+   deliver the tool results."
+  (str "Not recorded — you still have tool results coming back this turn. "
+    "Finish your work, then call submit_verdict again. Only the call that "
+    "ends your turn is recorded."))
+
+(defn node-tool-defs
+  "Assemble the Anthropic tool-definition list a node invocation exposes, from its seed `params` and a
+   `tool-registry`: the real tools (`:real-tools` selector), the event tools (`:allowed-events`), and —
+   when the node declares a `:verdict-schema` — `submit_verdict`, which rides the working palette (see
+   `verdict-tool-defs`). Region tools are omitted — they require a live chart's service registry, which
+   a headless replay has no access to. Used by `escapement.replay/refine-node` to re-issue a node's turn
+   with (most of) its original tool palette. A `nil` `tool-registry` yields only the event tools."
+  [tool-registry {:keys [real-tools allowed-events verdict-schema]}]
+  (let [[real-defs _]  (if tool-registry (resolve-real-tools tool-registry real-tools) [[] {}])
+        [event-defs _] (event-tool-defs (or allowed-events []))]
+    (into [] (concat real-defs event-defs (verdict-tool-defs verdict-schema)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Region-tool palette (chart-tools)
@@ -373,8 +427,39 @@
 (def ^:private tool-input-transformer
   (mt/transformer json-string-transformer mt/string-transformer))
 
+(def ^:private verdict-input-transformer
+  "Decoder for `submit_verdict` tool input. The LLM returns tool_use input as raw
+   JSON-shaped data (strings, numbers, vectors of those, never keywords); when the
+   chart-supplied `:verdict-schema` declares keyword shapes (`[:enum :a :b]`,
+   qualified keyword keys) validation would otherwise fail. `json-transformer`
+   lands those coercions; `json-string-transformer` additionally rescues small
+   models that stringify nested collections.
+
+   Deliberately shared by BOTH verdict paths (the up-front tool call and the
+   wrap-up fallback inference) — the fallback must accept exactly what the
+   primary accepts, or a model would be punished for succeeding on the retry."
+  (mt/transformer json-string-transformer (mt/json-transformer)))
+
 (defn- find-tool-uses [content-blocks]
   (filterv #(= :tool_use (:type %)) content-blocks))
+
+(defn- decode+validate-verdict
+  "Decode a `submit_verdict` tool_use `input` against `verdict-schema` (Malli).
+   Returns `{:verdict <decoded>}` on success, or
+   `{:errors <humanized-string> :decoded <decoded>}` on failure."
+  [verdict-schema input]
+  (let [schema  (or verdict-schema [:map])
+        decoded (m/decode schema (or input {}) verdict-input-transformer)]
+    (if (m/validate schema decoded)
+      {:verdict decoded}
+      {:errors  (humanize-malli-errors schema decoded)
+       :decoded decoded})))
+
+(defn- find-verdict-block
+  "The `submit_verdict` tool_use block in `content-blocks`, or nil."
+  [content-blocks]
+  (some (fn [b] (when (= submit-verdict-tool-name (:name b)) b))
+    (find-tool-uses content-blocks)))
 
 (defn- assistant-message
   "Build an :assistant role message from a response's :content blocks."
@@ -506,10 +591,14 @@
       :fatal? <bool>
       :error-data <map when fatal>}`
 
+   A `submit_verdict` block additionally yields `:verdict <validated-payload>`;
+   the caller treats that as the end-of-turn signal (see `handle-running-turn!`).
+
    `parent-ctx` is the worker's context (env/queue/parent-session-id/invokeid).
    `state*` holds the per-tool_use_id retry counters."
   [{:keys [tool-registry name->tool-kw name->event-entry name->region-tool
-           tool-reply-queue worker-state retry-counts transcript-fn capture turn]
+           tool-reply-queue worker-state retry-counts transcript-fn capture turn
+           verdict-schema verdict-deferred?]
     :as   ctx} parent-ctx block]
   (let [{:keys [id name input]} block
         retries (get @retry-counts id 0)
@@ -539,6 +628,50 @@
                                    resolved-path (assoc :resolved-path resolved-path)
                                    io-ref (assoc :io/ref (:io/ref io-ref)))})))))]
     (cond
+      ;; Verdict tool — offered up front on every working turn when the node
+      ;; declares a :verdict-schema. FIRST in the cond: `submit_verdict` is a
+      ;; reserved name, so a chart-declared tool must never shadow it.
+      ;;
+      ;; A validation failure here is NOT immediately fatal (unlike the wrap-up
+      ;; inference, which has no room to correct): the model is still mid-turn,
+      ;; so it gets the humanized errors back as a tool_result and one corrective
+      ;; attempt. The counter is keyed on a CONSTANT, not the tool_use_id, because
+      ;; a retry arrives with a fresh id — an id-keyed counter can never trip and
+      ;; the loop would only be bounded by :max-turns.
+      (= submit-verdict-tool-name name)
+      (let [{:keys [verdict errors]} (decode+validate-verdict verdict-schema input)]
+        (cond
+          ;; Batched with real/region-tool work the model has not seen results
+          ;; for yet — see `verdict-deferred-text`. Hand it back and let the
+          ;; turn run to its real end.
+          (and verdict verdict-deferred?)
+          (do
+            (post-tool-result! submit-verdict-tool-name false verdict-deferred-text)
+            {:result-block {:type    :tool_result :tool_use_id id
+                            :content verdict-deferred-text}})
+
+          verdict
+          (do
+            (post-tool-result! submit-verdict-tool-name false "ok")
+            {:result-block {:type :tool_result :tool_use_id id :content "ok"}
+             :verdict      verdict})
+
+          :else
+          (let [n (get @retry-counts ::verdict-invalid 0)]
+            (post-tool-result! submit-verdict-tool-name true errors)
+            (if (>= n 1)
+              {:fatal?        true
+               :fatal-reason  :verdict-validation
+               :error-data    {:reason    :verdict-validation
+                               :errors    errors
+                               :raw-input input}
+               :result-block  {:type    :tool_result :tool_use_id id
+                               :content errors :is-error true}}
+              (do
+                (swap! retry-counts assoc ::verdict-invalid (inc n))
+                {:result-block {:type    :tool_result :tool_use_id id
+                                :content errors :is-error true}})))))
+
       ;; Real tool
       (contains? name->tool-kw name)
       (let [tool-kw (get name->tool-kw name)
@@ -1014,32 +1147,31 @@
       :else
       (let [resp        (:ok outcome)
             {:keys [stop-reason content]} resp
-            tool-uses   (find-tool-uses content)
-            verdict-blk (some (fn [b]
-                                (when (= submit-verdict-tool-name (:name b)) b))
-                          tool-uses)
-            ;; The LLM returns tool_use input as raw JSON-shaped data
-            ;; (strings, numbers, vectors of those, never keywords). When
-            ;; the chart-supplied verdict-schema declares keyword shapes
-            ;; (e.g. `[:enum :a :b]`, qualified keyword keys), validation
-            ;; would otherwise fail. Decode through Malli's
-            ;; json-transformer so string → keyword (and similar)
-            ;; coercions land before validation.
-            decoded     (when verdict-blk
-                          (m/decode (or verdict-schema [:map])
-                            (or (:input verdict-blk) {})
-                            (mt/json-transformer)))]
+            verdict-blk (find-verdict-block content)
+            checked     (when verdict-blk
+                          (decode+validate-verdict verdict-schema (:input verdict-blk)))]
         (cond
           (nil? verdict-blk)
           {:no-tool-use stop-reason}
 
-          (not (m/validate (or verdict-schema [:map]) decoded))
-          {:validation-failed (humanize-malli-errors (or verdict-schema [:map]) decoded)
+          (:errors checked)
+          {:validation-failed (:errors checked)
            :input             (:input verdict-blk)
-           :decoded           decoded}
+           :decoded           (:decoded checked)}
 
           :else
-          {:verdict decoded})))))
+          {:verdict (:verdict checked)})))))
+
+(defn- emit-verdict!
+  "Log the `:llm/verdict` transcript event for a resolved verdict. `source` is
+   `:turn-tool-call` (the model called `submit_verdict` as part of its own turn —
+   the normal path) or `:wrap-up-inference` (the fallback follow-up turn ran)."
+  [{:keys [transcript-fn parent-ctx]} verdict source]
+  (transcript! transcript-fn
+    {:event :llm/verdict :ts (now-ms)
+     :data  {:invokeid (->id-str (:invokeid parent-ctx))
+             :verdict  verdict
+             :source   source}}))
 
 (defn- finalize-idle-data
   "Externalize the conversation OUTPUT so working memory and the transcript never carry the full
@@ -1057,13 +1189,28 @@
         (assoc :output-ref (:io/ref ref) :io/snippet (:io/snippet ref)))
       full)))
 
+(defn- finalize-idle-with-verdict!
+  "Happy path for a verdict the model already produced IN its own turn: log the
+   `:llm/verdict` transcript event and return `{:idle-data …}` with the verdict
+   attached. No extra LLM round-trip — this is the whole point of offering the
+   tool up front."
+  [{:keys [capture] :as ctx} turn base-idle-data verdict]
+  (emit-verdict! ctx verdict :turn-tool-call)
+  {:idle-data (finalize-idle-data capture turn (assoc base-idle-data :verdict verdict))})
+
 (defn- maybe-run-verdict-and-finalize-idle!
-  "When `verdict-schema` is set, run a forced `submit_verdict` inference and
-   return a map `{:idle-data <map>}` carrying the verdict (or `{:error
-   <reason> <data>}` on failure). When `verdict-schema` is nil, returns
-   `{:idle-data <base-idle-data>}` immediately. In both success paths the idle
-   data is run through `finalize-idle-data` so the full text is externalized to
-   an `:output-ref` handle (see `finalize-idle-data`)."
+  "FALLBACK verdict path. Reached only when a turn ended without the model
+   calling `submit_verdict` itself (the tool IS offered on every working turn —
+   see `verdict-tool-defs`). When `verdict-schema` is set, run a forced
+   `submit_verdict` inference and return a map `{:idle-data <map>}` carrying the
+   verdict (or `{:error <reason> <data>}` on failure). When `verdict-schema` is
+   nil, returns `{:idle-data <base-idle-data>}` immediately. In both success
+   paths the idle data is run through `finalize-idle-data` so the full text is
+   externalized to an `:output-ref` handle (see `finalize-idle-data`).
+
+   Kept deliberately: it costs nothing when unused (it does not run at all if the
+   turn already carried a verdict) and it is the only thing that rescues a model
+   that answered in prose only."
   [{:keys [transcript-fn parent-ctx capture] :as ctx} params base-messages verdict-schema turn base-idle-data]
   (if (nil? verdict-schema)
     {:idle-data (finalize-idle-data capture turn base-idle-data)}
@@ -1071,10 +1218,7 @@
       (cond
         (:verdict outcome)
         (do
-          (transcript! transcript-fn
-            {:event :llm/verdict :ts (now-ms)
-             :data  {:invokeid (->id-str (:invokeid parent-ctx))
-                     :verdict  (:verdict outcome)}})
+          (emit-verdict! ctx (:verdict outcome) :wrap-up-inference)
           {:idle-data (finalize-idle-data capture turn
                         (assoc base-idle-data :verdict (:verdict outcome)))})
 
@@ -1352,8 +1496,20 @@
                 base-data      {:text final-text
                                 :from (->id-str (:invokeid parent-ctx))}
                 verdict-schema (:verdict-schema params)
-                wrap           (maybe-run-verdict-and-finalize-idle!
-                                 ctx params @messages-atom verdict-schema turn base-data)]
+                ;; Defensive: most backends report a tool call as
+                ;; `:tool_use`, but a translating backend can hand back
+                ;; `:end_turn` with the block still in `content`. Honour a
+                ;; valid verdict here rather than paying for the fallback
+                ;; inference. An INVALID one falls through to the fallback,
+                ;; which owns the error taxonomy.
+                inline-blk     (when verdict-schema (find-verdict-block content))
+                inline-verdict (when inline-blk
+                                 (:verdict (decode+validate-verdict
+                                             verdict-schema (:input inline-blk))))
+                wrap           (if inline-verdict
+                                 (finalize-idle-with-verdict! ctx turn base-data inline-verdict)
+                                 (maybe-run-verdict-and-finalize-idle!
+                                   ctx params @messages-atom verdict-schema turn base-data))]
             (cond
               (:idle-data wrap)
               (do
@@ -1369,9 +1525,26 @@
 
           :tool_use
           (let [tool-use-blocks (find-tool-uses content)
+                ;; Will this turn keep going after we return the tool results?
+                ;; Yes iff some block is a real/region tool (whose result the
+                ;; model still needs) and no block is an event-tool (which ends
+                ;; the turn regardless). Decided from block NAMES, before any
+                ;; dispatch, because `handle-tool-use-block` sees one block at a
+                ;; time and a `submit_verdict` block must know whether it is the
+                ;; turn's terminator or a premature batch — see
+                ;; `verdict-deferred-text`.
+                continues?      (and
+                                  (boolean
+                                    (some #(or (contains? name->tool-kw (:name %))
+                                             (contains? (:name->region-tool ctx) (:name %)))
+                                      tool-use-blocks))
+                                  (not-any? #(contains? name->event-entry (:name %))
+                                    tool-use-blocks))
                 results         (atom [])
                 fatal           (atom nil)
-                posted-event?   (atom false)]
+                fatal-reason    (atom :tool-validation)
+                posted-event?   (atom false)
+                turn-verdict    (atom nil)]
             (doseq [b tool-use-blocks
                     :while (nil? @fatal)]
               (let [{:keys [result-block fatal? error-data]
@@ -1386,25 +1559,38 @@
                        :retry-counts      retry-counts
                        :transcript-fn     transcript-fn
                        :capture           capture
-                       :turn              turn}
+                       :turn              turn
+                       :verdict-schema    (:verdict-schema params)
+                       :verdict-deferred? continues?}
                       parent-ctx b)]
                 (swap! results conj result-block)
                 (when (:posted-event? block-res) (reset! posted-event? true))
-                (when fatal? (reset! fatal error-data))))
+                (when (contains? block-res :verdict)
+                  (reset! turn-verdict (:verdict block-res)))
+                (when fatal?
+                  (reset! fatal error-data)
+                  (reset! fatal-reason (or (:fatal-reason block-res) :tool-validation)))))
             (swap! messages-atom conj (user-tool-results-message @results))
             (cond
               @fatal
               (do
-                (post-error! :tool-validation @fatal)
+                (post-error! @fatal-reason @fatal)
                 (reset! worker-state :dying)
                 :error-and-die)
 
-              ;; glm-class models batch the terminating event-tool
-              ;; (event__done / event__tick) into a :tool_use response
-              ;; instead of emitting a separate :end_turn turn. When a
-              ;; block posted a chart event, mirror the :end_turn branch:
-              ;; fire on-end-turn-event with the assembled final text and
-              ;; park the worker in :awaiting-user.
+              ;; End-of-turn from within a :tool_use response. Two triggers:
+              ;;
+              ;;   1. `submit_verdict` was called — the model answered AND
+              ;;      submitted its structured verdict in one round-trip. This is
+              ;;      the normal path once the verdict tool is offered up front,
+              ;;      and it is why no wrap-up inference runs here: the verdict
+              ;;      is already in hand (one request per organ turn, not two).
+              ;;   2. glm-class models batch the terminating event-tool
+              ;;      (event__done / event__tick) into a :tool_use response
+              ;;      instead of emitting a separate :end_turn turn.
+              ;;
+              ;; Either way, mirror the :end_turn branch: fire on-end-turn-event
+              ;; with the assembled final text and park in :awaiting-user.
               ;;
               ;; De-dupe: only post when the worker is not already
               ;; :awaiting-user/:dying. `transition-state!` then moves the
@@ -1414,7 +1600,7 @@
               ;; (and transition-state! is a no-op once :dying), so the
               ;; :end_turn post-path cannot run again. Hence: exactly one
               ;; on-end-turn-event per logical turn.
-              (and @posted-event?
+              (and (or @turn-verdict @posted-event?)
                 (not (#{:awaiting-user :dying} @worker-state)))
               (let [final-text     (->> content
                                      (filter #(= :text (:type %)))
@@ -1423,8 +1609,10 @@
                     base-data      {:text final-text
                                     :from (->id-str (:invokeid parent-ctx))}
                     verdict-schema (:verdict-schema params)
-                    wrap           (maybe-run-verdict-and-finalize-idle!
-                                     ctx params @messages-atom verdict-schema turn base-data)]
+                    wrap           (if-let [v @turn-verdict]
+                                     (finalize-idle-with-verdict! ctx turn base-data v)
+                                     (maybe-run-verdict-and-finalize-idle!
+                                       ctx params @messages-atom verdict-schema turn base-data))]
                 (cond
                   (:idle-data wrap)
                   (do
@@ -1499,9 +1687,17 @@
                                     was exceeded (both map here intentionally)
      :error.llm.transport        — backend threw a categorized transport error
      :error.llm.tool-validation  — tool/event-tool input failed schema twice
+     :error.llm.verdict-validation — the model's own `submit_verdict` call failed
+                                    :verdict-schema twice in a turn, OR the fallback
+                                    wrap-up inference produced no tool use / input
+                                    that failed :verdict-schema
      :error.llm.unexpected-stop  — stop_reason other than :end_turn / :tool_use
      :error.llm.max-turns        — :max-turns budget exceeded
      :error.llm.worker-exception — uncaught throwable in the worker loop
+
+   EVERY one of these carries `:reason` and `:from` (the invokeid string) in its
+   event data, matching the `:from` on `:llm.idle`, so an error rail can guard on
+   the originating invoke the same way a success rail does.
 
    The categorized events above come from a backend throwing
    `(escapement.llm.protocol/llm-error category msg ...)`; consumers map
@@ -1514,9 +1710,15 @@
          :or   {on-end-turn-event :llm.idle}} params
         eff-max-turns (atom (when max-turns (long max-turns)))
         started-at  (now-ms)
+        ;; Every `:error.llm.*` this invocation posts carries the SAME attribution
+        ;; key successful events use (`:from` = the invokeid string, cf. the
+        ;; `:llm.idle` payload `{:text … :from …}`), so a chart error rail can
+        ;; guard on the originating invoke exactly as its success rail does.
         post-error! (fn [reason data]
                       (post-event-to-parent! parent-ctx (error-event reason)
-                        (assoc data :reason reason)))]
+                        (assoc data
+                          :reason reason
+                          :from   (->id-str (:invokeid parent-ctx)))))]
     (try
       (loop []
         (let [s @worker-state]
@@ -1674,7 +1876,11 @@
           [region-defs name->region] (region-tool-palette registry-snapshot
                                        chart-tools
                                        region-tool-default-timeout-ms)
-          tool-defs         (into [] (concat real-defs event-defs region-defs))
+          ;; The verdict tool rides the WORKING palette (not just the fallback
+          ;; wrap-up inference) so the model can answer and submit in one
+          ;; round-trip. See `verdict-tool-defs` for the measurement.
+          tool-defs         (into [] (concat real-defs event-defs region-defs
+                                       (verdict-tool-defs (:verdict-schema params))))
           initial-msgs      (cond
                               (seq initial-messages) (vec initial-messages)
                               initial-user-message [(text-user-message initial-user-message)]

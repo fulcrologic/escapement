@@ -148,7 +148,7 @@ today is human-input's `:render`.
 | `:real-tools` | `:real-tools` | static | |
 | `:chart-tools` | `:chart-tools` | static | |
 | `:model` / `:models` / `:needs` | same | static | model policy |
-| `:verdict-schema` | `:verdict-schema` | static | wrap-up inference |
+| `:verdict-schema` | `:verdict-schema` | static | submit_verdict tool on every turn; wrap-up inference as fallback |
 | `:autoforward?` | invoke `:auto-forward?` | static (default true) | control key |
 
 Everything else the processor accepts (`:temperature`, `:thinking`,

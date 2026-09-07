@@ -126,7 +126,10 @@
      * `:real-tools`          — real tool ids exposed to the LLM.
      * `:chart-tools`         — chart/region tools exposed to the LLM.
      * `:model`/`:models`/`:needs` — model selection policy.
-     * `:verdict-schema`      — schema for the `submit_verdict` wrap-up inference.
+     * `:verdict-schema`      — schema for the `submit_verdict` tool. Declaring it puts
+       that tool on EVERY working turn (so the model answers and submits in one
+       round-trip); a forced wrap-up inference is the fallback when a turn ends
+       without a verdict.
      * `:autoforward?` (default true) — whether to autoforward chart events to
                                 the invocation so `tell-llm` works. Control key
                                 (not a param).

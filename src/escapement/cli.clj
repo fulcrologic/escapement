@@ -353,6 +353,26 @@
    never collide with a user's own `:llm/aliases` key."
   :cli/model)
 
+(defn- session-id-keyword
+  "The chart/engine session-id keyword for session string `session`.
+
+   The keyword's NAME must be readable by `clojure.edn/read-string`: the
+   checkpoint written by `escapement.engine.store` serializes this very keyword
+   into the EDN (as `::sc/session-id`, as the working-memory `:_sessionid`, and
+   as an event-queue target key), and `--resume` reads that file back. A keyword
+   name may not begin with a digit, and ~62% of random UUIDs do — so the default
+   `(keyword \"session\" (str (UUID/randomUUID)))` produced checkpoints that could
+   never be re-read (`Invalid token: :session/7d34d4c2-…`), silently making
+   `--resume` impossible for most sessions.
+
+   Ids that are ALREADY name-safe (anything alpha-leading — every session on disk
+   that ever resumed) are returned unchanged, so existing checkpoint paths keep
+   resolving. Only the previously-unreadable ids move."
+  [session]
+  (let [nm (str/replace (str session) #"[^A-Za-z0-9_.-]" "-")
+        nm (if (re-find #"^[A-Za-z]" nm) nm (str "s" nm))]
+    (keyword "session" nm)))
+
 (def ^:private backend-flag->provider
   "`--backend <flag>` → the provider keyword used to tag the synthesized
    `--model` target. Only meaningful for the multi-dispatch path (a single
@@ -1116,7 +1136,7 @@
                                    (when code (System/exit code))))
         exit-code
         (try
-          (let [session-kw         (keyword "session" session)
+          (let [session-kw         (session-id-keyword session)
                 ;; OpenTUI: spawn + supervise the Bun sidecar. It connects back to
                 ;; the just-started api-server's WS and owns the tty; the agent runs
                 ;; headless below. A watcher thread tears the run down if the sidecar
