@@ -1671,6 +1671,65 @@
       (boolean (:no-progress result)) => true
       (contains? result :ok) => false)))
 
+(specification "drive-turn!: a provider that RESTARTS instead of continuing is caught"
+  ;; Verified live 2026-09-07: DeepSeek and opencode-go resume a prefilled
+  ;; partial turn; OpenRouter and z.ai silently start the message over. Merging
+  ;; a restart onto the accumulation produces a document containing its own
+  ;; prefix twice — no error, plausible transcript. That is the bug this
+  ;; guards, and the pre-existing :no-progress guard cannot see it, because a
+  ;; restart is never exactly equal to what came before.
+
+  (let [prefix   "The quick brown fox jumps over the lazy dog and keeps running for a while"
+        captured (atom [])
+        backend  (mock-backend [(max-tokens-response prefix)
+                                ;; the provider ignores the prefill and starts again
+                                (end-turn-response (str prefix " and then some more"))])
+        result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                   {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+    (assertions
+      "the restart is not stitched — the turn aborts instead"
+      (contains? result :ok) => false
+
+      "reported through the existing terminal path, with its own detail"
+      (:detail result) => :continuation-restarted
+
+      "the content kept is what we had, NOT the duplicated merge"
+      (->> (get-in result [:no-progress :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+      => prefix
+
+      "and it is observable in the transcript"
+      (count (filter #(= :llm/continuation-restarted (:event %)) @captured)) => 1))
+
+  (component "a legitimate resume is never mistaken for a restart"
+    (let [captured (atom [])
+          backend  (mock-backend [(max-tokens-response "Hel")
+                                  (end-turn-response "lo world")])
+          result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "the segments stitch as before"
+        (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+        => "Hello world"
+
+        "no restart was reported"
+        (count (filter #(= :llm/continuation-restarted (:event %)) @captured)) => 0)))
+
+  (component "the detector itself"
+    (let [blocks (fn [t] [{:type :text :text t}])
+          long-a (apply str (repeat 10 "abcdefghij"))]
+      (assertions
+        "a segment repeating the accumulated opening is a restart"
+        (#'llmc/continuation-restarted? (blocks long-a) (blocks (str long-a " more"))) => true
+
+        "a genuine resume is not"
+        (#'llmc/continuation-restarted? (blocks long-a) (blocks " and then more")) => false
+
+        "a short accumulation cannot false-positive on a coincidence"
+        (#'llmc/continuation-restarted? (blocks "Hel") (blocks "lo world")) => false
+
+        "nothing accumulated yet, nothing to restart"
+        (#'llmc/continuation-restarted? nil (blocks long-a)) => false))))
+
 (specification "try-models!: transient category is retried (bounded) then succeeds"
   (let [captured (atom [])
         [backend cnt] (flaky-backend 2 #(llm/llm-error :rate-limited "429" {})

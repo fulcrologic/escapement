@@ -399,6 +399,41 @@
    uses the same arithmetic to total what a failed turn spent."
   ellm/sum-usage)
 
+(defn- content-text
+  "All :text block text of a content vector, concatenated."
+  [content]
+  (->> content (filter #(= :text (:type %))) (map :text) (apply str)))
+
+(def ^:private restart-probe-chars
+  "How much of the accumulated text a continuation segment must repeat before
+   we call it a restart. Long enough that a model legitimately resuming
+   mid-sentence cannot trip it, short enough to catch a restart that then
+   diverges (a re-generation is rarely token-identical for long)."
+  64)
+
+(defn- continuation-restarted?
+  "True when a continuation segment BEGINS with what we already accumulated —
+   i.e. the provider ignored the assistant prefill and started the message
+   over.
+
+   Verified live 2026-09-07: DeepSeek and opencode-go resume a prefilled
+   partial turn, while OpenRouter and z.ai silently start again. Stitching a
+   restart onto the accumulation yields a document containing its own prefix
+   twice, with no error and a plausible-looking transcript — so the repeat is
+   detected and reported instead of merged.
+
+   Needs no provider knowledge: it is a property of the two texts. The
+   `:no-progress` guard does NOT cover this, since a restart is never exactly
+   equal to what came before."
+  [acc-content segment-content]
+  (let [acc (content-text acc-content)
+        seg (content-text segment-content)]
+    (boolean
+      (when (and (seq acc) (seq seg))
+        (let [probe (subs acc 0 (min restart-probe-chars (count acc)))]
+          (and (>= (count seg) (count probe))
+            (str/starts-with? seg probe)))))))
+
 (defn- merge-segment-content
   "Append continuation blocks `more` onto accumulated `acc`, merging the
    boundary when both sides are `:text` (a truncation mid-prose) so the
@@ -849,12 +884,29 @@
               merged-usage (merge-with-usage acc-usage usage)
               resp'        (assoc resp :content merged :usage merged-usage)]
           (cond
+            ;; FIRST: the provider ignored the prefill and started the message
+            ;; over. This is checked before the terminal-stop branch because a
+            ;; restart usually COMPLETES — it comes back as a clean :end_turn —
+            ;; and would otherwise be returned as a successful turn whose
+            ;; content holds its own prefix twice.
+            (continuation-restarted? acc-content content)
+            (do
+              (transcript! transcript-fn
+                {:event :llm/continuation-restarted :ts (now-ms)
+                 :data  {:segment    (inc seg)
+                         :model      (:model resp)
+                         :invokeid   (:invokeid parent-ctx)
+                         :session-id (:parent-session-id parent-ctx)}})
+              {:no-progress (assoc resp :content (vec acc-content)
+                              :usage (merge-with-usage acc-usage usage))
+               :detail      :continuation-restarted})
+
             (not= :max_tokens stop-reason)
             {:ok resp' :model-used (:model-used outcome)}
 
             ;; truncated but the continuation added nothing new → stuck.
             (and acc-content (= merged (vec acc-content)))
-            {:no-progress resp'}
+            {:no-progress resp' :detail :no-forward-progress}
 
             :else
             (do
@@ -1100,9 +1152,9 @@
           {:event :llm/error :ts (now-ms)
            :data  {:reason      :unexpected-stop
                    :stop-reason :max_tokens
-                   :detail      :no-forward-progress}})
+                   :detail      (or (:detail outcome) :no-forward-progress)}})
         (post-error! :unexpected-stop {:stop-reason :max_tokens
-                                       :detail      :no-forward-progress})
+                                       :detail      (or (:detail outcome) :no-forward-progress)})
         (reset! worker-state :dying)
         :error-and-die)
 
