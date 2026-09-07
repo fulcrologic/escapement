@@ -6,7 +6,7 @@
     [escapement.llm.openai :as oai]
     [escapement.llm.protocol :as proto]
     [escapement.llm.types :as types]
-    [fulcro-spec.core :refer [=> assertions specification]]
+    [fulcro-spec.core :refer [=> assertions component specification]]
     [com.fulcrologic.statecharts.promise :as p])
   (:import (java.io BufferedReader StringReader)))
 
@@ -420,3 +420,43 @@
       "whitespace tolerated"              (r {"retry-after" "  5 "})                  => 5000
       "absent header -> nil"              (r {})                                      => nil
       "unparseable -> nil"                (r {"retry-after" "Wed, 21 Oct 2026 07:28:00 GMT"}) => nil)))
+
+(specification "an unencodable block is an error, a documented drop is not"
+  ;; Found by sweeping for the shape that hid the Responses-wire vision bug: a
+  ;; `case` with a nil default inside a `keep`, which makes an unhandled block
+  ;; type disappear without a word. This wire drops `:thinking` /
+  ;; `:redacted_thinking` ON PURPOSE (they are Anthropic-only and the ns
+  ;; docstring says so); anything else is a programming error.
+
+  (component "the deliberate drops stay silent"
+    (let [body (oai/request->openai-json
+                 {:model    "m"
+                  :messages [{:role    :user
+                              :content [{:type :text :text "hi"}
+                                        {:type :thinking :thinking "…" :signature "s"}]}]})]
+      (assertions
+        "the turn still goes out"
+        (count (get body "messages")) => 1
+
+        "carrying only the text part — the thinking block is gone, as documented"
+        (get (first (get body "messages")) "content") => [{"type" "text" "text" "hi"}])))
+
+  (component "an unknown block type throws instead of vanishing"
+    (assertions
+      "and names the type"
+      (try (oai/request->openai-json
+             {:model    "m"
+              :messages [{:role :user :content [{:type :some_future_block :data "x"}]}]})
+           :no-throw
+           (catch clojure.lang.ExceptionInfo e (:block-type (ex-data e))))
+      => :some_future_block))
+
+  (component "images are unaffected — they were always handled here"
+    (let [body (oai/request->openai-json
+                 {:model    "m"
+                  :messages [{:role    :user
+                              :content [{:type   :image
+                                         :source {:type :base64 :media-type "image/png" :data "AAA"}}]}]})]
+      (assertions
+        "still an image_url part"
+        (-> (get body "messages") first (get "content") first (get "type")) => "image_url"))))

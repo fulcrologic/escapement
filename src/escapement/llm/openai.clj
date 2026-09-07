@@ -40,6 +40,12 @@
             (str/join ""))]
     (when (seq s) s)))
 
+(def ^:private deliberately-dropped-block-types
+  "Anthropic-only block types this wire cannot carry, dropped ON PURPOSE (see
+   the ns docstring). Listed so that a block type which is NOT here — i.e. one
+   nobody has thought about — is an error rather than a silent disappearance."
+  #{:thinking :redacted_thinking})
+
 (defn- user-content-block->openai [block]
   (case (:type block)
     :text
@@ -55,7 +61,17 @@
       (when url
         {"type" "image_url" "image_url" {"url" url}}))
 
-    nil))
+    ;; Everything else: deliberate drop, or a programming error. An unknown
+    ;; block type reaching a translator means the Request carried something
+    ;; nobody taught this wire about, and dropping it silently is how `:image`
+    ;; blocks went missing on the sibling Responses backend — the turn went out
+    ;; without the image and the model answered a vision prompt it could not
+    ;; see, with no error anywhere.
+    (if (contains? deliberately-dropped-block-types (:type block))
+      nil
+      (throw (ex-info (str "[openai] no chat-completions encoding for a "
+                        (pr-str (:type block)) " block in a user message")
+               {:block-type (:type block)})))))
 
 (defn- tool-use-blocks [blocks]
   (filterv #(= :tool_use (:type %)) blocks))

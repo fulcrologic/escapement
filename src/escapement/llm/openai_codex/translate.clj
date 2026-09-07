@@ -154,16 +154,72 @@
   {:type              "reasoning"
    :encrypted_content (:data block)})
 
+(defn- image-block->content-part
+  "Converts an `:image` block to a Responses `input_image` content part.
+
+   Verified against the live Responses wire 2026-09-07 (z.ai coding plan,
+   `glm-5v-turbo`): a data URL in `:image_url`, in the SAME message item as the
+   text part, is read by the model. The form mirrors the chat-completions
+   encoder in `escapement.llm.openai` rather than inventing a variant."
+  [{:keys [source]}]
+  {:type      "input_image"
+   :image_url (case (:type source)
+                :url (:url source)
+                :base64 (str "data:" (:media-type source) ";base64," (:data source)))})
+
+(defn- unrepresentable-block!
+  "An unknown content-block type reaching a translator is a PROGRAMMING error,
+   not a runtime condition — the Request was schema-validated on the way in.
+
+   This throws rather than dropping because dropping is how `:image` blocks
+   went missing on this wire in the first place: the turn went out without the
+   image, the model answered a vision prompt it could not see, and the run
+   returned normal-looking prose with no error anywhere. Adding one branch
+   would have fixed that block type and left the next one to vanish the same
+   silent way."
+  [role block]
+  (throw (ex-info (str "[openai-codex] no Responses-wire encoding for a "
+                    (pr-str (:type block)) " block in a " (name role) " message")
+           {:role role :block-type (:type block)})))
+
+(defn- message-content-part
+  "The Responses `content` part for a block that belongs INSIDE a message item
+   (as opposed to a sibling item like `function_call_output`), or nil when the
+   block is not one of those."
+  [role block]
+  (case (:type block)
+    :text {:type (if (= :assistant role) "output_text" "input_text")
+           :text (:text block)}
+    :image (image-block->content-part block)
+    nil))
+
 (defn- user-message->input-items
-  "Expands a user message into a vector of OpenAI input items."
+  "Expands a user message into OpenAI Responses input items.
+
+   Text and image blocks of ONE message are merged into ONE message item's
+   `:content` vector — that is what the wire expects for a multimodal turn, and
+   emitting an item per block would separate an image from the text asking
+   about it. `:tool_result` blocks are siblings (`function_call_output`), not
+   message content, so they are flushed as their own items in place, preserving
+   order."
   [{:keys [content]}]
-  (into []
-    (keep (fn [block]
-            (case (:type block)
-              :text (text-block->input-item :user block)
-              :tool_result (tool-result-block->input-item block)
-              nil)))
-    content))
+  (let [flush (fn [items parts]
+                (if (seq parts)
+                  (conj items {:type "message" :role "user" :content (vec parts)})
+                  items))
+        [items parts]
+        (reduce (fn [[items parts] block]
+                  (cond
+                    (= :tool_result (:type block))
+                    [(conj (flush items parts) (tool-result-block->input-item block)) []]
+
+                    (message-content-part :user block)
+                    [items (conj parts (message-content-part :user block))]
+
+                    :else (unrepresentable-block! :user block)))
+          [[] []]
+          content)]
+    (flush items parts)))
 
 (defn- assistant-message->input-items
   "Expands an assistant message into a vector of OpenAI input items."
@@ -173,9 +229,11 @@
             (case (:type block)
               :text (text-block->input-item :assistant block)
               :tool_use (tool-use-block->input-item block)
+              ;; Deliberate, not an oversight: a thinking block without a
+              ;; signature has nothing the wire can carry.
               :thinking (thinking-block->input-item block)
               :redacted_thinking (redacted-thinking-block->input-item block)
-              nil)))
+              (unrepresentable-block! :assistant block))))
     content))
 
 (>defn anthropic-messages->openai-input
