@@ -316,3 +316,22 @@
 
         "deliberately general-purpose, not a task-specialised -code model"
         (clojure.string/includes? (get-in tmpl [:ollama :default-model]) "-code") => false))))
+
+(specification "the z.ai default names the model that actually runs"
+  ;; The endpoint answers a `glm-4.6` request with `glm-5.3-flash` and always
+  ;; did; the old default therefore named a model that never ran. This is a
+  ;; truthfulness fix, NOT a tier change — same model delivered either way.
+
+  (component "both z.ai templates name the delivered model"
+    (let [tmpl @(resolve 'escapement.llm.providers/provider-templates)]
+      (assertions
+        "metered z.ai"
+        (get-in tmpl [:z-ai :default-model]) => "glm-5.3-flash"
+
+        "and its subscription-billed twin, which shares the wire backend"
+        (get-in tmpl [:z-ai-plan :default-model]) => "glm-5.3-flash"
+
+        ;; (`:route` holds a Pattern, which is never `=` to another Pattern.)
+        "the two still agree on everything else"
+        (-> (get tmpl :z-ai) (dissoc :kind) (update :route str))
+        => (-> (get tmpl :z-ai-plan) (dissoc :kind) (update :route str))))))

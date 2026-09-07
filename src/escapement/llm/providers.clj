@@ -250,14 +250,21 @@
   {:anthropic             {:kind          :anthropic :base-url "https://api.anthropic.com"
                            :default-model "claude-sonnet-5" :auth-mode :x-api-key
                            :route         #"^claude-"}
+   ;; `glm-5.3-flash`, NOT `glm-4.6`: that id is retired and the endpoint
+   ;; silently answers it with `glm-5.3-flash` anyway (verified 2026-09-07), so
+   ;; the old default named a model that never ran. This names the model the
+   ;; endpoint was already delivering — same model, same tier, now stated
+   ;; truthfully. Confirmed directly requestable and self-reporting.
    :z-ai                  {:kind          :zai :base-url "https://api.z.ai/api/anthropic"
-                           :default-model "glm-4.6" :auth-mode :bearer
+                           :default-model "glm-5.3-flash" :auth-mode :bearer
                            :http-timeout-ms 300000
                            :route         #"^glm-"}
    ;; `:z-ai-plan` is the subscription-billed face of z.ai used in
    ;; `default-preferences`; same wire backend as metered `:z-ai`.
    :z-ai-plan             {:kind          :zai :base-url "https://api.z.ai/api/anthropic"
-                           :default-model "glm-4.6" :auth-mode :bearer
+                           ;; See the `:z-ai` note: `glm-4.6` is retired and was
+                           ;; silently served as `glm-5.3-flash`.
+                           :default-model "glm-5.3-flash" :auth-mode :bearer
                            :http-timeout-ms 300000
                            :route         #"^glm-"}
    ;; z.ai coding plan, v1 (legacy) generation — OpenAI Responses wire. Mirrors
