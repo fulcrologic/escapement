@@ -3422,6 +3422,30 @@ If you are NOT using the CLI — your own bb script — choose your registry del
 
 `src/escapement/transcript.clj` is the JSONL sink.
 Every transcript row has `:event`, `:ts`, `:seq`, plus event-specific `:data`.
+
+[IMPORTANT]
+====
+**Run-level vs invocation-level, and how to tell them apart.** Attribution is
+by `:invokeid` in `:data`, and the two kinds of event are distinguished by
+whether it is there:
+
+* **Invocation-level** — every event emitted by an invocation processor
+(`:llm/*`, `:human-input/*`) carries `:invokeid`, and most also carry
+`:session-id`. **Including the failure events**: `:llm/error`,
+`:llm/model-policy-empty`, `:llm/budget-extender-error`,
+`:human-input/cancelled`, `:human-input/error`, and the rest.
+* **Run-level** — `:runner/*`, `:checkpoint/*`, `:cli/*`,
+`:transcript/serialize-error` and the debug events belong to the run, not to
+any invocation, and carry no `:invokeid` because there is none to carry.
+
+A host tap may therefore filter on `:invokeid` to attribute events to an
+invocation, and an absent one means run-level — never "this event forgot".
+If you add an event inside an invocation processor, stamp it: an
+invocation-scoped event without an `:invokeid` is invisible to every host
+filtering the documented way, and the events most worth attributing are the
+ones that report a failure.
+====
+
 The events emitted across the codebase:
 
 * `:runner/started`, `:runner/start-config`, `:runner/resumed`,

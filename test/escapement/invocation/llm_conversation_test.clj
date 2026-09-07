@@ -1942,6 +1942,72 @@
         "reaching the same suppression through :overrun spends two"
         @via-overrun => 2))))
 
+(defrecord AlwaysFailingBackend []
+  llm/LLMBackend
+  (send-turn [_ _]
+    (p/do! (throw (llm/llm-error :overloaded "HTTP 503 upstream is overloaded" {})))))
+
+(defn- error-ctx
+  "A worker ctx complete enough to drive ONE turn through
+   `handle-running-turn!`, which is where `:llm/error` is emitted."
+  [backend captured]
+  {:backend        backend
+   :transcript-fn  (fn [ev] (swap! captured conj ev))
+   :worker-state   (atom :running)
+   :model-status   (atom {})
+   :default-models ["mock"]
+   :messages-atom  (atom [])
+   :retry-counts   (atom {})
+   :turn-count     (atom 1)
+   :params         {:resilience {:max-retries 0 :backoff-ms 0}}
+   :parent-ctx     {:invokeid "design-node" :parent-session-id "sess-1"}})
+
+(specification "every invocation-scoped event carries its :invokeid"
+  ;; `:llm/error` was the ONE llm event emitted without one, while its six
+  ;; siblings (:llm/start :llm/request :llm/retry :llm/model-down
+  ;; :llm/worker-exit :llm/response) all carried it. A host tap filtering on
+  ;; :invokeid — the documented way to attribute an event to an invocation —
+  ;; therefore received every event about a failing turn EXCEPT the one saying
+  ;; what went wrong, so the failure reason, the category and the
+  ;; `:partial-usage` of the failed turn were all unreachable.
+
+  (component "a failing turn's error event is attributable"
+    (let [captured (atom [])
+          _        (#'llmc/handle-running-turn!
+                     (error-ctx (->AlwaysFailingBackend) captured)
+                     (fn [_ _] nil) :on-end)
+          errs     (filter #(= :llm/error (:event %)) @captured)]
+      (assertions
+        "the error event was emitted"
+        (count errs) => 1
+
+        "and it names the invocation it belongs to"
+        (get-in (first errs) [:data :invokeid]) => "design-node"
+
+        "and the session, like its siblings"
+        (get-in (first errs) [:data :session-id]) => "sess-1"
+
+        "the diagnosis rides with it — a 503 must not read as anything else"
+        (get-in (first errs) [:data :category]) => :overloaded)))
+
+  (component "no invocation-scoped event in a failing run is left unattributable"
+    ;; The general invariant, not just the one event the failing run happened to
+    ;; expose. Run-level events (`:runner/*`, `:checkpoint/*`) are excluded by
+    ;; construction — they belong to no invocation and none is emitted here.
+    (let [captured (atom [])
+          _        (#'llmc/handle-running-turn!
+                     (error-ctx (->AlwaysFailingBackend) captured)
+                     (fn [_ _] nil) :on-end)
+          orphans  (->> @captured
+                     (remove #(get-in % [:data :invokeid]))
+                     (mapv :event))]
+      (assertions
+        "every emitted event is attributable to the invocation"
+        orphans => []
+
+        "and the run did emit something, so this is not vacuous"
+        (boolean (seq @captured)) => true))))
+
 (specification "try-models!: transient category is retried (bounded) then succeeds"
   (let [captured (atom [])
         [backend cnt] (flaky-backend 2 #(llm/llm-error :rate-limited "429" {})

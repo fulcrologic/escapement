@@ -791,7 +791,9 @@
                   (fn [{:keys [policy strict?]}]
                     (transcript! transcript-fn
                       {:event :llm/model-policy-empty :ts (now-ms)
-                       :data  {:policy policy :strict? strict?}}))
+                       :data  {:policy policy :strict? strict?
+                               :invokeid invokeid
+                               :session-id (:parent-session-id parent-ctx)}}))
                   :on-latency-switch
                   (fn [{:keys [model provider first-token-ms remaining]}]
                     (transcript! transcript-fn
@@ -1142,7 +1144,9 @@
            :data  {:reason     :invalid-request
                    :detail     :eligibility-empty-strict
                    :policy     policy
-                   :candidates candidates}})
+                   :candidates candidates
+                   :invokeid   (:invokeid parent-ctx)
+                   :session-id (:parent-session-id parent-ctx)}})
         ;; Fail-closed: the eligibility gate excluded every candidate target
         ;; and `:llm/eligibility-strict?` is set. Categorize as
         ;; :invalid-request so the chart's :error.llm.* / .invalid-request
@@ -1162,10 +1166,12 @@
             known (:known outcome)]
         (transcript! transcript-fn
           {:event :llm/error :ts (now-ms)
-           :data  {:reason  :invalid-request
-                   :detail  :unknown-alias
-                   :alias   alias
-                   :known   known}})
+           :data  {:reason     :invalid-request
+                   :detail     :unknown-alias
+                   :alias      alias
+                   :known      known
+                   :invokeid   (:invokeid parent-ctx)
+                   :session-id (:parent-session-id parent-ctx)}})
         (post-error! :invalid-request {:detail :unknown-alias
                                        :alias  alias
                                        :known  known})
@@ -1178,9 +1184,11 @@
       (let [s (:string-model outcome)]
         (transcript! transcript-fn
           {:event :llm/error :ts (now-ms)
-           :data  {:reason :invalid-request
-                   :detail :string-model
-                   :model  s}})
+           :data  {:reason     :invalid-request
+                   :detail     :string-model
+                   :model      s
+                   :invokeid   (:invokeid parent-ctx)
+                   :session-id (:parent-session-id parent-ctx)}})
         (post-error! :invalid-request {:detail :string-model
                                        :model  s})
         (reset! worker-state :dying)
@@ -1191,10 +1199,12 @@
             bad (:bad outcome)]
         (transcript! transcript-fn
           {:event :llm/error :ts (now-ms)
-           :data  {:reason :invalid-request
-                   :detail :string-models
-                   :models ms
-                   :bad    bad}})
+           :data  {:reason     :invalid-request
+                   :detail     :string-models
+                   :models     ms
+                   :bad        bad
+                   :invokeid   (:invokeid parent-ctx)
+                   :session-id (:parent-session-id parent-ctx)}})
         (post-error! :invalid-request {:detail :string-models
                                        :models ms
                                        :bad    bad})
@@ -1207,7 +1217,9 @@
           {:event :llm/error :ts (now-ms)
            :data  {:reason      :unexpected-stop
                    :stop-reason :max_tokens
-                   :detail      (or (:detail outcome) :no-forward-progress)}})
+                   :detail      (or (:detail outcome) :no-forward-progress)
+                   :invokeid    (:invokeid parent-ctx)
+                   :session-id  (:parent-session-id parent-ctx)}})
         (post-error! :unexpected-stop {:stop-reason :max_tokens
                                        :detail      (or (:detail outcome) :no-forward-progress)})
         (reset! worker-state :dying)
@@ -1222,7 +1234,9 @@
           {:event :llm/error :ts (now-ms)
            :data  {:reason      :unexpected-stop
                    :stop-reason :max_tokens
-                   :detail      :overrun-retries-exhausted}})
+                   :detail      :overrun-retries-exhausted
+                   :invokeid    (:invokeid parent-ctx)
+                   :session-id  (:parent-session-id parent-ctx)}})
         (post-error! :unexpected-stop {:stop-reason :max_tokens
                                        :detail      :overrun-retries-exhausted})
         (reset! worker-state :dying)
@@ -1255,7 +1269,9 @@
                                     :data  (cond-> (assoc details
                                                      :reason reason
                                                      :category category
-                                                     :attempts attempts)
+                                                     :attempts attempts
+                                                     :invokeid (:invokeid parent-ctx)
+                                                     :session-id (:parent-session-id parent-ctx))
                                              (seq (:partial-usage outcome))
                                              (assoc :partial-usage (:partial-usage outcome)))})
         (post-error! reason (-> (select-keys details [:message :class])
@@ -1541,13 +1557,17 @@
                                   (catch Throwable t
                                     (transcript! transcript-fn
                                       {:event :llm/budget-extender-error :ts (now-ms)
-                                       :data  {:message (.getMessage t)}})
+                                       :data  {:message    (.getMessage t)
+                                               :invokeid   (:invokeid parent-ctx)
+                                               :session-id (:parent-session-id parent-ctx)}})
                                     nil)))]
                 (if (and extension (> (long extension) (long @eff-max-turns)))
                   (do
                     (transcript! transcript-fn
                       {:event :llm/budget-extended :ts (now-ms)
-                       :data  {:from @eff-max-turns :to (long extension) :turns @turn-count}})
+                       :data  {:from       @eff-max-turns :to (long extension) :turns @turn-count
+                               :invokeid   (:invokeid parent-ctx)
+                               :session-id (:parent-session-id parent-ctx)}})
                     (reset! eff-max-turns (long extension))
                     (recur))
                   (do
