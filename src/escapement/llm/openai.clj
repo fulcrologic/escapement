@@ -20,6 +20,7 @@
     [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [escapement.llm.http-transport :as ht]
+    [escapement.llm.model-quirks :as quirks]
     [escapement.llm.protocol :as proto]
     [escapement.llm.reasoning :as reasoning]
     [escapement.llm.types :as types]
@@ -503,7 +504,10 @@ Response map."
     (p/do!
       (let [request (cond-> request
                       (and (nil? (:model request)) (:default-model opts))
-                      (assoc :model (:default-model opts)))]
+                      (assoc :model (:default-model opts)))
+            ;; Per-endpoint request-key quirks (e.g. a model that accepts only
+            ;; temperature 1 on THIS gateway). No table → untouched.
+            request (quirks/apply-quirks (:model-quirks opts) request)]
         (when-let [err (types/validate-request request)]
           (throw (ex-info "Invalid LLM request" {:errors err :request request})))
         (let [transport     (or (:http-transport opts) (ht/default-transport))
@@ -532,7 +536,10 @@ Response map."
     (p/do!
       (let [request (cond-> request
                       (and (nil? (:model request)) (:default-model opts))
-                      (assoc :model (:default-model opts)))]
+                      (assoc :model (:default-model opts)))
+            ;; Per-endpoint request-key quirks (e.g. a model that accepts only
+            ;; temperature 1 on THIS gateway). No table → untouched.
+            request (quirks/apply-quirks (:model-quirks opts) request)]
         (when-let [err (types/validate-request request)]
           (throw (ex-info "Invalid LLM request" {:errors err :request request})))
         (let [transport     (or (:http-transport opts) (ht/default-transport))
@@ -568,6 +575,9 @@ Required opts:
 Optional opts:
 - `:default-model`   — string used when Request omits `:model`.
 - `:extra-headers`   — map of additional request headers.
+- `:model-quirks`    — vector of per-model request-key constraints for THIS
+                       endpoint (see `escapement.llm.model-quirks`). Absent, no
+                       request is adjusted.
 - `:http-timeout-ms` — request timeout (default 60000).
 - `:http-transport`  — an `escapement.llm.http-transport/HttpTransport`.
                        Defaults to `(http-transport/default-transport)` (bb

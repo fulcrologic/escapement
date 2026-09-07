@@ -77,6 +77,13 @@
   []
   {"x-opencode-session" (str "escapement-" (random-uuid))})
 
+(defn opencode-go-quirks
+  "Per-model request-key constraints for the opencode.ai Zen gateway. Resolved
+   lazily so this ns stays cheap to load."
+  []
+  (require 'escapement.llm.model-quirks)
+  @(resolve 'escapement.llm.model-quirks/opencode-go-quirks))
+
 (defn build-opencode-go-backend [{:keys [model api-key base-url] :as opts}]
   (if (opencode-go-anthropic-model? model)
     (build-api-backend {:api-key       api-key
@@ -87,7 +94,8 @@
     (build-openai-backend {:api-key       api-key
                            :base-url      (or base-url "https://opencode.ai/zen/go/v1")
                            :default-model (or model (:default-model opts) "glm-5")
-                           :extra-headers (opencode-session-headers)})))
+                           :extra-headers (opencode-session-headers)
+                           :model-quirks  (opencode-go-quirks)})))
 
 (defn detect-available-credentials
   "Returns a vector of available credential descriptors (one per env var or
@@ -212,7 +220,8 @@
     ;; without it the gateway 400s every request, whichever wire format.
     :opencode-go-openai (build-openai-backend
                           (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect])
-                            (assoc :extra-headers (opencode-session-headers))))
+                            (assoc :extra-headers (opencode-session-headers)
+                              :model-quirks (opencode-go-quirks))))
     :opencode-go-anthropic (build-api-backend
                              (-> (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms])
                                (assoc :extra-headers (opencode-session-headers))))
