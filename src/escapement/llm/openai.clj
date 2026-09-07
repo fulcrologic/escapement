@@ -21,6 +21,7 @@
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [escapement.llm.http-transport :as ht]
     [escapement.llm.protocol :as proto]
+    [escapement.llm.reasoning :as reasoning]
     [escapement.llm.types :as types]
     [com.fulcrologic.statecharts.promise :as p])
   (:import
@@ -145,10 +146,20 @@
 
 (>defn request->openai-json
   "Pure translation from our Request map to an OpenAI Chat Completions request
-body (Clojure map with string keys, ready for JSON serialization)."
-  [request]
-  [:map => :map]
-  (let [{:keys [model system messages tools max-tokens
+body (Clojure map with string keys, ready for JSON serialization).
+
+`dialect` selects how the normalised `:reasoning` field is rendered, because
+this one namespace serves several providers whose reasoning wire formats
+genuinely differ — `:openai` (`reasoning_effort`), `:openrouter` (a
+`reasoning` object), `:ollama` (a `think` flag), `:deepseek` (`thinking` plus
+`reasoning_effort`), or `:none` to emit nothing. It is a static property of
+the provider (see `escapement.llm.providers/provider-templates`), never
+sniffed from the base-url. Defaults to `:openai`. A request without
+`:reasoning` is unaffected by it."
+  ([request] [:map => :map] (request->openai-json request :openai))
+  ([request dialect]
+   [:map [:maybe :keyword] => :map]
+   (let [{:keys [model system messages tools max-tokens
                 temperature top-p stop-sequences tool-choice metadata]} request
         sys-msg  (when system [{"role" "system" "content" system}])
         rest-msg (into [] (mapcat message->openai messages))
@@ -161,7 +172,9 @@ body (Clojure map with string keys, ready for JSON serialization)."
       (some? top-p) (assoc "top_p" top-p)
       (seq stop-sequences) (assoc "stop" (vec stop-sequences))
       (some? tool-choice) (assoc "tool_choice" (tool-choice->openai tool-choice))
-      (:user-id metadata) (assoc "user" (:user-id metadata)))))
+      (:user-id metadata) (assoc "user" (:user-id metadata))
+      (seq (reasoning/wire-fields dialect request))
+      (merge (reasoning/wire-fields dialect request))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Response translation: OpenAI JSON -> our Response
@@ -488,7 +501,7 @@ Response map."
           (throw (ex-info "Invalid LLM request" {:errors err :request request})))
         (let [transport     (or (:http-transport opts) (ht/default-transport))
               transcript-fn (:transcript-fn opts)
-              body-map      (request->openai-json request)
+              body-map      (request->openai-json request (:reasoning-dialect opts :openai))
               _             (when transcript-fn
                               (transcript-fn {:event    :llm/request
                                               :backend  :openai
@@ -517,7 +530,7 @@ Response map."
           (throw (ex-info "Invalid LLM request" {:errors err :request request})))
         (let [transport     (or (:http-transport opts) (ht/default-transport))
               transcript-fn (:transcript-fn opts)
-              body-map      (request->openai-json request)
+              body-map      (request->openai-json request (:reasoning-dialect opts :openai))
               _             (when transcript-fn
                               (transcript-fn {:event    :llm/request
                                               :backend  :openai
@@ -552,7 +565,13 @@ Optional opts:
 - `:http-transport`  — an `escapement.llm.http-transport/HttpTransport`.
                        Defaults to `(http-transport/default-transport)` (bb
                        http-client on CLJ/bb). CLJS hosts must supply one.
-- `:transcript-fn`   — `(fn [event])` called with `:llm/request` / `:llm/response`."
+- `:transcript-fn`   — `(fn [event])` called with `:llm/request` / `:llm/response`.
+- `:reasoning-dialect` — how to render a request's normalised `:reasoning`
+                       field on this endpoint: `:openai` (default),
+                       `:openrouter`, `:ollama`, `:deepseek`, or `:none` to
+                       emit nothing. `escapement.llm.providers` sets this per
+                       provider; a caller only overrides it for an endpoint
+                       the library does not know about."
   ([] [=> :any] (new-backend {}))
   ([opts]
    [:map => :any]

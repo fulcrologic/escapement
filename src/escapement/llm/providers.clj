@@ -113,12 +113,14 @@
       (conj {:kind          :openai :source "OPENAI_API_KEY"
              :api-key       openai :base-url "https://api.openai.com/v1"
              :default-model (or (System/getenv "OPENAI_MODEL") "gpt-4o-mini")
+             :reasoning-dialect :openai
              :route         #"^gpt-"})
 
       openrouter
       (conj {:kind          :openrouter :source "OPENROUTER_API_KEY"
              :api-key       openrouter :base-url "https://openrouter.ai/api/v1"
              :default-model (or (System/getenv "OPENROUTER_MODEL") "openai/gpt-4o-mini")
+             :reasoning-dialect :openrouter
              :route         #".+/.+"})
 
       ;; DeepSeek's own metered endpoint — OpenAI chat-completions wire at
@@ -129,6 +131,7 @@
       (conj {:kind          :deepseek :source "DEEPSEEK_API_KEY"
              :api-key       deepseek :base-url "https://api.deepseek.com/v1"
              :default-model (or (System/getenv "DEEPSEEK_MODEL") "deepseek-v4-flash")
+             :reasoning-dialect :deepseek
              :route         #"^deepseek-"})
 
       ;; Keep established provider routes before newer hosted gateways so
@@ -157,6 +160,7 @@
       (conj {:kind          :opencode-go-openai :source "OPENCODE_GO_API_KEY"
              :api-key       opencode-go :base-url "https://opencode.ai/zen/go/v1"
              :default-model (or (System/getenv "OPENCODE_GO_MODEL") "glm-5")
+             :reasoning-dialect :none
              :route         #"^(glm-|kimi-|mimo-)"})
 
       opencode-go
@@ -169,6 +173,7 @@
       (conj {:kind          :ollama :source "OLLAMA_API_KEY"
              :api-key       ollama :base-url "https://ollama.com/v1"
              :default-model (or (System/getenv "OLLAMA_MODEL") "kimi-k2.5")
+             :reasoning-dialect :ollama
              :route         #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}))))
 
 (defn build-credential-backend
@@ -178,11 +183,15 @@
     :anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
     :zai (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
     :zai-coding-plan (build-codex-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms]))
-    :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
-    :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
-    :ollama (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
-    :deepseek (build-openai-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms]))
-    :opencode-go-openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
+    ;; `:reasoning-dialect` is a STATIC property of the provider, carried on the
+    ;; descriptor/template — never sniffed from the base-url, so pointing a
+    ;; provider at a proxy or a self-hosted gateway cannot silently change the
+    ;; wire format of its reasoning field.
+    :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
+    :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
+    :ollama (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
+    :deepseek (build-openai-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms :reasoning-dialect]))
+    :opencode-go-openai (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect]))
     :opencode-go-anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
     :codex (build-codex-backend {:default-model (:default-model c)})
     :claude-cli (build-claude-cli-backend
@@ -230,21 +239,21 @@
                            :http-timeout-ms 300000
                            :route         #"^glm-"}
    :openai                {:kind          :openai :base-url "https://api.openai.com/v1"
-                           :default-model "gpt-4o-mini"
+                           :default-model "gpt-4o-mini" :reasoning-dialect :openai
                            :route         #"^gpt-"}
    :openrouter            {:kind          :openrouter :base-url "https://openrouter.ai/api/v1"
-                           :default-model "openai/gpt-4o-mini"
+                           :default-model "openai/gpt-4o-mini" :reasoning-dialect :openrouter
                            :route         #".+/.+"}
    ;; DeepSeek, metered, on its own endpoint. Mirrors the descriptor
    ;; `detect-available-credentials` emits for DEEPSEEK_API_KEY.
    :deepseek              {:kind          :deepseek :base-url "https://api.deepseek.com/v1"
-                           :default-model "deepseek-v4-flash"
+                           :default-model "deepseek-v4-flash" :reasoning-dialect :deepseek
                            :route         #"^deepseek-"}
    :ollama                {:kind          :ollama :base-url "https://ollama.com/v1"
-                           :default-model "kimi-k2.5"
+                           :default-model "kimi-k2.5" :reasoning-dialect :ollama
                            :route         #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}
    :opencode-go           {:kind          :opencode-go-openai :base-url "https://opencode.ai/zen/go/v1"
-                           :default-model "glm-5"
+                           :default-model "glm-5" :reasoning-dialect :none
                            :route         #"^(glm-|kimi-|mimo-)"}
    :opencode-go-anthropic {:kind          :opencode-go-anthropic :base-url "https://opencode.ai/zen/go"
                            :default-model "minimax-m2.7" :auth-mode :x-api-key
@@ -277,7 +286,7 @@
   [{:keys [provider] :as desc}]
   (when-let [tmpl (get provider-templates provider)]
     (let [overrides (-> desc
-                      (select-keys [:api-key :base-url :default-model :auth-mode])
+                      (select-keys [:api-key :base-url :default-model :auth-mode :reasoning-dialect])
                       (cond-> (:model desc) (assoc :default-model (:model desc))))]
       (merge tmpl (into {} (remove (comp nil? val)) overrides)))))
 

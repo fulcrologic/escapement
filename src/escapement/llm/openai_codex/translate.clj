@@ -9,6 +9,7 @@
     [cheshire.core :as json]
     [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn ?]]
+    [escapement.llm.reasoning :as reasoning]
     [taoensso.timbre :as log]))
 
 ;;; ---------------------------------------------------------------------------
@@ -206,8 +207,15 @@ Notes:
 * `:max-tokens` is silently ignored (not accepted by the ChatGPT backend).
 * `:temperature`, `:top-p`, `:top-k`, `:stop-sequences` are silently dropped.
 * `cache_control` markers are no-ops; a debug log line is emitted when present.
-* The `:reasoning` key (if present) is passed through as-is; otherwise
- `{:effort \"medium\" :summary \"auto\"}` is used."
+* `:reasoning` — the normalised, provider-neutral reasoning control
+ (`escapement.llm.types/Reasoning`) is translated into the Responses API's
+ `reasoning` object. A map carrying a STRING `:effort` is instead passed
+ through verbatim, which is what this key meant before the normalised field
+ existed. With neither, `{:effort \"medium\" :summary \"auto\"}` is used, exactly
+ as before.
+
+ `:max` is rendered as \"high\", not \"xhigh\": the xhigh level is
+ model-dependent and was not verified against the live API."
   [{:keys [model system messages tools reasoning tool-choice] :as request}]
   [:map => :map]
   (when (has-cache-control? request)
@@ -224,7 +232,11 @@ Notes:
            :store        false
            :stream       true
            :include      ["reasoning.encrypted_content"]
-           :reasoning    (or reasoning {:effort "medium" :summary "auto"})
+           :reasoning    (cond
+                           (string? (:effort reasoning)) reasoning
+                           (some? reasoning) (or (reasoning/responses-reasoning request)
+                                               {:effort "medium" :summary "auto"})
+                           :else {:effort "medium" :summary "auto"})
            :text         {:verbosity "medium"}}
     (= :tool (:type tool-choice))
     (assoc :tool_choice {:type "function" :name (:name tool-choice)})))

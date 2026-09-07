@@ -47,7 +47,8 @@
     [escapement.llm.needs :as needs]
     [escapement.llm.preferences :as preferences]
     [escapement.llm.prompt-cache :as prompt-cache]
-    [escapement.llm.protocol :as proto]))
+    [escapement.llm.protocol :as proto]
+    [escapement.llm.types :as types]))
 
 (defn- now-ms [] (System/currentTimeMillis))
 
@@ -90,6 +91,12 @@
      * `:stop-sequences` — vector of strings
      * `:thinking` — `{:type :enabled :budget-tokens N}` to turn on
                      extended thinking. Requires `:max-tokens` > `N`.
+     * `:reasoning` — normalised, provider-neutral reasoning control:
+                     `{:effort :none|:minimal|:low|:medium|:high|:max}`, or
+                     the bare effort keyword as sugar, plus an optional
+                     `:budget-tokens` hint. Each backend translates it into
+                     its own dialect (see `escapement.llm.types/Reasoning`).
+                     Omit it for exactly today's wire output.
      * `:tool-choice` — `:auto` | `:any` | `:none` | `{:type :tool :name \"...\"}`
      * `:metadata` — `{:user-id \"...\"}`
      * `:auto-cache?` — boolean, default `true`. When true, fills in
@@ -116,7 +123,7 @@
        The NEWEST inbound turn is never marked. See `escapement.llm.prompt-cache`.
      * `:conv-id` — conversation correlation id; used as prompt cache key by openai-codex (string/keyword/uuid)"
   [{:keys [system messages tools model max-tokens conv-id
-           temperature top-p top-k stop-sequences thinking tool-choice metadata
+           temperature top-p top-k stop-sequences thinking reasoning tool-choice metadata
            system-cache-control tools-cache-control message-cache-control auto-cache?]
     :or   {auto-cache? true}}]
   ;; Auto-cache defaulting: an absent (== `nil`) cache-control marker
@@ -180,6 +187,8 @@
       (some? top-k) (assoc :top-k top-k)
       (seq stop-sequences) (assoc :stop-sequences (vec stop-sequences))
       thinking (assoc :thinking thinking)
+      ;; Normalise the sugar exactly once, here, so no backend sees two shapes.
+      (some? reasoning) (assoc :reasoning (types/normalize-reasoning reasoning))
       (some? tool-choice) (assoc :tool-choice tool-choice)
       (seq metadata) (assoc :metadata metadata)
       conv-id (assoc :conversation/id conv-id))))
@@ -221,14 +230,14 @@
   "Normalize a validated `:llm/aliases` target map into the uniform candidate
    shape consumed by `run-turn`. `:provider`/`:model` route+identify the
    target; `:params` carries this target's optional generation overrides
-   (`:temperature`/`:top-p`/`:top-k`/`:thinking`/`:max-tokens`) that are merged
+   (`:temperature`/`:top-p`/`:top-k`/`:thinking`/`:reasoning`/`:max-tokens`) that are merged
    UNDER the node's explicit params (node wins) on its attempt."
   ([target] (alias-target->candidate target nil))
   ([{:keys [provider model] :as target} alias]
    {:provider provider
     :model    model
     :alias    alias
-    :params   (select-keys target [:temperature :top-p :top-k :thinking :max-tokens])}))
+    :params   (select-keys target [:temperature :top-p :top-k :thinking :reasoning :max-tokens])}))
 
 (defn- node-alias-vector
   "Normalize a node's model selection into a vector of alias keywords.
@@ -608,6 +617,7 @@
                                     :top-k                (:top-k eff)
                                     :stop-sequences       (:stop-sequences params)
                                     :thinking             (:thinking eff)
+                                    :reasoning            (:reasoning eff)
                                     :tool-choice          (:tool-choice params)
                                     :metadata             (:metadata params)
                                     :system-cache-control (:system-cache-control params)

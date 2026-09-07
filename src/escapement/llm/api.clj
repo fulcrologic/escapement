@@ -18,7 +18,9 @@
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [escapement.llm.http-transport :as ht]
     [escapement.llm.protocol :as proto]
+    [escapement.llm.reasoning :as reasoning]
     [escapement.llm.types :as types]
+    [taoensso.timbre :as log]
     [com.fulcrologic.statecharts.promise :as p])
   (:import
     (java.io BufferedReader)))
@@ -161,6 +163,28 @@
     (cond-> {}
       (:user-id m) (assoc "user_id" (:user-id m)))))
 
+(def ^:private thinking-conflict-warned
+  "Warn once per process, not once per turn: a chart that sets both a sampling
+   parameter and a reasoning directive does it on every turn."
+  (atom false))
+
+(defn- drop-sampling-for-thinking
+  "Anthropic rejects a request that enables extended thinking while also
+   setting `temperature` / `top_p` / `top_k`. Enabling `:reasoning` therefore
+   turns a chart that works today into a 400 on the identical request, so the
+   backend drops the conflicting keys and says so once, rather than passing
+   through a request it already knows the API will reject."
+  [wire request]
+  (let [present (filterv #(some? (get request %))
+                  reasoning/sampling-keys-thinking-forbids)]
+    (when (and (seq present)
+            (compare-and-set! thinking-conflict-warned false true))
+      (log/warn "[anthropic] extended thinking is enabled, which the API will not accept"
+        "alongside" (mapv name present) "— dropped for this and every later turn."
+        "The model owns its own sampling while reasoning."
+        "This is logged once per process."))
+    (dissoc wire "temperature" "top_p" "top_k")))
+
 (>defn request->anthropic-json
   "Pure translation from our Request map to the Anthropic Messages API request body
 (as a Clojure map with string keys, ready for JSON serialization)."
@@ -168,7 +192,8 @@
   [:map => :map]
   (let [{:keys [model system messages tools max-tokens system-cache-control
                 temperature top-p top-k stop-sequences
-                thinking tool-choice metadata]} request
+                tool-choice metadata]} request
+        thinking (reasoning/anthropic-thinking request)
         sys (system->wire system system-cache-control)]
     (cond-> {"model"      model
              "messages"   (mapv message->wire messages)
@@ -180,6 +205,7 @@
       (some? top-k) (assoc "top_k" top-k)
       (seq stop-sequences) (assoc "stop_sequences" (vec stop-sequences))
       thinking (assoc "thinking" (thinking->wire thinking))
+      (reasoning/thinking-enabled? thinking) (drop-sampling-for-thinking request)
       (some? tool-choice) (assoc "tool_choice" (tool-choice->wire tool-choice))
       (seq metadata) (assoc "metadata" (metadata->wire metadata)))))
 

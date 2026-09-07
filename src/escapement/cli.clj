@@ -437,7 +437,8 @@
       "openai"
       (let [m (or model "gpt-4o-mini")]
         {:backend        (build-openai-backend (cond-> {:base-url      (or api-base-url "https://api.openai.com/v1")
-                                                        :default-model m}
+                                                        :default-model m
+                                                        :reasoning-dialect :openai}
                                                  api-key-env (assoc :api-key (System/getenv api-key-env))
                                                  (not api-key-env) (assoc :api-key (System/getenv "OPENAI_API_KEY"))))
          :default-models [m]})
@@ -445,7 +446,8 @@
       "ollama"
       (let [m (or model "kimi-k2.5")]
         {:backend        (build-openai-backend (cond-> {:base-url      (or api-base-url "https://ollama.com/v1")
-                                                        :default-model m}
+                                                        :default-model m
+                                                        :reasoning-dialect :ollama}
                                                  api-key-env (assoc :api-key (System/getenv api-key-env))
                                                  (not api-key-env) (assoc :api-key (System/getenv "OLLAMA_API_KEY"))))
          :default-models [m]})
@@ -453,7 +455,8 @@
       "deepseek"
       (let [m (or model "deepseek-v4-flash")]
         {:backend        (build-openai-backend (cond-> {:base-url      (or api-base-url "https://api.deepseek.com/v1")
-                                                        :default-model m}
+                                                        :default-model m
+                                                        :reasoning-dialect :deepseek}
                                                  api-key-env (assoc :api-key (System/getenv api-key-env))
                                                  (not api-key-env) (assoc :api-key (System/getenv "DEEPSEEK_API_KEY"))))
          :default-models [m]})
