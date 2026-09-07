@@ -42,7 +42,8 @@
     :openai {:source "openai" :auth :metered}
     :z-ai {:source "zai" :auth :metered}
     :z-ai-plan {:source "zai-coding-plan" :auth :subscription}
-    :ollama {:source "ollama-cloud" :auth :subscription}))
+    :ollama {:source "ollama-cloud" :auth :subscription}
+    :deepseek {:source "deepseek" :auth :metered}))
 
 (def ^:private family->company
   "Coarse model family → maker, for display. The dump has no per-model

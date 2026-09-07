@@ -86,6 +86,7 @@
         zai         (nonblank-env "ZAI_API_KEY")
         openai      (nonblank-env "OPENAI_API_KEY")
         openrouter  (nonblank-env "OPENROUTER_API_KEY")
+        deepseek    (nonblank-env "DEEPSEEK_API_KEY")
         ollama      (nonblank-env "OLLAMA_API_KEY")
         opencode-go (nonblank-env "OPENCODE_GO_API_KEY")
         codex-auth  (try
@@ -119,6 +120,16 @@
              :api-key       openrouter :base-url "https://openrouter.ai/api/v1"
              :default-model (or (System/getenv "OPENROUTER_MODEL") "openai/gpt-4o-mini")
              :route         #".+/.+"})
+
+      ;; DeepSeek's own metered endpoint — OpenAI chat-completions wire at
+      ;; `https://api.deepseek.com/v1`. Listed BEFORE Ollama on purpose: the
+      ;; Ollama descriptor's route also matches `deepseek-*`, so a key for the
+      ;; model's own vendor must win over a gateway that merely resells it.
+      deepseek
+      (conj {:kind          :deepseek :source "DEEPSEEK_API_KEY"
+             :api-key       deepseek :base-url "https://api.deepseek.com/v1"
+             :default-model (or (System/getenv "DEEPSEEK_MODEL") "deepseek-v4-flash")
+             :route         #"^deepseek-"})
 
       ;; Keep established provider routes before newer hosted gateways so
       ;; adding Ollama/OpenCode credentials does not steal existing glm-* traffic.
@@ -170,6 +181,7 @@
     :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :ollama (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
+    :deepseek (build-openai-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms]))
     :opencode-go-openai (build-openai-backend (select-keys c [:api-key :base-url :default-model]))
     :opencode-go-anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
     :codex (build-codex-backend {:default-model (:default-model c)})
@@ -223,6 +235,11 @@
    :openrouter            {:kind          :openrouter :base-url "https://openrouter.ai/api/v1"
                            :default-model "openai/gpt-4o-mini"
                            :route         #".+/.+"}
+   ;; DeepSeek, metered, on its own endpoint. Mirrors the descriptor
+   ;; `detect-available-credentials` emits for DEEPSEEK_API_KEY.
+   :deepseek              {:kind          :deepseek :base-url "https://api.deepseek.com/v1"
+                           :default-model "deepseek-v4-flash"
+                           :route         #"^deepseek-"}
    :ollama                {:kind          :ollama :base-url "https://ollama.com/v1"
                            :default-model "kimi-k2.5"
                            :route         #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}

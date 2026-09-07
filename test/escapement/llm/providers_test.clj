@@ -213,3 +213,62 @@
 
         "surviving route is the known provider"
         (-> (route-classes mb) first) => ["^claude-" "AnthropicAPIBackend"]))))
+
+(specification ":deepseek provider template"
+
+  (component "an injected :deepseek descriptor resolves to the OpenAI wire backend"
+    (let [mb (providers/build-injected-credentials-backend
+               [{:provider :deepseek :api-key "sk-ds"}]
+               [{:provider :deepseek :model "deepseek-v4-pro"}])
+          b  (:default-backend mb)]
+      (assertions
+        "DeepSeek speaks OpenAI chat-completions, so it is the OpenAI backend"
+        (backend-class b) => "OpenAIBackend"
+
+        "on DeepSeek's own metered endpoint"
+        (-> b :opts :base-url) => "https://api.deepseek.com/v1"
+
+        "carrying the injected key"
+        (-> b :opts :api-key) => "sk-ds"
+
+        "and the template default model"
+        (-> b :opts :default-model) => "deepseek-v4-flash"
+
+        "routed by the deepseek- model prefix"
+        (-> (route-classes mb) first first) => "^deepseek-")))
+
+  (component "the env-detected descriptor mirrors the static template"
+    ;; The two assembly paths must not drift: same kind, base-url, model, route.
+    (let [tmpl (get @(resolve 'escapement.llm.providers/provider-templates) :deepseek)
+          desc (with-redefs [providers/nonblank-env
+                             (fn [k] (when (= k "DEEPSEEK_API_KEY") "sk-ds"))]
+                 (->> (providers/detect-available-credentials)
+                   (filter #(= :deepseek (:kind %)))
+                   first))]
+      (assertions
+        "env detection emits a :deepseek descriptor when the key is present"
+        (some? desc) => true
+
+        "same wire facts as the template"
+        (select-keys desc [:kind :base-url :default-model])
+        => (select-keys tmpl [:kind :base-url :default-model])
+
+        "same route"
+        (str (:route desc)) => (str (:route tmpl)))))
+
+  (component "DeepSeek's own key outranks a gateway that merely resells the models"
+    ;; Ollama's route also matches `deepseek-*`; the vendor endpoint must be
+    ;; tried first when both credentials are present.
+    (let [descs (with-redefs [providers/nonblank-env
+                              (fn [k] (get {"DEEPSEEK_API_KEY" "sk-ds"
+                                            "OLLAMA_API_KEY"   "sk-ol"} k))]
+                  (providers/detect-available-credentials))
+          ;; A saved codex OAuth token may also be detected on the host
+          ;; running the suite; only the two under test matter here.
+          kinds (filterv #{:deepseek :ollama} (mapv :kind descs))]
+      (assertions
+        "both providers detected"
+        (set kinds) => #{:deepseek :ollama}
+
+        ":deepseek is ordered before :ollama"
+        (< (.indexOf kinds :deepseek) (.indexOf kinds :ollama)) => true))))

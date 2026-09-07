@@ -32,7 +32,7 @@
     (component "providers — curated allowlist with our keywords"
       (assertions
         "only curated providers are surfaced (keywordized)"
-        (set (keys providers)) => #{:anthropic :openai :z-ai :z-ai-plan :ollama}
+        (set (keys providers)) => #{:anthropic :openai :z-ai :z-ai-plan :ollama :deepseek}
         "metered provider keeps real per-token pricing"
         (get-in providers [:openai :models "gpt-5" :pricing])
         => {:input 1.25 :output 10.0}

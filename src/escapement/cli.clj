@@ -21,7 +21,7 @@
                                 dir). Set this to a repo the chart clones/operates on
                                 to decouple tool I/O from the session/checkpoint dir.
         --resume                Resume from saved working memory.
-        --backend (api|codex|claude-cli|openai|ollama|opencode-go)  LLM backend (optional; only needed for LLM charts).
+        --backend (api|codex|claude-cli|openai|ollama|deepseek|opencode-go)  LLM backend (optional; only needed for LLM charts).
         --model <name>          Model name.
         --api-base-url <url>    API base URL.
         --api-key-env <name>    Env-var name holding the API key.
@@ -364,6 +364,7 @@
    "claude-cli"  :claude-cli
    "openai"      :openai
    "ollama"      :ollama
+   "deepseek"    :deepseek
    "opencode-go" :opencode-go
    ;; z.ai coding plan, v1 (legacy) Responses wire — see
    ;; `escapement.llm.providers/detect-available-credentials` for the
@@ -447,6 +448,14 @@
                                                         :default-model m}
                                                  api-key-env (assoc :api-key (System/getenv api-key-env))
                                                  (not api-key-env) (assoc :api-key (System/getenv "OLLAMA_API_KEY"))))
+         :default-models [m]})
+
+      "deepseek"
+      (let [m (or model "deepseek-v4-flash")]
+        {:backend        (build-openai-backend (cond-> {:base-url      (or api-base-url "https://api.deepseek.com/v1")
+                                                        :default-model m}
+                                                 api-key-env (assoc :api-key (System/getenv api-key-env))
+                                                 (not api-key-env) (assoc :api-key (System/getenv "DEEPSEEK_API_KEY"))))
          :default-models [m]})
 
       "opencode-go"
@@ -583,12 +592,14 @@
         openai     (System/getenv "OPENAI_API_KEY")
         openrouter (System/getenv "OPENROUTER_API_KEY")
         ollama     (System/getenv "OLLAMA_API_KEY")
+        deepseek   (System/getenv "DEEPSEEK_API_KEY")
         ocgo       (System/getenv "OPENCODE_GO_API_KEY")]
     (println "  ANTHROPIC_API_KEY : " (if (seq anthropic) "set" "not set"))
     (println "  ZAI_API_KEY       : " (if (seq zai) "set" "not set"))
     (println "  OPENAI_API_KEY    : " (if (seq openai) "set" "not set"))
     (println "  OPENROUTER_API_KEY: " (if (seq openrouter) "set" "not set"))
     (println "  OLLAMA_API_KEY    : " (if (seq ollama) "set" "not set"))
+    (println "  DEEPSEEK_API_KEY  : " (if (seq deepseek) "set" "not set"))
     (println "  OPENCODE_GO_API_KEY: " (if (seq ocgo) "set" "not set")))
   (let [codex-info (codex-auth-info)
         auth-file  (codex-auth-file)]
@@ -1391,7 +1402,7 @@ Common `run` flags:
   --transcript <path>           Transcript path.
   --checkpoint-dir <dir>        Checkpoint dir.
   --resume                      Resume from saved working memory.
-  --backend (api|codex|claude-cli|openai|ollama|opencode-go)
+  --backend (api|codex|claude-cli|openai|ollama|deepseek|opencode-go)
                                 LLM backend (only needed for LLM charts).
                                 `claude-cli` drives the `claude -p` CLI, billing a
                                 Claude Max/Pro subscription instead of an API key.
