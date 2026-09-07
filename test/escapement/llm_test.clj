@@ -89,8 +89,16 @@
         => {:status :ok :response "the answer" :model "glm-5.1"
             :usage  {:input-tokens 1 :output-tokens 1}}
         "ask* returns the FULL Response under :response (not just the text)"
-        (dissoc (:response (llm/ask* (ctx b) {:prompt "q" :model :fast})) :elapsed-ms)
+        (dissoc (:response (llm/ask* (ctx b) {:prompt "q" :model :fast}))
+          :elapsed-ms :model-requested :model-substituted?)
         => (end-turn "the answer")
+        ;; The mock answers as "mock" whatever was asked for, which is exactly
+        ;; the silent substitution real providers do (z.ai, DeepSeek). Both ids
+        ;; ride on the Response; they are never collapsed into one.
+        "the Response carries the id we ASKED for alongside the one it reported"
+        (select-keys (:response (llm/ask* (ctx b) {:prompt "q" :model :fast}))
+          [:model :model-requested :model-substituted?])
+        => {:model "mock" :model-requested "glm-5.1" :model-substituted? true}
         "ask* surfaces per-call latency as :elapsed-ms on the Response"
         (number? (:elapsed-ms (:response (llm/ask* (ctx b) {:prompt "q" :model :fast})))) => true)))
 

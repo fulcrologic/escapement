@@ -393,13 +393,11 @@
 ;; Resilience: transient-error retry + max_tokens continuation
 ;; ---------------------------------------------------------------------------
 
-(defn- merge-with-usage
+(def ^:private merge-with-usage
   "Sum numeric usage fields across continuation segments; non-numeric fields
-   take the latest non-nil value."
-  [a b]
-  (merge-with (fn [x y]
-                (if (and (number? x) (number? y)) (+ x y) (or y x)))
-    (or a {}) (or b {})))
+   take the latest non-nil value. Shared with `escapement.llm/run-turn`, which
+   uses the same arithmetic to total what a failed turn spent."
+  ellm/sum-usage)
 
 (defn- merge-segment-content
   "Append continuation blocks `more` onto accumulated `acc`, merging the
@@ -789,9 +787,14 @@
                                 (assoc :provider (get-in env [:candidate :provider])))
                           :model-used (:model env)}
       :overrun           {:overrun (:response env) :model-used (:model env)}
+      ;; `:partial-usage` — tokens the turn burned before it failed or was
+      ;; cancelled. Kept rather than discarded: a cancelled run is exactly when
+      ;; someone wants to know what it cost.
       :exhausted         {:exhausted      (get-in env [:error :attempts])
-                          :last-throwable (:last-throwable env)}
-      :interrupted       {:interrupted (get-in env [:error :throwable])}
+                          :last-throwable (:last-throwable env)
+                          :partial-usage  (:partial-usage env)}
+      :interrupted       {:interrupted   (get-in env [:error :throwable])
+                          :partial-usage (:partial-usage env)}
       :eligibility-empty {:eligibility-empty (:error env)}
       :unknown-alias     {:unknown-alias (get-in env [:error :alias])
                           :known         (get-in env [:error :known])}
@@ -1122,9 +1125,11 @@
       (do
         (transcript! transcript-fn
           {:event :llm/worker-exit :ts (now-ms)
-           :data  {:reason :interrupted-mid-turn
-                   :invokeid (:invokeid parent-ctx)
-                   :session-id (:parent-session-id parent-ctx)}})
+           :data  (cond-> {:reason :interrupted-mid-turn
+                           :invokeid (:invokeid parent-ctx)
+                           :session-id (:parent-session-id parent-ctx)}
+                    (seq (:partial-usage outcome))
+                    (assoc :partial-usage (:partial-usage outcome)))})
         (reset! worker-state :dying)
         :error-and-die)
 
@@ -1140,10 +1145,12 @@
                        category
                        :backend)]
         (transcript! transcript-fn {:event :llm/error :ts (now-ms)
-                                    :data  (assoc details
-                                             :reason reason
-                                             :category category
-                                             :attempts attempts)})
+                                    :data  (cond-> (assoc details
+                                                     :reason reason
+                                                     :category category
+                                                     :attempts attempts)
+                                             (seq (:partial-usage outcome))
+                                             (assoc :partial-usage (:partial-usage outcome)))})
         (post-error! reason (-> (select-keys details [:message :class])
                               (assoc :category category
                                      :attempts attempts)))
@@ -1152,7 +1159,8 @@
 
       :else
       (let [response      (:ok outcome)
-            {:keys [stop-reason content usage model elapsed-ms wait-ms provider]} response
+            {:keys [stop-reason content usage model elapsed-ms wait-ms provider
+                    model-requested model-substituted?]} response
             ctx-window    (some-> model catalog/context-window)
             input-tokens  (:input-tokens usage)
             output-tokens (:output-tokens usage)
@@ -1177,7 +1185,13 @@
                            :content     (mapv ->transcript-content-block content)
                            :invokeid    (:invokeid parent-ctx)
                            :session-id  (:parent-session-id parent-ctx)}
+                    ;; `:model` is what the PROVIDER reported; `:model-requested`
+                    ;; is what we asked for. Never collapsed — servers substitute
+                    ;; silently, and a transcript that records only one id is
+                    ;; confidently wrong about what ran.
                     model (assoc :model model)
+                    model-requested (assoc :model-requested model-requested)
+                    model-substituted? (assoc :model-substituted? true)
                     provider (assoc :provider provider)
                     elapsed-ms (assoc :elapsed-ms elapsed-ms)
                     wait-ms (assoc :wait-ms wait-ms)
@@ -1186,6 +1200,17 @@
                     io-ref (assoc :io/ref (:io/ref io-ref))
                     ctx-used-frac (assoc :context-used-frac
                                          (Double/parseDouble (format "%.3f" ctx-used-frac))))})
+        ;; A silent server-side substitution is a first-class observable, not
+        ;; an anomaly to smooth over: anything pricing or comparing this run by
+        ;; the id it ASKED for is wrong until it sees this.
+        (when model-substituted?
+          (transcript! transcript-fn
+            {:event :llm/model-substituted
+             :ts    (now-ms)
+             :data  {:requested  model-requested
+                     :reported   model
+                     :invokeid   (:invokeid parent-ctx)
+                     :session-id (:parent-session-id parent-ctx)}}))
         (when (and ctx-used-frac (>= ctx-used-frac 0.8))
           (transcript! transcript-fn
             {:event :llm/context-warning
