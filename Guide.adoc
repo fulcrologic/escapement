@@ -1638,9 +1638,18 @@ Use `cache_control` markers on `system` and stable message prefixes to drive tha
 Nothing acts on a half-finished message.
 
 This is **unbounded by default** — it is just "finish reading the message".
-The sole stop condition besides a terminal
-`stop_reason` is *no forward progress*: if a continuation segment adds no new content, the worker stops and fires `:error.llm.unexpected-stop`
-(`:detail :no-forward-progress`) rather than loop and drain quota.
+The stop conditions besides a terminal `stop_reason` are *no forward progress* — if a continuation segment adds no new content, the worker stops and fires `:error.llm.unexpected-stop` (`:detail :no-forward-progress`) rather than loop and drain quota — and two **ceilings**, since "unbounded" otherwise means exactly that:
+
+[source,clojure]
+----
+{:resilience {:continuation {:max-segments 64        ; bounds the CALLS
+                             :max-chars    2000000}}} ; bounds the MEMORY
+----
+
+A model that truncates on *every* segment makes genuine forward progress each round, so the no-progress guard never trips: the loop keeps going and the accumulated content keeps growing. Unbounded, that ends as an `OutOfMemoryError` in the runner — a failure that says nothing about continuation and may fire when the JVM can no longer log usefully. Any model under a tight output cap can produce it; it is not a pathological case.
+
+Hitting either ceiling ends the turn through the ordinary terminal path with `:error.llm.unexpected-stop` (`:detail :continuation-limit`) and a `:llm/continuation-limit` transcript event, **keeping everything stitched so far** — the caller still gets the long answer it paid for, plus an honest error. The two axes are deliberate: segments bound the calls and the quota they spend, while the character ceiling bounds memory, which is what actually fails, and a handful of very large segments can breach it long before any segment count would. Both defaults sit far above a legitimate answer and far below an OOM; raise them for a deliberately enormous artifact.
+
 Each continuation emits a `:llm/continuation` transcript event (`{:segment N :blocks K :usage {…}}`) for observability.
 
 ===== Continuation only works where the provider honours a prefill

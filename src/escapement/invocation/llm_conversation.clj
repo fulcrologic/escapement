@@ -865,7 +865,8 @@
   ;; `:max-retries`; we must therefore SKIP continuation here, or it would undo
   ;; the cap by resuming the runaway. The single returned turn is terminal:
   ;; `:ok` (truncate accepted) or `:overrun` (`:on-exhausted :fail`).
-  (if (pos? (long (or (:max-retries (:overrun (params->resilience params))) 0)))
+  (let [{:keys [max-segments max-chars]} (:continuation (params->resilience params))]
+   (if (pos? (long (or (:max-retries (:overrun (params->resilience params))) 0)))
     (try-models! ctx params (vec base-messages) tools)
     (loop [acc-content nil
          acc-usage   {}
@@ -922,6 +923,31 @@
                          :session-id (:parent-session-id parent-ctx)}})
               {:no-progress resp' :detail :continuation-unsupported})
 
+            ;; The stitch loop's other guard is forward progress, and a model
+            ;; that truncates EVERY segment makes real progress every round —
+            ;; so that guard never trips and the accumulation grows until the
+            ;; JVM dies (observed: OutOfMemoryError in `runner/run!` against a
+            ;; backend that always answers `:max_tokens`). Reachable with any
+            ;; model under a tight cap, not just adversarially. Two ceilings:
+            ;; segments bound the CALLS (and the quota they spend), size bounds
+            ;; the MEMORY, which is what actually failed.
+            (or (>= (inc seg) (long max-segments))
+              (>= (count (content-text merged)) (long max-chars)))
+            (do
+              (transcript! transcript-fn
+                {:event :llm/continuation-limit :ts (now-ms)
+                 :data  {:segments     (inc seg)
+                         :max-segments max-segments
+                         :chars        (count (content-text merged))
+                         :max-chars    max-chars
+                         :model        (:model resp)
+                         :invokeid     (:invokeid parent-ctx)
+                         :session-id   (:parent-session-id parent-ctx)}})
+              ;; Keep everything stitched so far — the caller gets the long
+              ;; answer it paid for, plus an honest terminal error, rather than
+              ;; an OOM that says nothing about continuation.
+              {:no-progress resp' :detail :continuation-limit})
+
             :else
             (do
               (transcript! transcript-fn
@@ -930,7 +956,7 @@
                          :blocks   (count content)
                          :usage    (or usage {})
                          :invokeid (:invokeid parent-ctx)}})
-              (recur merged merged-usage (inc seg))))))))))
+              (recur merged merged-usage (inc seg)))))))))))
 
 (defn- run-verdict-inference!
   "Run a single forced-tool inference asking the model to call `submit_verdict`

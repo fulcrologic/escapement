@@ -1620,12 +1620,14 @@
     => {:max-retries 3 :backoff-ms 500
         :latency {:first-token-ms nil :fallback nil}
         :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
-                  :temperature-bump nil :temperature-max 1.0}}
+                  :temperature-bump nil :temperature-max 1.0}
+        :continuation {:max-segments 64 :max-chars 2000000}}
     (#'llmc/params->resilience {:resilience {:max-retries 0}})
     => {:max-retries 0 :backoff-ms 500
         :latency {:first-token-ms nil :fallback nil}
         :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
-                  :temperature-bump nil :temperature-max 1.0}}
+                  :temperature-bump nil :temperature-max 1.0}
+        :continuation {:max-segments 64 :max-chars 2000000}}
     "merge-segment-content stitches text across a truncation boundary"
     (#'llmc/merge-segment-content [{:type :text :text "Hel"}]
       [{:type :text :text "lo"}])
@@ -1767,6 +1769,92 @@
         "stitched as before"
         (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
         => "Hello world"))))
+
+(defrecord AlwaysTruncatingBackend [n counter]
+  ;; A model that hits the output cap on EVERY segment. Each segment is genuine
+  ;; new content, so forward progress is real every round and the no-progress
+  ;; guard never trips — the exact shape that used to grow the accumulation
+  ;; until the JVM died with an OutOfMemoryError in the runner.
+  llm/LLMBackend
+  (send-turn [_ _]
+    (p/do!
+      (swap! counter inc)
+      {:stop-reason :max_tokens
+       ;; DISTINCT text per segment: identical repeated content would (rightly)
+       ;; be classified as a restart by `continuation-restarted?`, which is a
+       ;; different failure. This is the honest shape — real new content every
+       ;; round, real forward progress, and still unbounded.
+       :content     [{:type :text :text (apply str (repeat n (char (+ 97 (mod @counter 26)))))}]
+       :usage       {:input-tokens 1 :output-tokens 1}
+       :model       "mock"})))
+
+(specification "drive-turn!: a model that truncates every segment is bounded, not fatal"
+  ;; Regression: with only the forward-progress guard this looped forever,
+  ;; growing the stitched content each round, and killed the runner with an
+  ;; OutOfMemoryError that said nothing about continuation. Reachable with any
+  ;; model under a tight output cap, not just adversarially.
+
+  (component "the segment ceiling stops it"
+    (let [captured (atom [])
+          counter  (atom 0)
+          result   (#'llmc/drive-turn! (drive-ctx (->AlwaysTruncatingBackend 8 counter) captured)
+                     {:resilience {:continuation {:max-segments 5 :max-chars 1000000}}}
+                     [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "it terminates at all"
+        (some? result) => true
+
+        "through the terminal path, with a named detail"
+        (:detail result) => :continuation-limit
+
+        "after exactly the configured number of segments"
+        @counter => 5
+
+        "everything stitched so far is kept — the caller still gets what it paid for"
+        (count (->> (get-in result [:no-progress :content])
+                 (filter #(= :text (:type %))) (map :text) (apply str))) => 40
+
+        "and the limit is observable"
+        (count (filter #(= :llm/continuation-limit (:event %)) @captured)) => 1)))
+
+  (component "the size ceiling stops it — the axis that actually OOMed"
+    (let [captured (atom [])
+          counter  (atom 0)
+          result   (#'llmc/drive-turn! (drive-ctx (->AlwaysTruncatingBackend 500 counter) captured)
+                     {:resilience {:continuation {:max-segments 1000 :max-chars 2000}}}
+                     [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "a few huge segments trip the char ceiling long before the segment count"
+        (:detail result) => :continuation-limit
+
+        "stopped as soon as the accumulation reached the ceiling"
+        @counter => 4)))
+
+  (component "the DEFAULT ceilings terminate it — this is the OOM regression"
+    ;; No resilience params at all: the shape that killed the runner.
+    (let [captured (atom [])
+          counter  (atom 0)
+          result   (#'llmc/drive-turn! (drive-ctx (->AlwaysTruncatingBackend 16 counter) captured)
+                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "it terminates on the built-in defaults, with no configuration"
+        (:detail result) => :continuation-limit
+
+        "at the default segment ceiling"
+        @counter => 64)))
+
+  (component "a well-behaved run is unaffected by the defaults"
+    (let [captured (atom [])
+          backend  (mock-backend [(max-tokens-response "Hel") (end-turn-response "lo world")])
+          result   (#'llmc/drive-turn! (drive-ctx backend captured)
+                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+      (assertions
+        "still stitches normally under the default ceilings"
+        (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
+        => "Hello world"
+
+        "and no limit event fires"
+        (count (filter #(= :llm/continuation-limit (:event %)) @captured)) => 0))))
 
 (specification "try-models!: transient category is retried (bounded) then succeeds"
   (let [captured (atom [])

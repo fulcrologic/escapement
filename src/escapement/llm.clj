@@ -426,10 +426,18 @@
        honored when `:first-token-ms` is set. The cap applies to each candidate;
        if the LAST candidate is slow with nowhere left to switch, the turn rides
        it out (a slow answer beats no answer)."
-  {:max-retries 3 :backoff-ms 500
-   :latency     {:first-token-ms nil :fallback nil}
-   :overrun     {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
-                 :temperature-bump nil :temperature-max 1.0}})
+  {:max-retries  3 :backoff-ms 500
+   :latency      {:first-token-ms nil :fallback nil}
+   :overrun      {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
+                  :temperature-bump nil :temperature-max 1.0}
+   ;; Ceilings on the automatic `:max_tokens` continuation stitch (see
+   ;; `escapement.invocation.llm-conversation/drive-turn!`). Continuation is
+   ;; otherwise unbounded — "just finish reading the message" — and a model that
+   ;; truncates EVERY segment makes genuine forward progress every round, so the
+   ;; no-progress guard never trips and the accumulation grows until the JVM
+   ;; dies. Both defaults sit far above any legitimate answer and far below an
+   ;; OOM; raise them for a deliberately enormous artifact.
+   :continuation {:max-segments 64 :max-chars 2000000}})
 
 (defn sum-usage
   "Sum numeric usage fields across two usage maps; non-numeric fields take the
