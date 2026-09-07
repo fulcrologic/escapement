@@ -389,3 +389,58 @@
 
         "OpenAI — no evidence either way, left alone"
         (-> oai :opts :prefill-support) => nil))))
+
+(specification "the two assembly paths do not drift"
+  ;; `providers.clj` states that the injected path "MIRRORS — fact for fact —
+  ;; the descriptor `detect-available-credentials` emits" and that "the
+  ;; equivalence is covered by tests". Until this test it was NOT: the only
+  ;; parity assertion in the suite covered one provider, while the comment told
+  ;; the next maintainer that drift was caught for all of them. A comment
+  ;; claiming coverage that does not exist is worse than no comment, so this
+  ;; makes the claim true rather than softening it.
+
+  (let [templates @(resolve 'escapement.llm.providers/provider-templates)
+        ;; Every env var the detector reads, present — so every env-detectable
+        ;; provider emits a descriptor in one pass.
+        detected  (with-redefs [providers/nonblank-env (fn [k] (str k "-value"))]
+                    (providers/detect-available-credentials))
+        by-kind   (group-by :kind detected)
+        ;; Facts that MUST agree wherever both paths describe the same provider.
+        ;; `:api-key` and `:source` are excluded on purpose: they are the
+        ;; env-dependent half, which is exactly what the two paths differ on by
+        ;; design.
+        shared    [:kind :base-url :auth-mode :reasoning-dialect :http-timeout-ms]
+        drift     (for [[pk tmpl] (sort-by key templates)
+                        :let [desc (first (get by-kind (:kind tmpl)))]
+                        :when desc
+                        :let [a (select-keys tmpl shared)
+                              b (select-keys desc shared)]
+                        :when (or (not= a b)
+                                (not= (str (:route tmpl)) (str (:route desc))))]
+                    {:provider pk
+                     :template (assoc a :route (str (:route tmpl)))
+                     :detected (assoc b :route (str (:route desc)))})]
+
+    (component "every provider described by both paths describes it identically"
+      (assertions
+        "no drift in wire facts or routing"
+        (vec drift) => []))
+
+    (component "the test actually reaches the providers it claims to"
+      (assertions
+        ;; Guard against the failure mode this test exists to prevent: a parity
+        ;; test that passes because it compared nothing.
+        "several provider kinds were detected and compared"
+        (> (count by-kind) 5) => true
+
+        "and each detected kind has a template describing the same provider"
+        (vec (remove (set (map :kind (vals templates))) (keys by-kind))) => []))
+
+    (component "a template that drifts WOULD be caught"
+      ;; Proves the comparison has teeth rather than trivially passing.
+      (let [poisoned (assoc-in templates [:anthropic :base-url] "https://elsewhere.example")
+            desc     (first (get by-kind :anthropic))]
+        (assertions
+          "the poisoned template no longer matches its detected twin"
+          (= (select-keys (get poisoned :anthropic) shared)
+            (select-keys desc shared)) => false)))))

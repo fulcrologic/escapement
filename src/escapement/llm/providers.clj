@@ -241,7 +241,9 @@
 ;; constructor, so the provider matrix cannot drift between CLI auto-detection
 ;; and explicit injection: changing a provider's wire shape means changing it
 ;; in BOTH `detect-available-credentials` and here, and the equivalence is
-;; covered by tests. This path NEVER reads `System/getenv` and NEVER touches
+;; covered by tests — see the "the two assembly paths do not drift" spec in
+;; `test/escapement/llm/providers_test.clj`, which compares EVERY provider both
+;; paths describe, not a sample. This path NEVER reads `System/getenv` and NEVER touches
 ;; disk — every value is supplied by the caller's descriptor or the static
 ;; template below.
 (def ^:private provider-templates
