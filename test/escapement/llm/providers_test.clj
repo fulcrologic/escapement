@@ -307,7 +307,7 @@
   (component "the header is attached on the OpenAI-shaped route"
     (let [b (-> (providers/build-injected-credentials-backend
                   [{:provider :opencode-go :api-key "k"}] [])
-              :default-backend)]
+              :default-backend :default-backend)]
       (assertions
         "a session header is present"
         (some? (get (-> b :opts :extra-headers) "x-opencode-session")) => true)))
@@ -458,9 +458,10 @@
     ;; half-fix — the select-keys alone — would look complete when tested
     ;; through DeepSeek while leaving Ollama and OpenRouter at the default.
     (let [timeout-of (fn [provider]
-                       (-> (providers/build-injected-credentials-backend
-                             [{:provider provider :api-key "k" :http-timeout-ms 300000}] [])
-                         :default-backend :opts :http-timeout-ms))]
+                        (let [b (:default-backend (providers/build-injected-credentials-backend
+                                                   [{:provider provider :api-key "k" :http-timeout-ms 300000}] []))]
+                          (-> (if (= :opencode-go provider) (:default-backend b) b)
+                            :opts :http-timeout-ms)))]
       (assertions
         ":openai"
         (timeout-of :openai) => 300000

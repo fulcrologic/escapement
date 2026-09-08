@@ -93,12 +93,20 @@
       [:model {:optional true} [:maybe :string]]
       [:default-model {:optional true} [:maybe :string]]
       [:auth-mode {:optional true} :any]
+      [:auth-fn {:optional true} fn?]
+      [:http-transport {:optional true} :any]
+      [:http-timeout-ms {:optional true} pos-int?]
+      [:max-sse-event-chars {:optional true} pos-int?]
+      [:extra-headers {:optional true} [:map-of :string :string]]
+      [:endpoint-profile {:optional true} [:enum :responses :chatgpt]]
       ;; ACCEPTED AND INERT. Nothing in `src/` reads this key; whether a
       ;; provider bills a subscription is a fact about the provider, read from
-      ;; the model catalog's `:auth`. It stays in this CLOSED schema only so
-      ;; hosts already passing it (our own older examples taught it) keep
-      ;; validating. Do not teach it, and do not start reading it here —
-      ;; ask the catalog.
+      ;; the model catalog's `:auth`. It is listed only so its TYPE is checked
+      ;; for hosts already passing it (our own older examples taught it). Note
+      ;; this descriptor map is deliberately NOT `{:closed true}` — only the
+      ;; outer options map is — so an unlisted key validates and is then
+      ;; ignored by assembly. Do not teach this key, and do not start reading
+      ;; it here — ask the catalog.
       [:subscription {:optional true} :any]]]]
    ;; --- optional: hermetic config (`.escapement.edn`-shaped map) ---
    ;; `:llm/preferences`, `:llm/ratings`, `:llm/eligibility-strict?`. Kept

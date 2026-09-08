@@ -226,6 +226,15 @@
 ;; Assembled tables
 ;; =============================================================================
 
+(def ^:private model-spelling-aliases
+  ;; ZAI accepts glm-4.6V, but its bundled models.dev row is glm-4.6v.
+  ;; Live evidence, 2026-09-08 (re-confirmed): max_tokens 131072 is rejected
+  ;; with `"code":"1210"` — "The max_tokens parameter is illegal.：限制数值范围
+  ;; [1,32768]" — while 32768 is accepted and answers normally.
+  ;; Without an exact vision entry the mixed-case id prefix-matched glm-4.6
+  ;; (text model, 131072 output). Inherit registry facts, not a task budget.
+  {"glm-4.6V" "glm-4.6v"})
+
 (def models
   "Canonical model id → intrinsic fact map (objective only; subjective
    `:intelligence` is overlaid by `info`, not stored here). Loaded from
@@ -233,7 +242,21 @@
    host; on CLJS the dump is baked in at compile time via
    `escapement.llm.catalog-macros/embedded-catalog`."
   (let [{:keys [models]} (src/load-catalog)]
-    (deep-merge models local-models)))
+    (reduce-kv (fn [ms alias canonical]
+                 (cond
+                   ;; A future explicit registry entry takes precedence over the alias.
+                   (contains? ms alias) ms
+                   ;; Never insert a nil-valued key. `prefix-lookup` treats a
+                   ;; nil hit as a miss and walks on to the longest prefix, so
+                   ;; a dropped/renamed canonical row would silently resolve
+                   ;; `glm-4.6V` back to the text-only `glm-4.6` — the exact
+                   ;; wrong-output-cap bug this alias exists to prevent, with
+                   ;; every test still green. Fail at load instead.
+                   (contains? ms canonical) (assoc ms alias (get ms canonical))
+                   :else (throw (ex-info "Model spelling alias names a canonical id the catalog does not define"
+                                  {:alias alias :canonical canonical}))))
+      (deep-merge models local-models)
+      model-spelling-aliases)))
 
 (def providers
   "Provider keyword → `{:display :auth :env :api :models}`. Same id may

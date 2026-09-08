@@ -651,6 +651,15 @@ Models the catalog does not know fall back to the api backend's wire default (**
 This caps generation in ONE assistant HTTP response — not the whole conversation, not a tool round-trip.
 See
 <<tokens-and-turns>> for the full mechanics and how `:thinking` interacts with it.
++
+Known accepted spelling aliases inherit their canonical registry facts before
+family-prefix fallback. In particular, ZAI's accepted `glm-4.6V` spelling maps to
+the bundled native-ZAI `glm-4.6v` vision facts: **32768 output tokens**, not the
+text-only `glm-4.6` model's 131072. Live evidence reported on 2026-09-08:
+ZAI rejected 131072 with code `1210` and an allowed maximum of 32768. The registry
+already contained that limit; the correction is catalog lookup, not a new task
+budget. The requested wire ID is unchanged, and explicit smaller host budgets
+such as 8192 still win. Other provider/model limits are not rewritten.
 
 `:stream?`::
 Optional boolean.
@@ -754,6 +763,31 @@ for the 1024-token floor); OpenAI — `reasoning_effort`; OpenRouter — its
 Omitting `:reasoning` produces exactly the wire body it always did — the field
 adds nothing to a request that does not ask for it. An explicit `:thinking`
 always wins over a `:reasoning`-derived one.
++
+IMPORTANT: `:effort :none` now emits an explicit *off directive* on every
+dialect that has one, rather than omitting the field on some of them.
+Anthropic-shaped requests carry `thinking: {"type": "disabled"}`, OpenAI-shaped
+requests carry `reasoning_effort: "none"`, and the Responses wire carries
+`reasoning: {"effort": "none"}` (with no `summary` request). The dialects that
+already had an off directive are unchanged: OpenRouter's
+`reasoning {"enabled": false}`, DeepSeek's `thinking {"type": "disabled"}` and
+Ollama's `think: false`. *This is a wire-behaviour change* for anything already passing
+`:effort :none` on the Anthropic, OpenAI or Responses dialects, where the field
+used to be omitted and the provider default silently applied. The distinction is
+deliberate: "do not reason" is a caller instruction, so a model that cannot
+honour it should reject the request rather than quietly think anyway. If what
+you actually want is *the provider's default*, omit `:reasoning` entirely — that
+still emits nothing.
++
+All three new directives were live-verified on 2026-09-08 and **accepted**:
+the Responses form by z.ai's coding-plan v1 endpoint (`glm-5.3`) and by the
+ChatGPT subscription backend (`gpt-5.6-sol`); `reasoning_effort: "none"` by
+Ollama Cloud's chat-completions endpoint (`glm-5.3-flash`); and
+`thinking: {"type": "disabled"}` by z.ai's Anthropic-shaped endpoint.
+Accepted is not the same as *honoured* — Ollama Cloud took the value and still
+returned reasoning prose. `api.anthropic.com` and `api.openai.com` proper were
+not reachable for this check; the directives sent to them are the documented
+ones and are exercised against gateways that speak the same wires.
 +
 CAUTION: Enabling reasoning on the Anthropic-shaped wire drops `:temperature` /
 `:top-p` / `:top-k`, which that API refuses to accept alongside extended
@@ -2813,9 +2847,13 @@ Works against any service that speaks that wire format.
 ----
 
 The auth mode is auto-sniffed from the base URL: `z.ai` → `Authorization:
-Bearer <key>`; anything else → `x-api-key: <key>` plus `anthropic-version:
-2023-06-01`.
+Bearer <key>`; anything else → `x-api-key: <key>`.
 Override with `:auth-mode :bearer` or `:auth-mode :x-api-key`.
+`anthropic-version: 2023-06-01` (overridable via `:anthropic-version`) is now
+sent in **both** modes rather than only alongside `x-api-key`, so that a host
+`:auth-fn` — which replaces the auth headers and only the auth headers — cannot
+accidentally strip the API-version header. Endpoints that ignore the header
+(z.ai does) are unaffected.
 
 `cache_control` markers are passed through verbatim — both Anthropic and z.ai consume them natively.
 
@@ -2932,21 +2970,51 @@ Charts opt in per state with `:stream?` (see <<params-fn>>); incremental content
 `:llm/delta` transcript events.
 Each delta may carry an optional cumulative `:usage` key for live UX — OpenAI only emits usage on the final chunk, so most deltas carry none; the finalized `Response` usage remains the billing source of truth.
 
-=== `escapement.llm.openai-codex` — ChatGPT subscription via OAuth
+=== `escapement.llm.openai-codex` — the Responses wire (ChatGPT subscription or any Responses endpoint)
 
 Defined in `src/escapement/llm/openai_codex.clj` (entry point) and the
 `openai_codex/` sub-package.
-Routes to
-`https://chatgpt.com/backend-api/codex/responses` using an OAuth 2.0 +
-PKCE token bound to a ChatGPT Plus, Pro, Business, or Enterprise account.
-No OpenAI API key is required; billing is against your subscription's per-tier message limits.
+
+Despite the historical name, this is the general **Responses-API** backend,
+selected by an `:endpoint-profile`:
+
+* `:chatgpt` (the default when no `:base-url` is given) — routes to
+`https://chatgpt.com/backend-api/codex/responses` using an OAuth 2.0 + PKCE
+token bound to a ChatGPT Plus, Pro, Business, or Enterprise account. No OpenAI
+API key is required; billing is against your subscription's per-tier message
+limits. This is the only profile that drops `max_output_tokens` and remaps
+retired model ids through the ChatGPT alias table, and the only one that sends
+the ChatGPT dialect headers (`OpenAI-Beta: responses=experimental`,
+`originator`). Those headers follow the **profile**, not the auth mode: since
+the profile also reshapes the body, an `:api-key` or stored-OAuth request under
+`:chatgpt` announces the same dialect an `:auth-fn` request does. Your own
+`:extra-headers` still win where they overlap.
+* `:responses` (the default when a `:base-url` **is** given) — any other service
+speaking the Responses wire (z.ai's coding plan, a proxy, a self-hosted
+gateway). Model ids are sent verbatim and `:max-tokens` is honoured as
+`max_output_tokens`. Verified live 2026-09-08 against z.ai's coding-plan v1
+endpoint: `max_output_tokens` is accepted there, while the `:chatgpt` profile
+provably still omits it.
+
+It implements `StreamingLLMBackend`, so `stream-turn` (and `send-turn*` with a
+delta callback) yields live text and reasoning-summary deltas plus terminal
+usage; `send-turn` returns the same final result. For host-supplied
+credentials (`:auth-fn`), the SSE size ceiling (`:max-sse-event-chars`) and the
+full option list, see <<host-provider-auth>>.
 
 ==== Constructor
 
 [source,clojure]
 ----
 (require '[escapement.llm.openai-codex :as codex])
+
+;; ChatGPT subscription (saved OAuth)
 (codex/new-backend {:default-model "gpt-5.6-sol"})
+
+;; any other Responses endpoint
+(codex/new-backend {:base-url "https://api.z.ai/api/v1"
+                    :api-key  (System/getenv "ZAI_API_KEY")
+                    :default-model "glm-5.1"})
 ----
 
 ==== Authentication
@@ -2960,13 +3028,22 @@ escapement logout codex  # remove cached credentials
 Credentials are saved to `~/.escapement/openai-auth.json` (mode 0600).
 The backend refreshes the token automatically when it is within 60 seconds of expiry.
 
+That saved-token path belongs to the **CLI**. It applies only on the `:chatgpt`
+profile, and only when `:allow-stored-auth?` is true — which the CLI opts into
+explicitly and which the direct `codex/new-backend` constructor still defaults to
+for backwards compatibility. Backends assembled from injected `:credentials`
+(the `escapement.lib` path) default it to **false**: they never read
+`~/.escapement/openai-auth.json`, never refresh a saved token and never open a
+browser. Without an `:auth-fn` or `:api-key` they fail at request time with an
+`:auth` category. See <<host-provider-auth>>.
+
 ==== Available models
 
 IMPORTANT: ChatGPT-account auth accepts a *much* smaller set than the OpenAI model
 catalog implies. Every `-codex`, `-pro`, and `-nano` variant is rejected with
 `The '<id>' model is not supported when using Codex with a ChatGPT account`, as is
-the previous generation of general models. Since ChatGPT-account auth is the only
-mode this backend has, only these ids work (verified live 2026-07-29):
+the previous generation of general models. On the ChatGPT endpoint profile,
+these ids work (verified live 2026-07-29); other Responses endpoints accept their own models:
 
 * `gpt-5.6-sol` — GPT-5.6 flagship, OpenAI's best coding model *(default)*
 * `gpt-5.6-terra` — GPT-5.6 mid tier
@@ -2991,7 +3068,7 @@ Anthropic-style names map by family: `claude-opus-*` / `claude-fable-*` →
 ==== Reasoning effort
 
 The normalised `:reasoning` field (see <<params-fn>>) is rendered into the Responses API's `reasoning` object: `{:reasoning :high}` becomes `{:effort "high" :summary "auto"}`.
-`:none` omits the field (the provider default applies) and `:max` renders as `"high"`, not `"xhigh"` — that level is model-dependent and has been confirmed only on z.ai's implementation of this wire, not on OpenAI's own Responses models.
+`:none` sends `{:effort "none"}` explicitly, without a summary request. A model that cannot disable reasoning may reject it; silently restoring medium is not an off switch. `:max` renders as `"high"`, not `"xhigh"`, which remains model-dependent. DeepSeek's separate Chat Completions dialect preserves `:high` as `"high"` and `:max` as `"max"`.
 
 A map with a *string* `:effort` is the pre-normalisation escape hatch and is passed through verbatim, which is how a caller reaches a level the ordinal has no name for:
 
@@ -3017,7 +3094,7 @@ If you need multi-user or production deployment, use a pay-per-token backend (th
 
 ==== Limitations vs `api` backend
 
-* `:max-tokens` is silently ignored (not accepted by the ChatGPT backend).
+* `:max-tokens` is omitted ONLY for `:endpoint-profile :chatgpt` (the subscription endpoint rejects it). Generic `:responses` endpoints receive `max_output_tokens`; their model ids are not remapped through ChatGPT aliases.
 * `:temperature`, `:top-p`, `:top-k`, `:stop-sequences`, `:tool-choice`
 are silently ignored (reasoning models do not accept them).
 * Extended-thinking is replaced by the reasoning effort knob (`:reasoning`
@@ -3209,9 +3286,15 @@ Credential: `DEEPSEEK_API_KEY` (optional `DEEPSEEK_MODEL`).
 Listed ahead of Ollama in credential detection, since Ollama's route also matches `deepseek-*` and the vendor's own endpoint should win over a gateway reselling the same models.
 * **OpenCode Go** — `escapement run --backend opencode-go`, served at
 `https://opencode.ai/zen/go`.
-The wire shape is chosen per model:
-Anthropic-shaped for `minimax-*` models, OpenAI-shaped for
+The wire shape is chosen per *request*, from the model on that request:
+Anthropic-shaped for `minimax-*` and `qwen*` models (case-insensitive), OpenAI-shaped for
 `glm-*`/`kimi-*`/`mimo-*`.
+One `opencode-go` backend therefore serves both shapes — including for a request
+that names `:provider :opencode-go` explicitly — so a host injecting a single
+`{:provider :opencode-go :api-key "…"}` descriptor reaches every model the
+gateway sells without declaring the two wire-specific providers separately.
+The explicit `:opencode-go-anthropic` provider remains available to pin the
+Messages shape.
 Credential: `OPENCODE_GO_API_KEY`.
 `--api-base-url` overrides the endpoint.
 The Zen gateway rejects any request without an `x-opencode-session` header (`MissingSessionID`, HTTP 400) on both wire shapes; the library attaches one per backend instance.
@@ -4220,6 +4303,80 @@ Do not depend on a daemon API; there is none.
 
 === `escapement.lib/run`
 
+[[host-provider-auth]]
+==== Host-Owned Provider Auth
+
+HTTP backends support the same `:auth-fn` option, both in `:credentials`
+descriptors and direct constructors (`api/new-backend`, `openai/new-backend`,
+`openai-codex/new-backend`). This is an in-process function, not EDN config data.
+The host owns OAuth login, expiry checks, refresh, persistence and tenant selection.
+Escapement does not need the refresh token or the host's credential-store format.
+
+[source,clojure]
+----
+;; The host's closure selects one account and returns a currently usable token.
+(def credentials
+  [{:provider :codex
+    :auth-fn (fn [{:keys [refresh?]}]
+               (let [{:keys [access-token account-id]}
+                     (host-current-auth! {:force-refresh? refresh?})]
+                 {:headers {"Authorization" (str "Bearer " access-token)
+                            "chatgpt-account-id" account-id}}))}])
+
+;; Pass credentials to lib/run, or assemble once for reuse via its :backend option:
+(providers/build-injected-credentials-backend credentials [])
+----
+
+* Callback input: `{:refresh? false}` before every HTTP request. It is synchronous and must return `{:headers {string nonblank-string}}`; return nil or throw when no credential is available. Both become a categorized `:auth` failure without retaining callback exception details that may contain secrets.
+* On HTTP 401 only, Escapement calls it once more with `{:refresh? true}` and retries once. A second 401 is returned as `:auth`. 403 does not trigger refresh. Normal 429/5xx retry belongs to the engine's bounded resilience policy, not the auth callback.
+* No tokens are cached or persisted by this seam. The host refreshes near-expiry tokens on ordinary calls, persists replacements, and coordinates concurrent refreshes across sessions. Callbacks can run concurrently. Do not open a browser or wait for interactive login inside them.
+* Callback headers override static auth, case-insensitively, and remove competing `Authorization`/`x-api-key` headers. Non-auth headers, including the Messages API version, are retained; use `:extra-headers` for static provider-required beta headers. ChatGPT requires the account-id header from the host; its endpoint profile supplies Codex beta/originator headers.
+* API keys remain supported via `:api-key` without a callback. A callback takes precedence when both are supplied. `:http-transport`, `:http-timeout-ms`, `:extra-headers` and `:endpoint-profile` survive injected credential assembly.
+* Injected Codex credentials never fall back to disk or browser login by default. Missing `:auth-fn`/`:api-key` fails as `:auth` at request time. The CLI explicitly opts into `:allow-stored-auth? true`, retaining `escapement login codex`, saved-token refresh and existing interactive behavior. Direct Codex constructors also retain that legacy default; server callers should supply `:auth-fn` or set `:allow-stored-auth? false`.
+
+Responses endpoint selection is independent of authentication. Without `:base-url`,
+the profile defaults to `:chatgpt` and uses the subscription endpoint. With a root
+`:base-url`, it defaults to `:responses` and appends `/responses`. Explicit
+`:endpoint-profile :chatgpt` supports a proxy of the subscription endpoint.
+Only that profile drops the output cap and remaps retired model aliases.
+For a generic Responses service, use `openai-codex/new-backend` with a base URL
+and API key/callback, or an injected `:codex` descriptor with those overrides.
+Despite its historical name this backend implements the reusable Responses wire.
+
+Responses implements `StreamingLLMBackend`: `protocol/send-turn*` or
+`protocol/stream-turn` delivers text and reasoning-summary deltas before the final
+response, plus cumulative usage when the terminal event supplies it. Callback
+exceptions do not abort generation. `send-turn` produces the same final result.
+Terminal output items remain authoritative for text, encrypted reasoning and tool
+arguments when the terminal output array is nonempty. Some subscription endpoints
+send `output: []` after complete `output_item.done` events; absent/empty terminal
+output therefore preserves collected items in `output_index` order, with final
+items replacing their earlier partial versions rather than duplicating tool calls.
+Token-limited incomplete output reports `:max_tokens`; content-filter incomplete
+output reports `:refusal`, even when tool items were collected. Premature EOF and SSE failures
+are categorized errors, not empty successes. Usage is not invented when the
+provider disconnects before reporting it.
+
+Responses SSE events accept optional single-space prefixes and multiple `data`
+fields joined with newlines, dispatch at blank lines, and flush pending terminal
+data at EOF. `:max-sse-event-chars` is the one parser resource option, accepted by
+the Responses constructor and injected descriptors. It defaults to 8388608
+characters per event, counting one newline per data field. Overflow clears the
+pending data buffer, latches `:llm/category :invalid-request` with
+`:reason :sse-event-too-large`, ignores subsequent lines, and fails after the
+transport finishes. The engine does not retry this deterministic limit failure.
+This bounds event accumulation, not the transport's allocation of a single line,
+total response size, or network draining time; `:http-timeout-ms` still applies.
+
+One injected `{:provider :opencode-go :api-key "..."}` covers both wire formats:
+MiniMax and Qwen models use Messages, other models use Chat Completions, even when
+the request explicitly names `:provider :opencode-go`. No application-specific
+aliases are needed. `:base-url` is the gateway root (optional trailing `/v1`);
+both routes retain the mandatory session header and injected transport/auth.
+The explicit `:opencode-go-anthropic` provider remains available to pin Messages.
+
+==== Run Contract
+
 `escapement.lib/run` is a thin, additive facade over the runner.
 It validates its single option map against a **closed Malli schema**
 (unknown keys are rejected — invalid options throw `ExceptionInfo`
@@ -4344,12 +4501,30 @@ Each names a
 ----
 
 **The keys that are honoured** are `:provider` (required keyword), `:api-key`,
-`:base-url`, `:model`, `:default-model`, `:auth-mode`, `:reasoning-dialect` and
-`:http-timeout-ms` — and `:auth-mode` only reaches the Anthropic-shaped
-providers, since the OpenAI-shaped ones authenticate one way. The descriptor map
-is not closed, so **any other key is accepted by validation and then silently
-ignored**. If you need a knob that is not in that list, construct the backend
-yourself and pass it as `:backend`.
+`:auth-fn`, `:base-url`, `:model`, `:default-model`, `:auth-mode`,
+`:reasoning-dialect`, `:http-timeout-ms`, `:http-transport`, `:extra-headers`,
+`:endpoint-profile`, `:allow-stored-auth?` and `:max-sse-event-chars`. Some are
+shape-specific: `:auth-mode` only reaches the Anthropic-shaped providers (the
+OpenAI-shaped ones authenticate one way), and `:endpoint-profile` /
+`:max-sse-event-chars` / `:allow-stored-auth?` only reach the Responses-wire
+providers (`:codex`, `:openai-codex`, `:zai-coding-plan`). The descriptor map is not closed, so
+**any other key is accepted by validation and then silently ignored**. If you
+need a knob that is not in that list, construct the backend yourself and pass it
+as `:backend`.
+
+* `:auth-fn` is the host-owned credential callback — the provider-neutral way to
+supply your own OAuth/short-lived tokens without Escapement touching env, disk
+or a browser. It is a function, so it is *in-process* data, not EDN config. See
+<<host-provider-auth>> for the full contract (refresh-on-401, header
+precedence, failure categories).
+* `:http-transport` swaps the HTTP client (a
+`escapement.llm.http-transport/HttpTransport`), which is how a host tests a
+provider path or routes through its own connection pool.
+* `:extra-headers` adds static provider-required headers (`{string string}`).
+Headers returned by `:auth-fn` take precedence over these for the auth headers.
+* `:allow-stored-auth?` defaults to **false** on this injected path: an
+embedded Responses/Codex backend will not fall back to `escapement login codex`
+credentials on disk. The CLI is the one caller that opts back in.
 
 `:http-timeout-ms` is worth setting deliberately rather than inheriting. It
 defaults to **60 s** on the OpenAI-shaped backends (a few provider templates
@@ -4670,7 +4845,7 @@ Escapement therefore never collapses the two ids. The requested id and the id th
 +
 --
 ** **Anthropic assistant prefill** — documented by Anthropic, unverified here; deliberately left enabled rather than downgraded on a guess.
-** **OpenAI `reasoning_effort` `"none"` and `"minimal"`** — no `OPENAI_API_KEY` was available. `:effort :none` therefore emits *nothing* on the OpenAI dialect (the provider default applies) rather than a guessed wire value, and `:minimal` is sent as `"low"`.
+** **OpenAI reasoning levels remain model-dependent.** `:effort :none` sends the documented `"none"` off directive; models that do not support disabling reasoning may reject it. Omitting reasoning still leaves the provider default alone. `:minimal` is conservatively sent as `"low"`. `"none"` and `"high"` were live-verified accepted on Ollama Cloud's chat-completions endpoint (2026-09-08); `api.openai.com` itself was not reachable for that check, and no endpoint is *guaranteed* to honour a value it accepts.
 ** **The Responses API `"xhigh"` effort level** — confirmed on ONE implementation of that wire, not on the other. z.ai's coding-plan endpoint validates the field and names its accepted set in the error text (`none, minimal, low, medium, high, xhigh, max`), and a bogus value is a 400 there, so the check discriminates. OpenAI's own Responses models remain unverified — a different implementation of the same wire. `:effort :max` therefore still renders as `"high"` for everyone. A caller who needs `xhigh` on an endpoint that accepts it can pass it verbatim by supplying `:reasoning` with a *string* `:effort`.
 ** **Ollama reasoning models and prefill** — inconclusive: they returned reasoning and no content under every output cap tried, so their prefill behaviour was never established. The hard `400` recorded above came from a non-reasoning model on the same endpoint.
 --
@@ -4714,4 +4889,3 @@ Strings only — the LLM sees a string.
 3. Add a `new-backend` constructor.
 4. Wire into the CLI's `make-backend` if it should be selectable via
 `--backend`.
-

@@ -262,7 +262,7 @@
   "Converts an Escapement LLM Request map to an OpenAI Responses API body map.
 
 Notes:
-* `:max-tokens` is silently ignored (not accepted by the ChatGPT backend).
+* `:max-tokens` becomes `:max_output_tokens`. The backend applies endpoint constraints.
 * `:temperature`, `:top-p`, `:top-k`, `:stop-sequences` are silently dropped.
 * `cache_control` markers are no-ops; a debug log line is emitted when present.
 * `:reasoning` — the normalised, provider-neutral reasoning control
@@ -283,7 +283,7 @@ Notes:
     ;; whole frame (the classic Tab-toggle corruption). `route-logs-to-file!`
     ;; sends timbre to the session log instead.
     (log/debug "[openai-codex] backend ignores cache-control markers; subscription billing uses backend's own caching"))
-  (cond-> {:model        (normalize-model model)
+  (cond-> {:model        (or model default-model)
            :instructions (or system "")
            :input        (anthropic-messages->openai-input messages)
            :tools        (mapv anthropic-tool->openai-tool (or tools []))
@@ -296,6 +296,7 @@ Notes:
                                                {:effort "medium" :summary "auto"})
                            :else {:effort "medium" :summary "auto"})
            :text         {:verbosity "medium"}}
+    (:max-tokens request) (assoc :max_output_tokens (:max-tokens request))
     (= :tool (:type tool-choice))
     (assoc :tool_choice {:type "function" :name (:name tool-choice)})))
 

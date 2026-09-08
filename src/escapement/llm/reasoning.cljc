@@ -34,14 +34,21 @@
                      is dropped when both are present.
    - Anthropic-shaped `thinking {:type enabled :budget_tokens N}` — accepted.
 
-   Rows deliberately left conservative because they could NOT be verified from
-   this machine (no OpenAI credentials), and a plausible-but-wrong payload is
-   worse than no payload:
+   Explicit `:none` emits the wire's own off directive — OpenAI
+   `reasoning_effort: \"none\"`, Responses `{effort: \"none\"}`, Anthropic
+   `thinking: {type: disabled}`. It used to emit nothing on those three, so a
+   caller who asked for no reasoning silently got the provider's default.
+   Live-verified accepted 2026-09-08 on every endpoint reachable from this
+   machine (z.ai coding-plan v1, the ChatGPT subscription backend, Ollama
+   Cloud, z.ai's Anthropic-shaped endpoint); `api.openai.com` and
+   `api.anthropic.com` proper have no credentials here, so vendor acceptance
+   of the documented directive is inferred, not measured. Note also that
+   accepted is not honoured: Ollama Cloud took `\"none\"` and reasoned anyway.
 
-   - `:openai` `:none` and `:minimal` — the ordinary low/medium/high
-     `reasoning_effort` values are emitted, but `:none` omits the field
-     (provider default) rather than guessing at a wire value, and `:minimal`
-     is emitted as \"low\".
+   Rows deliberately left conservative, because a plausible-but-wrong payload
+   is worse than no payload:
+
+   - OpenAI `:minimal` — emitted as \"low\", not \"minimal\".
    - Codex/Responses `:max` — emitted as \"high\", not \"xhigh\".
 
      PARTIALLY RESOLVED 2026-09-07. z.ai's coding-plan Responses endpoint
@@ -106,7 +113,10 @@
    `:reasoning`, or nil to emit nothing.
 
    An explicit `:thinking` on the request always WINS — nothing that works
-   today changes.
+   today changes. An explicit `:effort :none` emits `{:type :disabled}` rather
+   than nothing, so the provider's default reasoning cannot quietly override
+   the caller (live-verified 2026-09-08 against z.ai's Anthropic-shaped
+   endpoint, glm-5.3-flash: accepted). Omit `:reasoning` to emit nothing.
 
    `max-tokens` is respected. Anthropic requires the budget to be strictly
    below it, but merely clamping to `max-tokens - 1` would spend the entire
@@ -119,7 +129,7 @@
   (cond
     (some? thinking) thinking
     (not (requested? request)) nil
-    (reasoning-off? request) nil
+    (reasoning-off? request) {:type :disabled}
     :else
     (when-let [e (effort request)]
       (let [explicit (budget-tokens request)
@@ -149,13 +159,23 @@
 ;;; OpenAI chat-completions family
 
 (def ^:private effort->openai
-  {:minimal "low" :low "low" :medium "medium" :high "high" :max "high"})
+  {:none "none" :minimal "low" :low "low" :medium "medium" :high "high" :max "high"})
 
 (defn openai-reasoning-effort
-  "OpenAI `reasoning_effort` string, or nil to emit nothing.
+  "OpenAI `reasoning_effort` string, including explicit off as \"none\".
 
-   `:none` deliberately emits NOTHING rather than a guessed wire value (see
-   the verification note in this namespace's docstring)."
+   Sending the off directive is deliberate: before this, `:effort :none`
+   emitted nothing and the provider's own default reasoning applied, so a
+   caller who asked for no reasoning silently got some. Callers who want the
+   provider default should omit `:reasoning` entirely, which still emits
+   nothing.
+
+   Live-verified 2026-09-08 against Ollama Cloud's chat-completions endpoint
+   (glm-5.3-flash): `\"reasoning_effort\": \"none\"` is ACCEPTED, as is
+   \"high\". Note ACCEPTED is not the same as HONOURED — that gateway still
+   returned reasoning prose for the \"none\" request. An endpoint that does not
+   accept the value must reject the request; a caller learning that loudly is
+   the point, since the alternative was learning nothing at all."
   [request]
   (when-let [e (effort request)]
     (get effort->openai e)))
@@ -166,8 +186,7 @@
 (defn openrouter-reasoning
   "OpenRouter's unified `reasoning` object, or nil to emit nothing.
 
-   `:none` turns reasoning OFF explicitly (`{:enabled false}`) — the one
-   dialect where \"do not think\" has a real wire representation.
+   `:none` turns reasoning OFF explicitly (`{:enabled false}`).
 
    `:effort` and `:max_tokens` are mutually exclusive on this API (verified: a
    request carrying both is a 400), so an explicit `:budget-tokens` wins and
@@ -193,7 +212,9 @@
     :else nil))
 
 (def ^:private effort->deepseek
-  "DeepSeek accepts low / high / max and defaults to high."
+  "DeepSeek accepts low / high / max and defaults to high. High is NOT max.
+   Confirmed against https://api-docs.deepseek.com/guides/thinking_mode
+   on 2026-09-08: medium/xhigh map to high, only max maps to max."
   {:minimal "low" :low "low" :medium "high" :high "high" :max "max"})
 
 (defn deepseek-fields
@@ -214,17 +235,19 @@
 (def ^:private effort->responses
   "`:max` maps to \"high\", NOT \"xhigh\": the xhigh level is model-dependent
    and was not verified."
-  {:minimal "minimal" :low "low" :medium "medium" :high "high" :max "high"})
+  {:none "none" :minimal "minimal" :low "low" :medium "medium" :high "high" :max "high"})
 
 (defn responses-reasoning
-  "The Responses API `reasoning` object, or nil to emit nothing. `:none` omits
-   the field rather than guessing at an \"off\" representation."
+  "The Responses API `reasoning` object, or nil when absent. Explicit off
+   emits effort \"none\" and asks for no reasoning summary.
+
+   Live-verified 2026-09-08 on both Responses endpoints this library speaks
+   to — z.ai's coding-plan v1 (glm-5.3) and the ChatGPT subscription backend
+   (gpt-5.6-sol): `{\"effort\": \"none\"}` is accepted by each."
   [request]
-  (when-not (reasoning-off? request)
-    (when-let [e (effort request)]
-      (when-let [v (get effort->responses e)]
-        ;; Keyword keys, matching the body map `openai-codex.translate` builds.
-        {:effort v :summary "auto"}))))
+  (when-let [v (get effort->responses (effort request))]
+    (cond-> {:effort v}
+      (not (reasoning-off? request)) (assoc :summary "auto"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Dispatch

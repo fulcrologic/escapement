@@ -19,6 +19,7 @@
     [cheshire.core :as json]
     [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [escapement.llm.auth :as host-auth]
     [escapement.llm.http-transport :as ht]
     [escapement.llm.model-quirks :as quirks]
     [escapement.llm.protocol :as proto]
@@ -536,7 +537,7 @@ Response map."
             request (quirks/apply-quirks (:model-quirks opts) request)]
         (when-let [err (types/validate-request request)]
           (throw (ex-info "Invalid LLM request" {:errors err :request request})))
-        (let [transport     (or (:http-transport opts) (ht/default-transport))
+        (let [transport     (host-auth/transport opts)
               transcript-fn (:transcript-fn opts)
               body-map      (request->openai-json request (:reasoning-dialect opts :openai))
               _             (when transcript-fn
@@ -569,7 +570,7 @@ Response map."
             request (quirks/apply-quirks (:model-quirks opts) request)]
         (when-let [err (types/validate-request request)]
           (throw (ex-info "Invalid LLM request" {:errors err :request request})))
-        (let [transport     (or (:http-transport opts) (ht/default-transport))
+        (let [transport     (host-auth/transport opts)
               transcript-fn (:transcript-fn opts)
               body-map      (request->openai-json request (:reasoning-dialect opts :openai))
               _             (when transcript-fn
@@ -601,6 +602,7 @@ Required opts:
               trailing `/chat/completions`).
 
 Optional opts:
+- `:auth-fn`         — host callback; see `escapement.llm.auth/transport`.
 - `:default-model`   — string used when Request omits `:model`.
 - `:extra-headers`   — map of additional request headers.
 - `:prefill-support` — `:unsupported` when this endpoint is KNOWN not to honour
