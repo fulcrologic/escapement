@@ -11,8 +11,9 @@
    descriptor. The CLI's auto-detection and the live e2e suite both consume
    these so the provider matrix never drifts between them.
 
-   Backend constructors are resolved lazily (require + resolve) so this ns
-   stays cheap to load and pulls in only the backends actually used."
+   Backend constructors are resolved lazily with requiring-resolve so this ns
+   stays cheap to load and pulls in only the backends actually used. Unlike
+   separate require + resolve, concurrent first use waits for JVM loading."
   (:require
     [clojure.string :as str]
     [taoensso.timbre :as log]))
@@ -21,8 +22,7 @@
   "Anthropic-compatible (Messages API) backend: Anthropic, z.ai,
    opencode-go-anthropic."
   [opts]
-  (require 'escapement.llm.api)
-  (let [ctor (resolve 'escapement.llm.api/new-backend)]
+  (let [ctor (requiring-resolve 'escapement.llm.api/new-backend)]
     (assert ctor "escapement.llm.api/new-backend not found")
     (ctor opts)))
 
@@ -30,32 +30,28 @@
   "OpenAI Chat-Completions-compatible backend: OpenAI, OpenRouter, Ollama
    Cloud, opencode-go-openai."
   [opts]
-  (require 'escapement.llm.openai)
-  (let [ctor (resolve 'escapement.llm.openai/new-backend)]
+  (let [ctor (requiring-resolve 'escapement.llm.openai/new-backend)]
     (assert ctor "escapement.llm.openai/new-backend not found")
     (ctor opts)))
 
 (defn build-codex-backend
   "Responses backend: host auth, bearer API key, or CLI saved OAuth."
   [opts]
-  (require 'escapement.llm.openai-codex)
-  (let [ctor (resolve 'escapement.llm.openai-codex/new-backend)]
+  (let [ctor (requiring-resolve 'escapement.llm.openai-codex/new-backend)]
     (assert ctor "escapement.llm.openai-codex/new-backend not found")
     (ctor opts)))
 
 (defn build-claude-cli-backend
   "Claude Max/Pro-subscription backend via the `claude -p` CLI."
   [opts]
-  (require 'escapement.llm.claude-cli)
-  (let [ctor (resolve 'escapement.llm.claude-cli/new-backend)]
+  (let [ctor (requiring-resolve 'escapement.llm.claude-cli/new-backend)]
     (assert ctor "escapement.llm.claude-cli/new-backend not found")
     (ctor opts)))
 
 (defn build-multi-backend
   "Model-prefix dispatcher across several sub-backends."
   [opts]
-  (require 'escapement.llm.multi)
-  (let [ctor (resolve 'escapement.llm.multi/new-backend)]
+  (let [ctor (requiring-resolve 'escapement.llm.multi/new-backend)]
     (assert ctor "escapement.llm.multi/new-backend not found")
     (ctor opts)))
 
@@ -89,8 +85,7 @@
   "Per-model request-key constraints for the opencode.ai Zen gateway. Resolved
    lazily so this ns stays cheap to load."
   []
-  (require 'escapement.llm.model-quirks)
-  @(resolve 'escapement.llm.model-quirks/opencode-go-quirks))
+  @(requiring-resolve 'escapement.llm.model-quirks/opencode-go-quirks))
 
 (defn build-opencode-go-backend
   "Route per request, including requests explicitly tagged :provider :opencode-go.
@@ -139,8 +134,7 @@
         ollama      (nonblank-env "OLLAMA_API_KEY")
         opencode-go (nonblank-env "OPENCODE_GO_API_KEY")
         codex-auth  (try
-                      (require 'escapement.llm.openai-codex.auth)
-                      (when-let [load! (resolve 'escapement.llm.openai-codex.auth/load-auth!)]
+                      (when-let [load! (requiring-resolve 'escapement.llm.openai-codex.auth/load-auth!)]
                         (load!))
                       (catch Throwable _ nil))]
     (cond-> []

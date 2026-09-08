@@ -1,5 +1,39 @@
 # Changelog
 
+## [unreleased] — fix/concurrent-provider-loading — 2026-09-08
+
+### Added
+
+- **`bb provider-loading-smoke`** — a repo task that proves the fix below. For
+  each of the seven lazy lookups it starts a fresh JVM, releases eight threads
+  at the same cold namespace simultaneously, and requires every one to succeed.
+  It makes no provider calls and reads no credentials, so it is safe to run
+  anywhere the `clojure` CLI is available.
+
+### Fixed
+
+- **Building backends concurrently no longer trips over a half-loaded provider
+  namespace on the JVM.** `escapement.llm.providers` loads each backend
+  namespace on first use. When two threads reached the same *cold* provider at
+  once — an embedding host assembling backends in parallel, the multi-backend
+  dispatcher warming several routes, or two `escapement.lib/run` calls starting
+  together — one thread could observe the namespace mid-load and fail with a
+  `… not found` assertion, or get a nil quirks/saved-auth lookup, even though
+  nothing was actually misconfigured. First use is now serialized by the
+  runtime, so a concurrent caller waits for the in-flight load instead of
+  racing it. Loading is still lazy: a namespace a run never touches is still
+  never loaded. Covers all five backend constructors (Anthropic-compatible,
+  OpenAI-compatible, Codex/Responses, `claude` CLI, multi-dispatch) plus the
+  opencode.ai Zen model-quirks table and the saved Codex auth lookup. Babashka
+  is unaffected either way and its behaviour is unchanged.
+
+### Notes
+
+- The race was reachable only on the JVM (library/`escapement.lib` embedders and
+  the `clojure -M` paths). `bb test` covers the seven call sites' lookup
+  behaviour; the actual concurrency proof lives in `bb provider-loading-smoke`,
+  which needs the `clojure` CLI and is therefore not part of `bb test`.
+
 ## [unreleased] — fix/embedded-provider-contracts — 2026-09-08
 
 Gives an embedding host a provider-neutral way to supply its **own** HTTP
