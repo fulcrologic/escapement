@@ -139,6 +139,7 @@ adopted alongside as appropriate.
 bb test               # engine + queue + control-plane suite (bb, guardrails 1.2.16)
 bb ui-test            # RAD/TUI explorer tests (JVM, guardrails 1.3.2) — render-target-isolated JVMs; see "Web UI"
 bb sanity             # engine smoke
+bb provider-loading-smoke # fresh-JVM concurrent lazy provider loading (needs the clojure CLI); no network/auth reads
 bb opentui-test       # OpenTUI sidecar UI tests (bun test in tui/opentui/: unit + snapshot) — see "OpenTUI sidecar UI"
 bb opentui-build      # OpenTUI sidecar typecheck (bun x tsc --noEmit in tui/opentui/)
 bb haiku-opentui      # haiku tournament via the OpenTUI sidecar (--tui=opentui); needs a real TTY + bun + ollama gemma3:1b
