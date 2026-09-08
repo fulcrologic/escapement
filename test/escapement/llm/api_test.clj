@@ -3,6 +3,7 @@
     [cheshire.core :as json]
     [clojure.string :as str]
     [escapement.llm.api :as api]
+    [escapement.llm.http-transport]
     [escapement.llm.protocol :as proto]
     [escapement.llm.types :as types]
     [fulcro-spec.core :refer [=> assertions component specification]]
@@ -319,6 +320,49 @@
     "auto-sniff anthropic.com -> x-api-key"
     (get (api/auth-headers {:base-url "https://api.anthropic.com" :api-key "ak"})
       "x-api-key") => "ak"))
+
+(specification "the Messages request carries anthropic-version in BOTH auth modes"
+  ;; `anthropic-version` identifies the API version, not the credential. It
+  ;; used to be produced only by `auth-headers`, i.e. only in x-api-key mode —
+  ;; and a host `:auth-fn` replaces exactly the auth headers, so a bearer-mode
+  ;; request could reach the endpoint with no version header at all.
+  (doseq [[label opts] [["x-api-key" {:auth-mode :x-api-key :api-key "sk-anth"
+                                      :base-url "https://api.anthropic.com"}]
+                        ["bearer" {:auth-mode :bearer :api-key "zk"
+                                   :base-url "https://api.z.ai/api/anthropic"}]
+                        ["host auth-fn" {:base-url "https://api.anthropic.com"
+                                         :auth-fn (fn [_] {:headers {"Authorization" "Bearer host"}})}]
+                        ["explicit override" {:auth-mode :bearer :api-key "zk"
+                                              :base-url "https://api.anthropic.com"
+                                              :anthropic-version "2099-01-01"}]]
+          streaming? [false true]]
+    (component label
+      (let [seen    (atom nil)
+            backend (api/new-backend
+                      (assoc opts :default-model "claude-sonnet-5"
+                        :http-transport
+                        (reify escapement.llm.http-transport/HttpTransport
+                          (request [_ req]
+                            (reset! seen req)
+                            (p/resolved {:status 200
+                                         :body (json/generate-string
+                                                 {:model "m" :content [{:type "text" :text "ok"}]
+                                                  :stop_reason "end_turn" :usage {}})}))
+                          (request-streaming [_ req on-line]
+                            (reset! seen req)
+                            (doseq [line (str/split-lines
+                                           (sse [{:type "message_start" :message {:model "m" :usage {:input_tokens 1}}}
+                                                 {:type "message_delta" :delta {:stop_reason "end_turn"} :usage {:output_tokens 1}}]))]
+                              (on-line line))
+                            (p/resolved {:status 200})))))]
+        (p/await! (proto/send-turn* backend
+                    {:model "claude-sonnet-5" :max-tokens 16
+                     :messages [{:role :user :content [{:type :text :text "hi"}]}]}
+                    (when streaming? (fn [_]))))
+        (assertions
+          "the version header is present on the outgoing request"
+          (get-in @seen [:headers "anthropic-version"])
+          => (or (:anthropic-version opts) "2023-06-01"))))))
 
 ;;; --- Live tests (gated on env vars) -----------------------------------------
 

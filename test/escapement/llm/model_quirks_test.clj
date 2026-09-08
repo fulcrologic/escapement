@@ -64,7 +64,7 @@
     ;; was perfectly happy to honour.
     (let [oc (-> (providers/build-injected-credentials-backend
                    [{:provider :opencode-go :api-key "k"}] [])
-               :default-backend)
+               :default-backend :default-backend)
           ol (-> (providers/build-injected-credentials-backend
                    [{:provider :ollama :api-key "k"}] [])
                :default-backend)
@@ -79,7 +79,7 @@
   (component "the backend applies them on the way to the wire"
     (let [b (-> (providers/build-injected-credentials-backend
                   [{:provider :opencode-go :api-key "k"}] [])
-              :default-backend)
+              :default-backend :default-backend)
           adjusted (quirks/apply-quirks (-> b :opts :model-quirks)
                      {:model "kimi-k2.7-code" :messages [] :temperature 0.7})]
       (assertions

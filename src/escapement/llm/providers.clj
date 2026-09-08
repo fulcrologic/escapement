@@ -36,7 +36,7 @@
     (ctor opts)))
 
 (defn build-codex-backend
-  "ChatGPT-subscription backend via saved OAuth token."
+  "Responses backend: host auth, bearer API key, or CLI saved OAuth."
   [opts]
   (require 'escapement.llm.openai-codex)
   (let [ctor (resolve 'escapement.llm.openai-codex/new-backend)]
@@ -65,8 +65,15 @@
   (let [v (System/getenv k)]
     (when-not (str/blank? v) v)))
 
+(def opencode-go-anthropic-route
+  "The single definition of which models opencode.ai's Zen gateway serves on
+   its Anthropic-shaped `/messages` route. Referenced by the predicate AND by
+   both credential descriptors below (env-detected and template), so the three
+   cannot drift apart — they used to be three separate literals."
+  #"(?i)^(minimax-|qwen)")
+
 (defn opencode-go-anthropic-model? [model]
-  (and model (re-find #"^minimax-" model)))
+  (boolean (and model (re-find opencode-go-anthropic-route model))))
 
 (defn opencode-session-headers
   "opencode.ai's Zen gateway REJECTS any request without an
@@ -85,18 +92,39 @@
   (require 'escapement.llm.model-quirks)
   @(resolve 'escapement.llm.model-quirks/opencode-go-quirks))
 
-(defn build-opencode-go-backend [{:keys [model api-key base-url] :as opts}]
-  (if (opencode-go-anthropic-model? model)
-    (build-api-backend {:api-key       api-key
-                        :base-url      (or base-url "https://opencode.ai/zen/go")
-                        :default-model model
-                        :auth-mode     :x-api-key
-                        :extra-headers (opencode-session-headers)})
-    (build-openai-backend {:api-key       api-key
-                           :base-url      (or base-url "https://opencode.ai/zen/go/v1")
-                           :default-model (or model (:default-model opts) "glm-5")
-                           :extra-headers (opencode-session-headers)
-                           :model-quirks  (opencode-go-quirks)})))
+(defn build-opencode-go-backend
+  "Route per request, including requests explicitly tagged :provider :opencode-go.
+   :base-url is the gateway root (an optional trailing /v1 is normalized).
+
+   ACCEPTED DEBT — this returns a `multi` that the injected-credentials
+   assembly then nests inside its own `multi`, so anything walking the route
+   table sees one provider whose backend is itself a route table. The
+   alternative (two flat outer routes) cannot work: the outer table dispatches
+   an explicit `:provider :opencode-go` request through a provider index that
+   holds ONE backend per provider keyword, so two same-tagged routes would send
+   every MiniMax/Qwen request to whichever was indexed first. Nesting keeps the
+   provider tag intact and defers the model decision to the inner table, which
+   is the behaviour the gateway requires. Revisit if the provider index ever
+   grows per-request matching of its own."
+  [{:keys [model base-url reasoning-dialect] :as opts}]
+  (let [root     (str/replace (or base-url "https://opencode.ai/zen/go") #"(/v1)?/?$" "")
+        model    (or model (:default-model opts) "glm-5")
+        headers  (merge (opencode-session-headers) (:extra-headers opts))
+        opts     (assoc opts :default-model model :extra-headers headers)
+        messages (build-api-backend (assoc opts :base-url root :auth-mode :x-api-key))
+        chat     (build-openai-backend
+                   (assoc opts
+                     :base-url (str root "/v1")
+                     ;; Honour a descriptor-supplied dialect; the gateway's own
+                     ;; default is :none. Hardcoding it here silently discarded
+                     ;; a host's `:reasoning-dialect` and made this route
+                     ;; disagree with the `:opencode-go-openai` credential kind
+                     ;; for the very same endpoint.
+                     :reasoning-dialect (or reasoning-dialect :none)
+                     :model-quirks (opencode-go-quirks)))]
+    (build-multi-backend
+      {:routes          [[(fn [m] (opencode-go-anthropic-model? (if (seq m) m model))) messages]]
+       :default-backend chat})))
 
 (defn detect-available-credentials
   "Returns a vector of available credential descriptors (one per env var or
@@ -184,11 +212,15 @@
              :reasoning-dialect :none
              :route         #"^(glm-|kimi-|mimo-)"})
 
+      ;; Live-verified 2026-09-08: `qwen3.5-plus` answers on the Zen gateway's
+      ;; Anthropic-shaped `/go/v1/messages` route, and `glm-5` on
+      ;; `/go/v1/chat/completions` — the per-request split below is what the
+      ;; gateway actually requires, not an inference from model naming.
       opencode-go
       (conj {:kind          :opencode-go-anthropic :source "OPENCODE_GO_API_KEY"
              :api-key       opencode-go :base-url "https://opencode.ai/zen/go"
              :default-model "minimax-m2.7" :auth-mode :x-api-key
-             :route         #"^minimax-"})
+             :route         opencode-go-anthropic-route})
 
       ollama
       (conj {:kind          :ollama :source "OLLAMA_API_KEY"
@@ -202,33 +234,74 @@
              :reasoning-dialect :ollama
              :route         #"^(kimi-|deepseek-|glm-|minimax-|gpt-oss)"}))))
 
+;; Per-wire ALLOWLISTS of descriptor keys a backend constructor may see.
+;;
+;; These are deliberate, not incidental. A descriptor also carries
+;; credential-DETECTION fields (`:kind`, `:source`, `:route`, `:subscription`)
+;; that describe how the credential was found, not how the wire behaves;
+;; forwarding the whole descriptor makes "which key reaches the wire"
+;; unauditable and lets a future `(:route opts)` read inside a backend silently
+;; pick one up. Adding a wire-relevant key means adding it HERE, next to the
+;; wire it belongs to.
+(def ^:private http-credential-keys
+  "Keys every HTTP-wire backend understands, host auth included."
+  [:api-key :base-url :default-model :http-timeout-ms :http-transport
+   :auth-fn :extra-headers])
+
+(def ^:private messages-credential-keys
+  (into http-credential-keys [:auth-mode :anthropic-version]))
+
+(def ^:private chat-credential-keys
+  ;; `:reasoning-dialect` is a STATIC property of the provider, carried on the
+  ;; descriptor/template — never sniffed from the base-url, so pointing a
+  ;; provider at a proxy or a self-hosted gateway cannot silently change the
+  ;; wire format of its reasoning field.
+  (into http-credential-keys [:reasoning-dialect :prefill-support :model-quirks]))
+
+(def ^:private responses-credential-keys
+  (into http-credential-keys [:endpoint-profile :allow-stored-auth? :max-sse-event-chars]))
+
+(defn- opencode-go-opts
+  "opencode.ai's Zen gateway REJECTS any request without `x-opencode-session`
+   (HTTP 400 `MissingSessionID`) on both its wire shapes, so the header is
+   added for every opencode route. A caller's own `:extra-headers` wins."
+  [c keys]
+  (assoc (select-keys c keys)
+    :extra-headers (merge (opencode-session-headers) (:extra-headers c))))
+
 (defn build-credential-backend
-  "Instantiate the sub-backend for one credential descriptor."
+  "Instantiate the sub-backend for one credential descriptor.
+
+   Only the keys allowlisted per wire above reach a constructor."
   [{:keys [kind] :as c}]
   (case kind
-    :anthropic (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
-    :zai (build-api-backend (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms]))
-    :zai-coding-plan (build-codex-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms]))
-    ;; `:reasoning-dialect` is a STATIC property of the provider, carried on the
-    ;; descriptor/template — never sniffed from the base-url, so pointing a
-    ;; provider at a proxy or a self-hosted gateway cannot silently change the
-    ;; wire format of its reasoning field.
-    :openai (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms]))
-    :openrouter (build-openai-backend (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms]))
-    :ollama (build-openai-backend (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms])
-                                    (assoc :prefill-support :unsupported)))
-    :deepseek (build-openai-backend (select-keys c [:api-key :base-url :default-model :http-timeout-ms :reasoning-dialect]))
-    ;; Both opencode.ai routes carry the mandatory `x-opencode-session` header;
-    ;; without it the gateway 400s every request, whichever wire format.
+    :anthropic (build-api-backend (select-keys c messages-credential-keys))
+    :zai (build-api-backend (select-keys c messages-credential-keys))
+    :zai-coding-plan (build-codex-backend (select-keys c responses-credential-keys))
+    :openai (build-openai-backend (select-keys c chat-credential-keys))
+    :openrouter (build-openai-backend (select-keys c chat-credential-keys))
+    :ollama (build-openai-backend (assoc (select-keys c chat-credential-keys)
+                                    :prefill-support :unsupported))
+    :deepseek (build-openai-backend (select-keys c chat-credential-keys))
+    ;; `:auth-mode` too: this kind builds BOTH wires, and the Messages half
+    ;; needs it. (`:model` is deliberately absent — `descriptor->credential`
+    ;; folds a descriptor's `:model` into `:default-model` before it gets here.)
+    :opencode-go (build-opencode-go-backend
+                   (select-keys c (conj chat-credential-keys :auth-mode)))
     :opencode-go-openai (build-openai-backend
-                          (-> (select-keys c [:api-key :base-url :default-model :reasoning-dialect :http-timeout-ms])
-                            (assoc :extra-headers (opencode-session-headers)
-                              :model-quirks (opencode-go-quirks))))
-    :opencode-go-anthropic (build-api-backend
-                             (-> (select-keys c [:api-key :base-url :default-model :auth-mode :http-timeout-ms])
-                               (assoc :extra-headers (opencode-session-headers))))
-    :codex (build-codex-backend (cond-> {:default-model (:default-model c)}
-                                  (:http-timeout-ms c) (assoc :http-timeout-ms (:http-timeout-ms c))))
+                          (assoc (opencode-go-opts c chat-credential-keys)
+                            :model-quirks (opencode-go-quirks)))
+    :opencode-go-anthropic (build-api-backend (opencode-go-opts c messages-credential-keys))
+    ;; A Responses credential with NO `:base-url` is the ChatGPT subscription,
+    ;; whose endpoint takes an OAuth token — an `:api-key` is meaningless there
+    ;; and the constructor rejects one. Drop it rather than fail assembly: a
+    ;; `.escapement.edn` `{:provider :codex :key-from …}` that happens to
+    ;; resolve a key has always meant "use my ChatGPT login", and it must keep
+    ;; meaning that. With a `:base-url` the key IS the credential and is kept.
+    :codex (let [opts (select-keys c responses-credential-keys)]
+             (build-codex-backend
+               (cond-> opts
+                 (str/blank? (str (:base-url opts))) (dissoc :api-key))))
     :claude-cli (build-claude-cli-backend
                   (select-keys c [:default-model :binary :timeout-ms :max-concurrency
                                   :effort :max-budget-usd]))))
@@ -312,7 +385,7 @@
                            :route         #"^(glm-|kimi-|mimo-)"}
    :opencode-go-anthropic {:kind          :opencode-go-anthropic :base-url "https://opencode.ai/zen/go"
                            :default-model "minimax-m2.7" :auth-mode :x-api-key
-                           :route         #"^minimax-"}
+                           :route         opencode-go-anthropic-route}
    ;; ChatGPT-subscription: no api-key/base-url; OAuth token is loaded by the
    ;; codex backend itself at send time, not here.
    :codex                 {:kind  :codex :default-model "gpt-5.6-sol"
@@ -358,9 +431,16 @@
     ;; 60s default had no way to say so.
     (let [overrides (-> desc
                       (select-keys [:api-key :base-url :default-model :auth-mode :reasoning-dialect
-                                    :http-timeout-ms])
+                                    :http-timeout-ms :http-transport :auth-fn :extra-headers
+                                    :endpoint-profile :allow-stored-auth? :max-sse-event-chars])
                       (cond-> (:model desc) (assoc :default-model (:model desc))))]
-      (merge tmpl (into {} (remove (comp nil? val)) overrides)))))
+      (cond-> (merge tmpl {:allow-stored-auth? false}
+                (into {} (remove (comp nil? val)) overrides))
+        ;; Union of the two opencode routes: the merged credential claims
+        ;; every model the gateway serves on either wire, and
+        ;; `build-opencode-go-backend` picks the wire per request.
+        (= :opencode-go provider) (assoc :kind :opencode-go
+                                    :route #"(?i)^(glm-|kimi-|mimo-|minimax-|qwen)")))))
 
 (defn- preference-rank
   "Map of provider-keyword → its rank (lower = higher priority), derived from
@@ -391,6 +471,13 @@
      Each is resolved to a concrete sub-backend via
      `build-credential-backend`. Descriptors with an unknown `:provider`
      are dropped.
+    - HTTP descriptors accept `:auth-fn` (see `escapement.llm.auth/transport`),
+      `:http-transport`, `:http-timeout-ms`, `:extra-headers`; Responses also
+      accepts `:endpoint-profile`. No host auth is invoked at construction.
+      Stored OAuth/browser login is disabled unless `:allow-stored-auth? true`
+      is explicitly supplied (the CLI opts in). A callback always wins over it.
+    - `:opencode-go` routes MiniMax and Qwen to Messages per request, including
+      explicit provider requests; other models use Chat Completions.
    - `pref-targets` — the flattened preference-alias targets
      (`preferences/flatten-targets` of `:llm/preferences` over `:llm/aliases`,
      highest priority first; each a `{:provider :model …}` map). Used ONLY to

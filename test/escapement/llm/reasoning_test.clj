@@ -129,9 +129,9 @@
       (contains? (api/request->anthropic-json (assoc base :max-tokens 1024 :reasoning {:effort :high})) "thinking")
       => false
 
-      ":none emits nothing on this wire (Anthropic has no explicit off switch)"
-      (contains? (api/request->anthropic-json (assoc base :max-tokens 8192 :reasoning {:effort :none})) "thinking")
-      => false))
+      ":none explicitly disables thinking"
+      (get (api/request->anthropic-json (assoc base :max-tokens 8192 :reasoning {:effort :none})) "thinking")
+      => {"type" "disabled"}))
 
   (component "an explicit :thinking still wins — nothing that works today changes"
     (assertions
@@ -177,8 +177,8 @@
       ":max collapses onto high (the top of OpenAI's scale)"
       (openai-body :openai {:effort :max}) => {"reasoning_effort" "high"}
 
-      ":none emits NOTHING — unverified against the live API, so no payload is guessed"
-      (openai-body :openai {:effort :none}) => {}))
+      ":none explicitly disables reasoning (unsupported models must reject, not silently think)"
+      (openai-body :openai {:effort :none}) => {"reasoning_effort" "none"}))
 
   (component ":openrouter — the unified reasoning object"
     (assertions
@@ -212,6 +212,10 @@
       ":max reaches DeepSeek's own top level"
       (openai-body :deepseek {:effort :max})
       => {"thinking" {"type" "enabled"} "reasoning_effort" "max"}
+
+      ":medium maps to high, not max (DeepSeek's documented scale)"
+      (openai-body :deepseek {:effort :medium})
+      => {"thinking" {"type" "enabled"} "reasoning_effort" "high"}
 
       ":none disables thinking explicitly"
       (openai-body :deepseek {:effort :none}) => {"thinking" {"type" "disabled"}}))

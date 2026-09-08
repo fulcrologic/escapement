@@ -16,6 +16,7 @@
     [cheshire.core :as json]
     [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [escapement.llm.auth :as host-auth]
     [escapement.llm.http-transport :as ht]
     [escapement.llm.protocol :as proto]
     [escapement.llm.reasoning :as reasoning]
@@ -503,7 +504,8 @@
                                extra-headers http-timeout-ms]}
                        body-map]
   (let [url     (str base-url "/v1/messages")
-        headers (merge {"Content-Type" "application/json"}
+        headers (merge {"Content-Type" "application/json"
+                        "anthropic-version" (or anthropic-version "2023-06-01")}
                   (auth-headers {:auth-mode         auth-mode
                                  :base-url          base-url
                                  :api-key           api-key
@@ -531,7 +533,8 @@
                          body-map request-model on-delta]
   (let [url     (str base-url "/v1/messages")
         headers (merge {"Content-Type" "application/json"
-                        "Accept"       "text/event-stream"}
+                        "Accept"       "text/event-stream"
+                        "anthropic-version" (or anthropic-version "2023-06-01")}
                   (auth-headers {:auth-mode         auth-mode
                                  :base-url          base-url
                                  :api-key           api-key
@@ -563,7 +566,7 @@
                       (assoc :model (:default-model opts)))]
         (when-let [err (types/validate-request request)]
           (throw (ex-info "Invalid LLM request" {:errors err :request request})))
-        (let [transport     (or (:http-transport opts) (ht/default-transport))
+        (let [transport     (host-auth/transport opts)
               transcript-fn (:transcript-fn opts)
               body-map      (request->anthropic-json request)
               _             (when transcript-fn
@@ -592,7 +595,7 @@
                       (assoc :model (:default-model opts)))]
         (when-let [err (types/validate-request request)]
           (throw (ex-info "Invalid LLM request" {:errors err :request request})))
-        (let [transport     (or (:http-transport opts) (ht/default-transport))
+        (let [transport     (host-auth/transport opts)
               transcript-fn (:transcript-fn opts)
               body-map      (request->anthropic-json request)
               _             (when transcript-fn
@@ -622,9 +625,13 @@ Required opts:
               \"https://api.z.ai/api/anthropic\".
 
 Optional opts:
+- `:auth-fn`          — host callback; see `escapement.llm.auth/transport`.
 - `:default-model`     — string used when `Request` omits `:model`.
 - `:auth-mode`         — `:bearer` | `:x-api-key`. Auto-sniffed from `:base-url` if absent.
-- `:anthropic-version` — header value for x-api-key mode (default \"2023-06-01\").
+- `:anthropic-version` — `anthropic-version` header value (default \"2023-06-01\").
+                         Sent in BOTH auth modes: it identifies the API
+                         version, not the credential, and a host `:auth-fn`
+                         replaces only the auth headers.
 - `:extra-headers`     — map of additional request headers.
 - `:http-timeout-ms`   — request timeout (default 60000).
 - `:http-transport`    — an `escapement.llm.http-transport/HttpTransport`.

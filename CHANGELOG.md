@@ -1,5 +1,186 @@
 # Changelog
 
+## [unreleased] — fix/embedded-provider-contracts — 2026-09-08
+
+Gives an embedding host a provider-neutral way to supply its **own** HTTP
+credentials, and makes the Responses/Codex, OpenCode Go, reasoning-off and model
+catalog paths behave the same whether they are reached from the CLI or from
+`escapement.lib`. Read the "Changed" section before upgrading: two of the
+entries alter what goes on the wire for code that already works.
+
+### Added
+
+- **Host-owned provider auth: `:auth-fn`.** Every HTTP backend (Anthropic
+  Messages, OpenAI Chat Completions, the Responses wire) accepts an in-process
+  callback instead of a static key, in both `escapement.lib` `:credentials`
+  descriptors and the direct `new-backend` constructors. It is called as
+  `(auth-fn {:refresh? false})` before each request and must return
+  `{:headers {string nonblank-string}}`; on an HTTP 401 it is called once more
+  with `{:refresh? true}` and the request is retried exactly once. The host owns
+  login, expiry, refresh, persistence and concurrent-refresh coordination;
+  Escapement caches nothing and never reads env, disk or a browser on this path.
+  Returning nil or throwing becomes a categorized `:auth` failure with the
+  callback's own exception data dropped (it may hold tokens).
+- **`:endpoint-profile` on the Responses backend** (`:responses` | `:chatgpt`).
+  Defaults to `:chatgpt` when no `:base-url` is given and `:responses` when one
+  is. Generic Responses endpoints now receive `max_output_tokens` from
+  `:max-tokens` and get the requested model id verbatim; only the `:chatgpt`
+  profile drops the output cap and remaps retired model ids through the
+  ChatGPT alias table.
+- **`:max-sse-event-chars`** on the Responses backend and its credential
+  descriptors — a per-SSE-event data ceiling, default 8388608 characters.
+  Overflow clears the buffer and latches a non-retryable
+  `:invalid-request` / `:sse-event-too-large` failure rather than relying on a
+  parser exception that streaming transports swallow.
+- **Live streaming from the Responses backend.** It now implements
+  `StreamingLLMBackend`, so `stream-turn` (and `send-turn*` with a delta
+  callback) yields text deltas, reasoning-summary deltas and terminal usage.
+  `send-turn` returns the identical final result; a throwing delta callback
+  cannot abort generation.
+- The `escapement.lib` option schema now lists `:auth-fn`, `:http-transport`,
+  `:http-timeout-ms`, `:max-sse-event-chars`, `:extra-headers` and
+  `:endpoint-profile` on credential descriptors, so a wrong-typed value is
+  caught at validation instead of being ignored at assembly. (The descriptor
+  map itself is not closed — only the outer options map is — so these were
+  already *accepted*; what is new is that they are honoured and type-checked.)
+
+### Changed
+
+- **Explicit "do not reason" is now sent on the wire.** `:reasoning {:effort
+  :none}` emits `thinking {"type":"disabled"}` on Anthropic-shaped requests,
+  `reasoning_effort "none"` on OpenAI-shaped requests and
+  `reasoning {"effort":"none"}` on the Responses wire. Previously those three
+  dialects emitted **nothing** and the provider's default reasoning applied —
+  so an embedder that asked for no reasoning silently got some.
+  *Migration:* if you were relying on `:effort :none` meaning "leave the
+  provider default alone", omit `:reasoning` entirely instead — that still
+  emits nothing. A model with no off switch may now reject the request rather
+  than quietly think, which is the intended, honest failure.
+  All three directives were **live-verified 2026-09-08** and accepted: the
+  Responses form by z.ai's coding-plan v1 (glm-5.3) and by the ChatGPT
+  subscription backend (gpt-5.6-sol), `reasoning_effort "none"` by Ollama
+  Cloud's chat-completions endpoint (glm-5.3-flash), and
+  `thinking {"type":"disabled"}` by z.ai's Anthropic-shaped endpoint. Accepted
+  is not the same as honoured — Ollama Cloud took the value and still returned
+  reasoning prose — but no endpoint reachable from here rejects it.
+  The dialects that already had an off directive are unchanged: OpenRouter
+  (`reasoning {"enabled": false}`), DeepSeek (`thinking {"type": "disabled"}`)
+  and Ollama (`think: false`).
+- **Injected Codex/Responses credentials no longer fall back to CLI login.**
+  Backends assembled from `:credentials` default `:allow-stored-auth?` to
+  `false`: they will not read `~/.escapement/openai-auth.json`, refresh a saved
+  token or open a browser, and fail with an `:auth` category when neither
+  `:auth-fn` nor `:api-key` is supplied. The CLI explicitly opts back in, so
+  `escapement login codex` and saved-token refresh are unchanged there. The
+  direct `openai-codex/new-backend` constructor also keeps the old default for
+  backwards compatibility; server callers should pass `:auth-fn` or set
+  `:allow-stored-auth? false`.
+- **`anthropic-version` is sent in bearer mode too**, not only alongside
+  `x-api-key` (still overridable via `:anthropic-version`, still defaulting to
+  `2023-06-01`). Without it, a host `:auth-fn` — which replaces the auth headers
+  and only the auth headers — could leave a bearer-mode Anthropic-shaped request
+  with no API-version header. Endpoints that ignore the header (z.ai) are
+  unaffected.
+- **One `:opencode-go` credential now serves both of the gateway's wire
+  shapes.** The wire is chosen per *request* from that request's model —
+  Messages for `minimax-*` and `qwen*` (case-insensitive), Chat Completions for
+  everything else — including for requests that name `:provider :opencode-go`
+  explicitly. Previously a `{:provider :opencode-go}` descriptor built a Chat
+  Completions backend only, so MiniMax traffic went out on the wrong wire.
+  `qwen*` is new to the Messages route on the CLI and env-detected paths as
+  well, and is live-verified (2026-09-08: `qwen3.5-plus` answers on
+  `/go/v1/messages`, `glm-5` on `/go/v1/chat/completions`).
+  `:opencode-go-anthropic` still pins the Messages shape. A descriptor's own
+  `:reasoning-dialect` is honoured on the chat route instead of being replaced
+  by the gateway default, so a host's effort setting is no longer silently a
+  no-op.
+- Credential descriptors now carry `:auth-fn`, `:http-transport`,
+  `:http-timeout-ms` and `:extra-headers` through to every HTTP provider's
+  backend builder rather than a subset. The per-wire allowlist that decides
+  which descriptor keys reach a constructor is kept — credential-DETECTION
+  fields (`:kind`, `:source`, `:route`, `:subscription`) still stop at the
+  assembly seam — it was widened, not removed.
+- Responses failures now carry an `:llm/category` (`:auth`, `:rate-limited`,
+  `:timeout`, `:overloaded`, `:context-length`, `:invalid-request`,
+  `:transport`) instead of bare `ex-info`s, so the engine's bounded retry policy
+  retries the transient ones and stops on the rest. Premature EOF and SSE
+  `error` / `response.failed` events are categorized errors, not empty
+  successes, and usage is never invented when the provider disconnects first.
+
+### Fixed
+
+- **ZAI's accepted `glm-4.6V` spelling now resolves to the `glm-4.6v` vision
+  row** (vision enabled, 32768 output cap) instead of prefix-matching the
+  text-only `glm-4.6` and defaulting to a 131072 output budget — which the
+  provider rejected live with code `1210`. The wire model id is sent unchanged
+  and an explicit smaller caller budget still wins; no blanket case-folding and
+  no provider-wide cap were introduced.
+- **A Responses terminal carrying `output: []` no longer erases the output
+  already collected.** Some subscription endpoints send complete
+  `output_item.done` events and then an empty terminal array, which used to
+  produce an empty turn. A non-empty terminal output is still authoritative;
+  otherwise the collected items are used, in `output_index` order, with final
+  items replacing their partial versions rather than duplicating tool calls.
+  Token-limited incomplete output reports `:max_tokens` and content-filtered
+  output reports `:refusal`, even when tool items were collected. Only items
+  confirmed by an `output_item.done` are replayed: an item seen solely via
+  `output_item.added` still holds partial content — a function call's
+  `arguments` is a JSON fragment there — and is dropped rather than handed to
+  the tool layer.
+- **A context overflow reported as a 5xx is no longer retried as congestion.**
+  Proxies in front of a Responses endpoint surface an upstream
+  `context_length_exceeded` as an HTTP 500; classified `:overloaded`, the
+  engine spent its whole retry budget re-sending the identical oversized
+  prompt. Body evidence of a context overflow now outranks the 5xx status
+  sweep, so the failure is non-retryable and the caller can compact history.
+- **The ChatGPT endpoint profile's dialect headers no longer depend on the
+  auth mode.** `OpenAI-Beta: responses=experimental` and `originator` were
+  attached only on the `:auth-fn` branch, while the profile's body shaping
+  (dropped output cap, remapped model id) applied unconditionally — so an
+  `:api-key` request under `:endpoint-profile :chatgpt` went out shaped for a
+  dialect it never announced. A caller's own `:extra-headers` still win.
+- **A `.escapement.edn` credential a provider cannot honour is now reported as
+  a config error** — naming the message and the providers declared — instead of
+  surfacing as an assembly stack trace at CLI startup. The commonest case is an
+  `:api-key` (or a resolving `:key-from`) on `{:provider :codex}`, which has no
+  endpoint to send a key to; previously the key was silently dropped and the
+  run continued on stored OAuth.
+- **A model-spelling alias whose canonical catalog row is missing now fails at
+  load** instead of inserting a nil-valued key. `prefix-lookup` treats a nil
+  hit as a miss and walks on to the shorter prefix, so a future dump refresh
+  that dropped `glm-4.6v` would have silently reinstated the wrong output cap
+  with every test still green.
+
+### Notes
+
+- **Live-verified 2026-09-08** against the subscriptions reachable from this
+  machine, in addition to the offline suite: the three reasoning-off directives
+  (z.ai coding-plan v1, the ChatGPT subscription backend, Ollama Cloud, z.ai's
+  Anthropic-shaped endpoint); a generic Responses endpoint accepting
+  `max_output_tokens` while the ChatGPT profile still drops it; opencode-go's
+  per-request Messages/Chat split; the ChatGPT stored-OAuth path end to end;
+  and the `glm-4.6V` cap — 32768 answers normally, 131072 is rejected with
+  `"code":"1210"`, "The max_tokens parameter is illegal.：限制数值范围
+  [1,32768]".
+- **Still unverified live:** api.anthropic.com and api.openai.com proper (no
+  key on this machine — the Anthropic-shaped and OpenAI-shaped directives were
+  verified against z.ai and Ollama Cloud, which speak those wires), and the
+  DeepSeek `high`/`max` distinction, which rests on vendor documentation.
+- The reasoning-off change remains a judgement call a reviewer should weigh
+  rather than a pure bug fix: it trades a silent, possibly-wrong default for a
+  request a model may reject. Note that accepted is not honoured — Ollama
+  Cloud accepted `"none"` and reasoned anyway. See the migration note above
+  and the `:reasoning` entry in `Guide.adoc`.
+- **Accepted debt, logged deliberately:** an `:opencode-go` credential builds a
+  route table nested inside the outer one, because the outer provider index
+  holds one backend per provider keyword and two same-tagged flat routes would
+  send every MiniMax/Qwen request to whichever was indexed first. The rationale
+  is recorded at `providers/build-opencode-go-backend`.
+- This branch also carries the committed `fix/llm-error-attribution` work
+  (`lib/event_sink` error classification and the CLI's Ollama `:prefill-support`
+  declaration), which has its own entry below. Bundled deliberately rather than
+  split, since neither touches this branch's files.
+
 ## [unreleased] — fix/llm-error-attribution — 2026-09-08
 
 ### Fixed

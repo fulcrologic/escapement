@@ -210,7 +210,7 @@
   (component "OpenCode Go chooses OpenAI-compatible wiring for GLM/Kimi/MIMO models"
     (with-redefs [providers/build-openai-backend identity
                   providers/build-api-backend    identity]
-      (let [backend (#'providers/build-opencode-go-backend {:api-key "k" :model "glm-5"})]
+      (let [backend (:default-backend (#'providers/build-opencode-go-backend {:api-key "k" :model "glm-5"}))]
         (assertions
           "base URL"
           (:base-url backend) => "https://opencode.ai/zen/go/v1"
@@ -230,14 +230,14 @@
                                                 :api-base-url "https://proxy.example/anthropic"})]
         (assertions
           "OpenAI-shaped route uses override"
-          (get-in openai-backend [:backend :base-url]) => "https://proxy.example/v1"
+          (get-in openai-backend [:backend :default-backend :base-url]) => "https://proxy.example/v1"
           "Anthropic-shaped route uses override"
-          (get-in api-backend [:backend :base-url]) => "https://proxy.example/anthropic"))))
+          (get-in api-backend [:backend :routes 0 1 :base-url]) => "https://proxy.example/anthropic"))))
 
   (component "OpenCode Go chooses Anthropic-compatible wiring for MiniMax models"
     (with-redefs [providers/build-openai-backend identity
                   providers/build-api-backend    identity]
-      (let [backend (#'providers/build-opencode-go-backend {:api-key "k" :model "minimax-m2.7"})]
+      (let [backend (get-in (#'providers/build-opencode-go-backend {:api-key "k" :model "minimax-m2.7"}) [:routes 0 1])]
         (assertions
           "base URL"
           (:base-url backend) => "https://opencode.ai/zen/go"
@@ -383,6 +383,48 @@
       (get-in (#'cli/read-json-store f) ["a" "k"]) => "v"
       "a missing file yields nil (not an error)"
       (#'cli/read-json-store (str (tmp-dir) "/nope.json")) => nil)))
+
+(specification "a config credential a provider cannot honour is a config error, not a stack trace"
+  (let [died (atom nil)]
+    (with-redefs [cli/die! (fn [msg code] (reset! died [msg code]) ::died)]
+      (let [;; A constraint the constructor enforces and a config file can
+            ;; violate: the SSE ceiling must be a positive integer.
+            result (#'cli/build-config-credentials-backend!
+                     [{:provider :codex :max-sse-event-chars 0 :allow-stored-auth? true}] [])]
+        (assertions
+          "assembly stops"
+          result => ::died
+          "with exit code 1"
+          (second @died) => 1
+          "a message naming the config file and the failing constraint"
+          (boolean (re-find #"\.escapement\.edn" (first @died))) => true
+          (boolean (re-find #":max-sse-event-chars" (first @died))) => true
+          "and the providers the host declared"
+          (boolean (re-find #":codex" (first @died))) => true))))
+  (let [died (atom false)]
+    (with-redefs [cli/die! (fn [_ _] (reset! died true) ::died)]
+      (assertions
+        "a descriptor the provider CAN honour assembles normally"
+        (some? (#'cli/build-config-credentials-backend!
+                 [{:provider :z-ai-plan :api-key "K"}] [])) => true
+        @died => false))))
+
+(specification "config-file credentials are the only ones that opt into stored auth"
+  (let [creds [{:provider :codex} {:provider :z-ai-plan :api-key "K"}]]
+    (assertions
+      "the CLI stamps every config credential, whatever the provider"
+      (mapv :allow-stored-auth? (#'cli/cli-credential-descriptors creds)) => [true true]
+      "and changes nothing else about them"
+      (mapv #(dissoc % :allow-stored-auth?) (#'cli/cli-credential-descriptors creds)) => creds
+      "an empty config yields no descriptors"
+      (#'cli/cli-credential-descriptors []) => []))
+  (component "the embeddable path deliberately does NOT"
+    (assertions
+      "an injected descriptor defaults to false, so no disk or browser auth"
+      (:allow-stored-auth? (#'providers/descriptor->credential {:provider :codex})) => false
+      "and the CLI's stamp survives resolution when it IS supplied"
+      (:allow-stored-auth? (#'providers/descriptor->credential
+                             {:provider :codex :allow-stored-auth? true})) => true)))
 
 (specification "resolve-config-credentials"
   (let [store (str (tmp-dir) "/auth.json")

@@ -398,6 +398,43 @@
    `claude` binary, which does its own OAuth/keychain read."
   #{:codex :claude-cli})
 
+(defn- build-config-credentials-backend!
+  "Assemble the `.escapement.edn` credential backend, reporting a descriptor a
+   provider cannot accept as a config error rather than a stack trace.
+
+   A constructor rejects a descriptor it cannot honour — an `:api-key` on a
+   provider with no endpoint to send it to, for instance. That is the right
+   diagnosis, but it arrives from deep inside assembly, and the person who has
+   to act on it is editing a config file."
+  [descriptors pref-targets]
+  (try
+    (providers/build-injected-credentials-backend descriptors pref-targets)
+    (catch Throwable e
+      (die! (str "Error: :llm/credentials in .escapement.edn could not be assembled.\n"
+                 "  " (ex-message e) "\n"
+                 (when-let [d (not-empty (ex-data e))] (str "  " (pr-str d) "\n"))
+                 "Providers declared: "
+                 (pr-str (mapv :provider descriptors)) "\n"
+                 "See: Guide.adoc, \"Project configuration (.escapement.edn)\"")
+        1))))
+
+(defn- cli-credential-descriptors
+  "Stamp `.escapement.edn`-declared credentials as CLI-owned.
+
+   The CLI is the ONLY caller that opts into saved OAuth and interactive
+   browser login; `providers/descriptor->credential` defaults
+   `:allow-stored-auth?` to false so an embedding host never inherits the
+   developer's `~/.escapement/openai-auth.json`.
+
+   Applied to EVERY config credential, not only `:codex`. Only the Responses
+   backend reads the flag today, but a config file is a first-party,
+   user-authored declaration on an interactive machine — the same place
+   `escapement login` writes to — so a provider that later grows a
+   stored-credential path should follow the same rule by default rather than
+   be silently excluded by a keyword check written before it existed."
+  [config-creds]
+  (mapv #(assoc % :allow-stored-auth? true) config-creds))
+
 (defn- resolve-config-credentials
   "Resolve `:llm/credentials` from `run-cfg` into concrete descriptor maps for
    `providers/build-injected-credentials-backend`. Each descriptor's API key is
@@ -916,8 +953,8 @@
                                             "See: escapement info   (or:  Guide.adoc, \"LLM backends\")")
                                        1))
         backend-info           (if (seq config-creds)
-                                 {:backend        (providers/build-injected-credentials-backend
-                                                    config-creds
+                                 {:backend        (build-config-credentials-backend!
+                                                    (cli-credential-descriptors config-creds)
                                                     (preferences/flatten-targets llm-preferences llm-aliases))
                                   :default-models (preferences/model-order llm-preferences llm-aliases)}
                                  (make-backend opts))

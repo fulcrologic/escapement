@@ -24,6 +24,26 @@
     "unknown id returns nil, not a throw"
     (catalog/info "totally-made-up") => nil))
 
+(specification "ZAI's accepted vision spelling inherits the vision registry row, not the text prefix"
+  (assertions
+    "both accepted spellings resolve the same objective facts"
+    (catalog/info "glm-4.6V") => (catalog/info "glm-4.6v")
+    "native spelling, accepted mixed-case spelling and qualified OpenRouter id retain the correct cap"
+    (mapv catalog/max-output-tokens ["glm-4.6v" "glm-4.6V" "z-ai/glm-4.6v"])
+    => [32768 32768 32768]
+    "vision eligibility is not inherited from the text-only GLM-4.6"
+    (catalog/vision? "glm-4.6V") => true
+    "the text model's own limits are untouched"
+    (catalog/max-output-tokens "glm-4.6") => 131072
+    (catalog/vision? "glm-4.6") => false
+    ;; A nil-valued alias key would be a SILENT regression: prefix-lookup
+    ;; treats a nil hit as a miss and walks on to the text-only prefix, so
+    ;; the wrong output cap would come back with every test still green.
+    "no alias resolves to a nil row"
+    (some nil? (map catalog/info (keys @#'catalog/model-spelling-aliases))) => nil
+    "and every alias names a canonical id the catalog actually defines"
+    (every? #(contains? catalog/models %) (vals @#'catalog/model-spelling-aliases)) => true))
+
 (specification "catalog — info carries objective facts; opinion is config-only"
   (assertions
     "objective facts flow from the dump"
