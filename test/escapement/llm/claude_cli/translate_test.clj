@@ -67,6 +67,26 @@
 ;;; ---------------------------------------------------------------------------
 ;;; normalize-model
 
+(specification "partial messages are notifications, never final content"
+  (let [acc (atom (t/stream-acc-init))
+        deltas (atom [])
+        event {:type "stream_event"
+               :event {:type "content_block_delta" :index 0
+                       :delta {:type "text_delta" :text "hello"}}}]
+    (doseq [e [event
+               (assoc event :parent_tool_use_id "nested-tool")
+               (assoc-in event [:event :delta :text] "")
+               (assoc-in event [:event :delta :text] nil)
+               (assoc-in event [:event :delta :type] "thinking_delta")
+               (assoc-in event [:event :type] "unknown")]]
+      (t/process-stream-line! acc (json/generate-string e) #(swap! deltas conj %)))
+    (t/process-stream-line! acc "not-json" #(swap! deltas conj %))
+    (assertions
+      @deltas => [{:type :text-delta :text "hello"}]
+      (:texts @acc) => []
+      (:assistant-usages @acc) => []
+      (:parse-failures @acc) => 1)))
+
 (specification "normalize-model"
   (assertions
     "bare CLI aliases pass through, lower-cased"
@@ -156,7 +176,13 @@
         "the prompt is not smuggled in as a trailing positional either"
         (str/starts-with? (last argv) "-") => false        ; last is the schema VALUE
         "and every non-flag element is the value of the flag before it"
-        (even? (count (drop 1 argv))) => true)))
+        (->> (rest argv)
+          (remove #{"-p" "--strict-mcp-config" "--safe-mode"
+                    "--disable-slash-commands" "--no-session-persistence"
+                    "--verbose" "--include-partial-messages"})
+          (partition-all 2)
+          (every? (fn [[flag value]]
+                    (and (str/starts-with? flag "--") (some? value))))) => true)))
 
   (component "--tools \"\" arity safety"
     (let [argv (t/build-argv {:binary "claude" :system-prompt-file "/tmp/sp.txt"})
@@ -608,6 +634,9 @@
 
         "output tokens DO come from the aggregate — every one was really generated"
         (get-in resp [:usage :output-tokens]) => 256
+
+        "aggregate consumption remains available separately from context"
+        (:consumed-usage resp) => {:input-tokens 40550 :output-tokens 256}
 
         "cache fields are zeroed because they are already folded into
          :input-tokens, and llm_conversation compares that against the context

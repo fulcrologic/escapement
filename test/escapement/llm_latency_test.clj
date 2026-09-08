@@ -63,6 +63,31 @@
         (when (and tail-ms (pos? (long tail-ms))) (Thread/sleep (long tail-ms)))
         (end-turn (str "done:" (:model req)))))))
 
+(defrecord MuteStreamBackend [calls profiles]
+  ;; A backend that SATISFIES StreamingLLMBackend but never calls `on-delta` for
+  ;; this particular turn, then resolves a perfectly good Response. Not a
+  ;; hypothetical: verified live 2026-09-08 against the real `claude` CLI
+  ;; 2.1.263 — a tool-use turn (3 tool calls, 41 CLI lines, content
+  ;; [:text :tool_use :tool_use :tool_use]) emitted ZERO partial-message events,
+  ;; because the CLI streams partial text only for plain prose turns. Inline
+  ;; under `p/do!` rather than on a side future, mirroring how
+  ;; `ClaudeCliBackend/stream-turn` actually blocks in `send-turn*`.
+  proto/LLMBackend
+  (send-turn [_ req]
+    (swap! calls conj (:model req))
+    (p/do! (end-turn (str "done:" (:model req)))))
+  proto/StreamingLLMBackend
+  (stream-turn [_ req _on-delta]
+    (swap! calls conj (:model req))
+    (p/do!
+      (let [{:keys [tail-ms]} (get profiles (:model req) {})]
+        (when (and tail-ms (pos? (long tail-ms))) (Thread/sleep (long tail-ms)))
+        (end-turn (str "done:" (:model req)))))))
+
+(def ^:private mute-profiles
+  {"mute-slow" {:tail-ms 600}   ; healthy, delta-less, but slower than the cap
+   "mute-fast" {:tail-ms 0}})   ; healthy, delta-less, finishes under the cap
+
 (def ^:private profiles
   {"slow"     {:ttft-ms 1500}            ; never produces a first token under the cap
    "fast"     {:ttft-ms 0}              ; first token immediately
@@ -147,6 +172,38 @@
         calls => ["rideout"]
         "and it is not marked :down"
         (get status "rideout") => nil)))
+
+  (component "a streaming backend that emits NO deltas is judged on total time"
+    ;; The cap cannot distinguish "slow to start" from "never signals". A
+    ;; backend that advertises `streaming?` but stays silent for a given turn
+    ;; therefore has its TOTAL duration measured against a FIRST-TOKEN budget.
+    ;; This is the claude-cli tool-use case (see MuteStreamBackend): the turn is
+    ;; healthy and will complete, but it is abandoned anyway if a fallback
+    ;; candidate exists. Documented as a caveat on ClaudeCliBackend; pinned here
+    ;; so the behavior cannot change silently.
+    (let [b (->MuteStreamBackend (atom []) mute-profiles)
+          {:keys [env calls status]}
+          (run! b "mute-slow" {:first-token-ms cap-ms
+                               :fallback [{:provider :b :model "mute-fast"}]})]
+      (assertions
+        "a healthy but delta-less turn IS abandoned at the cap and fails over"
+        (:status env) => :ok
+        (:model env)  => "mute-fast"
+        calls => ["mute-slow" "mute-fast"]
+        "and the abandoned model is still not marked :down"
+        (get status "mute-slow") => nil))
+
+    (component "…but only when it also outruns the cap"
+      (let [b (->MuteStreamBackend (atom []) mute-profiles)
+            {:keys [env calls]}
+            (run! b "mute-fast" {:first-token-ms cap-ms
+                                 :fallback [{:provider :b :model "mute-slow"}]})]
+        (assertions
+          "a delta-less turn that finishes inside the budget is never abandoned,
+           so emitting no deltas is not by itself a failover trigger"
+          (:status env) => :ok
+          (:model env)  => "mute-fast"
+          calls => ["mute-fast"]))))
 
   (component "feature off (no cap) → no abandonment even for a slow backend"
     (let [b   (->SpeedBackend (atom []) profiles)

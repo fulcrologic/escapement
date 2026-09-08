@@ -1699,9 +1699,11 @@
 
   (let [prefix   "The quick brown fox jumps over the lazy dog and keeps running for a while"
         captured (atom [])
-        backend  (mock-backend [(max-tokens-response prefix)
+        backend  (mock-backend [(assoc (max-tokens-response prefix)
+                                  :consumed-usage {:input-tokens 100 :output-tokens 2})
                                 ;; the provider ignores the prefill and starts again
-                                (end-turn-response (str prefix " and then some more"))])
+                                (assoc (end-turn-response (str prefix " and then some more"))
+                                  :consumed-usage {:input-tokens 200 :output-tokens 3})])
         result   (#'llmc/drive-turn! (drive-ctx backend captured)
                    {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
     (assertions
@@ -1714,6 +1716,16 @@
       "the content kept is what we had, NOT the duplicated merge"
       (->> (get-in result [:no-progress :content]) (filter #(= :text (:type %))) (map :text) (apply str))
       => prefix
+
+      ;; The abandoned turn still has to report what it SPENT. Content is
+      ;; rolled back to the pre-restart accumulation, but tokens are not:
+      ;; both segments were really billed, so per-call context usage and
+      ;; aggregate consumption stay summed across them.
+      "per-call context usage is summed across both segments, not rolled back"
+      (get-in result [:no-progress :usage]) => {:input-tokens 3 :output-tokens 3}
+
+      "and aggregate consumption is carried through the restart abort too"
+      (get-in result [:no-progress :consumed-usage]) => {:input-tokens 300 :output-tokens 5}
 
       "and it is observable in the transcript"
       (count (filter #(= :llm/continuation-restarted (:event %)) @captured)) => 1))
@@ -2311,6 +2323,40 @@
                     (dct/start!))
         t         (await-config! t :done 3000)]
     {:in-done? (dct/in? t :done) :transcript @captured}))
+
+(specification "transcript keeps consumed usage separate through continuation"
+  (doseq [[first-consumed last-consumed expected]
+          [[{:input-tokens 40550 :output-tokens 256} nil 40570]
+           [nil {:input-tokens 40550 :output-tokens 256} 40560]
+           [nil nil nil]]]
+    (let [segment (cond-> (assoc (end-turn-response "prefix")
+                           :stop-reason :max_tokens
+                           :usage {:input-tokens 10 :output-tokens 3})
+                    first-consumed (assoc :consumed-usage first-consumed))
+          terminal (cond-> (assoc (end-turn-response " suffix")
+                            :usage {:input-tokens 20 :output-tokens 4})
+                     last-consumed (assoc :consumed-usage last-consumed))
+          {:keys [in-done? transcript]} (run-aliased-chart! (mock-backend [segment terminal]))
+          data (:data (first (events-named transcript :llm/response)))]
+      (assertions
+        in-done? => true
+        (:usage data) => {:input-tokens 30 :output-tokens 7}
+        (get-in data [:consumed-usage :input-tokens]) => expected
+        (get-in data [:consumed-usage :output-tokens])
+        => (cond first-consumed 260 last-consumed 259 :else nil)))))
+
+(specification "transcript emits cumulative consumption without replacing context usage"
+  (let [usage {:input-tokens 10117 :output-tokens 256}
+        consumed {:input-tokens 40550 :output-tokens 256}
+        {:keys [in-done? transcript]}
+        (run-aliased-chart!
+          (mock-backend [(assoc (end-turn-response "ok")
+                          :usage usage :consumed-usage consumed)]))
+        data (:data (first (events-named transcript :llm/response)))]
+    (assertions
+      in-done? => true
+      (:usage data) => usage
+      (:consumed-usage data) => consumed)))
 
 (specification "a silent model substitution is recorded on the transcript"
   ;; Providers substitute silently (a retired id answered by its successor)

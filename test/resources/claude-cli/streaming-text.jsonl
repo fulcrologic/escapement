@@ -1,0 +1,6 @@
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"private"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hello "}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"world."}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"assistant_text\":\"Hello world.\"}"}}}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Hello world."}],"usage":{"input_tokens":10,"cache_read_input_tokens":100,"output_tokens":3}}}
+{"type":"result","subtype":"success","is_error":false,"result":"Hello world.","usage":{"input_tokens":20,"cache_read_input_tokens":200,"output_tokens":12}}

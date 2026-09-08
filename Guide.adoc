@@ -663,7 +663,9 @@ such as 8192 still win. Other provider/model limits are not rewritten.
 
 `:stream?`::
 Optional boolean.
-When `true` AND the backend implements streaming (both bundled backend families do: the Anthropic/z.ai api backend and the OpenAI/OpenRouter backend), the turn is issued over SSE and incremental output is published as `:llm/delta` transcript events (`{:type :text-delta|:thinking-delta :text "…" :model … :invokeid …}`) while the turn is still in flight — relay these to a UI for live output.
+When `true` AND the backend implements streaming, incremental output is published as `:llm/delta` transcript events (`{:type :text-delta|:thinking-delta :text "…" :model … :invokeid …}`) while the turn is still in flight. HTTP backends use SSE; Claude CLI uses partial stream-json messages. Relay these events to a UI for live progress.
+Deltas are *progress*, not output: on `claude-cli` in particular the streamed text is provisional and may include text the final response does not (see <<claude-cli>>), so never assemble a turn's answer out of deltas — read the final Response or the captured output blob.
+On `claude-cli`, streaming covers **prose turns only** — a turn that ends in tool calls emits no deltas at all (verified live: a 3-tool-call turn produced zero deltas even though its content began with a `:text` block), so do not enable `:stream?` on a tool-heavy node expecting live output, and see the `:first-token-ms` caveat in <<claude-cli>> before combining the two.
 The final Response and all chart semantics are byte-identical to a non-streamed turn.
 No-op (plain buffered turn) on backends without streaming support.
 
@@ -1484,6 +1486,18 @@ The worker stamps every `:llm/response` event with:
 * `:usage`  — the Anthropic `usage` block (`:input-tokens`,
 `:output-tokens`, `:cache-creation-input-tokens`,
 `:cache-read-input-tokens` when present)
+* `:consumed-usage` — *optional*, and present only from backends that can tell
+the two numbers apart (today: `claude-cli`). Where `:usage` answers "how full is
+the context window right now", `:consumed-usage` answers "how many tokens did
+this turn actually burn in total". Where the CLI serves a turn with a single
+internal call the two coincide (observed on live prose and tool turns alike);
+where it fans one turn out into several, `:usage` — a `max` over per-call
+context totals — would understate consumption, which is exactly why the
+aggregate is reported separately instead of folded in. Absent for every other
+backend, where the two are the same number and `:usage` is it. Anything totalling
+consumption should read `:consumed-usage` and fall back to `:usage`; anything
+reasoning about *context pressure* must keep reading `:usage`, which is what
+`:context-window`/`:context-used-frac` below are computed from.
 * `:model` — the model id reported by the API (or our request model)
 * `:context-window` — the lookup-table value for that model, when known
 * `:context-used-frac` — `:input-tokens` / `:context-window`, rounded to three decimals; absent when we can't look up the model
@@ -3104,6 +3118,7 @@ key described above).
 * Stateless: `store: false`.
 The full conversation is re-sent on every turn (no server-side caching across turns beyond reasoning summaries).
 
+[[claude-cli]]
 === `escapement.llm.claude-cli` — Claude subscription via the `claude -p` CLI
 
 Defined in `src/escapement/llm/claude_cli.clj` (entry point) plus the pure
@@ -3222,9 +3237,25 @@ and the CLI accepts only user messages).
 * `cache_control` markers are no-ops; the CLI owns its own prompt caching.
 * Extended thinking is not directly controllable; `:thinking {:type :enabled}`
 maps onto the CLI's `--effort high`.
-* **No streaming.** The backend implements `LLMBackend` only, so there is no
-live token display and `:latency :first-token-ms` degrades to a total-response
-cap.
+* **Streaming.** `StreamingLLMBackend` delivers CLI partial text as
+`{:type :text-delta :text "..."}` before completion, using
+`--include-partial-messages`. Callbacks are isolated from turn failures.
+These are provisional progress, potentially including a tool envelope; thinking,
+extraction-tool JSON and complete-message echoes are not emitted as text.
+Final content, decoded tools and usage still come from complete assistant/result
+messages, identically to `send-turn`. Consumers must use the final response or
+captured artifact rather than treating streamed text as authoritative output.
++
+Deltas are emitted only for top-level `text_delta` chunks, so **a turn that
+produces no assistant prose stamps no first token** — a tool-only or
+structured-output turn, a thinking-only stretch, or text emitted under a CLI
+sub-agent (`parent_tool_use_id`). This is not a corner case: a live 3-tool-call
+turn produced **zero** deltas despite its content starting with a `:text` block.
+Consequently, under `:resilience {:latency {:first-token-ms N}}` with a fallback
+candidate configured, `await-turn!` abandons such a turn at the cap exactly as it
+did before this backend streamed. Streaming narrows that hazard — a prose turn
+now stamps first-token normally — but does not remove it, and the CLI's
+300-500 MB cold start means the cap must be set generously regardless.
 * Stateless: no `--resume`, no session reuse. The full conversation is
 re-rendered as a single flattened user message every turn.
 * Each turn is a separate ~300-500 MB process with a real cold start, so
@@ -3559,6 +3590,15 @@ The events emitted across the codebase:
 * `:llm/start`, `:llm/request`, `:llm/response`, `:llm/error`,
 `:llm/user-message`, `:llm/worker-exit`, `:llm/context-warning`.
 `:llm/error` (and an `:interrupted-mid-turn` `:llm/worker-exit`) carries `:partial-usage` — the tokens a failed or cancelled streamed turn had already spent, summed across failover candidates — whenever any usage was observed on the wire; the key is absent otherwise.
+
+Completed Responses and `:llm/response` transcript data may also carry
+`:consumed-usage`, with `:input-tokens` and `:output-tokens`. Claude CLI supplies
+aggregate consumption across its internal calls, including cache reads and
+creation in input, while its ordinary `:usage` retains maximum per-call context
+size for context-window checks. Consumption consumers should prefer
+`:consumed-usage` and fall back to `:usage` for other providers. Continuation
+stitching sums consumption across segments, applying that fallback per segment.
+This is completed-response accounting, not a ledger of failed/retried attempts.
 * `:llm/event-posted` — a chart event the conversation fired at the LLM's
 request (an `:allowed-events` / event-tool call). `:data` is
 `{:invokeid … :event-name <kw> :event-data <decoded input>}`, and the row
@@ -3570,6 +3610,7 @@ is stamped with the invocation coordinates `:transcript/node-id`,
 `{:type :text-delta|:thinking-delta :text "…" :model … :invokeid …}`.
 Only emitted when the state set `:stream?` and the backend supports streaming; consumers MUST ignore unknown `:type` values (more may be added).
 Relay these off the transcript tap for live UI output; the final `:llm/response` is unchanged.
+Delta text is provisional progress and is not guaranteed to reconstruct the turn's content — on `claude-cli` it can include text (e.g. a tool envelope) that the decoded final response does not, and omit content the final response does have. Display it; never accumulate it as the answer.
 * `:llm/retry` — a transient backend failure is being retried per
 `:resilience`. `:data` is `{:model … :category … :attempt N
 :max-retries M :invokeid …}`.

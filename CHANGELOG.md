@@ -1,5 +1,75 @@
 # Changelog
 
+## [unreleased] — feat/claude-cli-streaming — 2026-09-08
+
+### Added
+
+- **Live token output from the `claude-cli` backend.** The Claude Code CLI
+  backend now implements `StreamingLLMBackend`, so a state that sets
+  `:stream? true` gets `:llm/delta` (`:text-delta`) transcript events while a
+  prose turn is still running instead of nothing until it ends (tool-use turns
+  still emit no deltas — see Notes) — the TUI's live
+  token panel, the OpenTUI sidecar, and any `:transcript-tap` consumer now show
+  a Claude-subscription turn in progress the same way they already showed the
+  HTTP backends. `proto/streaming?` reports `true` for this backend, which also
+  means a `escapement.llm.multi` route set mixing it with other streaming
+  backends is now itself streaming rather than silently buffered. Turns issued
+  without `:stream?` are unchanged, and the final Response — content, decoded
+  tool calls, usage, stop reason — is identical either way.
+- **`:consumed-usage` on responses and `:llm/response` transcript rows.** An
+  optional second usage block reporting how many tokens a turn actually *spent*,
+  as distinct from `:usage`, which reports how much context a single call saw.
+  The `claude-cli` backend supplies it; every other backend omits it, in which
+  case `:usage` remains the whole story. On a turn the CLI serves with a single
+  internal call the two numbers coincide — that is what live prose and tool turns
+  both showed. They come apart only when the CLI fans one turn out into several
+  internal calls, where `:usage` (a `max` over per-call context totals) would
+  understate what was spent; reporting the aggregate separately keeps both
+  numbers honest instead of corrupting one. Anything totalling consumption
+  should read `:consumed-usage` and fall back to `:usage`; context-pressure
+  signals (`:context-window`, `:context-used-frac`, `:llm/context-warning`) are
+  unchanged and still derive from `:usage`. When a truncated turn is stitched
+  back together by continuation, consumption is summed across the segments.
+
+### Changed
+
+- **`claude-cli` turns now pass `--include-partial-messages` to the CLI.** This
+  is what makes the incremental text available; it does not change what the CLI
+  is asked to do or what it returns.
+- **A delta consumer that throws no longer affects the turn.** An exception from
+  the `on-delta` callback is swallowed at the boundary; streaming continues and
+  the turn completes normally. Timeout/auth/invalid-request failures still
+  surface with the same error categories as before.
+
+### Notes
+
+- **Streaming on `claude-cli` covers prose turns only — a tool-use turn emits no
+  deltas at all.** Deltas come from top-level `text_delta` chunks, so a turn that
+  ends in tool calls, a thinking-only stretch, or text produced under a CLI
+  sub-agent stamps no first token. Verified live: a 3-tool-call turn produced
+  zero deltas even though its content began with a text block. Do not enable
+  `:stream? true` on a tool-heavy node expecting live output. This also means
+  that under `:resilience {:latency {:first-token-ms N}}` with a fallback
+  candidate configured, such a turn is still abandoned at the cap exactly as it
+  was before this backend streamed — streaming narrows that hazard for prose
+  turns, it does not remove it.
+- **Streamed text from `claude-cli` is provisional progress, not output.** It is
+  the CLI's raw partial text, which may include a tool envelope, and it excludes
+  thinking and extraction-tool JSON. It is neither guaranteed to reconstruct the
+  turn nor to match it. Display it; read the final Response (or the captured
+  output blob) for anything that matters. `Guide.adoc` now says this at the
+  `:stream?` key, in the `:llm/delta` vocabulary entry, and in the `claude-cli`
+  backend section.
+- **Automated coverage uses a fake `claude` binary; two live turns were run by
+  hand.** The tests drive a scripted stream-json fixture through a real child
+  process (proving deltas arrive before the turn resolves, callback isolation,
+  and the error categories). Two turns against a real `claude` CLI 2.1.263 on a
+  subscription confirmed the shape: a prose turn streamed and its deltas
+  reconstructed the final content exactly; a 3-tool-call turn streamed nothing.
+  In both, `:consumed-usage` equalled `:usage`. What still needs a human eyeball
+  is how the live TUI token panel reads when fed CLI deltas, and behaviour on
+  `claude` versions other than the one probed.
+
 ## [unreleased] — fix/concurrent-provider-loading — 2026-09-08
 
 ### Added

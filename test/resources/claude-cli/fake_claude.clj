@@ -11,6 +11,7 @@
 ;;   FAKE_CLAUDE_SPAWN_CHILD   spawn a `sleep <value>` grandchild (destroy-tree probe)
 ;;   FAKE_CLAUDE_TIMING_DIR    write {:start ms :end ms} EDN per invocation (concurrency probe)
 ;;   FAKE_CLAUDE_NO_STDIN      do not drain stdin
+;;   FAKE_CLAUDE_LINE_DELAY_MS delay after each flushed fixture line
 (require '[babashka.process :as bp] '[clojure.java.io :as io])
 
 (def env (into {} (System/getenv)))
@@ -44,7 +45,9 @@
   (with-open [r (io/reader f)]
     (doseq [line (line-seq r)]
       (println line)
-      (flush))))
+      (flush)
+      (when-let [ms (ev "FAKE_CLAUDE_LINE_DELAY_MS")]
+        (Thread/sleep (parse-long ms))))))
 
 (when-let [d (ev "FAKE_CLAUDE_TIMING_DIR")]
   (.mkdirs (io/file d))

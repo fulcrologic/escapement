@@ -1020,6 +1020,7 @@
     (try-models! ctx params (vec base-messages) tools)
     (loop [acc-content nil
          acc-usage   {}
+         acc-consumed nil
          seg         0]
     (let [msgs    (if (seq acc-content)
                     (conj (vec base-messages) (assistant-message acc-content))
@@ -1028,12 +1029,16 @@
       (if-not (:ok outcome)
         outcome
         (let [resp         (:ok outcome)
-              {:keys [stop-reason content usage]} resp
+              {:keys [stop-reason content usage consumed-usage]} resp
               merged       (if acc-content
                              (merge-segment-content acc-content content)
                              (vec content))
               merged-usage (merge-with-usage acc-usage usage)
-              resp'        (assoc resp :content merged :usage merged-usage)]
+              merged-consumed (when (or acc-consumed consumed-usage)
+                                (merge-with-usage (or acc-consumed acc-usage)
+                                  (or consumed-usage usage)))
+              resp'        (cond-> (assoc resp :content merged :usage merged-usage)
+                             merged-consumed (assoc :consumed-usage merged-consumed))]
           (cond
             ;; FIRST: the provider ignored the prefill and started the message
             ;; over. This is checked before the terminal-stop branch because a
@@ -1048,8 +1053,7 @@
                          :model      (:model resp)
                          :invokeid   (:invokeid parent-ctx)
                          :session-id (:parent-session-id parent-ctx)}})
-              {:no-progress (assoc resp :content (vec acc-content)
-                              :usage (merge-with-usage acc-usage usage))
+              {:no-progress (assoc resp' :content (vec acc-content))
                :detail      :continuation-restarted})
 
             (not= :max_tokens stop-reason)
@@ -1106,7 +1110,7 @@
                          :blocks   (count content)
                          :usage    (or usage {})
                          :invokeid (:invokeid parent-ctx)}})
-              (recur merged merged-usage (inc seg)))))))))))
+              (recur merged merged-usage merged-consumed (inc seg)))))))))))
 
 (defn- run-verdict-inference!
   "Run a single forced-tool inference asking the model to call `submit_verdict`
@@ -1426,7 +1430,7 @@
 
       :else
       (let [response      (:ok outcome)
-            {:keys [stop-reason content usage model elapsed-ms wait-ms provider
+            {:keys [stop-reason content usage consumed-usage model elapsed-ms wait-ms provider
                     model-requested model-substituted?]} response
             ctx-window    (some-> model catalog/context-window)
             input-tokens  (:input-tokens usage)
@@ -1452,6 +1456,7 @@
                            :content     (mapv ->transcript-content-block content)
                            :invokeid    (:invokeid parent-ctx)
                            :session-id  (:parent-session-id parent-ctx)}
+                    consumed-usage (assoc :consumed-usage consumed-usage)
                     ;; `:model` is what the PROVIDER reported; `:model-requested`
                     ;; is what we asked for. Never collapsed — servers substitute
                     ;; silently, and a transcript that records only one id is
