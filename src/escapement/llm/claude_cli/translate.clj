@@ -437,6 +437,7 @@
              "--no-session-persistence"
              "--input-format" "stream-json"
              "--output-format" "stream-json"
+             "--include-partial-messages"
              "--verbose"
              "--system-prompt-file" (str system-prompt-file)])
       (cond->
@@ -544,9 +545,12 @@
    Unrecognized line types are ignored on purpose: the CLI adds new `system`
    subtypes between releases and an unknown one must never fail a turn. A line
    that is not JSON at all is counted, not thrown — the CLI occasionally
-   interleaves plain-text notices."
-  [acc line]
-  [:any (? :string) => :nil]
+   interleaves plain-text notices. Partial text is progress only: never fold it
+   into final content, which comes from complete assistant/result messages."
+  ([acc line] [:any (? :string) => :nil]
+   (process-stream-line! acc line nil))
+  ([acc line on-delta]
+  [:any (? :string) (? fn?) => :nil]
   (when-not (str/blank? line)
     (swap! acc update :line-count inc)
     (let [parsed (try (json/parse-string line true)
@@ -555,6 +559,18 @@
         (swap! acc update :parse-failures inc)
         (let [{:keys [type subtype message]} parsed]
           (case type
+            "stream_event"
+            (let [event (:event parsed)
+                  delta (:delta event)
+                  text (:text delta)]
+              (when (and on-delta
+                         (nil? (:parent_tool_use_id parsed))
+                         (= "content_block_delta" (:type event))
+                         (= "text_delta" (:type delta))
+                         (string? text) (seq text))
+                (try (on-delta {:type :text-delta :text text})
+                  (catch Throwable _ nil))))
+
             "assistant"
             (swap! acc
               (fn [a]
@@ -580,7 +596,7 @@
                 (select-keys parsed [:error :attempt :delayMs :status])))
 
             nil))))
-    nil))
+    nil)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Usage
@@ -615,7 +631,8 @@
    (flat-fee subscription), so no cost math is affected.
 
    `:output-tokens` comes from `result.usage`, where the aggregate is the
-   honest number — every output token really was generated."
+    honest number — every output token really was generated. The Response's
+    separate `:consumed-usage` reports aggregate consumption, not context size."
   [{:keys [assistant-usages result]}]
   [:map => :map]
   {:input-tokens                (reduce max 0 (mapv usage-context-total assistant-usages))
@@ -868,6 +885,8 @@
                          :else :end_turn)
      :content          content
      :usage            (turn-usage acc)
+     :consumed-usage   {:input-tokens (usage-context-total (:usage result))
+                        :output-tokens (get-in result [:usage :output_tokens] 0)}
      :model            (or (:model acc) (not-empty (str request-model)) "claude-cli")
      :backend-metadata (cond-> {:backend         :claude-cli
                                 ;; The CLI accepts only type:user messages, so a

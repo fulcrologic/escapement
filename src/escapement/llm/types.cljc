@@ -231,6 +231,8 @@
    [:stop-reason StopReason]
    [:content [:vector ContentBlock]]
    [:usage Usage]
+   ;; Optional cumulative consumption when :usage measures per-call context.
+   [:consumed-usage {:optional true} Usage]
    [:model :string]
    [:backend-metadata {:optional true} :map]])
 

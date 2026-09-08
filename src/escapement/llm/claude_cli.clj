@@ -38,15 +38,22 @@
    backend usually want `:resilience {:max-retries 1}` so the two retry layers
    do not multiply.
 
-   ## Not streaming
+   ## Streaming
 
-   This record intentionally implements only `LLMBackend`, never
-   `StreamingLLMBackend`. A `defrecord` cannot conditionally satisfy a
-   protocol, and a `stream-turn` that never calls `on-delta` would make
-   `await-turn!` abandon the turn at the first-token cap whenever a fallback
-   candidate is configured. The cost is no live token display, and
-   `:latency :first-token-ms` degrading to a total-response cap — already
-   documented as acceptable in `escapement.llm`."
+   Partial text events provide live progress through `StreamingLLMBackend`.
+   These are provisional CLI text (possibly a tool envelope), not the decoded
+   final content. Complete messages and the result remain authoritative for
+   content, tool calls and usage; extraction JSON and thinking are not text.
+
+   Deltas are emitted ONLY for top-level `text_delta` chunks, so a turn that
+   produces no assistant prose — a tool-only/structured-output turn, a
+   thinking-only stretch, or text emitted under a CLI sub-agent
+   (`parent_tool_use_id`) — still stamps no first token. Under
+   `:latency {:first-token-ms N}` with a fallback candidate configured,
+   `await-turn!` therefore abandons such a turn at the cap exactly as it did
+   before this backend streamed. Streaming narrows that hazard (a prose turn
+   now stamps first-token normally) but does not remove it; the CLI's
+   300-500 MB cold start also means the cap must be set generously."
   (:require
     [babashka.process :as bp]
     [cheshire.core :as json]
@@ -143,7 +150,7 @@
         (recur (rest in) (conj out a)))
       out)))
 
-(defn- run-cli!
+(>defn ^:private run-cli!
   "Spawns the CLI, folds its stdout, and returns
    `{:acc A :exit N :stderr S :timed-out? B}`.
 
@@ -163,7 +170,8 @@
      escalating to `.destroyForcibly` if it does not go. `destroy-tree` rather
      than a bare `.destroy` because the CLI is a Node process that spawns its
      own children, and SIGTERMing only the direct child would orphan them."
-  [{:keys [argv env stdin timeout-ms]}]
+  [{:keys [argv env stdin timeout-ms on-delta]}]
+  [:map => :map]
   (let [err-file (File/createTempFile "esc-claude-cli-err" ".log")
         timed-out (atom false)
         acc      (atom (t/stream-acc-init))]
@@ -198,7 +206,7 @@
         (with-open [rdr (io/reader (:out proc))]
           (loop []
             (when-let [line (.readLine rdr)]
-              (t/process-stream-line! acc line)
+              (t/process-stream-line! acc line on-delta)
               (recur))))
         (.waitFor p)
         (future-cancel watchdog)
@@ -233,8 +241,9 @@
     (get effort->cli (rsn/effort request))
     (when (= :enabled (get-in request [:thinking :type])) "high")))
 
-(defn- send-turn*
-  [opts request]
+(>defn ^:private send-turn*
+  [opts request on-delta]
+  [:map :map [:maybe fn?] => :map]
   (let [request       (cond-> request
                         (and (nil? (:model request)) (:default-model opts))
                         (assoc :model (:default-model opts)))
@@ -291,7 +300,8 @@
       (acquire-slot! sem timeout-ms)
       (let [{:keys [acc exit stderr timed-out?]}
             (try
-              (run-cli! {:argv argv :env env :stdin stdin :timeout-ms timeout-ms})
+              (run-cli! {:argv argv :env env :stdin stdin :timeout-ms timeout-ms
+                         :on-delta on-delta})
               (finally (when sem (.release ^Semaphore sem))))
             result   (:result acc)
             failed?  (or timed-out?
@@ -332,7 +342,10 @@
 (defrecord ClaudeCliBackend [opts]
   proto/LLMBackend
   (send-turn [_ request]
-    (p/do! (send-turn* opts request))))
+    (p/do! (send-turn* opts request nil)))
+  proto/StreamingLLMBackend
+  (stream-turn [_ request on-delta]
+    (p/do! (send-turn* opts request on-delta))))
 
 (>defn new-backend
   "Constructs a Claude Code CLI backend.

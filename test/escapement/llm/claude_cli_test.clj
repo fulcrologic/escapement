@@ -133,6 +133,51 @@
 ;;; ---------------------------------------------------------------------------
 ;;; What the child actually saw  (NN-2, NN-4)
 
+(specification "claude-cli streams before completion without changing the final response"
+  (let [b (backend {"FAKE_CLAUDE_FIXTURE" (fixture-path "streaming-text")
+                    "FAKE_CLAUDE_LINE_DELAY_MS" "100"})
+        first-delta (promise)
+        release (promise)
+        deltas (atom [])
+        turn (future (p/await! (proto/send-turn* b (request)
+                                (fn [delta]
+                                  (swap! deltas conj delta)
+                                  (deliver first-delta delta)
+                                  (deref release 10000 nil)))))]
+    (try
+      (assertions
+        "a real child delivers incremental text while the turn is still pending"
+        (deref first-delta 10000 ::timeout) => {:type :text-delta :text "Hello "}
+        (realized? turn) => false)
+      (finally (deliver release true)))
+    (let [response (deref turn 10000 ::timeout)
+          plain (:response (send! b (request)))]
+      (assertions
+        "thinking and extraction JSON are not text, complete messages aren't replayed"
+        @deltas => [{:type :text-delta :text "Hello "} {:type :text-delta :text "world."}]
+        response => plain
+        (:content response) => [{:type :text :text "Hello world."}]
+        (:input-tokens (:usage response)) => 110
+        (:input-tokens (:consumed-usage response)) => 220))))
+
+(specification "claude-cli isolates callback failures and preserves terminal failures"
+  (let [calls (atom 0)
+        b (backend {"FAKE_CLAUDE_FIXTURE" (fixture-path "streaming-text")})
+        response (p/await! (proto/stream-turn b (request)
+                            (fn [_] (swap! calls inc) (throw (ex-info "consumer failed" {})))))]
+    (assertions
+      @calls => 2
+      (:content response) => [{:type :text :text "Hello world."}]))
+  (doseq [[fixture timeout category] [["is-error-auth" 10000 :auth]
+                                     ["streaming-text" 800 :timeout]
+                                     [nil 10000 :invalid-request]]]
+    (let [b (backend (cond-> {"FAKE_CLAUDE_LINE_DELAY_MS" "500"}
+                      fixture (assoc "FAKE_CLAUDE_FIXTURE" (fixture-path fixture)))
+              :timeout-ms timeout)
+          error (try (p/await! (proto/stream-turn b (request) (fn [_]))) nil
+                     (catch Throwable e e))]
+      (assertions (proto/error-category error) => category))))
+
 (specification "claude-cli — what reaches the child process"
   (let [rec (io/file (temp-dir! "cc-rec") "rec.edn")
         b   (backend {"FAKE_CLAUDE_FIXTURE"   (fixture-path "tool-call")
@@ -163,6 +208,8 @@
         (contains? (set argv) "--tools") => true
         "safe-mode on"
         (contains? (set argv) "--safe-mode") => true
+        "partial messages are requested from the CLI"
+        (contains? (set argv) "--include-partial-messages") => true
         "a system prompt file was passed and it EXISTS at spawn time"
         (contains? (set argv) "--system-prompt-file") => true))
 
@@ -483,11 +530,8 @@
       "a missing binary yields nil rather than an exception"
       (cc/cli-version "definitely-not-a-real-binary-xyz") => nil))
 
-  (component "the record implements LLMBackend but NOT StreamingLLMBackend (NN-8)"
+  (component "the record implements both turn capabilities"
     (let [b (cc/new-backend {})]
       (assertions
-        "so send-turn* falls back cleanly instead of a stream-turn that never
-         calls on-delta, which would make await-turn! abandon the turn at the
-         first-token cap whenever a fallback candidate is configured"
         (satisfies? proto/LLMBackend b) => true
-        (proto/streaming? b) => false))))
+        (proto/streaming? b) => true))))
