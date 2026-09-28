@@ -4,8 +4,11 @@
   "private": true,
   "description": "shadow-cljs harness: the `bb cljs-test` Node test runner and the `:main` browser SPA for the read surface (served by the escapement --api-server).",
   "packageManager": "pnpm@11.21.0",
-  "scripts": {
-    "preinstall": "npx only-allow@1.2.2 pnpm"
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.21.0"
+    }
   },
   "dependencies": {
     "@js-joda/core": "3.2.0",
