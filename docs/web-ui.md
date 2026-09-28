@@ -163,7 +163,7 @@ clojure -M:api:ui-test      # RAD/TUI explorer screens (JVM, guardrails 1.3.2)
 
 ```bash
 # Terminal 1 — recompile + hot-reload on every save (dev build, with shadow's reload runtime).
-bb watch-ui            # = npx shadow-cljs watch main  (output to resources/public/js/main, gitignored)
+bb watch-ui            # = pnpm exec shadow-cljs watch main  (output to resources/public/js/main, gitignored)
 
 # Terminal 2 — serve the app + the live API from one origin so the relative `/api` remote works.
 escapement run escapement.examples.ask/agent --no-tui --api-server 8920

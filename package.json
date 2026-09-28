@@ -3,16 +3,20 @@
   "version": "0.0.0",
   "private": true,
   "description": "shadow-cljs harness: the `bb cljs-test` Node test runner and the `:main` browser SPA for the read surface (served by the escapement --api-server).",
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "preinstall": "npx only-allow@1.2.2 pnpm"
+  },
   "dependencies": {
     "@js-joda/core": "3.2.0",
     "@js-joda/timezone": "2.8.0",
     "big.js": "6.1.1",
-    "elkjs": "^0.11.0",
+    "elkjs": "0.11.1",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "semantic-ui-react": "2.1.5"
   },
   "devDependencies": {
-    "shadow-cljs": "^3.3.4"
+    "shadow-cljs": "3.4.11"
   }
 }

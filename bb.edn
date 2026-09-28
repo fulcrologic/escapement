@@ -90,18 +90,18 @@
             {:doc  "Compile + run .cljc tests under Node via shadow-cljs."
              :task (do
                      (when-not (.exists (clojure.java.io/file "node_modules"))
-                       (println "[cljs-test] installing npm deps...")
-                       (shell "npm install --no-fund --no-audit"))
-                     (shell "npx shadow-cljs compile node-test")
+                       (println "[cljs-test] installing pnpm deps...")
+                       (shell "pnpm install --frozen-lockfile"))
+                     (shell "pnpm exec shadow-cljs compile node-test")
                      (shell "node out/node-tests.js"))}
             build-ui
             {:doc      "Release-compile the browser SPA and refresh the fetch manifest (resources/escapement-ui.edn). After this, commit the manifest and upload resources/public/js/main/main.js to the matching GitHub release (escapement-<version>)."
              :requires ([clojure.java.io :as io] [clojure.string :as str])
              :task     (do
                          (when-not (.exists (io/file "node_modules"))
-                           (println "[build-ui] installing npm deps...")
-                           (shell "npm install --no-fund --no-audit"))
-                         (shell "npx shadow-cljs release main")
+                           (println "[build-ui] installing pnpm deps...")
+                           (shell "pnpm install --frozen-lockfile"))
+                         (shell "pnpm exec shadow-cljs release main")
                          (let [bytes   (java.nio.file.Files/readAllBytes
                                          (.toPath (io/file "resources/public/js/main/main.js")))
                                digest  (.digest (java.security.MessageDigest/getInstance "SHA-256") bytes)
@@ -117,9 +117,9 @@
             {:doc  "Dev-compile + hot-reload the browser SPA (shadow watch). Pair with `run --api-server <port>` to serve it."
              :task (do
                      (when-not (.exists (clojure.java.io/file "node_modules"))
-                       (println "[watch-ui] installing npm deps...")
-                       (shell "npm install --no-fund --no-audit"))
-                     (shell "npx shadow-cljs watch main"))}
+                       (println "[watch-ui] installing pnpm deps...")
+                       (shell "pnpm install --frozen-lockfile"))
+                     (shell "pnpm exec shadow-cljs watch main"))}
             release-ui
             {:doc      "Publish the ALREADY-BUILT resources/public/js/main/main.js as an asset on the GitHub release escapement-<version>. Verify-not-rebuild: never recompiles — it asserts the on-disk bundle's SHA-256 matches the committed escapement-ui.edn (so the published asset == what bbin installs verify against), that the manifest is committed, and that the tag is on origin. Run order: `bb build-ui` -> commit escapement-ui.edn -> maven release (tags+pushes) -> `bb release-ui`."
              :requires ([clojure.edn :as edn] [clojure.string :as str])
