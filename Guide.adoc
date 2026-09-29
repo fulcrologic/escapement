@@ -2584,7 +2584,21 @@ Place it on the service region's `on-entry`:
 * `:tool` — the chart event the LLM call fires.
 * `:description` — exposed to the LLM verbatim.
 * `:input-schema` — a Malli schema.
-Must be _open_ (no `{:closed true}`) so the framework can merge an implicit optional `:timeout-ms` field; closed schemas error at registration time.
+Must be _open_ (no `{:closed true}`) so the framework can merge an implicit optional `:timeout-ms` field; closed schemas error at registration time (unless `:llm-timeout? false`, below).
+* `:timeout-ms` (optional) — how long a calling conversation waits for this tool's reply when the call does not pass its own `:timeout-ms`.
+Defaults to 120 s.
+Declare it for tools whose work takes minutes (a sub-agent, a test run), otherwise the caller gets a "timed out" tool_result while the work is still running and may call again.
+* `:llm-timeout?` (optional, default `true`) — `false` takes the deadline away from the model: no `:timeout-ms` field is added to the tool's schema, a model-supplied value is ignored, and every call waits the author's `:timeout-ms`.
+
+[source,clojure]
+----
+(on-entry {} (service/register-tool!
+               {:tool         :errand/run
+                :description  "Run an errand; replies when it finishes."
+                :input-schema [:map [:task :string]]
+                :timeout-ms   (* 30 60 1000)     ; 30 minutes
+                :llm-timeout? false}))           ; the model cannot shorten it
+----
 
 The `:owner` is read from the enclosing state (`::sc/context-element-id`) at runtime — you never pass it.
 Two sibling regions MAY register the same tool keyword; consumers disambiguate with `:as`.
@@ -2655,8 +2669,8 @@ Each tool becomes an Anthropic tool named `region__<encoded>`.
 With `:as
 :py`, `:repl/eval` becomes `region__py__repl_eval` on the LLM side and the consumer can call both `:py` and `:clj` variants in the same turn without collision.
 
-The LLM may include `:timeout-ms` in any region-tool call to override the default (30s).
-The framework merges that field into every region-tool's JSON schema automatically.
+The LLM may include `:timeout-ms` in any region-tool call to override the tool's default deadline (the `:timeout-ms` declared on `register-tool!`, else 120 s).
+The framework merges that field into every region-tool's JSON schema automatically, except for tools registered with `:llm-timeout? false`.
 
 [CAUTION]
 ====

@@ -272,9 +272,11 @@
 
        {:event-kw         <chart event keyword>
         :owner            <state-id>
-        :input-schema     <malli, post-implicit-timeout merge>
+        :input-schema     <malli, post-implicit-timeout merge (unless
+                           the author set `:llm-timeout? false`)>
         :raw-input-schema <malli, as registered>
-        :timeout-default  <int>
+        :timeout-default  <int: the author's `:timeout-ms`, else `default-timeout-ms`>
+        :llm-timeout?     <boolean: may the model's `:timeout-ms` override it>
         :tool-kw          <consumer-facing keyword, aliased if applicable>}
 
    Throws on collision (two entries mapping to the same LLM-facing name —
@@ -295,13 +297,15 @@
                                    tool-kw  (if as
                                               (keyword (name as) (name event-kw))
                                               event-kw)
-                                   raw      (or (:input-schema entry) [:map])]]
+                                   raw      (or (:input-schema entry) [:map])
+                                   llm-to?  (not (false? (:llm-timeout? entry)))]]
                          {:event-kw         event-kw
                           :owner            owner
                           :description      (:description entry)
                           :raw-input-schema raw
-                          :input-schema     (assoc-implicit-timeout raw)
-                          :timeout-default  default-timeout-ms
+                          :input-schema     (if llm-to? (assoc-implicit-timeout raw) raw)
+                          :timeout-default  (or (:timeout-ms entry) default-timeout-ms)
+                          :llm-timeout?     llm-to?
                           :tool-kw          tool-kw}))
                      decls))]
     (reduce
@@ -541,9 +545,10 @@
 
 (def ^:const region-tool-default-timeout-ms
   "Default per-call deadline for a region-tool dispatch when neither the
-   LLM nor the conversation params specify one. 120 seconds is generous for
-   slower/rate-limited models whose region handlers themselves call an LLM;
-   a chart that needs a different bound passes `:timeout-ms` per call."
+   LLM nor the tool's `register-tool!` declaration specifies one. 120 seconds
+   is generous for slower/rate-limited models whose region handlers themselves
+   call an LLM; a tool that needs a different bound declares `:timeout-ms` on
+   `register-tool!` (and `:llm-timeout? false` to stop the model overriding it)."
   120000)
 
 (def ^:const region-tool-poll-step-ms
@@ -739,19 +744,23 @@
       ;; poll the worker's `tool-reply-queue` until a matching reply
       ;; arrives or the per-call deadline passes.
       (contains? name->region-tool name)
-      (let [{:keys [event-kw owner input-schema timeout-default]}
+      (let [{:keys [event-kw owner input-schema timeout-default llm-timeout?]
+             :or   {llm-timeout? true}}
             (get name->region-tool name)
             schema  (or input-schema [:map])
             decoded (m/decode schema (or input {}) tool-input-transformer)]
         (if (m/validate schema decoded)
           (let [reply-id   (str "tr_" (java.util.UUID/randomUUID))
-                ;; LLM may supply :timeout-ms; otherwise fall back to the
-                ;; per-tool default. The wire payload carries the relative
-                ;; duration; the worker computes the absolute deadline.
-                timeout-ms (or (get decoded :timeout-ms) timeout-default
+                ;; LLM may supply :timeout-ms (unless the author set
+                ;; :llm-timeout? false); otherwise fall back to the per-tool
+                ;; default (the author's :timeout-ms, else the engine default).
+                ;; The wire payload carries the relative duration; the worker
+                ;; computes the absolute deadline.
+                timeout-ms (or (when llm-timeout? (get decoded :timeout-ms))
+                             timeout-default
                              region-tool-default-timeout-ms)
                 payload    (-> decoded
-                             (dissoc :timeout-ms)
+                             (cond-> llm-timeout? (dissoc :timeout-ms))
                              (assoc :escapement.tool/reply-id reply-id
                                     :escapement.tool/reply-to (->id-str
                                                                 (:invokeid parent-ctx))

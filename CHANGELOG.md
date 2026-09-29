@@ -1,5 +1,26 @@
 # Changelog
 
+## [unreleased] — feat/region-tool-timeout — 2026-09-29
+
+### Added
+
+- **Per-tool reply deadline for region tools.** `service/register-tool!` takes
+  an optional `:timeout-ms`: how long a calling conversation waits for that
+  tool's reply when the call passes no `:timeout-ms` of its own. Previously
+  every call without one waited the fixed engine default (120 s,
+  `llm-conversation/region-tool-default-timeout-ms`), so a tool whose work
+  takes minutes returned "timed out" to the model while still running, and the
+  model could call it again. The engine default is unchanged.
+- **`:llm-timeout? false` on `register-tool!`** pins the deadline to the
+  author's value: no implicit `:timeout-ms` is merged into the tool's schema
+  (so a closed schema is allowed), and a model-supplied `:timeout-ms` is
+  ignored. Default `true` keeps
+  today's behaviour.
+
+### Fixed
+
+- Guide said the region-tool default deadline was 30 s; it is 120 s.
+
 ## [unreleased] — feat/claude-cli-streaming — 2026-09-08
 
 ### Added

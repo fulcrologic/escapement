@@ -71,7 +71,11 @@ synchronization concerns.
 ### 2. Per-chart service registry
 
 A new env entry: `::service/registry` → `(atom {tool-kw entry})` where
-`entry = {:owner <state-id> :description <s> :input-schema <malli>}`.
+`entry = {:owner <state-id> :description <s> :input-schema <malli>}`, plus
+the optional author-declared `:timeout-ms` (default reply deadline for this
+tool; the engine default is 120 s) and `:llm-timeout?` (default true; false
+means the model cannot override the deadline — no implicit `:timeout-ms` is
+merged into the schema, so the schema may then be closed).
 
 Built once when the engine env is constructed (`escapement/engine/env.clj`,
 around line 36). Empty at first; populated by on-entry actions.
@@ -214,6 +218,12 @@ Merged into the assembled Anthropic `:tools` array alongside real-tools
 and event-tools, schemas passed through `malli->json-schema`. An implicit
 optional `:timeout-ms` field is merged into each schema (the merge requires
 schemas to be open; closed schemas error at snapshot with a clear message).
+`:timeout-default` is the entry's author-declared `:timeout-ms`, else
+`region-tool-default-timeout-ms` (120 s). An entry registered with
+`:llm-timeout? false` skips the merge and its deadline is always
+`:timeout-default` — a long-running tool (a sub-agent errand) is then not at
+the mercy of a model that passes a short `:timeout-ms`, times out, and calls
+again while the first run is still working.
 
 #### 5b. Worker entry additions
 

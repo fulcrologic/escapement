@@ -4,6 +4,7 @@
   proves the API works end-to-end so subsequent agents have something to
   build on."
   (:require
+    [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.chart :as chart]
     [com.fulcrologic.statecharts.elements :refer [final on-entry on-exit
                                                   parallel state
@@ -129,7 +130,7 @@
 (specification "missing-handler timeout: LLM gets is-error tool_result"
   (let [backend    (mock-backend
                      [(tool-use-response
-                        [{:id    "u1" :name "region__repl_eval"
+                        [{:id    "u1"                              :name "region__repl_eval"
                           :input {:expr "(+ 1 2)" :timeout-ms 200}}])
                       (end-turn-response "ok then")])
         chart      (chart/statechart
@@ -246,8 +247,8 @@
       "the snapshot raises an :region-palette-collision ex-info"
       (try
         (#'llmc/region-tool-palette registry-snapshot
-          [{:owner :repl-A} {:owner :repl-B}]
-          30000)
+                                    [{:owner :repl-A} {:owner :repl-B}]
+                                    30000)
         :no-throw
         (catch Exception e
           (:reason (ex-data e))))
@@ -356,3 +357,118 @@
          :no-throw
          (catch Exception e (:reason (ex-data e))))
     => :closed-region-tool-schema))
+
+;; ---------------------------------------------------------------------------
+;; Author-declared reply deadline (:timeout-ms / :llm-timeout? on register-tool!)
+;; ---------------------------------------------------------------------------
+
+(specification "region-tool-palette: per-tool reply deadline declared by the chart author"
+  (let [snapshot [{:tool       :svc/slow :owner :svc :description "slow" :input-schema [:map]
+                   :timeout-ms 900000}
+                  {:tool :svc/plain :owner :svc :description "plain" :input-schema [:map]}
+                  {:tool         :svc/fixed                         :owner        :svc  :description "fixed"
+                   :input-schema [:map {:closed true} [:x :string]]
+                   :timeout-ms   5000                               :llm-timeout? false}]
+        [defs index] (#'llmc/region-tool-palette snapshot [{:owner :svc}] 120000)
+        slow  (get index "region__svc_slow")
+        plain (get index "region__svc_plain")
+        fixed (get index "region__svc_fixed")]
+    (assertions
+      "an author :timeout-ms becomes the tool's default deadline"
+      (:timeout-default slow) => 900000
+      "a tool without one keeps the conversation-wide default"
+      (:timeout-default plain) => 120000
+      "the model may still override by default (implicit :timeout-ms merged)"
+      (:llm-timeout? slow) => true
+      (last (:input-schema slow)) => [:timeout-ms {:optional true} [:int {:min 1}]]
+      ":llm-timeout? false leaves the schema exactly as registered"
+      (:llm-timeout? fixed) => false
+      (:input-schema fixed) => [:map {:closed true} [:x :string]]
+      (:timeout-default fixed) => 5000
+      "the model-facing JSON schema for a fixed-deadline tool has no timeout-ms property"
+      (-> (filterv #(= "region__svc_fixed" (:name %)) defs)
+        first :input-schema pr-str
+        (.contains "timeout-ms"))
+      => false)))
+
+(defn- author-timeout-chart
+  "A consumer conversation calling `region__svc_work` against a service region
+   that registers `decl` for `:svc/work` but installs no handler, so every call
+   runs to its deadline."
+  [decl]
+  (chart/statechart
+    {:initial :run}
+    (state {:id :run :initial :work}
+      (parallel {:id :work}
+        (state {:id :consumer :initial :running}
+          (state {:id :running}
+            (h/llm-conversation
+              {:id          "coder"
+               :chart-tools [{:owner :svc}]
+               :message     "go"})
+            (transition {:event :llm.idle :target :consumer-done}))
+          (final {:id :consumer-done}))
+        (state {:id :svc :initial :no-handler}
+          (on-entry {}
+            (service/register-tool!
+              (merge {:tool         :svc/work
+                      :description  "Slow work."
+                      :input-schema [:map [:task :string]]}
+                decl)))
+          (state {:id :no-handler})))
+      (transition {:event :done.state.work :target :finished})
+      (final {:id :finished}))))
+
+(defn- timeout-result-text
+  "Runs `chart` with a model that calls the tool once with `input`, returning
+   the text of the tool_result fed back on the second turn."
+  [chart input]
+  (let [backend (mock-backend
+                  [(tool-use-response [{:id "u1" :name "region__svc_work" :input input}])
+                   (end-turn-response "ok")])
+        t       (new-llm-test-env {:statechart chart :backend backend})
+        _       (await-config! t :consumer-done 5000)]
+    (some->> (-> backend :call-log deref second :messages)
+      (mapcat :content)
+      (filter #(= :tool_result (:type %)))
+      first
+      :content
+      str)))
+
+(specification "author :timeout-ms is the reply deadline when the model passes none"
+  (assertions
+    "the call times out on the author's 300ms, not the 120s global default"
+    (timeout-result-text (author-timeout-chart {:timeout-ms 300}) {:task "t"})
+    => "region__svc_work timed out after 300ms"
+    "a model-supplied :timeout-ms still overrides it when allowed"
+    (timeout-result-text (author-timeout-chart {:timeout-ms 60000})
+      {:task "t" :timeout-ms 250})
+    => "region__svc_work timed out after 250ms"))
+
+(specification ":llm-timeout? false pins the reply deadline to the author's value"
+  (assertions
+    "a model-supplied :timeout-ms is ignored"
+    (timeout-result-text (author-timeout-chart {:timeout-ms 300 :llm-timeout? false})
+      {:task "t" :timeout-ms 600000})
+    => "region__svc_work timed out after 300ms"))
+
+(specification "register-tool! accepts a closed schema when :llm-timeout? is false"
+  (let [env (env-with-registry)
+        run (fn [decl]
+              (try
+                ((:expr (service/register-tool! decl))
+                 (assoc env ::sc/context-element-id :svc) {})
+                :ok
+                (catch Exception e (:reason (ex-data e)))))]
+    (assertions
+      "closed + model override allowed is still rejected"
+      (run {:tool :svc/a :description "a" :input-schema [:map {:closed true}]})
+      => :closed-region-tool-schema
+      "closed + :llm-timeout? false registers"
+      (run {:tool       :svc/b :description  "b"   :input-schema [:map {:closed true}]
+            :timeout-ms 1000   :llm-timeout? false})
+      => :ok
+      "the registered entry carries the deadline declaration"
+      (get-in @(::service/registry env) [:svc/b :svc])
+      => {:owner      :svc :description  "b"   :input-schema [:map {:closed true}]
+          :timeout-ms 1000 :llm-timeout? false})))

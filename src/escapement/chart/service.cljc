@@ -30,7 +30,8 @@
   "Returns the chart-scoped registry atom on `env`. Returns nil when the env
 wasn't built by `escapement.engine.env/new-env` (e.g. a hand-rolled test env).
 
-Registry shape: `{tool-kw {owner-id {:owner :description :input-schema}}}`.
+Registry shape: `{tool-kw {owner-id {:owner :description :input-schema}}}`,
+plus `:timeout-ms` / `:llm-timeout?` when the declaration set them.
 A given tool keyword may be claimed by multiple owners (sibling service
 regions); consumers disambiguate via `:chart-tools` aliasing. A SINGLE
 owner re-registering the same tool keyword is a hard error."
@@ -40,7 +41,8 @@ owner re-registering the same tool keyword is a hard error."
 
 (>defn entries
   "Snapshot of the registry, flattened to a vector of entry maps. Each
-entry carries `:tool`, `:owner`, `:description`, `:input-schema`."
+entry carries `:tool`, `:owner`, `:description`, `:input-schema`, and the
+optional `:timeout-ms` / `:llm-timeout?` from its declaration."
   [env]
   [map? => [:vector :map]]
   (let [reg (some-> (registry env) deref)]
@@ -84,12 +86,26 @@ current state's id (`::sc/context-element-id` on the env).
 * `:tool`         (required, keyword) — the chart event the LLM call fires
 * `:description`  (required, string)  — exposed to the LLM verbatim
 * `:input-schema` (required, malli)   — validates the LLM's tool input.
-                                        Must be open (no `:closed true`)."
+                                        Must be open (no `:closed true`)
+                                        unless `:llm-timeout?` is false.
+* `:timeout-ms`   (optional, pos-int) — how long a consumer waits for this
+                                        tool's reply when the call supplies
+                                        no `:timeout-ms` of its own. Absent →
+                                        the engine default (120 s). Set it for
+                                        tools whose work takes minutes.
+* `:llm-timeout?` (optional, boolean, default true) — when false the model
+                                        cannot choose the deadline: no
+                                        implicit `:timeout-ms` is merged into
+                                        the tool's input schema, and the reply
+                                        always waits the author's `:timeout-ms`
+                                        (or the engine default)."
   [decl]
   [[:map
     [:tool :keyword]
     [:description :string]
-    [:input-schema :any]]
+    [:input-schema :any]
+    [:timeout-ms {:optional true} pos-int?]
+    [:llm-timeout? {:optional true} :boolean]]
    => any?]
   (elt/script
     {:expr
@@ -102,10 +118,12 @@ current state's id (`::sc/context-element-id` on the env).
          (when-not reg
            (throw (ex-info "No ::escapement.chart.service/registry on env. Build env via escapement.engine.env/new-env."
                     {:reason :no-registry})))
-         (assert-open-schema! (:input-schema decl) owner tool-kw)
-         (let [entry      {:owner        owner
-                           :description  (:description decl)
-                           :input-schema (:input-schema decl)}
+         (when-not (false? (:llm-timeout? decl))
+           (assert-open-schema! (:input-schema decl) owner tool-kw))
+         (let [entry      (merge {:owner        owner
+                                  :description  (:description decl)
+                                  :input-schema (:input-schema decl)}
+                            (select-keys decl [:timeout-ms :llm-timeout?]))
                ;; Atomic compare-and-set: a single `swap-vals!` rules out
                ;; the race where two concurrent registrations both observe
                ;; "no existing entry" and one quietly overwrites the other.
