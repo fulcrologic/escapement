@@ -85,7 +85,7 @@
             :timeout-ms      20000
             :parent-env      (merge (into {} (System/getenv)) fake-env)
             :extra-child-env (into {} (filterv (fn [[k _]] (str/starts-with? k "FAKE_CLAUDE_"))
-                                       fake-env))}
+                                        fake-env))}
       opts)))
 
 (defn send!
@@ -120,6 +120,17 @@
       (get-in response [:backend-metadata :backend]) => :claude-cli
       (get-in response [:backend-metadata :cli/exit]) => 0)))
 
+(specification "claude-cli — a turn whose tools were all called natively fails loudly"
+  (let [b (backend {"FAKE_CLAUDE_FIXTURE" (fixture-path "misrouted-tool-call")})
+        {:keys [error category]}
+        (send! b (request {:tools [(assoc sample-tool :name "fs_read")]}))]
+    (assertions
+      "rejects with a categorized :invalid-request instead of returning the
+       model's 'the tool is unavailable' prose"
+      category => :invalid-request
+      "naming the tools the CLI refused"
+      (:claude-cli/misrouted-tools (ex-data error)) => ["fs_read"])))
+
 (specification "claude-cli — a plain text turn with no tools"
   (let [b (backend {"FAKE_CLAUDE_FIXTURE" (fixture-path "text-only")})
         {:keys [response error]} (send! b (request))]
@@ -134,16 +145,16 @@
 ;;; What the child actually saw  (NN-2, NN-4)
 
 (specification "claude-cli streams before completion without changing the final response"
-  (let [b (backend {"FAKE_CLAUDE_FIXTURE" (fixture-path "streaming-text")
+  (let [b (backend {"FAKE_CLAUDE_FIXTURE"       (fixture-path "streaming-text")
                     "FAKE_CLAUDE_LINE_DELAY_MS" "100"})
         first-delta (promise)
         release (promise)
         deltas (atom [])
         turn (future (p/await! (proto/send-turn* b (request)
-                                (fn [delta]
-                                  (swap! deltas conj delta)
-                                  (deliver first-delta delta)
-                                  (deref release 10000 nil)))))]
+                                 (fn [delta]
+                                   (swap! deltas conj delta)
+                                   (deliver first-delta delta)
+                                   (deref release 10000 nil)))))]
     (try
       (assertions
         "a real child delivers incremental text while the turn is still pending"
@@ -164,15 +175,15 @@
   (let [calls (atom 0)
         b (backend {"FAKE_CLAUDE_FIXTURE" (fixture-path "streaming-text")})
         response (p/await! (proto/stream-turn b (request)
-                            (fn [_] (swap! calls inc) (throw (ex-info "consumer failed" {})))))]
+                             (fn [_] (swap! calls inc) (throw (ex-info "consumer failed" {})))))]
     (assertions
       @calls => 2
       (:content response) => [{:type :text :text "Hello world."}]))
   (doseq [[fixture timeout category] [["is-error-auth" 10000 :auth]
-                                     ["streaming-text" 800 :timeout]
-                                     [nil 10000 :invalid-request]]]
+                                      ["streaming-text" 800 :timeout]
+                                      [nil 10000 :invalid-request]]]
     (let [b (backend (cond-> {"FAKE_CLAUDE_LINE_DELAY_MS" "500"}
-                      fixture (assoc "FAKE_CLAUDE_FIXTURE" (fixture-path fixture)))
+                       fixture (assoc "FAKE_CLAUDE_FIXTURE" (fixture-path fixture)))
               :timeout-ms timeout)
           error (try (p/await! (proto/stream-turn b (request) (fn [_]))) nil
                      (catch Throwable e e))]
@@ -180,12 +191,12 @@
 
 (specification "claude-cli — what reaches the child process"
   (let [rec (io/file (temp-dir! "cc-rec") "rec.edn")
-        b   (backend {"FAKE_CLAUDE_FIXTURE"   (fixture-path "tool-call")
-                      "FAKE_CLAUDE_RECORD_TO" (.getPath rec)
+        b   (backend {"FAKE_CLAUDE_FIXTURE"    (fixture-path "tool-call")
+                      "FAKE_CLAUDE_RECORD_TO"  (.getPath rec)
                       ;; Present in the PARENT env; must not reach the child.
-                      "ANTHROPIC_API_KEY"     "sk-ant-MUST-NOT-LEAK"
-                      "ANTHROPIC_BASE_URL"    "https://evil.example"
-                      "CLAUDECODE"            "1"
+                      "ANTHROPIC_API_KEY"      "sk-ant-MUST-NOT-LEAK"
+                      "ANTHROPIC_BASE_URL"     "https://evil.example"
+                      "CLAUDECODE"             "1"
                       "CLAUDE_CODE_ENTRYPOINT" "cli"})
         _   (send! b (request {:tools [sample-tool]}))
         {:keys [argv env stdin]} (edn/read-string (slurp rec))]
@@ -454,7 +465,7 @@
 
     (component "the mapped value reaches argv"
       (let [argv-for (fn [request opts]
-                       (t/build-argv {:binary "claude" :system-prompt-file "/x"
+                       (t/build-argv {:binary "claude"                  :system-prompt-file "/x"
                                       :effort (effort-for request opts)}))
             flag-of  (fn [argv] (let [i (.indexOf ^java.util.List argv "--effort")]
                                   (when-not (neg? i) (nth argv (inc i)))))]

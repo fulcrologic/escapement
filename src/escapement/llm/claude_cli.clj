@@ -26,6 +26,22 @@
    and an MCP bridge are deliberately out of scope — they would break
    tool-execution symmetry across backends.
 
+   ## Tool calls go through `StructuredOutput`
+
+   Escapement's tools are NOT native tools in the child. They are described in
+   the system prompt, and `--json-schema` carries an envelope
+   `{assistant_text?, tool_calls?: [{name, input}]}`, which the CLI (2.1.x)
+   exposes to the model as its only native tool, `StructuredOutput`. A model
+   that calls a listed tool directly (e.g. `fs_read`) gets \"No such tool
+   available\" from the CLI. The system prompt therefore leads with, and repeats
+   after the tool list, that tools are called only as `tool_calls` entries of
+   the `StructuredOutput` call. If the model still calls offered tools natively
+   and no tool call comes back, the turn rejects with a categorized
+   `:invalid-request` whose ex-data carries `:claude-cli/misrouted-tools`
+   (chart event `:error.llm.invalid-request`), instead of returning the
+   model's \"the tool is unavailable\" prose. A turn that recovers is returned
+   normally with `:cli/misrouted-tool-calls` in `:backend-metadata`.
+
    ## Silently dropped
 
    `:temperature`, `:top-p`, `:top-k`, `:stop-sequences`, `:metadata`,
@@ -178,7 +194,7 @@
     (try
       (let [proc     (bp/process argv {:in       :pipe
                                        :out      :pipe
-                                       :err      :write :err-file err-file
+                                       :err      :write          :err-file err-file
                                        :env      env
                                        :shutdown bp/destroy-tree})
             ^Process p (:proc proc)
@@ -218,7 +234,7 @@
       (catch java.io.IOException e
         ;; exec itself failed — a missing binary surfaces here on some hosts
         ;; rather than as exit 127.
-        {:acc @acc :exit 127 :timed-out? false
+        {:acc    @acc                                            :exit 127 :timed-out? false
          :stderr (str (slurp-safe err-file) "\n" (ex-message e))})
       (finally
         (delete-quietly! err-file)))))
@@ -300,7 +316,7 @@
       (acquire-slot! sem timeout-ms)
       (let [{:keys [acc exit stderr timed-out?]}
             (try
-              (run-cli! {:argv argv :env env :stdin stdin :timeout-ms timeout-ms
+              (run-cli! {:argv     argv     :env env :stdin stdin :timeout-ms timeout-ms
                          :on-delta on-delta})
               (finally (when sem (.release ^Semaphore sem))))
             result   (:result acc)
@@ -321,7 +337,10 @@
                        {:mechanism     mechanism
                         :request-model (:model request)
                         :tool-names    (into #{} (map :name) tools)
-                        :exit          exit})]
+                        :exit          exit})
+            _        (when-let [{:keys [category message data]}
+                                (t/misrouted-tool-failure response (into #{} (map :name) tools))]
+                       (throw (proto/llm-error category message {:data data})))]
         (when (get-in response [:backend-metadata :truncated])
           (log/warn "[claude-cli] the CLI hit an output-token ceiling; reporting :end_turn with"
             ":truncated true (a :max_tokens stop cannot be stitched on this backend)")

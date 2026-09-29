@@ -262,11 +262,11 @@
   (let [captured (atom [])
         backend  (mock-backend
                    [(tool-use-response
-                      [{:id "u1" :name "event__poet_done"
+                      [{:id    "u1"                                                                :name "event__poet_done"
                         ;; nested array AND nested map arrive as raw strings
-                        :input {:idx     "1"
-                                :haikus  "[\"line1\\nline2\\nline3\",\"a\\nb\\nc\",\"x\\ny\\nz\"]"
-                                :meta    "{\"genre\":\"haiku\"}"}}])
+                        :input {:idx    "1"
+                                :haikus "[\"line1\\nline2\\nline3\",\"a\\nb\\nc\",\"x\\ny\\nz\"]"
+                                :meta   "{\"genre\":\"haiku\"}"}}])
                     (end-turn-response "ok")])
         chart    (chart/statechart
                    {:initial :work}
@@ -572,8 +572,8 @@
    messages (placement-level, pre-wire). Mirrors Anthropic's 4-breakpoint cap."
   [req]
   (+ (if (:system-cache-control req) 1 0)
-     (count (filter :cache-control (:tools req)))
-     (count (filter :cache-control (:messages req)))))
+    (count (filter :cache-control (:tools req)))
+    (count (filter :cache-control (:messages req)))))
 
 (defn- message-marker-indices
   "Indices of `:messages` carrying a `:cache-control` marker."
@@ -592,9 +592,9 @@
         backend   (mock-backend (into (vec (repeat n-tool-turns tool-turn))
                                   [(end-turn-response "ok")]))
         registry  (tp/new-registry [(->AlwaysOkTool)])
-        base      {:system         "stable system prompt"
-                   :real-tools     [:test/noop]
-                   :message        "go"}
+        base      {:system     "stable system prompt"
+                   :real-tools [:test/noop]
+                   :message    "go"}
         chart     (chart/statechart
                     {:initial :wrap}
                     (state {:id :wrap :initial :work}
@@ -1110,12 +1110,12 @@
     ;; :awaiting-user (poll, don't fixed-sleep: the turns complete on worker
     ;; threads, off the pump).
     (await-pred! t #(and (>= (count @(:call-log main-backend)) 1)
-                         (>= (count @(:call-log advisor-backend)) 1))
+                      (>= (count @(:call-log advisor-backend)) 1))
       3000)
     (let [queue (::sc/event-queue (:env t))
           sid   (:session-id t)]
       (sp/send! queue (:env t)
-        {:target sid :source-session-id sid
+        {:target sid                                          :source-session-id sid
          :event  :llm.user-message
          :data   {:text "for advisor only" :target "advisor"}}))
     ;; Wait until the targeted second turn actually reaches advisor's backend.
@@ -1247,7 +1247,7 @@
         _        (alter-meta! registry assoc :escapement/base-dir session)
         backend  (mock-backend
                    [(tool-use-response
-                      [{:id    "w1" :name "fs_write"
+                      [{:id    "w1"                                       :name "fs_write"
                         :input {:path "out/r3.txt" :content "hi-from-r3"}}])
                     (tool-use-response
                       [{:id "e1" :name "event__done" :input {}}])
@@ -1360,7 +1360,7 @@
                        (transition {:event :done :target :finished}))
                      (final {:id :finished})))
         t        (new-llm-test-env
-                   {:statechart    chart :backend backend
+                   {:statechart    chart                              :backend backend
                     :transcript-fn (fn [ev] (swap! captured conj ev))})
         _        (await-config! t :finished 3000)
         resp     (first (filter #(= :llm/response (:event %)) @captured))
@@ -1626,37 +1626,37 @@
   (assertions
     "params->resilience: defaults, per-key override keeps the rest"
     (#'llmc/params->resilience nil)
-    => {:max-retries 3 :backoff-ms 500
-        :latency {:first-token-ms nil :fallback nil}
-        :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
-                  :temperature-bump nil :temperature-max 1.0}
+    => {:max-retries  3                                                              :backoff-ms 500
+        :latency      {:first-token-ms nil :fallback nil}
+        :overrun      {:max-output-tokens nil :max-retries     0   :on-exhausted :truncate
+                       :temperature-bump  nil :temperature-max 1.0}
         :continuation {:enabled? true :max-segments 64 :max-chars 2000000}}
     (#'llmc/params->resilience {:resilience {:max-retries 0}})
-    => {:max-retries 0 :backoff-ms 500
-        :latency {:first-token-ms nil :fallback nil}
-        :overrun {:max-output-tokens nil :max-retries 0 :on-exhausted :truncate
-                  :temperature-bump nil :temperature-max 1.0}
+    => {:max-retries  0                                                              :backoff-ms 500
+        :latency      {:first-token-ms nil :fallback nil}
+        :overrun      {:max-output-tokens nil :max-retries     0   :on-exhausted :truncate
+                       :temperature-bump  nil :temperature-max 1.0}
         :continuation {:enabled? true :max-segments 64 :max-chars 2000000}}
     "a nested override keeps that group's other defaults (a shallow merge dropped them)"
     (:continuation (#'llmc/params->resilience {:resilience {:continuation {:max-segments 3}}}))
     => {:enabled? true :max-segments 3 :max-chars 2000000}
     "and the same holds for the other resilience groups"
     (:overrun (#'llmc/params->resilience {:resilience {:overrun {:max-retries 2}}}))
-    => {:max-output-tokens nil :max-retries 2 :on-exhausted :truncate
-        :temperature-bump nil :temperature-max 1.0}
+    => {:max-output-tokens nil :max-retries     2   :on-exhausted :truncate
+        :temperature-bump  nil :temperature-max 1.0}
     "merge-segment-content stitches text across a truncation boundary"
     (#'llmc/merge-segment-content [{:type :text :text "Hel"}]
-      [{:type :text :text "lo"}])
+                                  [{:type :text :text "lo"}])
     => [{:type :text :text "Hello"}]
     "non-text boundary just appends"
     (#'llmc/merge-segment-content [{:type :text :text "a"}]
-      [{:type :tool_use :id "i" :name "n" :input {}}])
+                                  [{:type :tool_use :id "i" :name "n" :input {}}])
     => [{:type :text :text "a"} {:type :tool_use :id "i" :name "n" :input {}}]
     "empty continuation yields the accumulator unchanged"
     (#'llmc/merge-segment-content [{:type :text :text "a"}] []) => [{:type :text :text "a"}]
     "merge-with-usage sums numeric fields"
     (#'llmc/merge-with-usage {:input-tokens 2 :output-tokens 3}
-      {:input-tokens 1 :output-tokens 4})
+                             {:input-tokens 1 :output-tokens 4})
     => {:input-tokens 3 :output-tokens 7}))
 
 (specification "drive-turn!: unbounded :max_tokens continuation stitches one terminal Response"
@@ -1665,7 +1665,7 @@
                                 (max-tokens-response "lo wor")
                                 (end-turn-response "ld")])
         result   (#'llmc/drive-turn! (drive-ctx backend captured)
-                   {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
     (assertions
       "the merged turn is terminal, not truncated"
       (get-in result [:ok :stop-reason]) => :end_turn
@@ -1681,9 +1681,9 @@
   (let [captured (atom [])
         backend  (mock-backend [(max-tokens-response "X")
                                 {:stop-reason :max_tokens :content []
-                                 :usage       {} :model "mock"}])
+                                 :usage       {}          :model   "mock"}])
         result   (#'llmc/drive-turn! (drive-ctx backend captured)
-                   {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
     (assertions
       "stuck model surfaces :no-progress (handler maps it to :error.llm.unexpected-stop)"
       (boolean (:no-progress result)) => true
@@ -1705,7 +1705,7 @@
                                 (assoc (end-turn-response (str prefix " and then some more"))
                                   :consumed-usage {:input-tokens 200 :output-tokens 3})])
         result   (#'llmc/drive-turn! (drive-ctx backend captured)
-                   {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
     (assertions
       "the restart is not stitched — the turn aborts instead"
       (contains? result :ok) => false
@@ -1735,7 +1735,7 @@
           backend  (mock-backend [(max-tokens-response "Hel")
                                   (end-turn-response "lo world")])
           result   (#'llmc/drive-turn! (drive-ctx backend captured)
-                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                       {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
       (assertions
         "the segments stitch as before"
         (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
@@ -1773,7 +1773,7 @@
                     [:backend-metadata :prefill-unsupported?] true)
         backend  (mock-backend [truncated (end-turn-response "should never be asked for")])
         result   (#'llmc/drive-turn! (drive-ctx backend captured)
-                   {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
     (assertions
       "the turn stops at the truncation instead of spending a doomed call"
       (:detail result) => :continuation-unsupported
@@ -1792,7 +1792,7 @@
     (let [captured (atom [])
           backend  (mock-backend [(max-tokens-response "Hel") (end-turn-response "lo world")])
           result   (#'llmc/drive-turn! (drive-ctx backend captured)
-                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                       {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
       (assertions
         "stitched as before"
         (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
@@ -1826,8 +1826,8 @@
     (let [captured (atom [])
           counter  (atom 0)
           result   (#'llmc/drive-turn! (drive-ctx (->AlwaysTruncatingBackend 8 counter) captured)
-                     {:resilience {:continuation {:max-segments 5 :max-chars 1000000}}}
-                     [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                       {:resilience {:continuation {:max-segments 5 :max-chars 1000000}}}
+                                       [{:role :user :content [{:type :text :text "hi"}]}] [])]
       (assertions
         "it terminates at all"
         (some? result) => true
@@ -1849,8 +1849,8 @@
     (let [captured (atom [])
           counter  (atom 0)
           result   (#'llmc/drive-turn! (drive-ctx (->AlwaysTruncatingBackend 500 counter) captured)
-                     {:resilience {:continuation {:max-segments 1000 :max-chars 2000}}}
-                     [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                       {:resilience {:continuation {:max-segments 1000 :max-chars 2000}}}
+                                       [{:role :user :content [{:type :text :text "hi"}]}] [])]
       (assertions
         "a few huge segments trip the char ceiling long before the segment count"
         (:detail result) => :continuation-limit
@@ -1863,7 +1863,7 @@
     (let [captured (atom [])
           counter  (atom 0)
           result   (#'llmc/drive-turn! (drive-ctx (->AlwaysTruncatingBackend 16 counter) captured)
-                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                       {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
       (assertions
         "it terminates on the built-in defaults, with no configuration"
         (:detail result) => :continuation-limit
@@ -1875,7 +1875,7 @@
     (let [captured (atom [])
           backend  (mock-backend [(max-tokens-response "Hel") (end-turn-response "lo world")])
           result   (#'llmc/drive-turn! (drive-ctx backend captured)
-                     {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                       {} [{:role :user :content [{:type :text :text "hi"}]}] [])]
       (assertions
         "still stitches normally under the default ceilings"
         (->> (get-in result [:ok :content]) (filter #(= :text (:type %))) (map :text) (apply str))
@@ -1908,8 +1908,8 @@
   (component "continuation OFF, no reruns — one call, and that is all"
     (let [counter (atom 0)
           result  (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend counter) (atom []))
-                    {:resilience {:continuation {:enabled? false}}}
-                    [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                      {:resilience {:continuation {:enabled? false}}}
+                                      [{:role :user :content [{:type :text :text "hi"}]}] [])]
       (assertions
         "exactly one call — no continuation, and no rerun it never asked for"
         @counter => 1
@@ -1927,8 +1927,8 @@
     ;; no-op. A caller trading correctness against cost should choose it.
     (let [counter (atom 0)]
       (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend counter) (atom []))
-        {:resilience {:overrun {:max-retries 1 :on-exhausted :truncate}}}
-        [{:role :user :content [{:type :text :text "hi"}]}] [])
+                          {:resilience {:overrun {:max-retries 1 :on-exhausted :truncate}}}
+                          [{:role :user :content [{:type :text :text "hi"}]}] [])
       (assertions
         "the initial call plus one rerun"
         @counter => 2)))
@@ -1936,8 +1936,8 @@
   (component "continuation ON — the default, unchanged"
     (let [counter (atom 0)
           result  (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend counter) (atom []))
-                    {:resilience {:continuation {:max-segments 3}}}
-                    [{:role :user :content [{:type :text :text "hi"}]}] [])]
+                                      {:resilience {:continuation {:max-segments 3}}}
+                                      [{:role :user :content [{:type :text :text "hi"}]}] [])]
       (assertions
         "it continues, stitching until the ceiling"
         @counter => 3
@@ -1951,11 +1951,11 @@
     (let [off-only (atom 0)
           via-overrun (atom 0)]
       (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend off-only) (atom []))
-        {:resilience {:continuation {:enabled? false}}}
-        [{:role :user :content [{:type :text :text "hi"}]}] [])
+                          {:resilience {:continuation {:enabled? false}}}
+                          [{:role :user :content [{:type :text :text "hi"}]}] [])
       (#'llmc/drive-turn! (drive-ctx (->CountingTruncatingBackend via-overrun) (atom []))
-        {:resilience {:overrun {:max-retries 1 :on-exhausted :truncate}}}
-        [{:role :user :content [{:type :text :text "hi"}]}] [])
+                          {:resilience {:overrun {:max-retries 1 :on-exhausted :truncate}}}
+                          [{:role :user :content [{:type :text :text "hi"}]}] [])
       (assertions
         "the explicit off-switch spends one generation"
         @off-only => 1
@@ -2182,6 +2182,35 @@
       "non-enum string field passes through unchanged"
       (get-in @seen-idle [:data :verdict :summary]) => "ready")))
 
+(specification "verdict with nested string-keyed maps decodes against the schema"
+  ;; Live z.ai glm regression: the Anthropic/OpenAI parsers keywordize only the
+  ;; top level of tool input, so a vector of maps arrived as
+  ;; `{:claims [{"claim" "x"}]}` and failed "missing required key".
+  (let [schema    [:map
+                   [:claims [:vector [:map [:claim :string] [:severity [:enum :low :high]]]]]
+                   [:files [:map-of :string :int]]]
+        backend   (mock-backend
+                    [(end-turn-response "ok")
+                     (verdict-tool-use-response
+                       {:claims [{"claim" "x" "severity" "high"}] :files {"src/a.clj" 2}})])
+        seen-idle (atom nil)
+        chart     (chart/statechart
+                    {:initial :wrap}
+                    (state {:id :wrap :initial :work}
+                      (state {:id :work}
+                        (h/llm-conversation {:id "judge" :message "go" :verdict-schema schema})
+                        (transition {:event :llm.idle :target :done}
+                          (script {:expr (fn [_ d] (reset! seen-idle (:_event d)) nil)})))
+                      (final {:id :done})))
+        t         (await-config! (new-llm-test-env {:statechart chart :backend backend}) :done 3000)]
+    (assertions
+      "the verdict validates and the chart reaches :done"
+      (dct/in? t :done) => true
+      "nested declared keys are keywords and their values are decoded"
+      (get-in @seen-idle [:data :verdict :claims]) => [{:claim "x" :severity :high}]
+      "open string-keyed data keeps its string keys"
+      (get-in @seen-idle [:data :verdict :files]) => {"src/a.clj" 2})))
+
 (specification "nil :verdict-schema is identical to today's behavior"
   (let [backend   (mock-backend [(end-turn-response "free text")])
         seen-idle (atom nil)
@@ -2330,11 +2359,11 @@
            [nil {:input-tokens 40550 :output-tokens 256} 40560]
            [nil nil nil]]]
     (let [segment (cond-> (assoc (end-turn-response "prefix")
-                           :stop-reason :max_tokens
-                           :usage {:input-tokens 10 :output-tokens 3})
+                            :stop-reason :max_tokens
+                            :usage {:input-tokens 10 :output-tokens 3})
                     first-consumed (assoc :consumed-usage first-consumed))
           terminal (cond-> (assoc (end-turn-response " suffix")
-                            :usage {:input-tokens 20 :output-tokens 4})
+                             :usage {:input-tokens 20 :output-tokens 4})
                      last-consumed (assoc :consumed-usage last-consumed))
           {:keys [in-done? transcript]} (run-aliased-chart! (mock-backend [segment terminal]))
           data (:data (first (events-named transcript :llm/response)))]
@@ -2351,7 +2380,7 @@
         {:keys [in-done? transcript]}
         (run-aliased-chart!
           (mock-backend [(assoc (end-turn-response "ok")
-                          :usage usage :consumed-usage consumed)]))
+                           :usage usage :consumed-usage consumed)]))
         data (:data (first (events-named transcript :llm/response)))]
     (assertions
       in-done? => true
@@ -2649,7 +2678,7 @@
 
         "and the :max-turns :llm/error row is attributable to the invocation"
         (let [err (first (filter #(= :max-turns (get-in % [:data :reason]))
-                                 (events-named transcript :llm/error)))]
+                           (events-named transcript :llm/error)))]
           (select-keys (:data err) [:reason :limit :invokeid :session-id]))
         => {:reason :max-turns :limit 2 :invokeid "p" :session-id :dcch.test/session}))))
 
@@ -2681,7 +2710,7 @@
                                        :transcript-fn (fn [ev] (swap! captured conj ev))})
         t           (await-config! t :failed 3000)
         err         (first (filter #(= :timeout (get-in % [:data :reason]))
-                                   (events-named @captured :llm/error)))]
+                             (events-named @captured :llm/error)))]
     (assertions
       "chart reached :failed on :error.llm.timeout"
       [(dct/in? t :failed) (:name @err-seen)] => [true :error.llm.timeout]
@@ -2896,7 +2925,7 @@
                     [{:stop-reason :tool_use
                       :content     [{:type :text :text "both"}
                                     {:type :tool_use :id "e1" :name "event__finish" :input {}}
-                                    {:type :tool_use :id "v1" :name "submit_verdict"
+                                    {:type  :tool_use     :id "v1" :name "submit_verdict"
                                      :input {:done? true}}]
                       :usage       {:input-tokens 1 :output-tokens 1}
                       :model       "mock"}])
@@ -2944,7 +2973,7 @@
         backend   (mock-backend
                     [{:stop-reason :tool_use
                       :content     [{:type :tool_use :id "t1" :name "test_noop" :input {}}
-                                    {:type :tool_use :id "v1" :name "submit_verdict"
+                                    {:type  :tool_use                       :id "v1" :name "submit_verdict"
                                      :input {:status :ok :note "premature"}}]
                       :usage       {:input-tokens 1 :output-tokens 1}
                       :model       "mock"}

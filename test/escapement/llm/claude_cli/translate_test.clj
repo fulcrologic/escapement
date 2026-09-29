@@ -70,8 +70,8 @@
 (specification "partial messages are notifications, never final content"
   (let [acc (atom (t/stream-acc-init))
         deltas (atom [])
-        event {:type "stream_event"
-               :event {:type "content_block_delta" :index 0
+        event {:type  "stream_event"
+               :event {:type  "content_block_delta"              :index 0
                        :delta {:type "text_delta" :text "hello"}}}]
     (doseq [e [event
                (assoc event :parent_tool_use_id "nested-tool")
@@ -220,8 +220,8 @@
         "--max-budget-usd") => true))
 
   (component "session ids are fresh per call"
-    (let [id-of (fn [] (let [a (t/build-argv {:binary "claude" :system-prompt-file "/x"
-                                             :session-id (str (random-uuid))})]
+    (let [id-of (fn [] (let [a (t/build-argv {:binary     "claude"            :system-prompt-file "/x"
+                                              :session-id (str (random-uuid))})]
                          (nth a (inc (.indexOf ^java.util.List a "--session-id")))))]
       (assertions
         "two calls never share a session id (concurrent workers must not collide)"
@@ -231,14 +231,14 @@
 ;;; child-env  (NN-4)
 
 (specification "child-env"
-  (let [parent (into {"PATH"                    "/usr/bin"
-                      "HOME"                    "/Users/me"
-                      "SHELL"                   "/bin/bash"
-                      "TERM"                    "xterm"
-                      "LANG"                    "en_US.UTF-8"
-                      "TMPDIR"                  "/tmp"
-                      "USER"                    "me"
-                      "SOME_UNRELATED_VAR"      "keepme?"}
+  (let [parent (into {"PATH"               "/usr/bin"
+                      "HOME"               "/Users/me"
+                      "SHELL"              "/bin/bash"
+                      "TERM"               "xterm"
+                      "LANG"               "en_US.UTF-8"
+                      "TMPDIR"             "/tmp"
+                      "USER"               "me"
+                      "SOME_UNRELATED_VAR" "keepme?"}
                  (map (fn [k] [k "leaked"])) t/scrubbed-env-vars)
         env    (t/child-env parent)]
     (assertions
@@ -267,13 +267,13 @@
       (every? string? (keys env)) => true))
 
   (component "specific billing-critical vars"
-    (let [env (t/child-env {"PATH"                  "/usr/bin"
-                            "HOME"                  "/h"
-                            "ANTHROPIC_API_KEY"     "sk-ant-secret"
-                            "ANTHROPIC_AUTH_TOKEN"  "tok"
-                            "ANTHROPIC_BASE_URL"    "https://proxy"
+    (let [env (t/child-env {"PATH"                    "/usr/bin"
+                            "HOME"                    "/h"
+                            "ANTHROPIC_API_KEY"       "sk-ant-secret"
+                            "ANTHROPIC_AUTH_TOKEN"    "tok"
+                            "ANTHROPIC_BASE_URL"      "https://proxy"
                             "CLAUDE_CODE_USE_BEDROCK" "1"
-                            "CLAUDECODE"            "1"})]
+                            "CLAUDECODE"              "1"})]
       (assertions
         "ANTHROPIC_API_KEY cannot reach the child (this is the whole point)"
         (contains? env "ANTHROPIC_API_KEY") => false
@@ -371,7 +371,7 @@
       (t/envelope-mechanism []) => :json-schema
       "a tool the validator would reject degrades to the fenced envelope instead
        of an opaque exit-1 startup death"
-      (t/envelope-mechanism [{:name "x" :description "d"
+      (t/envelope-mechanism [{:name         "x"                  :description "d"
                               :input-schema {"$ref" "#/$defs/q"}}]) => :fenced-json)))
 
 ;;; ---------------------------------------------------------------------------
@@ -467,7 +467,18 @@
       (str/includes? txt "\"content\"") => true
 
       "and the envelope instructions"
-      (str/includes? txt "tool_calls") => true))
+      (str/includes? txt "tool_calls") => true
+
+      "names StructuredOutput — the CLI's only native tool under --json-schema —
+       as the way to call them (live CC 2.1.282: without it the model called
+       fs_read natively and got \"No such tool available\")"
+      (str/includes? txt (str "Your ONLY native tool is `" t/structured-output-tool-name "`")) => true
+
+      "puts that calling convention BEFORE the tool list"
+      (< (str/index-of txt t/structured-output-tool-name) (str/index-of txt "### fs_write")) => true
+
+      "and repeats it after the tool list"
+      (> (str/last-index-of txt "a direct call fails") (str/index-of txt "### fs_list")) => true))
 
   (component "fenced-json mechanism gets fence instructions instead"
     (let [txt (t/system-prompt-text "S" [write-tool] :fenced-json)]
@@ -495,7 +506,7 @@
               {:role    :assistant
                :content [{:type :thinking :thinking "SECRET REASONING" :signature "sig123"}
                          {:type :text :text "Sure."}
-                         {:type :tool_use :id "toolu_1" :name "fs_write"
+                         {:type  :tool_use                     :id "toolu_1" :name "fs_write"
                           :input {:path "a.txt" :content "hi"}}]}
               {:role    :user
                :content [{:type :tool_result :tool_use_id "toolu_1" :content "wrote 2 bytes"}]}]
@@ -528,8 +539,8 @@
 
   (component "error tool results are marked"
     (let [out (t/render-transcript
-                [{:role :user :content [{:type :tool_result :tool_use_id "t1"
-                                         :content "boom" :is-error true}]}])]
+                [{:role :user :content [{:type    :tool_result :tool_use_id "t1"
+                                         :content "boom"       :is-error    true}]}])]
       (assertions
         "so the model knows the call failed"
         (str/includes? out "ERROR") => true)))
@@ -646,6 +657,38 @@
 
         "the raw numbers are preserved for auditing"
         (some? (get-in resp [:backend-metadata :usage/raw])) => true))))
+
+(specification "stream fold — a tool called natively instead of through StructuredOutput"
+  ;; Captured live (CC 2.1.282, sonnet, the pre-fix system prompt): the model
+  ;; called fs_read as a native tool, the CLI answered "No such tool available",
+  ;; and the model gave up in prose through StructuredOutput.
+  (let [resp (finalize-fixture "misrouted-tool-call" {:tool-names #{"fs_read"}})]
+    (assertions
+      "records the tool the CLI refused"
+      (get-in resp [:backend-metadata :cli/misrouted-tool-calls]) => ["fs_read"]
+      "the envelope carried prose only, so no tool call came back"
+      (:stop-reason resp) => :end_turn
+      "which is reported as a failure the consumer can route on"
+      (t/misrouted-tool-failure resp #{"fs_read"})
+      => {:category :invalid-request
+          :message  (str "claude CLI: the model called [\"fs_read\"] as native tools instead of"
+                      " through StructuredOutput; the CLI answered \"No such tool available\" and"
+                      " no tool call came back")
+          :data     {:claude-cli/misrouted-tools ["fs_read"]}}))
+  (assertions
+    "is no failure when the model recovered and returned a tool call"
+    (t/misrouted-tool-failure
+      {:content          [{:type :tool_use :id "x" :name "fs_read" :input {}}]
+       :backend-metadata {:cli/misrouted-tool-calls ["fs_read"]}}
+      #{"fs_read"})
+    => nil
+    "is no failure when the refused name is not a tool we offered"
+    (t/misrouted-tool-failure
+      {:content [{:type :text :text "hi"}] :backend-metadata {:cli/misrouted-tool-calls ["Bash"]}}
+      #{"fs_read"})
+    => nil
+    "is no failure on a clean turn"
+    (t/misrouted-tool-failure (finalize-fixture "text-only") #{"fs_read"}) => nil))
 
 (specification "stream fold — text-only fixture"
   (let [resp (finalize-fixture "text-only")]
@@ -824,14 +867,14 @@
     ;; bare :timeout would hide the real cause from the chart.
     (assertions
       "rate_limit backoff surfaces as :rate-limited, not :timeout"
-      (:category (t/categorize-failure {:timed-out?  true :exit 143
+      (:category (t/categorize-failure {:timed-out?  true                    :exit 143
                                         :api-retries [{:error "rate_limit"}]})) => :rate-limited
       "overload backoff surfaces as :overloaded"
-      (:category (t/categorize-failure {:timed-out?  true :exit 143
+      (:category (t/categorize-failure {:timed-out?  true                    :exit 143
                                         :api-retries [{:error "overloaded"}]})) => :overloaded
       "the LAST retry wins when several happened"
       (:category (t/categorize-failure
-                   {:timed-out? true
+                   {:timed-out?  true
                     :api-retries [{:error "rate_limit"} {:error "overloaded"}]})) => :overloaded
       "with no retry information it really is a timeout"
       (:category (t/categorize-failure {:timed-out? true :exit 143})) => :timeout))
@@ -854,7 +897,7 @@
     (assertions
       "a rejected --json-schema is a malformed invocation, not a transport blip"
       (:category (t/categorize-failure
-                   {:exit 1 :result nil
+                   {:exit   1                                                                          :result nil
                     :stderr "Error: --json-schema is not a valid JSON Schema: data/type must be array"}))
       => :invalid-request
 

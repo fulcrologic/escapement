@@ -123,6 +123,48 @@
                   (.contains (str (:content b)) "evaluated (+ 1 2)")))))
       => true)))
 
+(specification "region-tool input with nested string-keyed maps is decoded against the schema"
+  ;; The Anthropic/OpenAI parsers keywordize only the top level of tool input;
+  ;; a vector of maps used to arrive string-keyed and fail validation.
+  (let [backend (mock-backend
+                  [(tool-use-response
+                     [{:id    "u1"                               :name "region__review_note"
+                       :input {:claims [{"claim" "x" "line" 7}]}}])
+                   (end-turn-response "noted")])
+        chart   (chart/statechart
+                  {:initial :run}
+                  (state {:id :run :initial :work}
+                    (parallel {:id :work}
+                      (state {:id :consumer :initial :running}
+                        (state {:id :running}
+                          (h/llm-conversation
+                            {:id "coder" :chart-tools [{:owner :svc}] :message "go"})
+                          (transition {:event :llm.idle :target :consumer-done}))
+                        (final {:id :consumer-done}))
+                      (state {:id :svc :initial :idle}
+                        (on-entry {}
+                          (service/register-tool!
+                            {:tool         :review/note
+                             :description  "Record claims."
+                             :input-schema [:map [:claims [:vector [:map [:claim :string] [:line :int]]]]]}))
+                        (on-exit {} (service/unregister-tool! :review/note))
+                        (state {:id :idle}
+                          (h/handle-tool
+                            :review/note
+                            (fn [_env req]
+                              {:result   (pr-str (get-in req [:data :claims]))
+                               :is-error false})))))
+                    (transition {:event :done.state.work :target :finished})
+                    (final {:id :finished})))
+        t       (await-config! (new-llm-test-env {:statechart chart :backend backend}) :consumer-done 5000)
+        results (->> @(:call-log backend) second :messages (mapcat :content)
+                  (filterv #(= :tool_result (:type %))))]
+    (assertions
+      "the consumer finishes its turn"
+      (dct/in? t :consumer-done) => true
+      "the handler receives the claims keywordized, and the call is not an error"
+      (mapv (juxt :content :is-error) results) => [["[{:claim \"x\", :line 7}]" false]])))
+
 ;; ---------------------------------------------------------------------------
 ;; #2 — timeout: a service region with no handler in this state times out
 ;; ---------------------------------------------------------------------------

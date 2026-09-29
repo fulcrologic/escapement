@@ -1,5 +1,32 @@
 # Changelog
 
+## [unreleased] — fix/nested-tool-input-keys — 2026-09-29
+
+### Fixed
+
+- **Nested tool-input keys are decoded against the tool's schema.** The
+  Anthropic and OpenAI-compatible parsers keywordize only the top level of a
+  model's tool input, so `{:claims [{"claim" "x"}]}` failed validation with
+  "missing required key" (region tools, event tools, `:verdict-schema`
+  verdicts and registry tools alike); the claude CLI and Codex parsers
+  keywordize every level, turning `[:map-of :string ...]` keys into keywords.
+  New `escapement.tools.input-keys/key-transformer` decodes keys declared by
+  `:map` schemas at every depth (vectors, optional entries, `:maybe`, `:or`,
+  `:multi`), keeps `:map-of :string` keys as strings, and leaves undeclared
+  keys as they arrived. It runs in the conversation's tool-input and verdict
+  decoders and in `tools.protocol/dispatch`, which now passes the decoded
+  input to `invoke`.
+- **claude-cli: tools called natively got "No such tool available".** The CLI
+  (2.1.x) delivers `--json-schema` output through a native `StructuredOutput`
+  tool; the system prompt never named it, so the model called the listed
+  tools directly. The prompt now leads with, and repeats after the tool list,
+  that tools are called only as `tool_calls` entries of `StructuredOutput`. A
+  turn whose offered tools were all refused and that returns no tool call now
+  rejects with a categorized `:invalid-request` (ex-data
+  `:claude-cli/misrouted-tools`) instead of returning the model's "tool
+  unavailable" prose; refusals on a recovered turn are recorded as
+  `:cli/misrouted-tool-calls` in `:backend-metadata`.
+
 ## [unreleased] — feat/region-tool-timeout — 2026-09-29
 
 ### Added

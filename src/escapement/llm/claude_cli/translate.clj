@@ -110,7 +110,7 @@
                       (when (map? v) (run! walk-schema (vals v)))
                       ;; values are schema or vector-of-schema
                       ("items" "additionalProperties" "oneOf" "anyOf" "allOf" "not"
-                        "if" "then" "else" "contains" "propertyNames" "unevaluatedProperties")
+                               "if" "then" "else" "contains" "propertyNames" "unevaluatedProperties")
                       (cond
                         (sequential? v) (run! walk-schema v)
                         (map? v) (walk-schema v))
@@ -215,10 +215,11 @@
   "Renders `tools` as Markdown for the system prompt.
 
    This is **not** decoration: `--tools \"\"` leaves the CLI with no tools, and
-   the CLI cannot be handed foreign tool definitions. `--json-schema` extracts
-   structured output only *after* the model's turn is over, so the model never
-   sees the envelope while it is deciding what to do. The system prompt is the
-   only channel through which the model learns these tools exist."
+   the CLI cannot be handed foreign tool definitions. Under `--json-schema` the
+   model's only native tool is `structured-output-tool-name`, whose schema is
+   the envelope; nothing in that schema says what the named tools DO. The
+   system prompt is the only channel through which the model learns these
+   tools exist."
   [tools]
   [(? [:sequential :map]) => :string]
   (if (empty? tools)
@@ -230,12 +231,19 @@
       ;; unavailable" — it went looking for a tool affordance, found none (there
       ;; is none: `--tools \"\"`), and gave up. It must be told that DECLARING the
       ;; call in its structured reply IS the invocation.
-      "These tools are LIVE and available to you right now.\n\n"
-      "You will not see a tool-use UI, a permission prompt, or a spinner for them,\n"
-      "and you must not try to run them yourself with any built-in tool. Instead you\n"
-      "invoke a tool by NAMING it in the `" envelope-calls-key "` field of your reply\n"
-      "(described under \"Response format\" below). That declaration is a real call:\n"
-      "the harness executes it and sends you the result on a following turn.\n\n"
+      ;; A second live failure (CC 2.1.282, sonnet): told only "these are live",
+      ;; the model called `fs_read` as a NATIVE tool_use; the CLI answered
+      ;; "No such tool available" on every attempt. They must be told these are
+      ;; NOT native tools, and how a direct call fails.
+      "These tools are LIVE and available to you right now, but they are NOT\n"
+      "native tools in this session: calling one of them directly by its name fails\n"
+      "with \"No such tool available\". You will not see a tool-use UI, a permission\n"
+      "prompt, or a spinner for them, and you must not try to run them yourself with\n"
+      "any built-in tool. Instead you invoke a tool by NAMING it in the `"
+      envelope-calls-key "`\n"
+      "field of your reply (described under \"Response format\"). That\n"
+      "declaration is a real call: the harness executes it and sends you the result\n"
+      "on a following turn.\n\n"
       "Never say a tool is unavailable, never apologise for not being able to call\n"
       "one, and never substitute your own knowledge for a tool call the request asks\n"
       "for — just emit the call.\n\n"
@@ -251,16 +259,27 @@
     "Omit `" envelope-calls-key "` entirely when you are not calling a tool.\n"
     "`name` must be copied byte-for-byte from the tool headings above.\n"))
 
+(def structured-output-tool-name
+  "The one native tool `--json-schema` gives the model (CC 2.1.x). The CLI
+   implements `--json-schema` as this tool — the model must CALL it to deliver
+   its reply, and it is the model's only native tool under `--tools \"\"`."
+  "StructuredOutput")
+
 (def ^:private json-schema-instructions
-  (str "## Response format\n\n"
-    "Your reply is captured as a structured object with an optional `"
-    envelope-text-key "` string\n"
-    "and an optional `" envelope-calls-key "` array of `{\"name\", \"input\"}` tool calls.\n"
-    "Put prose in `" envelope-text-key "`. To call a tool, add an entry to `"
-    envelope-calls-key "`\n"
-    "whose `name` is copied byte-for-byte from the tool headings above and whose\n"
-    "`input` validates against that tool's schema. Omit `" envelope-calls-key
-    "` when calling no tool.\n"))
+  (str "## Response format (read this before calling anything)\n\n"
+    "Your ONLY native tool is `" structured-output-tool-name "`. You deliver your whole reply by\n"
+    "calling `" structured-output-tool-name "` exactly once, as your final action, with an object\n"
+    "holding an optional `" envelope-text-key "` string and an optional `" envelope-calls-key "` array of\n"
+    "`{\"name\", \"input\"}` tool calls. Put prose in `" envelope-text-key "`. To call a tool, add\n"
+    "an entry to `" envelope-calls-key "` whose `name` is copied byte-for-byte from a heading under\n"
+    "\"Tools you may call\" and whose `input` validates against that tool's schema, e.g.\n"
+    "`" structured-output-tool-name "({\"" envelope-calls-key "\": [{\"name\": \"<tool name>\", \"input\": {...}}]})`.\n"
+    "Several calls go in the same array. Never call a listed tool directly by its own\n"
+    "name. Omit `" envelope-calls-key "` when calling no tool.\n"))
+
+(def ^:private json-schema-reminder
+  (str "Reminder: the tools above are called ONLY as entries of `" envelope-calls-key "` inside your\n"
+    "single `" structured-output-tool-name "` call — a direct call fails with \"No such tool available\".\n"))
 
 (def default-system-prompt
   "Used when the Request carries no `:system`. `build-request` often leaves it
@@ -279,11 +298,13 @@
   [system tools mechanism]
   [(? :string) (? [:sequential :map]) [:enum :json-schema :fenced-json] => :string]
   (let [base  (if (str/blank? system) default-system-prompt (str/trim system))
-        parts (cond-> [base]
-                (seq tools) (conj (tools-doc tools))
-                (seq tools) (conj (if (= :fenced-json mechanism)
-                                    fenced-json-instructions
-                                    json-schema-instructions)))]
+        parts (cond
+                (empty? tools) [base]
+                (= :fenced-json mechanism) [base (tools-doc tools) fenced-json-instructions]
+                ;; Under --json-schema the calling convention leads and is repeated
+                ;; after the tool list: placed only after the list, a live sonnet
+                ;; (CC 2.1.282) still tried the listed tools natively first.
+                :else [base json-schema-instructions (tools-doc tools) json-schema-reminder])]
     (str/join "\n\n" parts)))
 
 ;;; ---------------------------------------------------------------------------
@@ -539,6 +560,22 @@
     (mapv :text)
     (remove str/blank?)))
 
+(def ^:private no-such-tool-pattern
+  "The CLI's tool_result text when the model calls a tool it does not have."
+  #"No such tool available: ([^\s<]+)")
+
+(defn- refused-tool-names
+  "Names of the tools the CLI refused in a `user` line's `message` — the
+   model called them as NATIVE tools instead of through the envelope."
+  [message]
+  (into []
+    (keep (fn [{:keys [type is_error content]}]
+            (when (and (= "tool_result" type) is_error)
+              (some->> (if (string? content) content (json/generate-string content))
+                (re-find no-such-tool-pattern)
+                second))))
+    (when (sequential? (:content message)) (:content message))))
+
 (>defn process-stream-line!
   "Folds one newline-delimited stdout line into the `acc` atom.
 
@@ -548,55 +585,59 @@
    interleaves plain-text notices. Partial text is progress only: never fold it
    into final content, which comes from complete assistant/result messages."
   ([acc line] [:any (? :string) => :nil]
-   (process-stream-line! acc line nil))
+              (process-stream-line! acc line nil))
   ([acc line on-delta]
-  [:any (? :string) (? fn?) => :nil]
-  (when-not (str/blank? line)
-    (swap! acc update :line-count inc)
-    (let [parsed (try (json/parse-string line true)
-                      (catch Throwable _ ::unparseable))]
-      (if (= ::unparseable parsed)
-        (swap! acc update :parse-failures inc)
-        (let [{:keys [type subtype message]} parsed]
-          (case type
-            "stream_event"
-            (let [event (:event parsed)
-                  delta (:delta event)
-                  text (:text delta)]
-              (when (and on-delta
-                         (nil? (:parent_tool_use_id parsed))
-                         (= "content_block_delta" (:type event))
-                         (= "text_delta" (:type delta))
-                         (string? text) (seq text))
-                (try (on-delta {:type :text-delta :text text})
-                  (catch Throwable _ nil))))
+   [:any (? :string) (? fn?) => :nil]
+   (when-not (str/blank? line)
+     (swap! acc update :line-count inc)
+     (let [parsed (try (json/parse-string line true)
+                       (catch Throwable _ ::unparseable))]
+       (if (= ::unparseable parsed)
+         (swap! acc update :parse-failures inc)
+         (let [{:keys [type subtype message]} parsed]
+           (case type
+             "stream_event"
+             (let [event (:event parsed)
+                   delta (:delta event)
+                   text (:text delta)]
+               (when (and on-delta
+                       (nil? (:parent_tool_use_id parsed))
+                       (= "content_block_delta" (:type event))
+                       (= "text_delta" (:type delta))
+                       (string? text) (seq text))
+                 (try (on-delta {:type :text-delta :text text})
+                      (catch Throwable _ nil))))
 
-            "assistant"
-            (swap! acc
-              (fn [a]
-                (cond-> a
-                  (and (:model message) (not= synthetic-model (:model message)))
-                  (assoc :model (:model message))
+             "assistant"
+             (swap! acc
+               (fn [a]
+                 (cond-> a
+                   (and (:model message) (not= synthetic-model (:model message)))
+                   (assoc :model (:model message))
 
-                  (:usage message) (update :assistant-usages conj (:usage message))
-                  true (update :texts into (assistant-text message))
-                  true (update :thinking-blocks
-                         + (count (filterv #(#{"thinking" "redacted_thinking"} (:type %))
-                                    (:content message)))))))
+                   (:usage message) (update :assistant-usages conj (:usage message))
+                   true (update :texts into (assistant-text message))
+                   true (update :thinking-blocks
+                          + (count (filterv #(#{"thinking" "redacted_thinking"} (:type %))
+                                     (:content message)))))))
 
-            "result"
-            (swap! acc assoc :result parsed)
+             "user"
+             (when-let [names (seq (refused-tool-names message))]
+               (swap! acc update :misrouted-tools (fnil into []) names))
 
-            "rate_limit_event"
-            (swap! acc assoc :rate-limit (:rate_limit_info parsed))
+             "result"
+             (swap! acc assoc :result parsed)
 
-            "system"
-            (when (= "api_retry" subtype)
-              (swap! acc update :api-retries conj
-                (select-keys parsed [:error :attempt :delayMs :status])))
+             "rate_limit_event"
+             (swap! acc assoc :rate-limit (:rate_limit_info parsed))
 
-            nil))))
-    nil)))
+             "system"
+             (when (= "api_retry" subtype)
+               (swap! acc update :api-retries conj
+                 (select-keys parsed [:error :attempt :delayMs :status])))
+
+             nil))))
+     nil)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Usage
@@ -862,7 +903,7 @@
   [:map :map => :map]
   (let [{:keys [mechanism request-model tool-names exit]} opts
         {:keys [result texts assistant-usages thinking-blocks api-retries rate-limit
-                line-count parse-failures]} acc
+                line-count parse-failures misrouted-tools]} acc
         joined     (str/join "\n\n" texts)
         envelope   (if (= :fenced-json mechanism)
                      (parse-fenced-envelope (or (not-empty joined)
@@ -885,26 +926,48 @@
                          :else :end_turn)
      :content          content
      :usage            (turn-usage acc)
-     :consumed-usage   {:input-tokens (usage-context-total (:usage result))
+     :consumed-usage   {:input-tokens  (usage-context-total (:usage result))
                         :output-tokens (get-in result [:usage :output_tokens] 0)}
      :model            (or (:model acc) (not-empty (str request-model)) "claude-cli")
-     :backend-metadata (cond-> {:backend         :claude-cli
+     :backend-metadata (cond-> {:backend              :claude-cli
                                 ;; The CLI accepts only type:user messages, so a
                                 ;; continuation prefill is dropped on the way in
                                 ;; (see the NN-5 spec in translate_test.clj).
                                 :prefill-unsupported? true
-                                :mechanism       mechanism
-                                :cli/num-turns   (:num_turns result)
-                                :cli/subtype     (:subtype result)
-                                :cli/session-id  (:session_id result)
-                                :cli/exit        exit
-                                :cli/duration-ms (:duration_ms result)
-                                :cli/lines       line-count
-                                :usage/raw       (:usage result)
-                                :usage/per-call  assistant-usages
-                                :thinking-blocks thinking-blocks}
+                                :mechanism            mechanism
+                                :cli/num-turns        (:num_turns result)
+                                :cli/subtype          (:subtype result)
+                                :cli/session-id       (:session_id result)
+                                :cli/exit             exit
+                                :cli/duration-ms      (:duration_ms result)
+                                :cli/lines            line-count
+                                :usage/raw            (:usage result)
+                                :usage/per-call       assistant-usages
+                                :thinking-blocks      thinking-blocks}
                          truncated? (assoc :truncated true
                                       :truncation-detail (str (:result result)))
                          (seq api-retries) (assoc :cli/api-retries api-retries)
                          rate-limit (assoc :cli/rate-limit rate-limit)
+                         (seq misrouted-tools) (assoc :cli/misrouted-tool-calls misrouted-tools)
                          (pos? (or parse-failures 0)) (assoc :cli/unparseable-lines parse-failures))}))
+
+(>defn misrouted-tool-failure
+  "The failure to raise for `response` when the model called offered tools
+   (`tool-names`) NATIVELY — the CLI refused each with \"No such tool
+   available\" — and no tool call came back through the envelope. Returns
+   `{:category :message :data}` for `protocol/llm-error`, or nil when the turn
+   is fine (no refusal, or the model recovered and returned a tool call).
+
+   Returning the model's prose instead would be silent: it typically says the
+   tool \"is unavailable\" and the chart proceeds as if it had nothing to read."
+  [response tool-names]
+  [:map (? [:set :string]) => (? :map)]
+  (let [refused (filterv #(contains? (or tool-names #{}) %)
+                  (distinct (get-in response [:backend-metadata :cli/misrouted-tool-calls])))]
+    (when (and (seq refused)
+            (not-any? #(= :tool_use (:type %)) (:content response)))
+      {:category :invalid-request
+       :message  (str "claude CLI: the model called " (pr-str refused) " as native tools instead of"
+                   " through " structured-output-tool-name "; the CLI answered \"No such tool available\""
+                   " and no tool call came back")
+       :data     {:claude-cli/misrouted-tools refused}})))

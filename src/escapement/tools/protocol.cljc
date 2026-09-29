@@ -11,6 +11,7 @@
   rather than a thrown exception."
   (:require
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [escapement.tools.input-keys :as input-keys]
     [malli.core :as m]
     [malli.error :as me]
     [malli.json-schema :as mjs]))
@@ -89,8 +90,9 @@
       (prn (me/humanize explained)))))
 
 (>defn dispatch
-  "Look up `tool-kw` in `reg` and `invoke` it with `input` after validating against
-  the tool's input schema. Returns `{:result <string> :is-error <bool>}`. Unknown
+  "Look up `tool-kw` in `reg` and `invoke` it with `input` after decoding its keys
+  (`escapement.tools.input-keys/decode-keys`) and validating against the tool's
+  input schema. Returns `{:result <string> :is-error <bool>}`. Unknown
   tool names and validation failures are returned as error results.
 
   `base-dir` (optional) is the directory that path-taking builtin tools resolve
@@ -104,7 +106,10 @@
   ([reg tool-kw input base-dir]
    [any? :keyword any? [:maybe :string] => [:map [:result :string] [:is-error :boolean]]]
    (if-let [t (lookup reg tool-kw)]
-     (let [schema (input-schema t)]
+     (let [schema (input-schema t)
+           ;; Model input is JSON: nested keys arrive as strings. Decode them
+           ;; against the schema so a vector of maps validates.
+           input  (input-keys/decode-keys schema input)]
        (if (m/validate schema input)
          (binding [*base-dir* base-dir]
            (try

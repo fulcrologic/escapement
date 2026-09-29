@@ -10,6 +10,21 @@
   (input-schema [_] [:map {:closed true} [:msg :string]])
   (invoke [_ {:keys [msg]}] {:result msg :is-error false}))
 
+(defrecord EditsTool []
+  tp/Tool
+  (tool-name [_] :test/edits)
+  (description [_] "Apply a list of edits.")
+  (input-schema [_] [:map [:edits [:vector [:map [:path :string] [:line :int]]]]])
+  (invoke [_ {:keys [edits]}]
+    {:result (pr-str (mapv (juxt :path :line) edits)) :is-error false}))
+
+(specification "dispatch decodes nested JSON keys against the tool's schema"
+  (let [reg (tp/new-registry [(->EditsTool)])]
+    (assertions
+      "a vector of string-keyed maps validates and reaches the tool keywordized"
+      (tp/dispatch reg :test/edits {:edits [{"path" "a.clj" "line" 3}]})
+      => {:result "[[\"a.clj\" 3]]" :is-error false})))
+
 (specification "Tool registry"
   (component "register/lookup/all-tools round-trip"
     (let [reg (tp/new-registry [(->EchoTool)])]
