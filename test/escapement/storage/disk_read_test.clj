@@ -36,8 +36,8 @@
     (contains? (dr/normalize-event {:event "x" :seq 0 :data {}}) :io/ref) => false
     "surfaces the invocation coordinates stamped on a conversation event (node-id re-keywordized)"
     (select-keys
-      (dr/normalize-event {:event "llm/event-posted" :seq 7 :data {:invokeid "w" :event-name "count/tick"}
-                           :transcript/node-id "w" :transcript/visit 0 :transcript/turn 1})
+      (dr/normalize-event {:event              "llm/event-posted" :seq              7 :data            {:invokeid "w" :event-name "count/tick"}
+                           :transcript/node-id "w"                :transcript/visit 0 :transcript/turn 1})
       [:transcript/node-id :transcript/visit :transcript/turn :transcript/invokeid])
     => {:transcript/node-id :w :transcript/visit 0 :transcript/turn 1 :transcript/invokeid "w"}
     "tolerates visit/turn 0 (does not drop them as falsey)"
@@ -138,6 +138,14 @@
         (.isFile (io/file root "s1" "artifacts/report.md")) => true
         "list-artifacts reports the author file"
         (mapv :artifact/path (proto/list-artifacts store "s1")) => ["artifacts/report.md"]))
+    (component "delegates byte access to the per-session dir"
+      (proto/write-artifact-bytes! store "s1" "artifacts/shot.png" (byte-array [-119 80 78 71]) {})
+      (assertions
+        "the bytes land in the session dir"
+        (vec (java.nio.file.Files/readAllBytes (.toPath (io/file root "s1" "artifacts/shot.png"))))
+        => [-119 80 78 71]
+        "read-artifact-bytes reads them back"
+        (vec (proto/read-artifact-bytes store "s1" "artifacts/shot.png")) => [-119 80 78 71]))
     (component "is read-only with respect to the transcript"
       (assertions
         "append-event! throws"

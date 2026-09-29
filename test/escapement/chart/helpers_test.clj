@@ -7,6 +7,8 @@
     [escapement.invocation.human-input :as hi]
     [escapement.invocation.llm-conversation :as llmc]
     [escapement.llm.protocol :as llm]
+    [escapement.protocols :as proto]
+    [escapement.storage.memory :as mem]
     [escapement.tools.protocol :as tp]
     [fulcro-spec.core :refer [=> assertions specification]]
     [com.fulcrologic.statecharts.promise :as p]))
@@ -124,10 +126,10 @@
                    {:initial :run}
                    (state {:id :run :initial :work}
                      (h/with-llm-questions
-                       {:id         :work
-                        :system     "s"
-                        :real-tools []
-                        :message    "go"
+                       {:id                                             :work
+                        :system                                         "s"
+                        :real-tools                                     []
+                        :message                                        "go"
                         :exit-transitions
                         [(transition {:event :llm.idle :target :done})]})
                      (final {:id :done})))
@@ -223,6 +225,39 @@
       (.exists (clojure.java.io/file path)) => true
       "contents are the assistant's final text"
       (slurp path) => end-text)))
+
+(specification "artifact helpers go through the env's ArtifactStore"
+  (let [store    (mem/new-store)
+        backend  (mock-backend [(end-turn "stored text")])
+        chart    (chart/statechart
+                   {:initial :run}
+                   (state {:id :run :initial :work}
+                     (state {:id :work}
+                       (h/llm-conversation
+                         {:id      "researcher"
+                          :message "go"})
+                       (transition {:event :llm.idle :target :done}
+                         (h/capture-llm-output {:as "notes.md"})))
+                     (final {:id :done})))
+        llm-proc (llmc/new-processor {:backend backend :tool-registry (tp/new-registry)})
+        t        (-> (dct/new-testing-env {:statechart chart :artifact-store store} llm-proc)
+                   (dct/start!))
+        t        (await-state! t :done 3000)
+        env      (:env t)
+        sid      (:session-id t)
+        summary  (first (filter #(= "artifacts/notes.md" (:artifact/path %))
+                          (proto/list-artifacts store sid)))]
+    (assertions
+      "capture-llm-output writes the text into the store under artifacts/<name>"
+      (proto/read-artifact store sid "artifacts/notes.md") => "stored text"
+      "the written artifact is classed :author"
+      (:artifact/class summary) => :author
+      "leaves the session dir untouched when a store is wired"
+      (.exists (clojure.java.io/file (:escapement/session-dir env) "artifacts/notes.md")) => false
+      "render-template reads artifacts from the store"
+      (h/render-template "N: {{notes.md}}" (assoc env :com.fulcrologic.statecharts/vwmem
+                                             (volatile! {:com.fulcrologic.statecharts/session-id sid})))
+      => "N: stored text")))
 
 (specification "capture-llm-output with explicit :as filename"
   (let [backend  (mock-backend [(end-turn "draft v1")])

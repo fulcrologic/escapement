@@ -1525,6 +1525,7 @@ The full request (system + messages + tools + model + knobs — the exact value 
 ----
 
 `<node-id>` is the chart element holding the `:llm-conversation`; `<visit>` is its 0-based entry count this run; `<n>` is the turn index.
+Since 1.0.6 each blob also gets a meta sidecar under `<session-dir>/.meta/nodes/…` (see <<artifact-meta>>); the blob files themselves are unchanged, so old and new sessions replay identically.
 The `:io/ref` value is exactly that relative path — the locator *is* the id, so the tree is walkable with no tooling and no translation table.
 Capture is active only when an artifact store is wired (the CLI runner builds one from `--session-dir`); with no store, these rows simply omit `:io/ref` and capture is a no-op.
 
@@ -2290,7 +2291,9 @@ Chart-side only — never expose to the LLM as a tool.
 
 === File-backed artifact helpers
 
-For agent pipelines that produce text artifacts to be embedded in later prompts, three helpers in `escapement.chart.helpers` write to and read from `<session-dir>/artifacts/<name>`:
+For agent pipelines that produce text artifacts to be embedded in later prompts, three helpers in `escapement.chart.helpers` write and read the author artifact `artifacts/<name>` through the env's `ArtifactStore` (`:escapement/artifact-store`; the CLI runner's disk store puts it at `<session-dir>/artifacts/<name>`).
+With no store on the env they fall back (CLJ only) to a disk store rooted at `:escapement/session-dir`, which writes the same files.
+Writes carry the meta `{:artifact/class :author}`.
 
 `(h/capture-llm-output)` / `(h/capture-llm-output {:as "x.md"})`::
 Returns a script.
@@ -2298,7 +2301,7 @@ Used in a transition reacting to `:llm.idle`.
 Dereferences the event's output handle (`:output-ref`, or the inline
 `:text` fallback when there is no artifact store — see the
 `:on-end-turn-event` payload section) and writes the resulting
-text to `<session-dir>/artifacts/<name>` atomically (temp + rename).
+text to `artifacts/<name>` through the store (on disk, atomically: temp + rename).
 Default `:as` is the producing invokeid (`:from`).
 Logs `:artifact/captured {:name N :bytes B}` to the transcript.
 
@@ -2313,7 +2316,7 @@ would previously have read `(get-in data [:_event :data :text])`.
 
 `(h/render-template tmpl env)` / `(h/render-template tmpl env extras)`::
 Pure-ish substitution.
-Mustache-light `{{name}}` tokens are resolved against `<session-dir>/artifacts/<name>`. `{{output}}` is reserved for in-flight text passed via `extras` (used by `forward-llm-output`).
+Mustache-light `{{name}}` tokens are resolved against the author artifacts `artifacts/<name>` in the store. `{{output}}` is reserved for in-flight text passed via `extras` (used by `forward-llm-output`).
 **Throws** `ex-info {:reason :missing-artifact ...}` on any unresolved token — fail-fast so a typoed prompt doesn't ship malformed text to the LLM.
 
 `(h/forward-llm-output {:to :template :as :capture?})`::
@@ -2357,6 +2360,28 @@ Latest write wins.
 Keep history by picking versioned filenames (`(str "draft-" iteration ".md")`).
 
 NOTE: These author files live under `<session-dir>/artifacts/`. The same session directory also grows a sibling `<session-dir>/nodes/` tree holding the runtime's captured LLM I/O (full request/response/tool-result + seed). That tree is written automatically by the capture layer, not by these helpers — see <<captured-io>>.
+
+[[artifact-meta]]
+==== Artifact meta and binary content
+
+Every `ArtifactStore` write takes a `meta` map, and the store keeps it: `list-artifacts` reports it back, merged over what the path implies (class, node-id, visit, turn, content-type).
+`:artifact/path` and `:artifact/size` (in bytes) always describe the stored content; meta cannot override them.
+Rewriting a path replaces its meta; an empty meta clears it.
+
+The disk store keeps meta in a sidecar at `<session-dir>/.meta/<path>.edn`, outside `artifacts/` and `nodes/`, so earlier Escapement versions — which list only those two trees — ignore it, and sessions written before 1.0.6 (no sidecars) list exactly as they always did.
+Because the sidecar holds the node-id the capture layer wrote, a node whose id contains `_` now lists under its real id instead of the lossy path decoding (`nodes/my_node/…` → `:my/node`).
+
+Binary content goes through `proto/write-artifact-bytes!` / `proto/read-artifact-bytes` (byte arrays; `Uint8Array` in CLJS):
+
+[source,clojure]
+----
+(proto/write-artifact-bytes! store sid "artifacts/screenshot.png" png-bytes
+  {:artifact/class :author :artifact/content-type "image/png"})
+(proto/read-artifact-bytes store sid "artifacts/screenshot.png")   ; => the same bytes
+----
+
+Without an `:artifact/content-type` a byte write records `application/octet-stream`.
+Strings and bytes share one path space: `read-artifact` decodes a byte artifact as UTF-8, and `read-artifact-bytes` of a string artifact returns its UTF-8 encoding.
 
 [[refine-turn]]
 === Replaying a captured turn: `refine-turn`

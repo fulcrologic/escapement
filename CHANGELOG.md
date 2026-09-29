@@ -1,5 +1,60 @@
 # Changelog
 
+## [unreleased] — feat/artifact-meta-and-binary — 2026-09-29
+
+### Added
+
+- **Artifact meta is persisted.** `ArtifactStore/write-artifact!` always
+  documented that `meta` is kept alongside the content; the disk store now
+  does it, in a sidecar at `<session-dir>/.meta/<path>.edn`, and
+  `list-artifacts` merges it over the path-derived coordinates. Any
+  EDN-serializable keys are kept. `:artifact/path` and `:artifact/size` always
+  come from the stored content. Rewriting a path replaces its meta; an empty
+  meta removes the sidecar. An unreadable sidecar is ignored.
+- **Binary artifacts.** `ArtifactStore` gains `write-artifact-bytes!` and
+  `read-artifact-bytes` (byte arrays; `Uint8Array` in CLJS), implemented by the
+  disk, memory and multi-session disk stores. A byte write with no
+  `:artifact/content-type` records `application/octet-stream`. The string
+  methods are unchanged: `write-artifact!` takes a string, `read-artifact`
+  returns one (a byte artifact is decoded as UTF-8).
+- `escapement.storage.common` — content-type, UTF-8 and summary helpers shared
+  by the built-in stores.
+
+### Changed
+
+- **`capture-llm-output`, `forward-llm-output` and `render-template` go through
+  the env's `ArtifactStore`.** They used to write and read
+  `<session-dir>/artifacts/<name>` directly, bypassing the store. With the
+  runner's disk store the files land in the same place; with no store on the
+  env they use a disk store at `:escapement/session-dir` (CLJ). A
+  memory-backed or CLJS host now gets author artifacts instead of an error.
+  Their meta is `{:artifact/class :author}`. A missing template artifact's
+  ex-data `:path` is now the store path (`artifacts/<name>`), not an absolute
+  file path.
+- `:artifact/size` is the UTF-8 byte count everywhere. The disk store already
+  listed file sizes in bytes, but `write-artifact!` returned the character
+  count, and the memory store reported characters in both places; they
+  differed only for non-ASCII text.
+- `list-artifacts` on the memory store now reports every meta key written,
+  not just the coordinates and class.
+
+### Compatibility
+
+- **Sessions written before this version** (no `.meta/`) list and read exactly
+  as before — covered by an on-disk fixture test.
+- **Older Escapement reading a new session**: `.meta/` sits outside
+  `artifacts/` and `nodes/`, the only trees older versions list, so they never
+  see sidecars. Captured-turn files (`nodes/…`) are byte-identical to before;
+  replay and the inspector read old and new sessions the same way.
+- A new session lists a captured blob under the node-id the capture layer
+  recorded, so a node id containing `_` (e.g. `:my_node`) is no longer
+  reported as `:my/node`. `capture/seed-visit-counts` therefore seeds such a
+  node correctly on resume.
+- **Third-party `ArtifactStore` implementations** keep loading and serving
+  every string method unchanged, but must implement `write-artifact-bytes!`
+  and `read-artifact-bytes` before anything calls them with binary content
+  (until then those calls throw "No implementation of method").
+
 ## [unreleased] — feat/region-tool-timeout — 2026-09-29
 
 ### Added

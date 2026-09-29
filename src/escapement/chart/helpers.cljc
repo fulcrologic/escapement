@@ -13,7 +13,6 @@
   IMPORTANT: `tell-llm` must execute inside the state that owns the binding (or a
   descendant thereof); the invocation only exists while that state is active."
   (:require
-    #?(:clj [clojure.java.io :as io])
     [clojure.edn :as edn]
     [clojure.string :as str]
     [com.fulcrologic.statecharts :as sc]
@@ -23,11 +22,8 @@
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.chart.service :as service]
     [escapement.invocation.llm-conversation :as llmc]
-    [escapement.protocols :as proto])
-  #?(:clj
-     (:import
-       (java.nio.file Files Paths StandardCopyOption)
-       (java.nio.file.attribute FileAttribute))))
+    [escapement.protocols :as proto]
+    #?(:clj [escapement.storage.disk :as disk])))
 
 ;; ---------------------------------------------------------------------------
 ;; Region-tool authoring sugar (re-exported from escapement.chart.service)
@@ -234,16 +230,16 @@
         ask-choice-id (keyword (str base-name ".ask-choice"))
         ask-text-id   (keyword (str base-name ".ask-text"))
         question-events
-                      [{:event       :question/ask-choice
-                        :description "Ask the human to pick one option. Use when you need a design decision the human must make."
-                        :data-schema [:map
-                                      [:question :string]
-                                      [:options [:vector [:map
-                                                          [:label :string]
-                                                          [:value :any]]]]]}
-                       {:event       :question/ask-text
-                        :description "Ask the human a free-text question. Use when you need clarification or a value the human must supply."
-                        :data-schema [:map [:question :string]]}]
+        [{:event       :question/ask-choice
+          :description "Ask the human to pick one option. Use when you need a design decision the human must make."
+          :data-schema [:map
+                        [:question :string]
+                        [:options [:vector [:map
+                                            [:label :string]
+                                            [:value :any]]]]]}
+         {:event       :question/ask-text
+          :description "Ask the human a free-text question. Use when you need clarification or a value the human must supply."
+          :data-schema [:map [:question :string]]}]
         ;; Forward the caller's flat conversation keys, but always resolve
         ;; :allowed-events (literal or fn) at invoke time and append the two
         ;; injected question events.
@@ -393,69 +389,55 @@
                (tell-other-llm! env target text)))}))
 
 ;; ===========================================================================
-;; Artifact helpers — file-backed LLM outputs
+;; Artifact helpers — named author artifacts
 ;;
 ;; Conventions:
-;;   - One directory per session: `<session-dir>/artifacts/`.
-;;   - Each artifact is a single file. Name includes any extension the
-;;     chart-author wants (default = the producing invokeid, no extension).
-;;   - Writes are atomic via temp + rename so concurrent reads never see a
-;;     partial file.
+;;   - Author artifacts live at the store path `artifacts/<name>`; on the disk
+;;     store that is `<session-dir>/artifacts/<name>`.
+;;   - Name includes any extension the chart-author wants (default = the
+;;     producing invokeid, no extension).
+;;   - Every read and write goes through the env's `ArtifactStore`
+;;     (`:escapement/artifact-store`), so the store's atomic writes and meta
+;;     apply. With no store on env (CLJ only) a disk store rooted at
+;;     `:escapement/session-dir` is used — the same files the runner's store
+;;     writes.
 ;;   - Latest write wins. To keep history, pick versioned names yourself
 ;;     (e.g. `(str "draft-" iteration ".md")`).
 ;; ===========================================================================
 
-(defn- session-dir
-  "Pull the session dir out of an SCXML env. Throws if missing — required for
-   any artifact-related operation."
+(defn- artifact-store
+  "The `ArtifactStore` for `env`'s session: the env's `:escapement/artifact-store`, else (CLJ only) a
+   disk store rooted at `:escapement/session-dir`. Throws when neither is available."
   [env]
-  (or (:escapement/session-dir env)
-    (throw (ex-info "No :escapement/session-dir on env — set :session-dir on (runner/run! …)"
+  (or (:escapement/artifact-store env)
+    #?(:clj (some-> (:escapement/session-dir env) disk/new-artifact-store))
+    (throw (ex-info "No :escapement/artifact-store or :escapement/session-dir on env — set :session-dir on (runner/run! …)"
              {:reason :missing-session-dir}))))
 
-(defn- artifact-path
-  "Absolute filesystem path for an artifact named `name` in `env`'s session."
-  [env name]
-  (str (session-dir env) "/artifacts/" name))
+(defn- env-session-id
+  "The session id of `env`, or `nil` when `env` carries no working memory."
+  [env]
+  (some-> (::sc/vwmem env) deref ::sc/session-id))
 
-(defn- atomic-write!
-  "Write `s` to `path`, durably and atomically. Creates parent dirs.
+(defn- author-path
+  "The store path of the author artifact called `name`."
+  [name]
+  (str "artifacts/" name))
 
-   CLJ/bb only: requires a real filesystem. CLJS hosts that want artifact
-   semantics must supply their own storage layer (no protocol exists yet)."
-  [^String path ^String s]
-  #?(:clj
-     (let [target (Paths/get path (into-array String []))
-           parent (.getParent target)
-           _      (when parent
-                    (Files/createDirectories parent (into-array FileAttribute [])))
-           tmp    (Files/createTempFile parent ".artifact-" ".tmp"
-                    (into-array FileAttribute []))]
-       (Files/writeString tmp s (into-array java.nio.file.OpenOption []))
-       (Files/move tmp target
-         (into-array java.nio.file.CopyOption
-           [StandardCopyOption/ATOMIC_MOVE
-            StandardCopyOption/REPLACE_EXISTING])))
-     :cljs
-     (throw (ex-info "atomic-write! is CLJ/bb only — no filesystem in CLJS host"
-              {:reason :no-fs :path path}))))
+(defn- write-artifact!
+  "Write `text` as the author artifact called `name` in `env`'s session."
+  [env name text]
+  (proto/write-artifact! (artifact-store env) (env-session-id env) (author-path name) text
+    {:artifact/class :author}))
 
 (defn- read-artifact!
-  "Read the artifact named `name` in `env`'s session. Throws ex-info with
-   {:reason :missing-artifact :name name :path path} if the file isn't there.
-
-   CLJ/bb only (see [[atomic-write!]])."
+  "Read the author artifact called `name` in `env`'s session. Throws ex-info with
+   {:reason :missing-artifact :name name :path path} if it isn't there."
   [env name]
-  #?(:clj
-     (let [path (artifact-path env name)
-           f    (io/file path)]
-       (when-not (.exists f)
-         (throw (ex-info (str "Missing artifact: " name)
-                  {:reason :missing-artifact :name name :path path})))
-       (slurp f))
-     :cljs
-     (throw (ex-info "read-artifact! is CLJ/bb only — no filesystem in CLJS host"
-              {:reason :no-fs :name name}))))
+  (let [path (author-path name)]
+    (or (proto/read-artifact (artifact-store env) (env-session-id env) path)
+      (throw (ex-info (str "Missing artifact: " name)
+               {:reason :missing-artifact :name name :path path})))))
 
 (defn deref-output
   "Returns the LLM's final assistant text for an idle event whose `data` is the transition's data
@@ -484,8 +466,9 @@
 (defn capture-llm-output
   "Returns a `script` element. When executed inside a transition on
    `:llm.idle` (or any event whose data carries `:output-ref`/`:text` and
-   `:from`), writes the LLM's final assistant text to
-   `<session-dir>/artifacts/<name>`.
+   `:from`), writes the LLM's final assistant text as the author artifact
+   `artifacts/<name>` through the env's `ArtifactStore` (on disk,
+   `<session-dir>/artifacts/<name>`), with meta `{:artifact/class :author}`.
 
    `opts` (all optional):
     * `:as`     — filename. Default `(:from data-of-event)`, i.e. the invokeid
@@ -502,7 +485,7 @@
           (when-not name
             (throw (ex-info "capture-llm-output: no :as and no :from in event data"
                      {:reason :missing-artifact-name})))
-          (atomic-write! (artifact-path env name) text)
+          (write-artifact! env name text)
           ;; Surface for the TUI + transcript JSONL.
           (when-let [tfn (:escapement/transcript-fn env)]
             (try (tfn {:event :artifact/captured
@@ -529,8 +512,9 @@
     (read-artifact! env token)))
 
 (defn render-template
-  "Substitute `{{name}}` tokens in `template` with file-backed artifacts from
-   `<session-dir>/artifacts/<name>`. Throws on any missing token (fail-fast
+  "Substitute `{{name}}` tokens in `template` with the author artifacts
+   `artifacts/<name>` read through the env's `ArtifactStore` (on disk,
+   `<session-dir>/artifacts/<name>`). Throws on any missing token (fail-fast
    so a half-populated session doesn't silently produce a malformed prompt).
 
    `{{output}}` is reserved for the in-flight assistant text and resolves
@@ -575,7 +559,7 @@
              queue    (::sc/event-queue env)
              sid      (env-ns/session-id env)]
          (when (and capture? art-name)
-           (atomic-write! (artifact-path env art-name) text)
+           (write-artifact! env art-name text)
            (when-let [tfn (:escapement/transcript-fn env)]
              (try (tfn {:event :artifact/captured
                         :data  {:name art-name :bytes (count text)}})

@@ -115,15 +115,15 @@
   (let [session-id (str session-id)                          ; tolerate a UUID session-id (see read-events*)
         f          (io/file work-dir session-id transcript-name)
         {:keys [started-at ended-at chart-id resume? status count]} (scan-transcript f)]
-    {::sc/session-id     session-id
-     ::sc/statechart-src (->keyword chart-id)
-     :session/started-at started-at
-     :session/ended-at   ended-at
-     :session/status     status
-     :session/resume?    resume?
+    {::sc/session-id      session-id
+     ::sc/statechart-src  (->keyword chart-id)
+     :session/started-at  started-at
+     :session/ended-at    ended-at
+     :session/status      status
+     :session/resume?     resume?
      :session/event-count count
-     :session/parent-id  nil
-     :session/child-ids  []}))
+     :session/parent-id   nil
+     :session/child-ids   []}))
 
 (defn list-sessions*
   "Enumerate session summaries for every immediate sub-directory of `work-dir` that contains a
@@ -163,7 +163,11 @@
   (read-artifact [_ session-id path]
     (proto/read-artifact (session-artifact-store work-dir session-id) session-id path))
   (list-artifacts [_ session-id]
-    (proto/list-artifacts (session-artifact-store work-dir session-id) session-id)))
+    (proto/list-artifacts (session-artifact-store work-dir session-id) session-id))
+  (write-artifact-bytes! [_ session-id path content meta]
+    (proto/write-artifact-bytes! (session-artifact-store work-dir session-id) session-id path content meta))
+  (read-artifact-bytes [_ session-id path]
+    (proto/read-artifact-bytes (session-artifact-store work-dir session-id) session-id path)))
 
 (defn new-store
   "Create a `MultiSessionDiskStore` rooted at the sessions-root `work-dir` (the runner's
