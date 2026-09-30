@@ -13,33 +13,29 @@
    State shape (per session-id):
      {session-id {:seq       <next gapless seq, long>
                   :events    [event …]                 ; append order == seq order
-                  :artifacts {path {:content s :meta m}}
+                  :artifacts {path {:content <UTF-8 bytes> :meta m}}
                   :wmem      <working memory>
                   :summary   {…session summary fields…}}}"
   (:require
-    [clojure.string :as str]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [com.fulcrologic.statecharts :as-alias sc]
     [com.fulcrologic.statecharts.protocols :as sp]
-    [escapement.protocols :as proto]))
-
-(defn- path->content-type
-  "Guess an artifact's content-type from its `path` suffix."
-  [path]
-  (cond
-    (str/ends-with? path ".json") "application/json"
-    (str/ends-with? path ".edn")  "application/edn"
-    (str/ends-with? path ".md")   "text/markdown"
-    :else                         "text/plain"))
+    [escapement.protocols :as proto]
+    [escapement.storage.common :as common]))
 
 (defn- artifact-summary
-  "Build the heavy-field-free summary map for the artifact stored at `path`."
+  "Build the heavy-field-free summary map for the artifact stored at `path`. `content` is kept as
+   the UTF-8 bytes written, so size and byte reads are exact whether it arrived as a string or bytes."
   [path {:keys [content meta]}]
-  (merge
-    (select-keys meta [:transcript/node-id :transcript/visit :transcript/turn :artifact/class])
-    {:artifact/path         path
-     :artifact/size         (count content)
-     :artifact/content-type (or (:artifact/content-type meta) (path->content-type path))}))
+  (common/artifact-summary path (common/byte-count content) {}
+    (dissoc meta :artifact/path :artifact/size)))
+
+(defn- store-artifact!
+  "Store `content` bytes and `meta` at `path` for `session-id` in `state`, returning the summary."
+  [state session-id path content meta]
+  (let [entry {:content content :meta (or meta {})}]
+    (swap! state assoc-in [session-id :artifacts path] entry)
+    (artifact-summary path entry)))
 
 (defn- matches-query?
   "True when `event` passes the `read-events` `query` predicates."
@@ -72,16 +68,18 @@
 
   proto/ArtifactStore
   (write-artifact! [_ session-id path content meta]
-    (let [entry {:content content :meta meta}]
-      (swap! state assoc-in [session-id :artifacts path] entry)
-      (artifact-summary path entry)))
+    (store-artifact! state session-id path (common/utf8-bytes content) meta))
   (read-artifact [_ session-id path]
-    (get-in @state [session-id :artifacts path :content]))
+    (some-> (get-in @state [session-id :artifacts path :content]) common/utf8-string))
   (list-artifacts [_ session-id]
     (->> (get-in @state [session-id :artifacts] {})
       (mapv (fn [[path entry]] (artifact-summary path entry)))
       (sort-by :artifact/path)
       vec))
+  (write-artifact-bytes! [_ session-id path content meta]
+    (store-artifact! state session-id path content (common/binary-meta meta)))
+  (read-artifact-bytes [_ session-id path]
+    (get-in @state [session-id :artifacts path :content]))
 
   proto/SessionIndex
   (list-sessions [_]

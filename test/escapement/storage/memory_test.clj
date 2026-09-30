@@ -53,8 +53,8 @@
           big     (apply str (repeat 50000 "x"))     ; far past the old 8192 truncation cap
           locator "nodes/chat/0/turns/0/request.json"]
       (proto/write-artifact! s "s1" locator big
-        {:transcript/node-id :chat :transcript/visit 0 :transcript/turn 0
-         :artifact/class :captured-io})
+        {:transcript/node-id :chat        :transcript/visit 0 :transcript/turn 0
+         :artifact/class     :captured-io})
       (proto/write-artifact! s "s1" "artifacts/report.md" "# Report"
         {:artifact/class :author})
       (assertions
@@ -102,5 +102,85 @@
         "get returns nil after delete"
         (sp/get-working-memory s {} "s1") => nil))))
 
+(def png-header
+  "The 8-byte PNG signature: non-UTF-8 bytes (0x89, 0x1A) that a string round-trip would corrupt."
+  [-119 80 78 71 13 10 26 10])
+
+(defn run-artifact-behaviors!
+  "Exercise the meta and binary contract of `ArtifactStore` against a store produced by the 0-arg
+   `new-store` factory. Shared by every backend so they persist meta and bytes identically."
+  [new-store]
+  (component "ArtifactStore meta round-trip"
+    (let [s       (new-store)
+          path    "nodes/my_node/0/turns/1/request.edn"
+          meta    {:transcript/node-id    :my_node
+                   :transcript/visit      0
+                   :transcript/turn       1
+                   :artifact/class        :captured-io
+                   :artifact/content-type "text/x-custom"
+                   :x/note                "kept"}
+          written (proto/write-artifact! s "s1" path "{:a 1}" meta)
+          listed  (first (proto/list-artifacts s "s1"))]
+      (assertions
+        "list-artifacts reports every meta key the caller wrote"
+        (select-keys listed (keys meta)) => meta
+        "write-artifact! returns the same summary list-artifacts reports"
+        written => listed
+        "the summary carries the stored path and its size"
+        [(:artifact/path listed) (:artifact/size listed)] => [path 6])))
+
+  (component "meta that names a path or size"
+    (let [s (new-store)]
+      (proto/write-artifact! s "s1" "artifacts/a.md" "abc" {:artifact/path "elsewhere" :artifact/size 999})
+      (assertions
+        "is overridden by the stored path and actual size"
+        (select-keys (first (proto/list-artifacts s "s1")) [:artifact/path :artifact/size])
+        => {:artifact/path "artifacts/a.md" :artifact/size 3})))
+
+  (component "rewriting an artifact"
+    (let [s (new-store)]
+      (proto/write-artifact! s "s1" "artifacts/a.md" "v1" {:artifact/class :author :x/note "old"})
+      (proto/write-artifact! s "s1" "artifacts/a.md" "v2" {:artifact/class :author})
+      (assertions
+        "replaces the prior meta wholesale"
+        (:x/note (first (proto/list-artifacts s "s1"))) => nil
+        "replaces the content"
+        (proto/read-artifact s "s1" "artifacts/a.md") => "v2")))
+
+  (component "string size"
+    (let [s (new-store)]
+      (proto/write-artifact! s "s1" "artifacts/u.txt" "héllo" {})
+      (assertions
+        "is the UTF-8 byte count, not the character count"
+        (:artifact/size (first (proto/list-artifacts s "s1"))) => 6)))
+
+  (component "binary content"
+    (let [s       (new-store)
+          png     (byte-array png-header)
+          written (proto/write-artifact-bytes! s "s1" "artifacts/shot.png" png {:artifact/class :author})
+          _       (proto/write-artifact-bytes! s "s1" "artifacts/typed.png" png
+                    {:artifact/content-type "image/png"})
+          _       (proto/write-artifact! s "s1" "artifacts/text.md" "héllo" {})
+          _       (proto/write-artifact-bytes! s "s1" "artifacts/ascii.txt" (.getBytes "plain" "UTF-8") {})
+          by-path (into {} (map (juxt :artifact/path identity)) (proto/list-artifacts s "s1"))]
+      (assertions
+        "read-artifact-bytes returns exactly the bytes written"
+        (vec (proto/read-artifact-bytes s "s1" "artifacts/shot.png")) => png-header
+        "the size is the byte count"
+        (:artifact/size (by-path "artifacts/shot.png")) => 8
+        "write-artifact-bytes! returns the listed summary"
+        written => (by-path "artifacts/shot.png")
+        "an untyped binary artifact lists as application/octet-stream"
+        (:artifact/content-type (by-path "artifacts/shot.png")) => "application/octet-stream"
+        "a caller-supplied content-type is kept"
+        (:artifact/content-type (by-path "artifacts/typed.png")) => "image/png"
+        "read-artifact-bytes on a string artifact returns its UTF-8 encoding"
+        (vec (proto/read-artifact-bytes s "s1" "artifacts/text.md")) => (vec (.getBytes "héllo" "UTF-8"))
+        "read-artifact on a byte artifact decodes it as UTF-8"
+        (proto/read-artifact s "s1" "artifacts/ascii.txt") => "plain"
+        "read-artifact-bytes returns nil for a path never written"
+        (proto/read-artifact-bytes s "s1" "artifacts/none") => nil))))
+
 (specification "MemoryStore (in-memory backend)"
-  (run-store-behaviors! mem/new-store mem/merge-session-summary!))
+  (run-store-behaviors! mem/new-store mem/merge-session-summary!)
+  (run-artifact-behaviors! mem/new-store))

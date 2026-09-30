@@ -54,18 +54,39 @@
    `list-artifacts` + `TranscriptStore/read-events`."
   (write-artifact! [store session-id path content meta]
     "Write `content` (a string) at `path` for `session-id`. `meta` is a map the store persists
-     alongside the bytes; the emit layer supplies `:transcript/node-id`, `:transcript/visit`,
-     `:transcript/turn`, `:artifact/class` (`:author` | `:captured-io`), and optionally
-     `:artifact/content-type`. Returns the stored artifact summary (see `list-artifacts`).")
+     alongside the content (the disk backend keeps it in a sidecar, see `escapement.storage.disk`);
+     the emit layer supplies `:transcript/node-id`, `:transcript/visit`, `:transcript/turn`,
+     `:artifact/class` (`:author` | `:captured-io`), and optionally `:artifact/content-type`. Any
+     other EDN-serializable keys are kept too. Rewriting a path replaces its meta wholesale (an
+     empty `meta` clears it). Returns the stored artifact summary — the same map `list-artifacts`
+     reports for `path`.")
   (read-artifact [store session-id path]
-    "Return the full `content` string previously written at `path`, or `nil` if absent.")
+    "Return the full `content` string previously written at `path`, or `nil` if absent. Content
+     written as bytes (see `write-artifact-bytes!`) is decoded as UTF-8.")
   (list-artifacts [store session-id]
-    "Return a seq of artifact summary maps for `session-id`. Each item carries `:artifact/path`,
-     `:artifact/size`, `:artifact/content-type`, `:artifact/class`, and the source coordinates
-     `:transcript/node-id` / `:transcript/visit` / `:transcript/turn` (when present). Heavy
-     `:artifact/content` is NOT included — it is loaded lazily via `read-artifact`. Supports
-     prefix scans (e.g. everything under `\"nodes/<node-id>/\"`) so the §5b layer can assemble one
-     invocation cheaply."))
+    "Return a seq of artifact summary maps for `session-id`, sorted by `:artifact/path`. Each item is
+     the persisted `meta` merged over the coordinates derivable from the path, and carries
+     `:artifact/path`, `:artifact/size` (bytes), `:artifact/content-type`, `:artifact/class`, and the
+     source coordinates `:transcript/node-id` / `:transcript/visit` / `:transcript/turn` (when
+     present). `:artifact/path` and `:artifact/size` always describe the stored content — meta never
+     overrides them. An artifact written with no meta (including any written by an Escapement
+     version before meta was persisted) lists from its path alone. Heavy `:artifact/content` is NOT
+     included — it is loaded lazily via `read-artifact`. Supports prefix scans (e.g. everything
+     under `\"nodes/<node-id>/\"`) so the §5b layer can assemble one invocation cheaply.")
+  (write-artifact-bytes! [store session-id path content meta]
+    "Write `content` (a byte array; a `Uint8Array` in CLJS) at `path` for `session-id`, persisting
+     `meta` exactly as `write-artifact!` does. When `meta` has no `:artifact/content-type` the store
+     records `\"application/octet-stream\"`. Returns the stored artifact summary.
+
+     Bytes and strings share one space of paths: `read-artifact` on a byte-written path decodes it
+     as UTF-8, and `read-artifact-bytes` on a string-written path returns its UTF-8 encoding.
+
+     Added in 1.0.6. An implementation written against an earlier version still loads and serves
+     every string method; it only needs this method (and `read-artifact-bytes`) before a caller
+     stores binary content through it.")
+  (read-artifact-bytes [store session-id path]
+    "Return the exact bytes stored at `path` (a byte array; a `Uint8Array` in CLJS), or `nil` if
+     absent. Added in 1.0.6 (see `write-artifact-bytes!`)."))
 
 (defprotocol SessionIndex
   "The ONE cross-session operation. The library has no session enumeration — `WorkingMemoryStore`
