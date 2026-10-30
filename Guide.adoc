@@ -3630,6 +3630,8 @@ The events emitted across the codebase:
 `:runner/quiescent`, `:runner/tick`, `:runner/done`, `:runner/error`,
 `:runner/aborted`, `:runner/event-processed`
 * `:checkpoint/written`
+* `:runner/metrics` — the run's totals (`escapement.metrics/summarize`), just before `:runner/done`
+* `:chart/entered` (`:state`, `:final?`) and `:chart/guard` (`:state :event :target :guard :condition :result`) — written by charts built from data
 * `:llm/start`, `:llm/request`, `:llm/response`, `:llm/error`,
 `:llm/user-message`, `:llm/worker-exit`, `:llm/context-warning`.
 `:llm/error` (and an `:interrupted-mid-turn` `:llm/worker-exit`) carries `:partial-usage` — the tokens a failed or cancelled streamed turn had already spent, summed across failover candidates — whenever any usage was observed on the wire; the key is absent otherwise.
@@ -4179,6 +4181,74 @@ threads where the runtime supports them, otherwise platform daemon threads (see 
 `escapement.lib/run`). Either way they do not prevent bb exit.
 
 [[testing]]
+== Charts from data
+
+Besides charts written as Clojure code, a chart can be built from DATA: a workflow *shape* (plain EDN) plus a namespace of *step functions*.
+A tool or an AI can create and edit the shape deterministically, while the logic stays in ordinary functions.
+The result is an ordinary chart value: it runs, resumes and is inspected exactly like a hand-written one.
+
+[source,clojure]
+----
+(require '[escapement.chart.data :as data])
+
+(def shape
+  {:id      :email-triage
+   :initial :inbox
+   :data    {:category nil}                  ; defaults under the run's :initial-data
+   :states
+   [{:id :inbox :label "Wait for an email"
+     :on [{:event :email/received :target :classify :actions [:store-email]}]}
+    {:id :classify :label "Classify the email"
+     :ai {:id "classify" :system "You triage." :message {:step :prompt}
+          :verdict-schema [:map [:category :keyword] [:confidence number?]]}
+     :retry {:max 2 :backoff-ms 60000 :on-exhausted :review}
+     :on [{:event :llm.idle :guard :confident? :condition "confidence ≥ 0.9" :target :approve}
+          {:event :llm.idle :target :review :label "not sure"}]}
+    {:id :approve :label "Wait for your OK"
+     :wait {:timeout-ms 172800000 :on-timeout :review}
+     :on [{:event :approval/answered :guard :approved? :target :reply}
+          {:event :approval/answered :target :review}]}
+    {:id :reply :call {:tool :email/send :input {:step :reply-input} :timeout-ms 10000}
+     :on [{:event :call.done :target :done} {:event :call.error :target :review}]}
+    {:id :review :type :final}
+    {:id :done :type :final}]})
+
+(data/compile shape {:steps 'wf.email-triage.v1a2b3c4d5e6f :chart-id :wf.email-triage/v1a2b3c4d5e6f})
+;; => {:ok? true :chart <chart> :chart-id … :problems []}
+----
+
+=== The shape
+
+* A state has `:id`, optional `:type` (`:state`, `:parallel`, `:final`), `:label` (the diagram label), `:detail` (`:business`, the default, or `:full` to show it only in the full diagram), `:states` + `:initial` for children, `:entry`/`:exit` actions, and `:on` transitions.
+* At most one invocation per state: `:ai` (an `:llm-conversation`; `:events` become event tools, `:tools` real tools), `:call` (a `:tool-call`; `:call.done`/`:call.error` name its done/error events), or `:invoke` (raw: `{:type kw :id s :params {…}}`). `:human-input` invokes are refused: ask people with wait states, which survive restarts.
+* `:wait {:timeout-ms n :on-timeout :state}` — a plain wait state with an optional timeout.
+* `:retry {:max n :backoff-ms ms :factor f :on-exhausted :state}` on an `:ai`/`:call` state — bounded retries with exponential backoff through a generated `<id>.retry-wait` state. A step's own transitions on *specific* errors of its family (`:error.call.unknown`) win over the retry; generic ones (`:error.llm`, `:call.error`) fire once the retries run out.
+* A transition has `:event` (keyword or vector; omit for an eventless transition), `:target` (keyword or vector; omit for a targetless one), `:guard`, `:actions`, `:label`, `:condition` (the text shown in brackets on the arrow; defaults to the guard's name), `:type`, and `:after` (a delay in ms, or `{:step :fn}` computed on entry).
+* References: an unqualified keyword names a public fn of the step namespace; a qualified keyword names an entry of the `:builtins` vocabulary passed to `compile` (`:std/always`, `:std/never`, `:std/noop`, `:std/store-event-data` ship). In a param position a reference is written `{:step :fn-name}`; any other value is a literal. Unknown references are problems, never literals.
+
+=== Step functions
+
+Every step fn takes `[env data]`; the triggering event is `(:_event data)` and an AI verdict is at `[:_event :data :verdict]`.
+An action returns nil, a vector of statecharts ops, or a map whose entries are assigned into the data model.
+A guard returns truthy or falsey. Effects go through tools: `(data/tool! env :email/send input)` dispatches on the run's tool registry (pretend tools in tests).
+
+=== Problems instead of exceptions
+
+`data/validate` (and `compile`) return every problem as `{:level :error|:warn :code kw :state id :at [path] :message "…"}`.
+The checks: shape errors and duplicate ids, unknown targets and initial states, unknown references (with "did you mean"), every state reachable from the initial state (`:unreachable`), no non-final state without a way out (`:stuck`), an error exit on every `:ai`/`:call`/`:invoke` state (`:no-error-exit`), no automatic error loop without a guard (`:unbounded-retry`), sane delays (`:bad-delay`), `:human-input` refused, and the statecharts library's own problems.
+A shape with errors builds no chart; `compile!` throws with the problems instead.
+
+=== Versions: `escapement.authoring.loader`
+
+Each version of a data-built chart is a fixed snapshot. `load-steps!` loads its step file under a version-unique namespace, `wf.<project>.v<sha12>` (the file's own `ns` name is rewritten), via `load-string` — never `require`, and never reloaded in place: a run on v3 keeps calling v3's functions while v4 loads beside it.
+`version-chart-id` gives the matching chart id, `:wf.<project>/v<sha12>`; pass it as `:chart-id` so the checkpoint names the version (resuming with a chart id that is not available is refused).
+Before loading, `escapement.authoring.portability/check` rejects step code that is not portable: file IO, shell, threads, runtime code loading or redefinition, and host interop, each reported with its line and column.
+
+=== Diagrams and explanations
+
+`(data/diagram shape {:detail :business|:full})` returns `{:initial :nodes :edges}` for drawing; the business view hides `:detail :full` states and reconnects the arrows around them.
+A compiled chart writes a `:chart/entered` row on every state entry (`:final? true` on finals) and a `:chart/guard` row for every guard decision (`:state :event :target :guard :condition :result`), so a host can show the exact path and answer "why did it go here?".
+
 == Testing
 
 Tests run under bb with `bb test`.
@@ -4200,6 +4270,43 @@ The library's
 (dct/data t)               ; current data-model contents
 (dct/run-events! t :foo {:name :bar :data {...}})
 ----
+
+=== The scripted backend: `escapement.llm.scripted`
+
+`(scripted/backend {:script {"classify" [reply …]}})` answers AI steps from a script instead of a provider: no network, no credentials.
+Each AI turn of a step (keyed by its invoke id) takes the next reply: `{:verdict m}`, `{:event kw :data m}` (one of the step's event tools), `{:tool kw :input m}` (a real tool), `{:text s}`, `{:fail category}` (a categorized backend failure; the runtime's retries of that turn repeat it without waiting), `{:malformed true}` (no usable verdict ⇒ the step's `:error.llm.*`), or `{:response r}` (raw).
+A turn the script has no reply for fails clearly, naming the step; `scripted/calls`, `scripted/divergences` and `scripted/remaining` report what happened.
+`escapement.testing.tools/pretend-registry` builds pretend tools (`{:reply …}`, `{:replies […]}` or a fn) that record their calls.
+
+=== Test cases as data: `escapement.testing.cases`
+
+`(cases/run-case compiled case opts)` runs one EDN test case against a chart on a manual clock (`escapement.engine.clock`) through the step API: outside events are delivered when the run settles (or at `:at-ms` of fake time), and timers and retry backoffs are jumped to, so a two-day wait takes milliseconds.
+
+[source,clojure]
+----
+{:name "a sure billing email is answered after approval"
+ :start "2026-11-23T09:00:00Z"
+ :ai {"classify" [{:verdict {:category :billing :confidence 0.95}}]}
+ :tools {:email/send {:reply "sent"}}
+ :events [{:event :email/received :data {:subject "Refund"}}
+          {:event :approval/answered :data {:approved? true} :at-ms 3600000}]
+ :expect {:status :done :final #{:done} :path [:classify :approve :reply]
+          :never #{:review} :data {[:category] :billing} :tool-calls {:email/send 1}
+          :max-ai-calls 1 :ai-request-contains {"classify" "Refund"}
+          :min-elapsed-fake-ms 3600000}}
+----
+
+The result carries `:pass?`, `:failures` (each a readable `:message`), the `:path`, `:final` states, `:data`, tool and AI calls, guard decisions, `:metrics` and `:elapsed-fake-ms`. `run-cases` sums a suite.
+
+=== Recording and replaying runs
+
+`escapement.recording/from-rows` turns a run's transcript rows into a recording: its initial data, its outside events in order (with their time offsets), the AI answers each step got, its path and where it ended. `save!`/`load-recording` keep it as EDN (record from the live rows; the JSONL file stores keyword values as strings).
+`(escapement.recording.replay/replay! recording {:chart c :chart-id id :tool-registry pretend})` replays it against the same or another version on a test clock, answering AI steps from the recording (or a script, or any backend) and using only the tools it is given; it reports `:divergences` (an AI step the recording never answered, recorded answers left unused, a different end or status) and writes its own transcript, never the recorded run's files.
+
+=== What a run used: `escapement.metrics`
+
+Every `:llm/response` row (conversation turns and one-shot `ask`/`map-prompt` calls from a chart env) carries `:cost-usd` from the catalog's pricing, `:cost-basis`, and `:cost-unknown? true` (with a nil cost, never zero) when the model has no price; a replay-cache hit is marked `:replay-cache/hit?`.
+A run's result carries `:metrics` and its transcript a `:runner/metrics` row: AI calls, tokens (input, output, cache read/write), cost, AI time, wall time, by model and by step. `metrics/summarize` folds any rows; `metrics/call-cost` prices a call against your own table.
 
 === Mocking the LLM backend
 

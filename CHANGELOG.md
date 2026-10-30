@@ -47,6 +47,31 @@
 - Transcript: `:initial-data` on `:runner/started`, and `:external?` on
   `:runner/event-processed`.
 - Human-input renderer opts carry `:invokeid` and `:session-id`.
+- **Charts from data** (`escapement.chart.data`, `escapement.chart.check`): build
+  a chart from an EDN shape whose guards and actions are keywords naming step
+  fns — AI steps, outside calls, wait states, delays (literal or computed),
+  bounded retries with backoff, labels and conditions for the diagram — with
+  structural checks returned as readable problems (reachability, stuck states,
+  error exits, bounded retries, delays, the library's own checks). Compiled
+  charts write `:chart/entered` and `:chart/guard` rows. `data/diagram` gives a
+  drawable graph.
+- `escapement.authoring.loader`: step code loads per version as
+  `wf.<project>.v<sha12>` (never reloaded in place), with per-version chart
+  ids; `escapement.authoring.portability` rejects non-portable step code.
+- `escapement.llm.scripted`: a scripted `LLMBackend` for tests and replays;
+  `escapement.testing.tools`: pretend tools that record calls.
+- `escapement.testing.cases`: run EDN test cases on a manual clock (path,
+  expectations, metrics).
+- `escapement.recording` and `escapement.recording.replay`: record a run's
+  inputs from its transcript and replay them against another chart version,
+  reporting divergences.
+- `escapement.metrics`: per-call cost from the catalog on `:llm/response` rows
+  (nil, never zero, when unknown), `:replay-cache/hit?`, `:llm/response` rows
+  for one-shot `ask`/`map-prompt` from a chart env, and run totals on the run
+  result (`:metrics`) and in a `:runner/metrics` row.
+- LLM requests carry the asking step's identity as Clojure metadata
+  (`:escapement/invokeid`, `:escapement/visit`, `:escapement/turn`); it is
+  never sent to a provider.
 
 ### Fixed
 
