@@ -81,15 +81,24 @@
       (clock/now-ms c) => (* 2 24 60 60 1000))))
 
 (specification "a run on a manual clock waits until the test advances it"
-  (let [c   (clock/manual-clock {:start-ms 0})
-        fut (future (lib/run {:chart two-day-chart :session-id :clock/manual :credentials creds
-                              :clock c :quiescent-sleep-ms 5}))]
-    (Thread/sleep 200)
+  (let [c     (clock/manual-clock {:start-ms 0})
+        env   (promise)
+        fut   (future (lib/run {:chart two-day-chart :session-id :clock/manual :credentials creds
+                                :clock c :quiescent-sleep-ms 5 :on-env-ready #(deliver env %)}))
+        ;; Advance only once the timer is armed (stamped from t=0), however slow startup is.
+        armed (let [q (:com.fulcrologic.statecharts/event-queue (deref env 5000 nil))
+                    deadline (+ (System/currentTimeMillis) 5000)]
+                (loop []
+                  (cond (and q (pos? (queue/pending-count q))) true
+                        (> (System/currentTimeMillis) deadline) false
+                        :else (do (Thread/sleep 5) (recur)))))]
+    (Thread/sleep 50)
     (let [held? (not (realized? fut))]
       (clock/advance! c (* 2 24 60 60 1000))
       (let [r (deref fut 5000 :timeout)]
         (assertions
           "the timer is not due while the clock stands still"
+          armed => true
           held? => true
           "advancing the clock fires it"
           (:final-config r) => [])))))

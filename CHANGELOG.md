@@ -50,7 +50,10 @@
 - `escapement.engine.step`: event-by-event stepping (`open`, `step!`, `state`,
   `close!`, `step-until-quiet!`).
 - `escapement.lib/deliver!`: deliver an outside event to a running or saved
-  session.
+  session. Optional `:at-ms` (also on `:resume-events` entries) orders it by
+  its real arrival time.
+- `escapement.lib/inspect`: read a saved session's state (chart id,
+  configuration, pending events, next wake) without running or locking it.
 - The `:tool-call` invocation type (`escapement.invocation.tool-call`),
   installed whenever the run has a tool registry.
 - Transcript: `:initial-data` on `:runner/started`, and `:external?` on

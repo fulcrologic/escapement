@@ -319,8 +319,17 @@
    session's clock when it is not the wall clock, and `:timeout-ms`). The event is written into the
    session's checkpoint before this returns. See `escapement.runner/deliver!` for the result:
    `{:accepted? true :where :running|:saved}` or `{:accepted? false :reason
-   :finished|:no-session|:locked-elsewhere|:busy}`. For `:where :saved`, resume the session
+   :finished|:no-session|:locked-elsewhere|:busy}`. Optional `:at-ms`: when the event arrived
+   (epoch ms on the session's clock); it is ordered by that time. For `:where :saved`, resume the session
    (`run` with `:resume? true`, same chart id and paths) to process it."
   [opts]
   [:map => :map]
   (runner/deliver! opts))
+
+(>defn inspect
+  "Read where a saved session stands, without running it or taking its lock:
+   `{:checkpoint-dir d :session-id s}` → `{:exists? false}` or `{:exists? true :chart-id
+   :configuration :final? :pending-events :next-wake-at}`. See `escapement.runner/inspect`."
+  [opts]
+  [:map => :map]
+  (runner/inspect opts))

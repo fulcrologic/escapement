@@ -4736,6 +4736,9 @@ Resume with `:resume? true` (same `:chart-id` and paths) at that time and the ti
 +
 The event joins the session's queue and is processed in order like any other; it is written into the session's checkpoint before `deliver!` returns, so an accepted event survives a crash.
 For a saved session on a non-wall clock, pass the session's `:clock`.
+An outside event normally arrives "now"; give it `:at-ms` (epoch ms on the session's clock, on `deliver!` or on a `:resume-events` entry) to order it by when it really arrived. An approval answer that came in before its timeout was due is then processed first even when it is delivered after downtime; an `:at-ms` in the future is never delivered early.
+
+`escapement.lib/inspect` reads where a saved session stands without running it or taking its lock: `(lib/inspect {:checkpoint-dir dir :session-id sid})` returns `{:exists? false}` or `{:exists? true :chart-id :configuration :final? :pending-events [{:event :data :due-at}] :next-wake-at}`. It writes nothing.
 
 A parked approval therefore looks like: `run` with `:report-waiting? true` → `:waiting`; later `deliver!` the answer (`:where :saved`) and `run` again with `:resume? true` → it continues.
 `:resume-events` keeps working for the same purpose.

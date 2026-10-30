@@ -48,11 +48,16 @@
 (defrecord InProcessQueue [session-queues next-ordinal clock]
   sp/EventQueue
   (send! [this _env {:keys [event data type target source-session-id send-id invoke-id delay
-                         origin origintype]}]
+                         origin origintype at-ms]}]
     (if (and (supported-type? type) (or target source-session-id))
       (let [target (or target source-session-id)
             now    (now-ms this)
-            tm     (if delay (+ now (long delay)) (dec now))
+            ;; `:at-ms` (opt-in, outside events): an explicit arrival time on the queue's clock,
+            ;; so an event that arrived while the host was down is ordered by WHEN it arrived,
+            ;; ahead of a timer that came due later (it is also a due time: never earlier).
+            tm     (cond at-ms (long at-ms)
+                         delay (+ now (long delay))
+                         :else (dec now))
             ;; A monotonic insertion ordinal is the STABLE tie-break for events that
             ;; share a delivery-time. Delivery is `(delivery-time, ordinal)`-ordered
             ;; (see `receive-events!`), so after a long resume gap — where many timers

@@ -833,21 +833,22 @@
 ;; Outside events (§runtime.outside-events/deliver)
 ;; ---------------------------------------------------------------------------
 
-(defn- outside-send-request [session-id event data]
+(defn- outside-send-request [session-id event data at-ms]
   ;; No `:source-session-id`: that is what marks it as coming from outside the chart.
-  {:event event :data (or data {}) :target session-id})
+  (cond-> {:event event :data (or data {}) :target session-id}
+    at-ms (assoc :at-ms at-ms)))
 
 (defn- deliver-live!
   "Deliver to a session this process is running: under its write lock, enqueue the event and write
    the checkpoint (so the accepted event survives a crash before it is processed)."
-  [{:keys [env store session-id phase] :as session} event data timeout-ms]
+  [{:keys [env store session-id phase] :as session} event data at-ms timeout-ms]
   (let [^ReentrantLock l (:write-lock session)]
     (if (.tryLock l (long timeout-ms) TimeUnit/MILLISECONDS)
       (try
         (let [wmem (sp/get-working-memory store env session-id)]
           (if (or (nil? wmem) (empty? (::sc/configuration wmem #{})))
             {:accepted? false :reason :finished}
-            (do (sp/send! (::sc/event-queue env) env (outside-send-request session-id event data))
+            (do (sp/send! (::sc/event-queue env) env (outside-send-request session-id event data at-ms))
                 (sp/save-working-memory! store env session-id wmem)
                 {:accepted? true
                  ;; :running — this run will process it; :saved — the run has already settled,
@@ -859,7 +860,7 @@
 (defn- deliver-saved!
   "Deliver to a session saved on disk and not running anywhere: take its session lock, append the
    event to its checkpoint's queue, and write the checkpoint back."
-  [checkpoint-dir session-id event data clock]
+  [checkpoint-dir session-id event data at-ms clock]
   (let [lock (try (session-lock/acquire! checkpoint-dir session-id)
                   (catch clojure.lang.ExceptionInfo e
                     (if (:escapement/session-locked (ex-data e)) ::locked (throw e))))]
@@ -878,7 +879,7 @@
             :else
             (let [q (engine-queue/queue-from-snapshot
                       (engine-store/get-queue-snapshot store session-id) {:clock clock})]
-              (sp/send! q {} (outside-send-request session-id event data))
+              (sp/send! q {} (outside-send-request session-id event data at-ms))
               (sp/save-working-memory! store {::sc/event-queue q} session-id wmem)
               {:accepted? true :where :saved})))
         (finally (session-lock/release! lock))))))
@@ -898,20 +899,24 @@
                                           process is writing it) or `:busy` (this process's run held
                                           its lock past `:timeout-ms`, e.g. paused in the debugger).
 
+   `:at-ms` (optional): when the event arrived, epoch ms on the session's clock. It is ordered by
+   that time, so an answer that arrived before a timeout came due is processed first even when it
+   is delivered after downtime (and it is never processed before that time). Without it the event
+   arrives \"now\".
    `:clock` (saved sessions only): the clock the session runs on, for the event's arrival time;
    pass the run's clock when it is not the wall clock. `:timeout-ms` (default 30000)."
-  [{:keys [checkpoint-dir session-id event data clock timeout-ms] :or {timeout-ms 30000}}]
+  [{:keys [checkpoint-dir session-id event data at-ms clock timeout-ms] :or {timeout-ms 30000}}]
   [[:map [:checkpoint-dir :string] [:session-id any?] [:event :keyword]] => :map]
   (let [live (fn [] (get @live-sessions (session-key checkpoint-dir session-id)))]
     (if-let [s (live)]
-      (deliver-live! s event data timeout-ms)
+      (deliver-live! s event data at-ms timeout-ms)
       (if-not (.exists (io/file checkpoint-dir))
         {:accepted? false :reason :no-session}
-        (let [r (deliver-saved! checkpoint-dir session-id event data clock)]
+        (let [r (deliver-saved! checkpoint-dir session-id event data at-ms clock)]
           (if (= ::locked r)
             ;; It may have just started running in THIS process.
             (if-let [s (live)]
-              (deliver-live! s event data timeout-ms)
+              (deliver-live! s event data at-ms timeout-ms)
               {:accepted? false :reason :locked-elsewhere})
             r))))))
 
@@ -1049,6 +1054,9 @@
                              `{:escapement/refused :no-checkpoint}`) when there is
                              no checkpoint, or one with no active configuration,
                              instead of starting fresh.
+    * `:resume-events` entries may carry `:at-ms` (epoch ms on the run's clock):
+                             the event is ordered by that arrival time instead of
+                             \"now\" (so it can precede a timer that came due later).
     * `:lock?` (default true) — take the single-writer session lock (see
                                 `escapement.engine.session-lock`) for the whole
                                 run. Held from before the transcript is opened
@@ -1085,3 +1093,37 @@
       (run-session! opts)
       (finally
         (session-lock/release! lock)))))
+
+;; ---------------------------------------------------------------------------
+;; Read-only inspection (§runtime.stepping/inspect)
+;; ---------------------------------------------------------------------------
+
+(>defn inspect
+  "Where the session saved under `:checkpoint-dir` / `:session-id` stands, read from its checkpoint
+   WITHOUT running anything or taking its lock (safe while a run holds it; the checkpoint is
+   replaced atomically, so a read sees a whole one). Returns `{:exists? false}` when there is no
+   checkpoint, else:
+     `:exists? true`, `:chart-id` (the chart id it runs), `:configuration` (active states, sorted),
+     `:final?`, `:pending-events` (`[{:event :data :due-at}]` in delivery order) and
+     `:next-wake-at` (earliest due time, epoch ms on the session's clock, or nil).
+   Writes nothing, and creates no directory or file."
+  [{:keys [checkpoint-dir session-id]}]
+  [[:map [:checkpoint-dir :string] [:session-id any?]] => :map]
+  (let [store (when (.isDirectory (io/file checkpoint-dir))
+                ;; A store over an EXISTING dir: `new-store` only creates a missing one.
+                (engine-store/new-store checkpoint-dir))
+        wmem  (some-> store (sp/get-working-memory {} session-id))]
+    (if-not wmem
+      {:exists? false}
+      (let [cfg     (vec (sort-by str (::sc/configuration wmem #{})))
+            snap    (engine-store/get-queue-snapshot store session-id)
+            pending (->> (get-in snap [:sessions session-id])
+                      (sort-by (juxt :delivery-time :ordinal))
+                      (mapv (fn [{:keys [event delivery-time]}]
+                              {:event (:name event) :data (:data event) :due-at delivery-time})))]
+        {:exists?        true
+         :chart-id       (::sc/statechart-src wmem)
+         :configuration  cfg
+         :final?         (empty? cfg)
+         :pending-events pending
+         :next-wake-at   (some->> (seq pending) (map :due-at) (reduce min))}))))
