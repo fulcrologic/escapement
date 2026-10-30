@@ -30,7 +30,10 @@
       `InvocationProcessor`s installed AFTER the built-in ones, so the built-ins keep handling
       their own types (this is what `runner/run!`'s `:invocation-processors` feeds)
     * `:registry` (optional) - statechart registry; defaults to a fresh `LocalMemoryRegistry`
-    * `:queue` (optional) - event queue; defaults to a fresh in-process queue
+    * `:queue` (optional) - event queue; defaults to a fresh in-process queue on `:clock`
+    * `:clock` (optional) - an `escapement.engine.clock/Clock` for the default queue's due times
+      (ignored when `:queue` is supplied: give that queue its own clock). Also exposed on the env as
+      `:escapement/clock`. Defaults to the wall clock.
     * `:store` (optional) - working-memory store; defaults to a file-backed store at `:checkpoint-dir`
     * `:retain-history?` (optional) - when true, the default file-backed store also retains an
       append-only, save-index-keyed copy of every checkpoint (for Level-3 replay/fork). Ignored when
@@ -53,11 +56,11 @@
            llm-backend llm-default-models llm-catalog-ratings llm-eligibility-strict?
            llm-aliases llm-preferences llm-resilience
            tool-registry transcript-fn human-renderer
-           session-dir artifact-store retain-history?]
+           session-dir artifact-store retain-history? clock]
     :or   {invocation-processors       []
            extra-invocation-processors []}}]
   (let [registry  (or registry (lmr/new-registry))
-        queue     (or queue (queue/new-queue))
+        queue     (or queue (queue/new-queue {:clock clock}))
         store     (or store (store/new-store (or checkpoint-dir "checkpoints")
                              {:retain-history? (boolean retain-history?)}))
         dm        (wmdm/new-flat-model)
@@ -100,6 +103,7 @@
              ;; stamp `:transcript/visit`. The library does not track re-entry,
              ;; so we own it (one atom per run; see `io-refactor-plan.md` §3).
              :escapement/visit-counts   (atom {})}
+      clock (assoc :escapement/clock clock)
       tool-registry (assoc :escapement/tool-registry tool-registry)
       session-dir (assoc :escapement/session-dir session-dir)
       ;; Injected by the host (the bb runner builds a disk store from session-dir;

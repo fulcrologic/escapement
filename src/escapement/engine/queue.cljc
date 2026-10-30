@@ -5,15 +5,16 @@
   that we own so we can evolve it without pulling library deps that break under bb. The semantics match:
   separate per-session queues, delivery-time gating for delays, `cancel!` by `send-id`."
   (:require
-    [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
+    [com.fulcrologic.guardrails.malli.core :refer [=> >defn ?]]
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.events :as evts]
-    [com.fulcrologic.statecharts.protocols :as sp]))
+    [com.fulcrologic.statecharts.protocols :as sp]
+    [escapement.engine.clock :as clock]))
 
-(def ^:private now-ms-fn
-  ;; Wrapper so tests could mock if needed.
-  #?(:clj  (fn [] (System/currentTimeMillis))
-     :cljs (fn [] (.getTime (js/Date.)))))
+(defn- now-ms
+  "Current time on `queue`'s clock (`escapement.engine.clock`); the wall clock when it has none."
+  [queue]
+  (clock/now-ms (clock/clock-or-wall (:clock queue))))
 
 (defn- supported-type? [type]
   (or (nil? type)
@@ -22,13 +23,13 @@
     (and (string? type)
       (clojure.string/starts-with? (clojure.string/lower-case type) "http://www.w3.org/tr/scxml"))))
 
-(defrecord InProcessQueue [session-queues next-ordinal]
+(defrecord InProcessQueue [session-queues next-ordinal clock]
   sp/EventQueue
-  (send! [_ _env {:keys [event data type target source-session-id send-id invoke-id delay
+  (send! [this _env {:keys [event data type target source-session-id send-id invoke-id delay
                          origin origintype]}]
     (if (and (supported-type? type) (or target source-session-id))
       (let [target (or target source-session-id)
-            now    (now-ms-fn)
+            now    (now-ms this)
             tm     (if delay (+ now (long delay)) (dec now))
             ;; A monotonic insertion ordinal is the STABLE tie-break for events that
             ;; share a delivery-time. Delivery is `(delivery-time, ordinal)`-ordered
@@ -62,7 +63,7 @@
     (if (nil? session-id)
       (doseq [sid (keys @session-queues)]
         (sp/receive-events! this env handler {:session-id sid}))
-      (let [cutoff  (now-ms-fn)
+      (let [cutoff  (now-ms this)
             [old _] (swap-vals! session-queues
                       (fn [qs]
                         (let [to-defer (filterv
@@ -82,10 +83,15 @@
                    (println "[engine.queue] handler threw:" (ex-message e))))))))))
 
 (>defn new-queue
-  "Create a new in-process event queue."
-  []
-  [=> any?]
-  (->InProcessQueue (atom {}) (atom 0)))
+  "Create a new in-process event queue.
+
+   `opts`:
+     * `:clock` — an `escapement.engine.clock/Clock` that stamps delayed sends' due times and decides
+                  which events are due; the wall clock when omitted."
+  ([] [=> any?] (new-queue {}))
+  ([{:keys [clock]}]
+   [[:map [:clock {:optional true} any?]] => any?]
+   (->InProcessQueue (atom {}) (atom 0) clock)))
 
 (defn snapshot
   "Return a plain-data, EDN-serializable snapshot of `queue`'s pending (undelivered) events across all
@@ -129,10 +135,12 @@
 (>defn queue-from-snapshot
   "Rebuild a fresh `InProcessQueue` from a `snapshot` (see `snapshot`), re-attaching each event's
    `::delivery-time`/`::ordinal` metadata so delivery ordering and future-dated gating resume exactly
-   as before the process exited. A `nil`/empty snapshot yields a fresh empty queue."
-  [snap]
-  [[:maybe :map] => any?]
-  (->InProcessQueue (atom (snapshot->session-queues snap)) (atom (or (:next-ordinal snap) 0))))
+   as before the process exited. A `nil`/empty snapshot yields a fresh empty queue. `opts` as in
+   `new-queue` (`:clock`)."
+  ([snap] [[:maybe :map] => any?] (queue-from-snapshot snap {}))
+  ([snap {:keys [clock]}]
+   [[:maybe :map] [:map [:clock {:optional true} any?]] => any?]
+   (->InProcessQueue (atom (snapshot->session-queues snap)) (atom (or (:next-ordinal snap) 0)) clock)))
 
 (>defn restore-into!
   "Repopulate an EXISTING `queue`'s pending events and ordinal counter from `snapshot`, in place.
@@ -151,12 +159,18 @@
     (:inner queue) (restore-into! (:inner queue) snap)
     :else nil))
 
-(defn- backing-session-queues
-  "The `session-queues` atom of `queue`, following a wrapping queue's `:inner` chain (e.g. the debug
-   `InstrumentedQueue`) down to the backing `InProcessQueue`."
+(defn- backing-queue
+  "The backing `InProcessQueue` of `queue`, following a wrapping queue's `:inner` chain (e.g. the
+   debug `InstrumentedQueue`)."
   [queue]
-  (or (:session-queues queue)
-    (some-> (:inner queue) backing-session-queues)))
+  (if (:session-queues queue)
+    queue
+    (some-> (:inner queue) backing-queue)))
+
+(defn- backing-session-queues
+  "The `session-queues` atom of `queue`'s backing `InProcessQueue`."
+  [queue]
+  (:session-queues (backing-queue queue)))
 
 (>defn pending-count
   "Return the number of currently-queued events across all sessions (including deferred ones)."
@@ -175,9 +189,27 @@
    e.g. a multiplex chart run without `:multi-session?` — fail fast)."
   [queue]
   [any? => :int]
-  (let [now (now-ms-fn)]
+  (let [now (now-ms (backing-queue queue))]
     (reduce
       (fn [n evs]
         (+ n (count (filter (fn [evt] (<= (::delivery-time (meta evt) 0) now)) evs))))
       0
       (vals @(backing-session-queues queue)))))
+
+(>defn next-delivery-time
+  "The earliest due time (epoch ms on the queue's clock) among `queue`'s pending events, or nil when
+   nothing is pending. With `session-id`, only that session's events count. Events already due report
+   their (past) due time, so `(<= (next-delivery-time q) now)` means something is deliverable now."
+  ([queue] [any? => (? :int)] (next-delivery-time queue nil))
+  ([queue session-id]
+   [any? any? => (? :int)]
+   (let [qs  @(backing-session-queues queue)
+         evs (if (some? session-id) (get qs session-id) (mapcat identity (vals qs)))
+         ts  (keep (fn [evt] (::delivery-time (meta evt))) evs)]
+     (when (seq ts) (long (reduce min ts))))))
+
+(>defn queue-clock
+  "The clock `queue` (or the queue it wraps) reads time from: its `:clock`, or the wall clock."
+  [queue]
+  [any? => any?]
+  (clock/clock-or-wall (:clock (backing-queue queue))))

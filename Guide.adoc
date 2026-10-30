@@ -4506,6 +4506,7 @@ Only these keys are accepted:
 | `:debug-controller` | optional | none | an `escapement.debug.controller` atom — the same pause/step gate as the CLI's `--debug`; every event is gated before it is processed
 | `:human-input-active?` | optional | derived | `(fn [] bool)`; while true the debug gate yields so an open human-input prompt can be answered. When omitted with a `:debug-controller`, it is derived from the run's human-input processor (a live prompt worker = open)
 | `:invocation-processors` | optional | none | `[:vector :any]` — extra statecharts `InvocationProcessor`s (e.g. `(com.fulcrologic.statecharts.invocation.future/new-future-processor)` for `:type :future`), installed after the built-in LLM, human-input, child-chart and multiplex processors, which keep handling their own types
+| `:clock` | optional | wall clock | an `escapement.engine.clock/Clock`: delayed events' due times and the runner's waits for them read it. `(clock/manual-clock {:start-ms 0 :auto-advance? true})` makes a chart that waits two days finish in milliseconds (timers still fire in due-time order); without `:auto-advance?` its time moves only on `clock/advance!` / `clock/set-ms!`
 | `:transcript-path` | optional | `<tmp>/transcript.jsonl` | when omitted, a fresh temp dir is created
 | `:checkpoint-dir` | optional | `<tmp>/checkpoints` | when omitted, a fresh temp dir is created
 | `:session-dir` | optional | `<tmp>` | artifact/session dir (`<session-dir>/artifacts/<name>`); defaults to the same temp dir

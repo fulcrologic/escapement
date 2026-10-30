@@ -127,6 +127,7 @@
    [:human-input-active? {:optional true} fn?]              ; (fn [] bool) — gate yields while a prompt is open;
                                                             ;   derived from the human-input processor when absent
    [:invocation-processors {:optional true} [:vector :any]] ; extra sp/InvocationProcessors, beside the built-ins
+   [:clock {:optional true} :any]                           ; escapement.engine.clock/Clock; wall clock when absent
    ;; --- optional: transcript / checkpoint (default to a fresh temp dir) ---
    [:transcript-path {:optional true} :string]              ; JSONL output path; defaults to <tmp>/transcript.jsonl
    [:checkpoint-dir {:optional true} :string]               ; checkpoint dir;   defaults to <tmp>/checkpoints
@@ -198,7 +199,7 @@
              {:errors errs :provided-keys (vec (keys opts))})))
   (let [{:keys [chart session-id credentials config backend tool-registry
                 initial-data transcript-tap on-env-ready transcript-path
-                human-renderer debug-controller human-input-active? invocation-processors
+                human-renderer debug-controller human-input-active? invocation-processors clock
                 checkpoint-dir session-dir store quiet? cancel chart-id resume? resume-events
                 retain-history? trace?
                 max-iterations quiescent-sleep-ms]
@@ -278,6 +279,7 @@
                           debug-controller (assoc :debug-controller debug-controller)
                           hi-active? (assoc :human-input-active? hi-active?)
                           invocation-processors (assoc :invocation-processors invocation-processors)
+                          clock (assoc :clock clock)
                           chart-id (assoc :chart-id chart-id)
                           resume? (assoc :resume? resume?)
                           resume-events (assoc :resume-events resume-events)

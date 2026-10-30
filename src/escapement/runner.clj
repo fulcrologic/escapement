@@ -10,6 +10,7 @@
     [com.fulcrologic.statecharts :as sc]
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.capture :as capture]
+    [escapement.engine.clock :as clock]
     [escapement.engine.env :as engine-env]
     [escapement.engine.instrumented-queue :as iq]
     [escapement.engine.queue :as engine-queue]
@@ -201,7 +202,7 @@
            max-iterations max-frozen-cycles quiescent-sleep-ms human-renderer
            on-env-ready transcript-tap prelude-events store run-id cancel
            debug-controller human-input-active? multi-session? resume-events retain-history?
-           invocation-processors]
+           invocation-processors clock]
     :or   {chart-id           ::chart
            resume?            false
            trace?             false
@@ -244,7 +245,8 @@
         ;; threaded in here so a live human-input modal keeps focus.
         queue         (when debug-controller
                         (iq/new-instrumented-queue
-                          {:controller   debug-controller
+                          {:inner        (engine-queue/new-queue {:clock clock})
+                           :controller   debug-controller
                            :human-input? human-input-active?}))
         env           (engine-env/new-env {:checkpoint-dir          checkpoint-dir
                                            :session-dir             session-dir
@@ -261,10 +263,13 @@
                                            :llm-preferences         llm-preferences
                                            :llm-resilience          llm-resilience
                                            :tool-registry           tool-registry
+                                           :clock                   clock
                                            :human-renderer          human-renderer
                                            :extra-invocation-processors (vec invocation-processors)
                                            :transcript-fn           transcript-fn})
         registry      (::sc/statechart-registry env)
+        ;; The run's time source: the queue's clock (the wall clock unless `:clock` was given).
+        run-clock     (engine-queue/queue-clock (::sc/event-queue env))
         store         (::sc/working-memory-store env)
         processor     (::sc/processor env)]
     (sp/register-statechart! registry chart-id chart)
@@ -397,7 +402,7 @@
                                    ;; `:multi-session?`) — that is a wedge, not a timer,
                                    ;; so it falls through to the frozen path below.
                                    (and (zero? live) (pos? pending) (zero? deliverable))
-                                   (do (Thread/sleep ^long quiescent-sleep-ms)
+                                   (do (clock/idle! run-clock (engine-queue/next-delivery-time (::sc/event-queue env)) quiescent-sleep-ms)
                                        (recur 0))
 
                                    (and (zero? live) (zero? deliverable))
@@ -416,7 +421,7 @@
                                    ;; real wedge: events STRANDED on un-drained sessions
                                    ;; (live = 0, deliverable > 0).
                                    (pos? live)
-                                   (do (Thread/sleep ^long quiescent-sleep-ms)
+                                   (do (clock/idle! run-clock nil quiescent-sleep-ms)
                                        (recur 0))
 
                                    ;; No progress, no live work, but deliverable events
@@ -440,7 +445,7 @@
                                        :frozen-config)
 
                                    :else
-                                   (do (Thread/sleep ^long quiescent-sleep-ms)
+                                   (do (clock/idle! run-clock nil quiescent-sleep-ms)
                                        (recur (inc no-progress)))))))))
             final-wmem (sp/get-working-memory store env session-id)
             cfg        (vec (::sc/configuration final-wmem #{}))]
@@ -575,6 +580,11 @@
                                 human-input, child-chart and multiplex
                                 processors. The built-ins are always present
                                 and keep handling their own types.
+    * `:clock` (optional) — an `escapement.engine.clock/Clock` the run reads
+                             time from: delayed events' due times, and the
+                             waits for them. A `manual-clock` makes timers due
+                             when the test advances it, or (`:auto-advance?`)
+                             straight away. Defaults to the wall clock.
     * `:lock?` (default true) — take the single-writer session lock (see
                                 `escapement.engine.session-lock`) for the whole
                                 run. Held from before the transcript is opened
