@@ -200,7 +200,8 @@
            tool-registry initial-data resume? trace?
            max-iterations max-frozen-cycles quiescent-sleep-ms human-renderer
            on-env-ready transcript-tap prelude-events store run-id cancel
-           debug-controller human-input-active? multi-session? resume-events retain-history?]
+           debug-controller human-input-active? multi-session? resume-events retain-history?
+           invocation-processors]
     :or   {chart-id           ::chart
            resume?            false
            trace?             false
@@ -261,6 +262,7 @@
                                            :llm-resilience          llm-resilience
                                            :tool-registry           tool-registry
                                            :human-renderer          human-renderer
+                                           :extra-invocation-processors (vec invocation-processors)
                                            :transcript-fn           transcript-fn})
         registry      (::sc/statechart-registry env)
         store         (::sc/working-memory-store env)
@@ -566,6 +568,13 @@
                                     session-id`. Lets a host drive post-resume
                                     behavior a chart can't self-heal. Ignored on
                                     a fresh (non-resume) start.
+    * `:invocation-processors` (optional) — a vector of extra statecharts
+                                `InvocationProcessor`s (e.g. the library's
+                                `:future` processor, or a host's own type),
+                                installed alongside the built-in LLM,
+                                human-input, child-chart and multiplex
+                                processors. The built-ins are always present
+                                and keep handling their own types.
     * `:lock?` (default true) — take the single-writer session lock (see
                                 `escapement.engine.session-lock`) for the whole
                                 run. Held from before the transcript is opened

@@ -55,6 +55,7 @@
   (:require
     [babashka.fs :as fs]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn ?]]
+    [escapement.invocation.human-input :as human-input]
     [escapement.llm.preferences :as preferences]
     [escapement.llm.providers :as providers]
     [escapement.llm.ratings :as ratings]
@@ -120,6 +121,12 @@
    ;; --- optional: host callbacks ---
    [:transcript-tap {:optional true} fn?]                   ; (fn [event]) — receives every transcript row in-process
    [:on-env-ready {:optional true} fn?]                     ; (fn [env])   — called once env is built, before chart start
+   ;; --- optional: embedding seams (each absent ⇒ behaviour unchanged) ---
+   [:human-renderer {:optional true} :any]                  ; a HumanRenderer — enables `:human-input` invokes
+   [:debug-controller {:optional true} :any]                ; escapement.debug.controller atom — pause/step gate
+   [:human-input-active? {:optional true} fn?]              ; (fn [] bool) — gate yields while a prompt is open;
+                                                            ;   derived from the human-input processor when absent
+   [:invocation-processors {:optional true} [:vector :any]] ; extra sp/InvocationProcessors, beside the built-ins
    ;; --- optional: transcript / checkpoint (default to a fresh temp dir) ---
    [:transcript-path {:optional true} :string]              ; JSONL output path; defaults to <tmp>/transcript.jsonl
    [:checkpoint-dir {:optional true} :string]               ; checkpoint dir;   defaults to <tmp>/checkpoints
@@ -191,6 +198,7 @@
              {:errors errs :provided-keys (vec (keys opts))})))
   (let [{:keys [chart session-id credentials config backend tool-registry
                 initial-data transcript-tap on-env-ready transcript-path
+                human-renderer debug-controller human-input-active? invocation-processors
                 checkpoint-dir session-dir store quiet? cancel chart-id resume? resume-events
                 retain-history? trace?
                 max-iterations quiescent-sleep-ms]
@@ -232,6 +240,21 @@
         t-path          (or transcript-path (str (fs/path tmp-dir "transcript.jsonl")))
         ckpt-dir        (or checkpoint-dir (str (fs/path tmp-dir "checkpoints")))
         sess-dir        (or session-dir tmp-dir)
+        ;; With a debug controller the gate must yield while a human-input prompt is open
+        ;; (§runtime.embedding/debug-controller). A host that does not say how to tell gets
+        ;; the answer from the run's own human-input processor: a live worker = an open prompt.
+        env-ref         (atom nil)
+        hi-active?      (or human-input-active?
+                          (when debug-controller
+                            (fn [] (boolean
+                                     (some (fn [proc]
+                                             (and (instance? escapement.invocation.human_input.HumanInputProcessor proc)
+                                                  (pos? (human-input/active-worker-count proc))))
+                                       (some-> @env-ref :com.fulcrologic.statecharts/invocation-processors))))))
+        env-ready       (when (or on-env-ready (and debug-controller (nil? human-input-active?)))
+                          (fn [env]
+                            (reset! env-ref env)
+                            (when on-env-ready (on-env-ready env))))
         run-opts        (cond-> {:chart                  chart
                                  :session-id             session-id
                                  :transcript-path        t-path
@@ -250,7 +273,11 @@
                           tool-registry (assoc :tool-registry tool-registry)
                           initial-data (assoc :initial-data initial-data)
                           transcript-tap (assoc :transcript-tap transcript-tap)
-                          on-env-ready (assoc :on-env-ready on-env-ready)
+                          env-ready (assoc :on-env-ready env-ready)
+                          human-renderer (assoc :human-renderer human-renderer)
+                          debug-controller (assoc :debug-controller debug-controller)
+                          hi-active? (assoc :human-input-active? hi-active?)
+                          invocation-processors (assoc :invocation-processors invocation-processors)
                           chart-id (assoc :chart-id chart-id)
                           resume? (assoc :resume? resume?)
                           resume-events (assoc :resume-events resume-events)

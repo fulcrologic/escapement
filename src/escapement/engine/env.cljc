@@ -23,7 +23,12 @@
 
   `opts`:
     * `:checkpoint-dir` (required) - directory for atomic working-memory checkpoints
-    * `:invocation-processors` (optional, default `[]`) - vector of `InvocationProcessor` instances
+    * `:invocation-processors` (optional, default `[]`) - vector of `InvocationProcessor` instances,
+      installed BEFORE the built-in ones (so a stand-in can take over a built-in type, as
+      `escapement.engine.testing` does)
+    * `:extra-invocation-processors` (optional, default `[]`) - vector of host-supplied
+      `InvocationProcessor`s installed AFTER the built-in ones, so the built-ins keep handling
+      their own types (this is what `runner/run!`'s `:invocation-processors` feeds)
     * `:registry` (optional) - statechart registry; defaults to a fresh `LocalMemoryRegistry`
     * `:queue` (optional) - event queue; defaults to a fresh in-process queue
     * `:store` (optional) - working-memory store; defaults to a file-backed store at `:checkpoint-dir`
@@ -44,12 +49,13 @@
     * `:llm-resilience` (optional) - a partial `escapement.llm/default-resilience`
       map (the overrun output-cap + rerun-on-truncation primitive) injected
       run-wide under each node's own `:resilience`. Defaults to `{}`."
-  [{:keys [checkpoint-dir invocation-processors registry queue store
+  [{:keys [checkpoint-dir invocation-processors extra-invocation-processors registry queue store
            llm-backend llm-default-models llm-catalog-ratings llm-eligibility-strict?
            llm-aliases llm-preferences llm-resilience
            tool-registry transcript-fn human-renderer
            session-dir artifact-store retain-history?]
-    :or   {invocation-processors []}}]
+    :or   {invocation-processors       []
+           extra-invocation-processors []}}]
   (let [registry  (or registry (lmr/new-registry))
         queue     (or queue (queue/new-queue))
         store     (or store (store/new-store (or checkpoint-dir "checkpoints")
@@ -77,7 +83,8 @@
         chart-procs [(chart-invoke/new-invocation-processor)]
         ;; Multiplex: general dynamic-N fanout over any registered invocation type.
         mux-procs [(mux-proc/new-processor)]
-        all-procs (into [] (concat invocation-processors llm-procs hi-procs chart-procs mux-procs))]
+        all-procs (into [] (concat invocation-processors llm-procs hi-procs chart-procs mux-procs
+                             extra-invocation-processors))]
     (cond-> {::sc/statechart-registry   registry
              ::sc/data-model            dm
              ::sc/event-queue           queue

@@ -151,11 +151,18 @@
     (:inner queue) (restore-into! (:inner queue) snap)
     :else nil))
 
+(defn- backing-session-queues
+  "The `session-queues` atom of `queue`, following a wrapping queue's `:inner` chain (e.g. the debug
+   `InstrumentedQueue`) down to the backing `InProcessQueue`."
+  [queue]
+  (or (:session-queues queue)
+    (some-> (:inner queue) backing-session-queues)))
+
 (>defn pending-count
   "Return the number of currently-queued events across all sessions (including deferred ones)."
   [queue]
   [any? => :int]
-  (reduce + 0 (map count (vals @(:session-queues queue)))))
+  (reduce + 0 (map count (vals @(backing-session-queues queue)))))
 
 (>defn deliverable-now-count
   "Number of queued events across all sessions whose delivery-time has already
@@ -173,4 +180,4 @@
       (fn [n evs]
         (+ n (count (filter (fn [evt] (<= (::delivery-time (meta evt) 0) now)) evs))))
       0
-      (vals @(:session-queues queue)))))
+      (vals @(backing-session-queues queue)))))

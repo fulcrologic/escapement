@@ -208,6 +208,12 @@
          :or   {on-answer-event :human.answer
                 on-cancel-event :human.cancelled}} params
         env         (:env parent-ctx)
+        ;; What the renderer sees: the chart-author params plus WHICH prompt this is, so a
+        ;; host renderer serving many sessions can route the answer back (`:invokeid` is the
+        ;; key `escapement.ui.remote-renderer` already reads; `:session-id` names the session).
+        render-opts (assoc params
+                      :invokeid   (:invokeid parent-ctx)
+                      :session-id (:parent-session-id parent-ctx))
         ;; Same attribution contract as `:error.llm.*` — an `:error.human.*` rail
         ;; must be able to guard on which human-input invoke failed. Normalized
         ;; the same way `llm-conversation/->id-str` does (chart authors may write
@@ -236,12 +242,12 @@
         ;; Progress is fundamentally event-driven; for v1 just end immediately
         ;; and let the chart drive updates by other means. Future: park on a
         ;; queue and consume forwarded :human.progress events.
-        (let [handle (start-progress renderer params)]
+        (let [handle (start-progress renderer render-opts)]
           (end-progress renderer handle)
           (post-event-to-parent! parent-ctx on-answer-event {:answer :done}))
 
         :else
-        (let [answer (p/await! (dispatch-kind! renderer params env data))]
+        (let [answer (p/await! (dispatch-kind! renderer render-opts env data))]
           (cond
             (= :dying @worker-state)
             (transcript! transcript-fn {:event :human-input/cancelled :ts (now-ms)
