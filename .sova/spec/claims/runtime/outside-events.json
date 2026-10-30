@@ -1,0 +1,69 @@
+{
+  "§runtime.outside-events/arrival-time": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.outside-events/deliver",
+      "§runtime.stepping/next-wake"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/engine/queue.cljc",
+      "src/escapement/runner.clj",
+      "src/escapement/lib.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T01:41Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#06e5e62a"
+    }
+  },
+  "§runtime.outside-events/deliver": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.stepping/ack"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/runner.clj",
+      "src/escapement/lib.clj"
+    ]
+  },
+  "§runtime.outside-events/waiting-status": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.restarts/live-count"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/runner.clj",
+      "src/escapement/lib.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime/outside-events": {
+    "kind": "surface",
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/runner.clj",
+      "src/escapement/lib.clj"
+    ]
+  }
+}

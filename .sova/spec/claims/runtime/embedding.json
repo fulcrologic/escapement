@@ -1,0 +1,97 @@
+{
+  "§runtime.embedding/compatibility": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/lib.clj",
+      "src/escapement/runner.clj",
+      "src/escapement/engine/queue.cljc",
+      "src/escapement/engine/store.clj",
+      "src/escapement/engine/session_lock.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.embedding/debug-controller": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/lib.clj",
+      "src/escapement/invocation/human_input.clj",
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.embedding/human-renderer": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/lib.clj",
+      "src/escapement/invocation/human_input.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.embedding/invocation-processors": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/lib.clj",
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.embedding/tool-call": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.restarts/live-count"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/invocation/tool_call.clj",
+      "src/escapement/engine/env.cljc",
+      "src/escapement/engine/liveness.cljc"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:37Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime/embedding": {
+    "kind": "surface",
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/lib.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  }
+}

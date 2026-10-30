@@ -1,0 +1,11 @@
+{
+  "_": "Escapement's promises to embedders and users. The first claims are the runtime additions for hosting workflows (embedding, event-driven stepping, outside events, restarts, charts from data, testing, metrics, recording and replay); behaviour that predates them is not yet documented here. A behavior without `requires` has uninvestigated dependencies.",
+  "formatVersion": 2,
+  "grammar": {
+    "claimsRoot": "claims/",
+    "directoryKinds": [
+      "section"
+    ]
+  },
+  "claims": "records live beside each claim file, in claims/**/*.json"
+}

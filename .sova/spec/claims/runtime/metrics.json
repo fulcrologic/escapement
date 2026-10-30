@@ -1,0 +1,33 @@
+{
+  "§runtime.metrics/per-run": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/metrics.cljc",
+      "src/escapement/invocation/llm_conversation.clj",
+      "src/escapement/llm.clj",
+      "src/escapement/llm/cache.clj",
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime/metrics": {
+    "kind": "surface",
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/metrics.cljc"
+    ]
+  }
+}

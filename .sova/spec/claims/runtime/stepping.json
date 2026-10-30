@@ -1,0 +1,85 @@
+{
+  "§runtime.stepping/ack": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.stepping/one-event"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/engine/queue.cljc",
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.stepping/next-wake": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.stepping/one-event"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/engine/queue.cljc",
+      "src/escapement/engine/step.clj",
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.stepping/one-event": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/engine/step.clj",
+      "src/escapement/runner.clj",
+      "src/escapement/engine/queue.cljc"
+    ]
+  },
+  "§runtime.stepping/park-timers": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.stepping/next-wake",
+      "§runtime.outside-events/waiting-status"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/lib.clj",
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:18Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime/stepping": {
+    "kind": "surface",
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/engine/step.clj",
+      "src/escapement/runner.clj"
+    ]
+  }
+}
