@@ -142,7 +142,11 @@
                           {:scripted/step step :tool nm :offered offered})))]
     (cond
       (contains? reply :response)
-      (p/resolved (:response reply))
+      (let [names (keep #(when (= :tool_use (:type %)) (:name %)) (:content (:response reply)))
+            bad   (first (remove offered names))]
+        (if bad
+          (not-offered bad "a recorded tool call")
+          (p/resolved (:response reply))))
 
       (contains? reply :fail)
       (p/rejected (fail (:fail reply) step turn))

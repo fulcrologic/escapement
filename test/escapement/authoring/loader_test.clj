@@ -113,3 +113,15 @@
       (:code (first (port/check "(ns a)\n(in-ns 'b)"))) =fn=> #{:many-ns :not-portable}
       "unreadable code is reported, not thrown"
       (:code (first (port/check "(ns a)\n(defn f [] (+ 1 2)"))) => :syntax)))
+
+(specification "portability: local names may shadow forbidden core names"
+  (assertions
+    "let locals, fn params, destructuring and loop names are not calls"
+    (port/check "(ns x) (defn f [p] (let [send (count p)] (neg? send)))") => []
+    (port/check "(ns x) (defn f [future] (inc future))") => []
+    (port/check "(ns x) (defn f [{:keys [slurp]}] slurp)") => []
+    (port/check "(ns x) (defn f [xs] (for [spit xs :let [eval (inc spit)]] eval))") => []
+    (port/check "(ns x) (def g (fn [[agent & more]] agent))") => []
+    (port/check "(ns x) (defn f ([send] send) ([a send] (+ a send)))") => []
+    "but the real thing outside the local's scope is still caught"
+    (count (port/check "(ns x) (defn f [p] (let [send 1] send) (send p inc))")) => 1))

@@ -22,6 +22,7 @@
     [escapement.engine.store :as engine-store]
     [escapement.invocation.human-input :as human-input]
     [escapement.invocation.llm-conversation :as llm-conv]
+    [escapement.metrics :as metrics]
     [escapement.storage.disk :as disk]
     [escapement.transcript :as transcript]
     [taoensso.timbre :as log])
@@ -312,6 +313,16 @@
                                      "unaffected. This is logged once per run."))
                                  nil)))
                         jsonl-fn)
+        ;; §runtime.metrics/per-run: fold every row into the run's totals (tokens, cost,
+        ;; AI calls, time) as it is written. Additive: the file and the tap see the same
+        ;; rows as before; the collector only reads them.
+        run-metrics   (metrics/collector)
+        transcript-fn (let [write transcript-fn
+                            fold  (:tap run-metrics)]
+                        (fn [ev]
+                          (try (fold (cond-> ev (nil? (:ts ev)) (assoc :ts (now-ms))))
+                               (catch Throwable _ nil))
+                          (write ev)))
         ;; When a debug controller is supplied, the event queue becomes an
         ;; instrumented queue that applies the pause/step gate per event (and
         ;; exposes pending/last-delivered instrumentation to the api-server).
@@ -390,6 +401,7 @@
      :processor      (::sc/processor env)
      :sink           sink
      :transcript-fn  transcript-fn
+     :run-metrics    run-metrics
      :write-lock     (ReentrantLock.)
      ;; :open while the pump/stepper may still process events; :closing once the run has decided
      ;; its final status (an outside event delivered after that is saved for the next resume).
@@ -661,7 +673,10 @@
             cfg        (vec (::sc/configuration final-wmem #{}))
             wake-at    (when (= :sleeping status)
                          (engine-queue/next-delivery-time (::sc/event-queue env)
-                           (when-not (:multi-session? session) session-id)))]
+                           (when-not (:multi-session? session) session-id)))
+            totals     ((:snapshot (:run-metrics session)))]
+        ;; This call's totals (a resumed run reports the part it ran).
+        (transcript-fn {:event :runner/metrics :data totals})
         (transcript-fn {:event :runner/done
                         :data  (cond-> {:final-config cfg
                                         :status       status}
@@ -673,7 +688,9 @@
                  :checkpoint-dir checkpoint-dir
                  :env            env
                  ;; The chart's data model as of the end of the run (flat model).
-                 :data           (get final-wmem ::wmdm/data-model)}
+                 :data           (get final-wmem ::wmdm/data-model)
+                 ;; Tokens, cost, AI calls and time for this run (escapement.metrics/summarize).
+                 :metrics        totals}
           (= :waiting status) (assoc :waiting-in cfg)
           wake-at (assoc :next-wake-at wake-at)))
       (catch Throwable t

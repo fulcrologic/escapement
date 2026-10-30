@@ -93,10 +93,11 @@
                 (state {:id :end}))
         b     (scripted/backend {:script {"ask" [{:event :done :usage {:input-tokens 1000000}
                                                   :model "claude-sonnet-5"}]}})
-        _     (lib/run {:chart chart :session-id (keyword (str "m" (rand-int 1000000000)))
-                        :credentials [] :backend b :tool-registry (pt/pretend-registry {})
-                        :transcript-tap #(swap! rows conj %)})
-        resp  (first (filter #(= :llm/response (:event %)) @rows))]
+        result (lib/run {:chart chart :session-id (keyword (str "m" (rand-int 1000000000)))
+                         :credentials [] :backend b :tool-registry (pt/pretend-registry {})
+                         :transcript-tap #(swap! rows conj %)})
+        resp  (first (filter #(= :llm/response (:event %)) @rows))
+        mrow  (first (filter #(= :runner/metrics (:event %)) @rows))]
     (assertions
       "the conversation turn's row carries model, usage, latency and cost"
       (get-in resp [:data :model]) => "claude-sonnet-5"
@@ -104,7 +105,14 @@
       (contains? (:data resp) :elapsed-ms) => true
       (contains? (:data resp) :cost-usd) => true
       "totals come from the rows"
-      (:ai-calls (metrics/summarize @rows)) => 1))
+      (:ai-calls (metrics/summarize @rows)) => 1
+      "the run's result carries its totals"
+      (get-in result [:metrics :ai-calls]) => 1
+      (get-in result [:metrics :tokens :input]) => 1000000
+      (number? (get-in result [:metrics :wall-ms])) => true
+      "and so does its transcript, just before the done row"
+      (get-in mrow [:data :ai-calls]) => 1
+      (:event (last @rows)) => :runner/done))
   (component "a one-shot ask from a chart env leaves a row too"
     (let [rows (atom [])
           b    (scripted/backend {:script {:default [{:text "hello" :model "no-such-model"}]}})

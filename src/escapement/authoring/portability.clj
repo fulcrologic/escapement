@@ -138,20 +138,85 @@
             "is not allowed in a step namespace's ns form" (loc k clause)))))
     @acc))
 
+(defn- pattern-syms
+  "Every symbol a binding pattern binds (destructuring included)."
+  [pattern]
+  (set (filter #(and (symbol? %) (not= '& %)) (tree-seq coll? seq pattern))))
+
+(def ^:private let-like '#{let loop when-let if-let when-some if-some when-first})
+(def ^:private seq-binding-like '#{for doseq})
+(def ^:private fn-like '#{fn fn* defn defn- defmacro})
+
 (defn- walk-problems [form aliases]
   (let [out (volatile! [])]
-    (letfn [(walk [x parent]
+    (letfn [(bindings! [bvec bound]
+              ;; Walk inits left to right, each seeing the names bound before it;
+              ;; return the names bound by the whole vector.
+              (loop [pairs (partition 2 bvec) bound bound]
+                (if-let [[pat init] (first pairs)]
+                  (cond
+                    (= :let pat) (recur (rest pairs) (bindings! init bound))
+                    (keyword? pat) (do (walk init bound nil) (recur (rest pairs) bound))
+                    :else (do (walk init bound nil)
+                              (recur (rest pairs) (into bound (pattern-syms pat)))))
+                  bound)))
+            (fn-arity! [[params & body] bound]
+              (let [bound (into bound (pattern-syms params))]
+                (doseq [b body] (walk b bound nil))))
+            (walk [x bound parent]
               (cond
-                (symbol? x) (when-let [p (symbol-problem x aliases parent)] (vswap! out conj p))
-                (seq? x)    (do
-                              ;; (catch Exception e …): tolerate the class symbol.
-                              (if (and (= 'catch (first x)) (symbol? (second x)))
-                                (doseq [y (drop 2 x)] (walk y x))
-                                (doseq [y x] (walk y x))))
-                (map? x)    (doseq [[k v] x] (walk k parent) (walk v parent))
-                (coll? x)   (doseq [y x] (walk y parent))
+                (symbol? x)
+                (when-not (contains? bound x)
+                  (when-let [p (symbol-problem x aliases parent)] (vswap! out conj p)))
+
+                (seq? x)
+                (let [[head & args] x]
+                  (cond
+                    (and (let-like head) (vector? (first args)))
+                    (let [bound' (bindings! (first args) bound)]
+                      (doseq [b (rest args)] (walk b bound' x)))
+
+                    (and (seq-binding-like head) (vector? (first args)))
+                    (let [bound' (bindings! (first args) bound)]
+                      (doseq [b (rest args)] (walk b bound' x)))
+
+                    (= 'dotimes head)
+                    (let [[[n init] & body] args]
+                      (walk init bound x)
+                      (doseq [b body] (walk b (conj bound n) x)))
+
+                    (fn-like head)
+                    (let [args  (if (symbol? (first args)) (rest args) args)
+                          bound (if (and (#{'fn 'fn*} head) (symbol? (second x))) (conj bound (second x)) bound)
+                          args  (drop-while #(or (string? %) (map? %)) args)]
+                      (if (vector? (first args))
+                        (fn-arity! args bound)
+                        (doseq [arity args :when (and (seq? arity) (vector? (first arity)))]
+                          (fn-arity! arity bound))))
+
+                    (= 'letfn head)
+                    (let [specs  (first args)
+                          bound' (into bound (keep #(when (seq? %) (first %)) specs))]
+                      (doseq [spec specs :when (seq? spec)]
+                        (let [arities (rest spec)]
+                          (if (vector? (first arities))
+                            (fn-arity! arities bound')
+                            (doseq [a arities :when (seq? a)] (fn-arity! a bound')))))
+                      (doseq [b (rest args)] (walk b bound' x)))
+
+                    ;; (catch Exception e …): tolerate the class, bind the name.
+                    (and (= 'catch head) (symbol? (first args)))
+                    (let [bound' (cond-> bound (symbol? (second args)) (conj (second args)))]
+                      (doseq [b (drop 2 args)] (walk b bound' x)))
+
+                    (= 'quote head) nil
+
+                    :else (doseq [y x] (walk y bound x))))
+
+                (map? x) (doseq [[k v] x] (walk k bound parent) (walk v bound parent))
+                (coll? x) (doseq [y x] (walk y bound parent))
                 :else nil))]
-      (walk form nil))
+      (walk form #{} nil))
     @out))
 
 (defn parse

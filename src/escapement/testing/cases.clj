@@ -74,8 +74,9 @@
 (defn- send-outside! [session {:keys [event data]}]
   (let [env (:env session)
         sid (:session-id session)]
-    (sp/send! (::sc/event-queue env) env {:event event :data (or data {}) :target sid
-                                          :source-session-id sid})))
+    ;; No :source-session-id: that marks an event the chart raised itself; this
+    ;; one comes from outside (and is recorded as such).
+    (sp/send! (::sc/event-queue env) env {:event event :data (or data {}) :target sid})))
 
 (defn- current-data [session]
   (let [{:keys [env store session-id]} session
@@ -197,16 +198,21 @@
      * `:backend`       — an LLM backend to use instead of the case's `:ai` script;
      * `:work-dir`      — where the run's transcript/checkpoints go (default a temp dir);
      * `:max-fake-ms`   — how far the clock may jump past the start (default 60 days);
+     * `:clock`         — a MANUAL `escapement.engine.clock` clock to drive (e.g. one
+                          shared with a Fakeworld world); set to the case's `:start`
+                          when it has one. Default: a fresh manual clock;
      * `:session-id`, `:transcript-tap`.
    Returns the result map (see the ns doc); `:pass?` is true when no expectation failed."
   ([compiled tc] (run-case compiled tc {}))
   ([{:keys [chart chart-id shape]} tc
-    {:keys [tool-registry backend work-dir max-fake-ms max-steps session-id transcript-tap]
+    {:keys [tool-registry backend work-dir max-fake-ms max-steps session-id transcript-tap clock]
      :or   {max-fake-ms (* 60 day-ms) max-steps 100000}}]
    (assert chart "run-case needs a compiled :chart")
    (let [t0       (System/currentTimeMillis)
-         start    (start-ms (:start tc))
-         clk      (clock/manual-clock {:start-ms start :auto-advance? false})
+         clk      (or clock (clock/manual-clock {:start-ms (start-ms (:start tc)) :auto-advance? false}))
+         start    (if (and clock (:start tc))
+                    (do (clock/set-ms! clk (start-ms (:start tc))) (start-ms (:start tc)))
+                    (clock/now-ms clk))
          dir      (or work-dir (str (fs/create-temp-dir {:prefix "escapement-case-"})))
          sid      (or session-id (keyword (str "case-" (Math/abs (long (hash [(:name tc) t0]))))))
          backend  (or backend (scripted/backend {:script       (:ai tc)

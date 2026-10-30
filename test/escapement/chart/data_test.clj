@@ -219,6 +219,14 @@
       "duplicate ids"
       (codes (problems {:initial :a :states [{:id :a :type :final} {:id :a :type :final}]}))
       =fn=> #(contains? % :duplicate-id)
+      "a delay that is neither milliseconds nor a step"
+      (codes (problems {:initial :a :states [{:id :a :on [{:after "soon" :target :b}]}
+                                             {:id :b :type :final}]}))
+      => #{:bad-delay}
+      "a computed delay is fine"
+      (codes (problems {:initial :a :states [{:id :a :on [{:after {:step :approved?} :target :b}]}
+                                             {:id :b :type :final}]}))
+      => #{}
       "a bad retry"
       (codes (problems {:initial :a :states [{:id :a :ai {:message "x"} :retry {:max 0}
                                               :on [{:event :error.llm :target :b} {:event :llm.idle :target :b}]}

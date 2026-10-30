@@ -420,6 +420,30 @@
       (str "State " (kw-str id) " can retry forever: an error leads back to it through"
         " automatic steps with no condition. Use :retry {:max n …} or guard the loop."))))
 
+(defn- delay-ok? [d]
+  (or (and (number? d) (not (neg? d)))
+    (and (map? d) (= [:step] (keys d)) (keyword? (:step d)))))
+
+(defn- check-delays [{:keys [states order]}]
+  (concat
+    (for [id order
+          t (:transitions (states id))
+          :when (and (contains? (:raw t) :after) (not (delay-ok? (:after t))))]
+      (problem :error :bad-delay id (conj (:at t) :after)
+        (str "A delayed transition from " (kw-str id) " has :after " (pr-str (:after t))
+          "; use milliseconds (a number) or {:step :fn-name}.")))
+    (for [id order
+          :let [s (states id) w (:wait (:src s))]
+          :when (and (map? w) (contains? w :timeout-ms) (not (delay-ok? (:timeout-ms w))))]
+      (problem :error :bad-delay id (conj (:at s) :wait :timeout-ms)
+        (str "State " (kw-str id) " waits with :timeout-ms " (pr-str (:timeout-ms w))
+          "; use milliseconds (a number) or {:step :fn-name}.")))
+    (for [id order
+          :let [s (states id) r (:retry (:src s))]
+          :when (and (map? r) (contains? r :backoff-ms) (not (and (number? (:backoff-ms r)) (not (neg? (:backoff-ms r))))))]
+      (problem :error :bad-delay id (conj (:at s) :retry :backoff-ms)
+        (str "State " (kw-str id) " retries with :backoff-ms " (pr-str (:backoff-ms r)) "; use milliseconds.")))))
+
 (defn structural-problems
   "All structural problems of an `index` (see `index`), shape problems first."
   [idx]
@@ -430,6 +454,7 @@
          (check-error-exits idx)
          (check-retry-config idx)
          (check-bounded-retries idx)
+         (check-delays idx)
          (check-human-input idx)
          (check-parallels idx))))
 
