@@ -60,7 +60,9 @@
     (let [k    (cache-key request)
           file (io/file dir (str k ".edn"))]
       (if-let [hit (read-edn-file file)]
-        (p/resolved hit)
+        ;; Marked (as metadata, so the value is unchanged) so the transcript row
+        ;; and run metrics can tell a replayed answer from a paid one.
+        (p/resolved (vary-meta hit assoc :replay-cache/hit? true))
         (p/then (proto/send-turn inner request)
           (fn [response]
             (atomic-write-edn! file response)

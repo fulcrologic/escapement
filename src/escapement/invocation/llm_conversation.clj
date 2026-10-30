@@ -44,6 +44,7 @@
     [escapement.llm.preferences :as preferences]
     [escapement.llm.protocol :as llm]
     [escapement.llm.types :as llm-types]
+    [escapement.metrics :as metrics]
     [escapement.tools.input-keys :as input-keys]
     [escapement.tools.protocol :as tp]
     [malli.core :as m]
@@ -962,7 +963,11 @@
                     :eligibility-strict? eligibility-strict?
                     :model-status        model-status
                     :hooks               hooks}
-                   params messages tools)]
+                   (assoc params :escapement/request-meta
+                     {:escapement/invokeid (->id-str invokeid)
+                      :escapement/visit    (:visit capture)
+                      :escapement/turn     turn})
+                   messages tools)]
     (case (:status env)
       ;; Tag the response payload with the WINNING candidate's provider so the
       ;; live panel can show `provider/model` per session row (a group may mix
@@ -1487,7 +1492,15 @@
                     ctx-window (assoc :context-window ctx-window)
                     io-ref (assoc :io/ref (:io/ref io-ref))
                     ctx-used-frac (assoc :context-used-frac
-                                    (Double/parseDouble (format "%.3f" ctx-used-frac))))})
+                                    (Double/parseDouble (format "%.3f" ctx-used-frac)))
+                    (:replay-cache/hit? (meta response)) (assoc :replay-cache/hit? true)
+                    ;; Cost from the catalog's pricing; nil (+ :cost-unknown?) when
+                    ;; the model has no price — never a silent zero.
+                    true (merge (metrics/response-row-cost
+                                  {:provider        provider
+                                   :model           model
+                                   :model-requested model-requested
+                                   :usage           usage})))})
         ;; A silent server-side substitution is a first-class observable, not
         ;; an anomaly to smooth over: anything pricing or comparing this run by
         ;; the id it ASKED for is wrong until it sees this.

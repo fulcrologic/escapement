@@ -49,7 +49,8 @@
     [escapement.llm.prompt-cache :as prompt-cache]
     [escapement.llm.protocol :as proto]
     [escapement.llm.reasoning :as reasoning]
-    [escapement.llm.types :as types]))
+    [escapement.llm.types :as types]
+    [escapement.metrics :as metrics]))
 
 (defn- now-ms [] (System/currentTimeMillis))
 
@@ -688,7 +689,13 @@
                            ;; R3 dispatch: an alias candidate carries a provider
                            ;; keyword; tagging the request routes MultiBackend by
                            ;; provider (regex bypassed). nil :provider → untouched.
-                           (:provider cand) (assoc :provider (:provider cand)))
+                           (:provider cand) (assoc :provider (:provider cand))
+                           ;; Host-side identity of the asking step (invoke id,
+                           ;; visit, turn) as Clojure METADATA: never serialized,
+                           ;; never sent to a provider; read by scripted/replay
+                           ;; backends to answer per step.
+                           (:escapement/request-meta params)
+                           (vary-meta merge (:escapement/request-meta params)))
                 _        (before-send request m (:provider cand))
                 on-delta (delta-sink m (:provider cand))
                 ;; Usage seen on the wire BEFORE the turn ended. A streamed turn
@@ -923,6 +930,33 @@
     {:status (:status env) :response nil :error (:error env)
      :model  (:model env)}))
 
+(defn- log-ask!
+  "When `ctx-or-env` is a chart env with a transcript fn, leave an `:llm/response`
+   row for a one-shot call (model, provider, usage, latency, cost), like a
+   conversation turn's. Never throws."
+  [ctx-or-env env]
+  (when-let [tf (and (map? ctx-or-env) (:escapement/transcript-fn ctx-or-env))]
+    (when (= :ok (:status env))
+      (let [resp     (:response env)
+            provider (or (get-in env [:candidate :provider]) (:provider resp))
+            usage    (or (:usage resp) {})]
+        (try
+          (tf {:event :llm/response
+               :ts    (now-ms)
+               :data  (cond-> {:stop-reason (:stop-reason resp)
+                               :usage       usage
+                               :one-shot?   true}
+                        (:model resp) (assoc :model (:model resp))
+                        (:model env) (assoc :model-requested (:model env))
+                        provider (assoc :provider provider)
+                        (:elapsed-ms resp) (assoc :elapsed-ms (:elapsed-ms resp))
+                        (:replay-cache/hit? (meta resp)) (assoc :replay-cache/hit? true)
+                        true (merge (metrics/response-row-cost
+                                      {:provider provider :model (:model resp)
+                                       :model-requested (:model env) :usage usage})))})
+          (catch Throwable _ nil)))))
+  env)
+
 (defn ask*
   "Issue ONE LLM turn and return the result envelope with the full Response
    under `:response` on success. `ctx-or-env` is a resolution `ctx`, a `:elected`
@@ -940,6 +974,7 @@
   [ctx-or-env opts]
   (-> (run-turn (env->ctx ctx-or-env) (opts->params opts)
         (prompt-messages opts) (or (:tools opts) []))
+    (->> (log-ask! ctx-or-env))
     (public-envelope identity)))
 
 (defn ask
@@ -948,6 +983,7 @@
   [ctx-or-env opts]
   (-> (run-turn (env->ctx ctx-or-env) (opts->params opts)
         (prompt-messages opts) (or (:tools opts) []))
+    (->> (log-ask! ctx-or-env))
     (public-envelope response-text)))
 
 (defn elect-model
@@ -1020,7 +1056,7 @@
       (let [;; Election: pin a working model. Already-pinned ctx skips this.
             [pin0 head] (if (:pinned ctx)
                           [(:pinned ctx) nil]
-                          (let [env (run-turn ctx params (msgs-of (first items)) tools*)]
+                          (let [env (log-ask! ctx-or-env (run-turn ctx params (msgs-of (first items)) tools*))]
                             (if (= :ok (:status env))
                               [(:candidate env) (public-envelope env response-text)]
                               [::failed env])))]
@@ -1041,7 +1077,7 @@
                 (fn [item]
                   (if (and (= :abort on-error) @aborted?)
                     {:status :skipped :response nil}
-                    (let [env (run-turn (assoc ctx :pinned @pin) params (msgs-of item) tools*)]
+                    (let [env (log-ask! ctx-or-env (run-turn (assoc ctx :pinned @pin) params (msgs-of item) tools*))]
                       (if (or (= :ok (:status env))
                             (not (#{:exhausted :interrupted} (:status env))))
                         (do (when (and (= :abort on-error) (not= :ok (:status env)))
@@ -1051,7 +1087,7 @@
                         ;; (a full-failover turn that ALSO produces this result).
                         (let [renv (locking reelect-lock
                                      (if (< @reelections max-reelect)
-                                       (let [re (run-turn ctx params (msgs-of item) tools*)]
+                                       (let [re (log-ask! ctx-or-env (run-turn ctx params (msgs-of item) tools*))]
                                          (when (= :ok (:status re))
                                            (swap! reelections inc)
                                            (reset! pin (:candidate re)))
