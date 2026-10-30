@@ -4586,6 +4586,27 @@ Hosts read
 Omitting `:cancel` always yields
 `:status :done` for a normal run.
 
+[[tool-call]]
+==== Calling a tool as an invocation: `:type :tool-call`
+
+When the run has a `:tool-registry`, a chart can call a registered `Tool` as an invocation, off the chart's thread:
+
+[source,clojure]
+----
+(state {:id :fetch}
+  (invoke {:id :fetch :type :tool-call
+           :params {:tool :mail/list-new :input {:limit 10} :timeout-ms 5000}})
+  (transition {:event :done.invoke.fetch :target :triage})        ; data = the tool's whole result
+  (transition {:event :error.call.unknown :target :ask-the-user}) ; the tool can't tell if its effect happened
+  (transition {:event :error.call.* :target :failed}))            ; tool / exception / timeout
+----
+
+The input is validated against the tool's schema; the call runs on its own thread, so the chart keeps processing other events meanwhile, and it counts as in-flight work, so the run does not end while it runs.
+Exactly one event comes back: `done.invoke.<id>` (data: the tool's result map) on success, or one of `error.call.tool` (the tool reported `:is-error`, the input was invalid, or there is no such tool), `error.call.unknown` (the result has `:outcome :unknown`), `error.call.exception` (the tool threw; `{:message}`) or `error.call.timeout` (longer than `:timeout-ms`; `{:timeout-ms}` — the effect may still have happened).
+Error data also carries `:escapement/invokeid` and `:escapement/tool`.
+Leaving the state cancels the call; nothing is reported for it afterwards.
+On resume an in-flight call is started again with its state, so an effectful tool needs an at-most-once guard of its own.
+
 [[outside-events]]
 ==== Waiting, parking and outside events
 

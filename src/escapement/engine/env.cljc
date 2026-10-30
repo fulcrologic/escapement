@@ -16,7 +16,8 @@
     [escapement.engine.queue :as queue]
     [escapement.engine.store :as store]
     [escapement.invocation.human-input :as human-input]
-    [escapement.invocation.llm-conversation :as llm-conv]))
+    [escapement.invocation.llm-conversation :as llm-conv]
+    [escapement.invocation.tool-call :as tool-call]))
 
 (defn new-env
   "Build an `::sc/env` map.
@@ -80,13 +81,16 @@
                     [(human-input/new-processor {:renderer      human-renderer
                                                  :transcript-fn transcript-fn})]
                     [])
+        ;; `:type :tool-call`: call a registry Tool as an invocation, off the chart thread
+        ;; (`escapement.invocation.tool-call`). Installed whenever the run has a tool registry.
+        tool-procs (if tool-registry [(tool-call/new-processor)] [])
         ;; Statechart-as-invokable: needed both for plain <invoke type=::sc/chart>
         ;; and as a dependency of the multiplex processor (it spawns its own
         ;; aggregator chart via the statechart processor).
         chart-procs [(chart-invoke/new-invocation-processor)]
         ;; Multiplex: general dynamic-N fanout over any registered invocation type.
         mux-procs [(mux-proc/new-processor)]
-        all-procs (into [] (concat invocation-processors llm-procs hi-procs chart-procs mux-procs
+        all-procs (into [] (concat invocation-processors llm-procs hi-procs tool-procs chart-procs mux-procs
                              extra-invocation-processors))]
     (cond-> {::sc/statechart-registry   registry
              ::sc/data-model            dm
