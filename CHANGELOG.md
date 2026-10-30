@@ -1,5 +1,58 @@
 # Changelog
 
+## [unreleased] — feat/builder-runtime
+
+### Changed
+
+- **A cancelled send is never delivered, even when it was already due.** The
+  in-process queue used to take a whole batch of due events out at once, so an
+  event cancelled (SCXML `<cancel>`) by an earlier event in the same batch was
+  still delivered. Each event now leaves the queue only at its own turn, and a
+  cancelled one is skipped. This is a defect fix with no opt-in: `<cancel>`
+  means the send is not delivered. The bundled charts that cancel (the haiku
+  tournament's safety timers, data-built charts' exit cancels) already relied
+  on that meaning.
+- **Each event is acknowledged in the checkpoint written after processing it.**
+  A crash mid-batch no longer loses the events not yet handled.
+- **An event whose processing throws reaches the chart as `error.execution`**
+  (data `{:reason :event-processing-threw :message … :escapement/failed-event
+  <name>}`) with a `:runner/event-failed` transcript row, instead of being
+  printed and dropped.
+- **Resume restarts the invocations of active invoking states** (LLM
+  conversations, child charts, `:future` and `:tool-call` calls), recorded as
+  `:runner/reinvoked`. A restarted outside call can run twice.
+- **A run never ends while a `:future` invocation (or any processor
+  implementing `escapement.engine.liveness/ActiveCount`) is in flight.**
+- **Resuming a checkpoint whose chart id is not registered is refused**
+  (`{:escapement/refused :chart-id-mismatch}`), instead of failing every event.
+- Single-writer session lock and versioned checkpoint records (from
+  `durability/checkpoint-authority`).
+
+### Added
+
+- `escapement.lib/run` options `:human-renderer`, `:debug-controller`,
+  `:human-input-active?`, `:invocation-processors`, `:clock`,
+  `:report-waiting?` (`:status :waiting`), `:park-timers?` (`:status
+  :sleeping` + `:next-wake-at`) and `:require-checkpoint?`. `runner/run!` takes
+  the same. The result gains `:data`, plus `:waiting-in` and `:next-wake-at`
+  where they apply.
+- `escapement.engine.clock`: `wall-clock`, and `manual-clock` with
+  `:auto-advance?`.
+- `escapement.engine.step`: event-by-event stepping (`open`, `step!`, `state`,
+  `close!`, `step-until-quiet!`).
+- `escapement.lib/deliver!`: deliver an outside event to a running or saved
+  session.
+- The `:tool-call` invocation type (`escapement.invocation.tool-call`),
+  installed whenever the run has a tool registry.
+- Transcript: `:initial-data` on `:runner/started`, and `:external?` on
+  `:runner/event-processed`.
+- Human-input renderer opts carry `:invokeid` and `:session-id`.
+
+### Fixed
+
+- Runs with a `:debug-controller` no longer crash with an NPE the first time
+  they go quiet: the queue counts now see through the instrumented queue.
+
 ## [unreleased] — fix/nested-tool-input-keys — 2026-09-29
 
 ### Fixed

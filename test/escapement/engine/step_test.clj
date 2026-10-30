@@ -11,6 +11,7 @@
     [escapement.engine.queue :as queue]
     [escapement.engine.step :as step]
     [escapement.engine.store :as store]
+    [escapement.runner :as runner]
     [fulcro-spec.core :refer [=> assertions specification]])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
@@ -212,3 +213,28 @@
       (assertions
         "after close! it can be reopened"
         (map? s2) => true))))
+
+(def cancel-in-batch-chart
+  "Entering :a queues :go and :late together (both due at once). Processing :go leaves :a,
+   whose on-exit cancels :late. SCXML <cancel>: a cancelled send is never delivered."
+  (chart/statechart {:initial :a}
+    (state {:id :a}
+      (on-entry {} (ele/send {:event :go}) (ele/send {:id :late-send :event :late}))
+      (ele/on-exit {} (ele/cancel {:sendid :late-send}))
+      (transition {:event :go :target :b}))
+    (state {:id :b}
+      (transition {:event :late :target :wrong}))
+    (state {:id :wrong})))
+
+(specification "regression: a send cancelled while its batch is being delivered is not delivered"
+  ;; Before the per-event ack, a whole batch of due events left the queue at once, so an event
+  ;; cancelled by an earlier event in the same batch was still delivered.
+  (let [dir (tmp-dir "cancel-batch-")
+        r   (runner/run! {:chart           cancel-in-batch-chart
+                                     :session-id      :cancel/batch
+                                     :transcript-path (str dir "/t.jsonl")
+                                     :checkpoint-dir  (str dir "/chk")
+                                     :quiescent-sleep-ms 5})]
+    (assertions
+      "the chart stays in :b; the cancelled :late never arrives"
+      (:final-config r) => [:b])))
