@@ -128,6 +128,10 @@
                                                             ;   derived from the human-input processor when absent
    [:invocation-processors {:optional true} [:vector :any]] ; extra sp/InvocationProcessors, beside the built-ins
    [:clock {:optional true} :any]                           ; escapement.engine.clock/Clock; wall clock when absent
+   ;; --- optional: waiting / parking / strict resume (each absent ⇒ behaviour unchanged) ---
+   [:report-waiting? {:optional true} :boolean]             ; quiet in a non-final config ⇒ :status :waiting (+ :waiting-in)
+   [:park-timers? {:optional true} :boolean]                ; only a future timer left ⇒ save + :status :sleeping (+ :next-wake-at)
+   [:require-checkpoint? {:optional true} :boolean]         ; with :resume?: no checkpoint ⇒ throw, never start fresh
    ;; --- optional: transcript / checkpoint (default to a fresh temp dir) ---
    [:transcript-path {:optional true} :string]              ; JSONL output path; defaults to <tmp>/transcript.jsonl
    [:checkpoint-dir {:optional true} :string]               ; checkpoint dir;   defaults to <tmp>/checkpoints
@@ -200,6 +204,7 @@
   (let [{:keys [chart session-id credentials config backend tool-registry
                 initial-data transcript-tap on-env-ready transcript-path
                 human-renderer debug-controller human-input-active? invocation-processors clock
+                report-waiting? park-timers? require-checkpoint?
                 checkpoint-dir session-dir store quiet? cancel chart-id resume? resume-events
                 retain-history? trace?
                 max-iterations quiescent-sleep-ms]
@@ -280,6 +285,9 @@
                           hi-active? (assoc :human-input-active? hi-active?)
                           invocation-processors (assoc :invocation-processors invocation-processors)
                           clock (assoc :clock clock)
+                          report-waiting? (assoc :report-waiting? report-waiting?)
+                          park-timers? (assoc :park-timers? park-timers?)
+                          require-checkpoint? (assoc :require-checkpoint? require-checkpoint?)
                           chart-id (assoc :chart-id chart-id)
                           resume? (assoc :resume? resume?)
                           resume-events (assoc :resume-events resume-events)
@@ -300,3 +308,19 @@
       :transcript t-path
       :checkpoint-dir ckpt-dir
       :session-dir sess-dir)))
+
+;; ---------------------------------------------------------------------------
+;; Outside events
+;; ---------------------------------------------------------------------------
+
+(>defn deliver!
+  "Deliver an outside event to a session, whether it is running in this process or waiting with its
+   state saved: `{:checkpoint-dir d :session-id s :event kw :data m}` (plus optional `:clock`, the
+   session's clock when it is not the wall clock, and `:timeout-ms`). The event is written into the
+   session's checkpoint before this returns. See `escapement.runner/deliver!` for the result:
+   `{:accepted? true :where :running|:saved}` or `{:accepted? false :reason
+   :finished|:no-session|:locked-elsewhere|:busy}`. For `:where :saved`, resume the session
+   (`run` with `:resume? true`, same chart id and paths) to process it."
+  [opts]
+  [:map => :map]
+  (runner/deliver! opts))

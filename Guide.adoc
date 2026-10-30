@@ -4537,6 +4537,9 @@ Only these keys are accepted:
 | `:human-input-active?` | optional | derived | `(fn [] bool)`; while true the debug gate yields so an open human-input prompt can be answered. When omitted with a `:debug-controller`, it is derived from the run's human-input processor (a live prompt worker = open)
 | `:invocation-processors` | optional | none | `[:vector :any]` — extra statecharts `InvocationProcessor`s (e.g. `(com.fulcrologic.statecharts.invocation.future/new-future-processor)` for `:type :future`), installed after the built-in LLM, human-input, child-chart and multiplex processors, which keep handling their own types
 | `:clock` | optional | wall clock | an `escapement.engine.clock/Clock`: delayed events' due times and the runner's waits for them read it. `(clock/manual-clock {:start-ms 0 :auto-advance? true})` makes a chart that waits two days finish in milliseconds (timers still fire in due-time order); without `:auto-advance?` its time moves only on `clock/advance!` / `clock/set-ms!`
+| `:report-waiting?` | optional | `false` | a run that goes quiet in a NON-final configuration (nothing in flight, nothing pending) returns `:status :waiting` and `:waiting-in` (its active states) instead of `:done`; a final configuration still returns `:done`. See <<outside-events>>
+| `:park-timers?` | optional | `false` | a run whose only remaining work is a delayed event not yet due writes its checkpoint and returns `:status :sleeping` with `:next-wake-at` (epoch ms on the run's clock) instead of holding a thread asleep. Resume it at or after that time; resuming earlier parks again with the same wake time. Needs the default file-backed store (refused with a custom `:store`). See <<outside-events>>
+| `:require-checkpoint?` | optional | `false` | with `:resume? true`: a session with no checkpoint (none saved, or one with no active configuration) fails with `ex-data {:escapement/refused :no-checkpoint :session-id :checkpoint-dir :checkpoint-found?}` and nothing starts, instead of a silent fresh start
 | `:transcript-path` | optional | `<tmp>/transcript.jsonl` | when omitted, a fresh temp dir is created
 | `:checkpoint-dir` | optional | `<tmp>/checkpoints` | when omitted, a fresh temp dir is created
 | `:session-dir` | optional | `<tmp>` | artifact/session dir (`<session-dir>/artifacts/<name>`); defaults to the same temp dir
@@ -4564,7 +4567,10 @@ Supplying both explicitly creates no temp dir.
 |===
 | Key | Type | Value
 | `:run-id` | string | generated 36-char UUID string, stable within the run, unique across runs
-| `:status` | keyword | `:done` (normal quiescence) or `:aborted` (cancel fired, or max-iterations hit)
+| `:status` | keyword | `:done` (normal quiescence) or `:aborted` (cancel fired, or max-iterations hit); also `:frozen-config`; and, only when asked for, `:waiting` (`:report-waiting?`) or `:sleeping` (`:park-timers?`)
+| `:waiting-in` | vector | with `:status :waiting`: the active states the run waits in
+| `:next-wake-at` | long | with `:status :sleeping`: when the earliest delayed event is due (epoch ms on the run's clock)
+| `:data` | map | the chart's data model at the end of the run
 | `:transcript` | string | transcript path actually used (temp or explicit)
 | `:checkpoint-dir` | string | checkpoint dir actually used (temp or explicit)
 | `:session-dir` | string | session/artifact dir actually used (temp or explicit)
@@ -4579,6 +4585,37 @@ Hosts read
 `(:status result)`; `(= :aborted (:status result))` means the run was cancelled or hit the iteration bound.
 Omitting `:cancel` always yields
 `:status :done` for a normal run.
+
+[[outside-events]]
+==== Waiting, parking and outside events
+
+A workflow often stops to wait for something outside it (an approval, an incoming email, a webhook) or for a timer ("wait two days").
+A host can tell such a run apart from a finished one and wake it later, without holding a thread for the wait:
+
+* `:report-waiting? true` — a run that goes quiet in a non-final configuration returns `:status :waiting` (and `:waiting-in`), not `:done`.
+A run is never reported waiting (or done) while an invocation it started is still running.
+* `:park-timers? true` — when only a not-yet-due delayed event is left, the run saves its checkpoint and returns `:status :sleeping` with `:next-wake-at`.
+Resume with `:resume? true` (same `:chart-id` and paths) at that time and the timer fires.
+* `escapement.lib/deliver!` — deliver an outside event to a session by id:
++
+[source,clojure]
+----
+(lib/deliver! {:checkpoint-dir dir :session-id sid :event :approval/answered :data {:answer :yes}})
+;; => {:accepted? true :where :running}  a run in this process will process it
+;; => {:accepted? true :where :saved}    saved with the session: resume it to process it
+;; => {:accepted? false :reason :finished | :no-session | :locked-elsewhere | :busy}
+----
++
+The event joins the session's queue and is processed in order like any other; it is written into the session's checkpoint before `deliver!` returns, so an accepted event survives a crash.
+For a saved session on a non-wall clock, pass the session's `:clock`.
+
+A parked approval therefore looks like: `run` with `:report-waiting? true` → `:waiting`; later `deliver!` the answer (`:where :saved`) and `run` again with `:resume? true` → it continues.
+`:resume-events` keeps working for the same purpose.
+
+Each processed outside event (delivered, a `:resume-events` entry, a human's answer) is marked `:external? true` on its `:runner/event-processed` row, and `:runner/started` carries the run's `:initial-data`, so a recorded run holds what it needs to be replayed.
+
+A resumed checkpoint names the chart id it was running (`::sc/statechart-src`); if no chart is available under that id, the resume is refused with `ex-data {:escapement/refused :chart-id-mismatch :checkpoint-chart-id … :chart-id …}` instead of running it against another chart.
+Give each chart version its own `:chart-id`.
 
 ==== Cancellation
 

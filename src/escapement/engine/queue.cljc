@@ -42,6 +42,9 @@
          (binding [*out* *err*]
            (println "[engine.queue] handler threw:" (ex-message e))))))
 
+(defn- run-guarded [guard thunk]
+  (if guard (guard thunk) (thunk)))
+
 (defrecord InProcessQueue [session-queues next-ordinal clock]
   sp/EventQueue
   (send! [this _env {:keys [event data type target source-session-id send-id invoke-id delay
@@ -78,10 +81,10 @@
     nil)
   (receive-events! [this env handler]
     (sp/receive-events! this env handler {}))
-  (receive-events! [this env handler {:keys [session-id]}]
+  (receive-events! [this env handler {:keys [session-id guard] :as options}]
     (if (nil? session-id)
       (doseq [sid (keys @session-queues)]
-        (sp/receive-events! this env handler {:session-id sid}))
+        (sp/receive-events! this env handler (assoc options :session-id sid)))
       (let [cutoff  (now-ms this)
             ;; The batch is every event due at `cutoff`, in (delivery-time, ordinal) order — NOT
             ;; raw insertion order — so simultaneously-due events fire deterministically by the
@@ -95,9 +98,13 @@
         ;; therefore holds every other pending event (the rest of this batch included) but not this
         ;; one: that one atomic write is the event's acknowledgement. A crash mid-batch no longer
         ;; loses the events not yet handled. (They used to leave the queue all at once.)
+        ;; `:guard` (optional, `(fn [thunk])`) runs each take-and-handle as one unit, e.g. under the
+        ;; session's write lock, so nothing can checkpoint the queue between the take and the save.
         (doseq [event to-send]
-          (when (take-event! session-queues session-id event)
-            (deliver-to-handler! handler env event)))))))
+          (run-guarded guard
+            (fn []
+              (when (take-event! session-queues session-id event)
+                (deliver-to-handler! handler env event)))))))))
 
 (>defn new-queue
   "Create a new in-process event queue.
@@ -237,23 +244,26 @@
    are considered; without, every session's.
 
    The event stays in the queue until the moment its handler runs (the same acknowledgement rule as
-   `receive-events!`), and a handler throw is reported, never propagated. Works on the BACKING queue
+   `receive-events!`), and a handler throw is reported, never propagated. `:guard` as in
+   `receive-events!`. Works on the BACKING queue
    of a wrapper, so a debug gate does not apply: the caller is stepping by hand."
   ([queue env handler] [any? any? fn? => any?] (receive-one! queue env handler {}))
-  ([queue env handler {:keys [session-id]}]
+  ([queue env handler {:keys [session-id guard]}]
    [any? any? fn? [:maybe :map] => any?]
-   (let [bq    (backing-queue queue)
-         sq    (:session-queues bq)
-         now   (now-ms bq)
-         [sid event] (->> @sq
-                       (mapcat (fn [[sid evs]]
-                                 (when (or (nil? session-id) (= sid session-id))
-                                   (keep (fn [evt] (when (<= (::delivery-time (meta evt)) now) [sid evt])) evs))))
-                       (sort-by (comp delivery-key second))
-                       first)]
-     (when (and event (take-event! sq sid event))
-       (deliver-to-handler! handler env event)
-       event))))
+   (let [bq (backing-queue queue)
+         sq (:session-queues bq)]
+     (run-guarded guard
+       (fn []
+         (let [now         (now-ms bq)
+               [sid event] (->> @sq
+                             (mapcat (fn [[sid evs]]
+                                       (when (or (nil? session-id) (= sid session-id))
+                                         (keep (fn [evt] (when (<= (::delivery-time (meta evt)) now) [sid evt])) evs))))
+                             (sort-by (comp delivery-key second))
+                             first)]
+           (when (and event (take-event! sq sid event))
+             (deliver-to-handler! handler env event)
+             event)))))))
 
 (>defn pending-summary
   "Plain data for `queue`'s pending events (optionally only `session-id`'s), in delivery order:

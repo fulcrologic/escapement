@@ -5,9 +5,11 @@
 
   Public entry: `run!`. Public helper: `load-chart`."
   (:require
+    [clojure.java.io :as io]
     [clojure.set :as set]
     [com.fulcrologic.guardrails.malli.core :refer [=> >defn]]
     [com.fulcrologic.statecharts :as sc]
+    [com.fulcrologic.statecharts.data-model.working-memory-data-model :as wmdm]
     [com.fulcrologic.statecharts.protocols :as sp]
     [escapement.capture :as capture]
     [escapement.engine.clock :as clock]
@@ -22,7 +24,10 @@
     [escapement.invocation.llm-conversation :as llm-conv]
     [escapement.storage.disk :as disk]
     [escapement.transcript :as transcript]
-    [taoensso.timbre :as log]))
+    [taoensso.timbre :as log])
+  (:import
+    (java.util.concurrent TimeUnit)
+    (java.util.concurrent.locks ReentrantLock)))
 
 (defn- now-ms [] (System/currentTimeMillis))
 
@@ -91,6 +96,24 @@
     0
     (::sc/invocation-processors env)))
 
+(defn- with-session-lock
+  "Run `thunk` holding `session`'s write lock: the one lock under which its checkpoint is written
+   (processing an event, parking, delivering an outside event). Reentrant."
+  [{:keys [^ReentrantLock write-lock]} thunk]
+  (.lock write-lock)
+  (try (thunk) (finally (.unlock write-lock))))
+
+(defn- external-event?
+  "True for an event that came from outside the chart: delivered by the host (`deliver!`,
+   `:resume-events`, an env-level `sp/send!`) or a human's answer. Events the chart raised for itself
+   carry `::sc/source-session-id` (`engine.queue/send!`); the runner's own `:escapement/resumed`
+   signal is not an outside event."
+  [event]
+  (boolean
+    (or (= :escapement/human (:origintype event))
+        (and (nil? (::sc/source-session-id event))
+             (not= :escapement/resumed (:name event))))))
+
 (defn- report-event-failure!
   "`event`'s processing threw `t`: record it, and let the chart see it as `error.execution` (as the
    statecharts standard prescribes for errors during processing) instead of the event vanishing. The
@@ -152,6 +175,7 @@
                                 :entered       entered
                                 :exited        exited
                                 :event-data    (:data event)
+                                :external?     (external-event? event)
                                 :session-id    (str sid)}})
         (transcript-fn {:event :checkpoint/written
                         :data  {:session-id (str sid)}})))))
@@ -202,10 +226,11 @@
   [{:keys [env session-id multi-session?] :as session}]
   (let [queue       (::sc/event-queue env)
         progressed? (atom false)
-        handler     (event-handler session (fn [_] (reset! progressed? true)))]
+        handler     (event-handler session (fn [_] (reset! progressed? true)))
+        guard       (fn [thunk] (with-session-lock session thunk))]
     (if multi-session?
-      (sp/receive-events! queue env handler)
-      (sp/receive-events! queue env handler {:session-id session-id}))
+      (sp/receive-events! queue env handler {:guard guard})
+      (sp/receive-events! queue env handler {:session-id session-id :guard guard}))
     @progressed?))
 
 (defn- cancel-requested?
@@ -255,7 +280,7 @@
            tool-registry resume? human-renderer
            on-env-ready transcript-tap prelude-events store run-id
            debug-controller human-input-active? multi-session? retain-history?
-           invocation-processors clock]
+           invocation-processors clock initial-data park-timers?]
     :or   {chart-id ::chart
            resume?  false}
     :as   opts}]
@@ -319,6 +344,11 @@
                                            :transcript-fn           transcript-fn})
         registry      (::sc/statechart-registry env)]
     (try
+      ;; Parked timers come back from the checkpoint's queue snapshot, which only the default
+      ;; file-backed store keeps (a custom `:store` is given working memory only).
+      (when (and park-timers? (not (engine-store/file-backed? (::sc/working-memory-store env))))
+        (throw (ex-info ":park-timers? needs the default file-backed checkpoint store; a custom :store does not keep the timers a parked run resumes from."
+                 {:escapement/refused :park-timers-needs-file-store :session-id session-id})))
       (sp/register-statechart! registry chart-id chart)
       ;; Seed the per-(session,node) visit counter from artifacts already on disk so
       ;; a restart/resume of a looping chart keeps numbering re-entries `max+1` instead
@@ -344,7 +374,9 @@
                       :data  (cond-> {:session-id (str session-id)
                                       :chart-id   (str chart-id)
                                       :resume?    (boolean resume?)}
-                               run-id (assoc :run-id (str run-id)))})
+                               run-id (assoc :run-id (str run-id))
+                               ;; §runtime.replay/recording: what the run started with.
+                               (some? initial-data) (assoc :initial-data initial-data))})
       (catch Throwable t
         (transcript/close! sink)
         (throw t)))
@@ -358,6 +390,10 @@
      :processor      (::sc/processor env)
      :sink           sink
      :transcript-fn  transcript-fn
+     :write-lock     (ReentrantLock.)
+     ;; :open while the pump/stepper may still process events; :closing once the run has decided
+     ;; its final status (an outside event delivered after that is saved for the next resume).
+     :phase          (atom :open)
      ;; The run's time source: the queue's clock (the wall clock unless `:clock` was given).
      :clock          (engine-queue/queue-clock (::sc/event-queue env))}))
 
@@ -365,9 +401,34 @@
   "Start `session`'s chart fresh, or (with `:resume?` and a checkpoint that has an active
    configuration) resume it from that checkpoint. Returns `session`."
   [{:keys [env store processor transcript-fn session-id chart-id opts] :as session}]
-  (let [{:keys [resume? resume-events initial-data]} opts
-        existing (sp/get-working-memory store env session-id)]
-    (if (and resume? existing (seq (::sc/configuration existing #{})))
+  (let [{:keys [resume? resume-events initial-data require-checkpoint?]} opts
+        existing (sp/get-working-memory store env session-id)
+        resumable? (boolean (and existing (seq (::sc/configuration existing #{}))))]
+    ;; §runtime.restarts/require-checkpoint: with both flags, a missing checkpoint (none saved,
+    ;; or one with no active configuration) is an error, never a silent fresh start.
+    (when (and resume? require-checkpoint? (not resumable?))
+      (throw (ex-info (str "No checkpoint to resume session " session-id " from in "
+                        (get opts :checkpoint-dir) (if existing " (it has no active configuration)" "")
+                        "; :require-checkpoint? forbids starting it fresh.")
+               {:escapement/refused :no-checkpoint
+                :session-id         session-id
+                :checkpoint-dir     (get opts :checkpoint-dir)
+                :checkpoint-found?  (some? existing)})))
+    ;; §runtime.chart-data/version-identity: the checkpoint names the chart id it runs. Resuming
+    ;; it against a chart that is not available under that id is refused (rather than every event
+    ;; failing with "Statechart not found", or another version taking it over).
+    (when (and resume? resumable?)
+      (let [src (::sc/statechart-src existing)]
+        (when (and src (nil? (try (sp/get-statechart (::sc/statechart-registry env) src)
+                                  (catch Throwable _ nil))))
+          (throw (ex-info (str "Session " session-id " was checkpointed running chart " (pr-str src)
+                            ", which is not available (this run registered " (pr-str chart-id)
+                            "); refusing to resume it against another chart.")
+                   {:escapement/refused  :chart-id-mismatch
+                    :session-id          session-id
+                    :checkpoint-chart-id src
+                    :chart-id            chart-id})))))
+    (if (and resume? resumable?)
       ;; Rehydrate the durable event queue BEFORE the pump loop so delayed/timer
       ;; events scheduled before the exit (poll ticks, safety stops) are restored;
       ;; any whose delivery-time has since passed fire immediately, in
@@ -433,10 +494,11 @@
      :frozen-config — config wedged: no progress with live work for
                       `:max-frozen-cycles` consecutive cycles"
   [{:keys [env transcript-fn opts] run-clock :clock :as session}]
-  (let [{:keys [trace? cancel max-frozen-cycles quiescent-sleep-ms]
+  (let [{:keys [trace? cancel max-frozen-cycles quiescent-sleep-ms report-waiting? park-timers?]
          :or   {trace?             false
                 max-frozen-cycles  4000
-                quiescent-sleep-ms 50}} opts]
+                quiescent-sleep-ms 50}} opts
+        {:keys [store session-id]} session]
     ;; A SINGLE counter, `no-progress`, bounds *consecutive*
     ;; no-progress quiescent cycles while live work (or stranded
     ;; deliverable events) exist — the frozen-config wedge guard.
@@ -489,12 +551,26 @@
               ;; `:multi-session?`) — that is a wedge, not a timer,
               ;; so it falls through to the frozen path below.
               (and (zero? live) (pos? pending) (zero? deliverable))
-              (do (clock/idle! run-clock (engine-queue/next-delivery-time (::sc/event-queue env))
-                    quiescent-sleep-ms)
-                  (recur 0))
+              (if park-timers?
+                ;; Opt-in (§runtime.stepping/park-timers): instead of holding this thread
+                ;; asleep until the timer is due, write the checkpoint (its queue snapshot
+                ;; carries the timer with its absolute due time) and return `:sleeping`.
+                ;; The host resumes the session at `:next-wake-at`.
+                (do (with-session-lock session
+                      #(when-let [wmem (sp/get-working-memory store env session-id)]
+                         (sp/save-working-memory! store env session-id wmem)))
+                    :sleeping)
+                (do (clock/idle! run-clock (engine-queue/next-delivery-time (::sc/event-queue env))
+                      quiescent-sleep-ms)
+                    (recur 0)))
 
               (and (zero? live) (zero? deliverable))
-              :done                                         ;; done — no live work, nothing deliverable stuck
+              ;; Done — no live work, nothing deliverable stuck. Opt-in
+              ;; (§runtime.outside-events/waiting-status): a run parked in a NON-final
+              ;; configuration says it is waiting (for an outside event), not done.
+              (if (and report-waiting? (not (final-config? env session-id)))
+                :waiting
+                :done)
 
               ;; A LIVE invocation is in-flight (e.g. an LLM turn
               ;; mid-generation) — the run is WORKING, not wedged.
@@ -541,30 +617,75 @@
   [{:keys [sink]}]
   (transcript/close! sink))
 
+(defonce ^:private live-sessions
+  ;; Sessions this process is running right now, by (canonical checkpoint dir, session id), so an
+  ;; outside event for one of them (`deliver!`) joins its live queue instead of its file.
+  (atom {}))
+
+(defn- session-key [checkpoint-dir session-id]
+  [(.getCanonicalPath (io/file checkpoint-dir)) session-id])
+
+(defn- register-live! [{:keys [opts session-id] :as session}]
+  (swap! live-sessions assoc (session-key (:checkpoint-dir opts) session-id) session))
+
+(defn- unregister-live! [{:keys [opts session-id] :as session}]
+  (swap! live-sessions
+    (fn [m] (let [k (session-key (:checkpoint-dir opts) session-id)]
+              (if (identical? (get m k) session) (dissoc m k) m)))))
+
+(defn- pump-until-settled!
+  "`pump!`, then decide the run's final status under the write lock: an outside event delivered
+   while the pump was deciding to stop is processed in this run (pump again) rather than left
+   behind. Once decided, the session is marked `:closing` (a later `deliver!` saves the event for
+   the next resume and says so)."
+  [{:keys [env phase] :as session}]
+  (loop []
+    (let [status (pump! session)
+          again? (with-session-lock session
+                   (fn []
+                     (if (and (#{:done :waiting :sleeping} status)
+                              (pos? (engine-queue/deliverable-now-count (::sc/event-queue env))))
+                       true
+                       (do (reset! phase :closing) false))))]
+      (if again? (recur) status))))
+
 (defn- run-session!
   "The body of `run!`, run while the caller holds the session lock (see `run!`)."
   [{:keys [transcript-path checkpoint-dir] :as opts}]
   (let [{:keys [env store session-id transcript-fn] :as session} (open-session! opts)]
+    (register-live! session)
     (try
-      (start-or-resume! session)
-      (let [status     (pump! session)
+      (with-session-lock session #(start-or-resume! session))
+      (let [status     (pump-until-settled! session)
             final-wmem (sp/get-working-memory store env session-id)
-            cfg        (vec (::sc/configuration final-wmem #{}))]
+            cfg        (vec (::sc/configuration final-wmem #{}))
+            wake-at    (when (= :sleeping status)
+                         (engine-queue/next-delivery-time (::sc/event-queue env)
+                           (when-not (:multi-session? session) session-id)))]
         (transcript-fn {:event :runner/done
-                        :data  {:final-config cfg
-                                :status       status}})
-        {:final-config   cfg
-         :status         status
-         :session-id     session-id
-         :transcript     transcript-path
-         :checkpoint-dir checkpoint-dir
-         :env            env})
+                        :data  (cond-> {:final-config cfg
+                                        :status       status}
+                                 wake-at (assoc :next-wake-at wake-at))})
+        (cond-> {:final-config   cfg
+                 :status         status
+                 :session-id     session-id
+                 :transcript     transcript-path
+                 :checkpoint-dir checkpoint-dir
+                 :env            env
+                 ;; The chart's data model as of the end of the run (flat model).
+                 :data           (get final-wmem ::wmdm/data-model)}
+          (= :waiting status) (assoc :waiting-in cfg)
+          wake-at (assoc :next-wake-at wake-at)))
       (catch Throwable t
         (transcript-fn {:event :runner/error
                         :data  {:message (.getMessage t)}})
         (throw t))
       (finally
-        (close-session! session)))))
+        (reset! (:phase session) :closing)
+        (close-session! session)
+        ;; Before the caller releases the session lock, so a `deliver!` never finds this
+        ;; session neither live nor lockable.
+        (unregister-live! session)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Event-driven stepping (public; `escapement.engine.step` is the host-facing API)
@@ -607,14 +728,16 @@
   (assert checkpoint-dir "checkpoint-dir is required")
   (let [lock (session-lock/acquire! checkpoint-dir session-id {:lock? (if (some? lock?) lock? true)})]
     (try
-      (let [session (open-session! opts)]
+      (let [session (assoc (open-session! opts) ::lock lock)]
+        (register-live! session)
         (try
-          (start-or-resume! session)
-          (assoc session ::lock lock)
+          (with-session-lock session #(start-or-resume! session))
+          session
           (catch Throwable t
             ((:transcript-fn session) {:event :runner/error
                                        :data  {:message (.getMessage t)}})
             (close-session! session)
+            (unregister-live! session)
             (throw t))))
       (catch Throwable t
         (session-lock/release! lock)
@@ -628,7 +751,8 @@
   (let [delivered (atom nil)
         handler   (event-handler session (fn [ev] (reset! delivered ev)))]
     (engine-queue/receive-one! (::sc/event-queue env) env handler
-      (when-not multi-session? {:session-id session-id}))
+      (cond-> {:guard (fn [thunk] (with-session-lock session thunk))}
+        (not multi-session?) (assoc :session-id session-id)))
     (let [ev @delivered]
       (assoc (session-state session)
         :processed? (some? ev)
@@ -639,12 +763,102 @@
    session lock. Returns `session-state` as of closing."
   [session]
   (try
-    (let [state (session-state session)]
+    (let [state (with-session-lock session
+                  (fn []
+                    (reset! (:phase session) :closing)
+                    (session-state session)))]
       ((:transcript-fn session) {:event :runner/closed :data (select-keys state [:status :configuration])})
       state)
     (finally
       (close-session! session)
+      (unregister-live! session)
       (session-lock/release! (::lock session)))))
+
+;; ---------------------------------------------------------------------------
+;; Outside events (§runtime.outside-events/deliver)
+;; ---------------------------------------------------------------------------
+
+(defn- outside-send-request [session-id event data]
+  ;; No `:source-session-id`: that is what marks it as coming from outside the chart.
+  {:event event :data (or data {}) :target session-id})
+
+(defn- deliver-live!
+  "Deliver to a session this process is running: under its write lock, enqueue the event and write
+   the checkpoint (so the accepted event survives a crash before it is processed)."
+  [{:keys [env store session-id phase] :as session} event data timeout-ms]
+  (let [^ReentrantLock l (:write-lock session)]
+    (if (.tryLock l (long timeout-ms) TimeUnit/MILLISECONDS)
+      (try
+        (let [wmem (sp/get-working-memory store env session-id)]
+          (if (or (nil? wmem) (empty? (::sc/configuration wmem #{})))
+            {:accepted? false :reason :finished}
+            (do (sp/send! (::sc/event-queue env) env (outside-send-request session-id event data))
+                (sp/save-working-memory! store env session-id wmem)
+                {:accepted? true
+                 ;; :running — this run will process it; :saved — the run has already settled,
+                 ;; so it is processed when the session is next resumed.
+                 :where     (if (= :open @phase) :running :saved)})))
+        (finally (.unlock l)))
+      {:accepted? false :reason :busy})))
+
+(defn- deliver-saved!
+  "Deliver to a session saved on disk and not running anywhere: take its session lock, append the
+   event to its checkpoint's queue, and write the checkpoint back."
+  [checkpoint-dir session-id event data clock]
+  (let [lock (try (session-lock/acquire! checkpoint-dir session-id)
+                  (catch clojure.lang.ExceptionInfo e
+                    (if (:escapement/session-locked (ex-data e)) ::locked (throw e))))]
+    (if (= ::locked lock)
+      ::locked
+      (try
+        (let [store (engine-store/new-store checkpoint-dir)
+              wmem  (sp/get-working-memory store {} session-id)]
+          (cond
+            (nil? wmem)
+            {:accepted? false :reason :no-session}
+
+            (empty? (::sc/configuration wmem #{}))
+            {:accepted? false :reason :finished}
+
+            :else
+            (let [q (engine-queue/queue-from-snapshot
+                      (engine-store/get-queue-snapshot store session-id) {:clock clock})]
+              (sp/send! q {} (outside-send-request session-id event data))
+              (sp/save-working-memory! store {::sc/event-queue q} session-id wmem)
+              {:accepted? true :where :saved})))
+        (finally (session-lock/release! lock))))))
+
+(>defn deliver!
+  "Deliver an outside event (`:event` name + `:data`) to the session `:session-id` under
+   `:checkpoint-dir`, whether this process is running it or it is waiting with its state saved.
+
+   The event joins the session's queue and is processed in order like any other. It is written into
+   the session's checkpoint before this returns, so an accepted event is not lost if the process
+   stops before it is processed. Returns:
+     `{:accepted? true :where :running}` — a run in this process will process it;
+     `{:accepted? true :where :saved}`   — saved with the session; resume it (`:resume? true`, same
+                                          chart id and paths) to process it;
+     `{:accepted? false :reason r}`     — `r` is `:finished` (the session reached a final state),
+                                          `:no-session` (no checkpoint), `:locked-elsewhere` (another
+                                          process is writing it) or `:busy` (this process's run held
+                                          its lock past `:timeout-ms`, e.g. paused in the debugger).
+
+   `:clock` (saved sessions only): the clock the session runs on, for the event's arrival time;
+   pass the run's clock when it is not the wall clock. `:timeout-ms` (default 30000)."
+  [{:keys [checkpoint-dir session-id event data clock timeout-ms] :or {timeout-ms 30000}}]
+  [[:map [:checkpoint-dir :string] [:session-id any?] [:event :keyword]] => :map]
+  (let [live (fn [] (get @live-sessions (session-key checkpoint-dir session-id)))]
+    (if-let [s (live)]
+      (deliver-live! s event data timeout-ms)
+      (if-not (.exists (io/file checkpoint-dir))
+        {:accepted? false :reason :no-session}
+        (let [r (deliver-saved! checkpoint-dir session-id event data clock)]
+          (if (= ::locked r)
+            ;; It may have just started running in THIS process.
+            (if-let [s (live)]
+              (deliver-live! s event data timeout-ms)
+              {:accepted? false :reason :locked-elsewhere})
+            r))))))
 
 (>defn run!
   "Run a chart to quiescence. Returns a summary map.
@@ -765,6 +979,21 @@
                              waits for them. A `manual-clock` makes timers due
                              when the test advances it, or (`:auto-advance?`)
                              straight away. Defaults to the wall clock.
+    * `:report-waiting?` (optional) — when true, a run that goes quiet in a
+                             NON-final configuration (nothing in flight, nothing
+                             pending) returns `:status :waiting` with
+                             `:waiting-in` (its active states) instead of
+                             `:done`. A final configuration still returns `:done`.
+    * `:park-timers?` (optional) — when true, a run whose only remaining work is
+                             a delayed event not yet due saves its checkpoint and
+                             returns `:status :sleeping` with `:next-wake-at`
+                             (epoch ms on the run's clock) instead of sleeping.
+                             Resume it (`:resume? true`) at or after that time.
+                             Needs the default file-backed store.
+    * `:require-checkpoint?` (optional) — with `:resume? true`: throw (ex-data
+                             `{:escapement/refused :no-checkpoint}`) when there is
+                             no checkpoint, or one with no active configuration,
+                             instead of starting fresh.
     * `:lock?` (default true) — take the single-writer session lock (see
                                 `escapement.engine.session-lock`) for the whole
                                 run. Held from before the transcript is opened
