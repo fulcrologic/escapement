@@ -66,12 +66,19 @@
   structural checks returned as readable problems (reachability, stuck states,
   error exits, bounded retries, delays, the library's own checks). Compiled
   charts write `:chart/entered` and `:chart/guard` rows. `data/diagram` gives a
-  drawable graph.
+  drawable graph. A state's `:retry` retries only retryable errors: never an
+  outside call whose outcome is unknown (`error.call.unknown`, it may already
+  have happened), never an error marked `{:error {:retryable? false}}`, and with
+  `:retry {:on #{code …}}` only those codes. Other errors go to the state's own
+  error arrows; a retryable error out of attempts, or one no arrow takes, goes
+  to `:on-exhausted`. Unknown `:ai`/`:call` keys, an AI step without
+  `:message` and a call without `:tool` are problems.
 - `escapement.authoring.loader`: step code loads per version as
   `wf.<project>.v<sha12>` (never reloaded in place), with per-version chart
   ids; `escapement.authoring.portability` rejects non-portable step code.
 - `escapement.llm.scripted`: a scripted `LLMBackend` for tests and replays;
-  `escapement.testing.tools`: pretend tools that record calls.
+  `escapement.testing.tools`: pretend tools that record calls (replies keep
+  `:error`, `:value`, `:outcome`).
 - `escapement.testing.cases`: run EDN test cases on a manual clock (path,
   expectations, metrics).
 - `escapement.recording` and `escapement.recording.replay`: record a run's
