@@ -13,6 +13,7 @@
     [escapement.engine.env :as engine-env]
     [escapement.engine.instrumented-queue :as iq]
     [escapement.engine.queue :as engine-queue]
+    [escapement.engine.session-lock :as session-lock]
     [escapement.engine.store :as engine-store]
     [escapement.invocation.human-input :as human-input]
     [escapement.invocation.llm-conversation :as llm-conv]
@@ -191,123 +192,8 @@
         wmem  (sp/get-working-memory store env session-id)]
     (empty? (::sc/configuration wmem #{}))))
 
-(>defn run!
-  "Run a chart to quiescence. Returns a summary map.
-
-   `opts`:
-    * `:chart` (required) — a statechart value (e.g. from `chart/statechart`)
-    * `:chart-id` (default `::chart`) — the id under which to register it
-    * `:session-id` (required) — the session id for this run
-    * `:transcript-path` (required) — JSONL output file path
-    * `:checkpoint-dir` (required) — directory for atomic checkpoint files
-    * `:catalog-ratings` (optional) — subjective ratings table
-                             (`id → opinion-map`) threaded to the
-                             llm-conversation eligibility gate.
-                             Resolved ONCE by the caller (CLI: from
-                             disk config at startup). Defaults to `{}`.
-    * `:eligibility-strict?` (optional) — fail-closed flag for the
-                             eligibility gate; default fail-open.
-    * `:backend` (optional) — an `LLMBackend`; required only if chart uses `:llm-conversation`
-    * `:tool-registry` (optional) — tool registry atom
-    * `:store` (optional) — working-memory store override; threaded to
-                            `engine.env/new-env`. When omitted (`nil`) the
-                            default file-backed store is used (CLI behavior
-                            unchanged).
-    * `:run-id` (optional) — opaque correlation id. When supplied it is
-                             echoed on the `:runner/started` event so
-                             callers can correlate every transcript row.
-    * `:cancel` (optional) — a host-supplied cancellation handle: an atom
-                             (or any `IDeref`) whose truthy value, or a
-                             promise/future/delay whose delivered value is
-                             truthy, requests a prompt abort. Checked at a
-                             safe pump-loop boundary (between events, never
-                             mid-write); on cancel the run emits a
-                             `:runner/aborted` event with
-                             `{:reason :cancelled}`, stops pumping cleanly,
-                             and the summary map carries
-                             `:status :aborted`. Omitting it (`nil`)
-                             preserves prior behavior exactly.
-    * `:initial-data` (optional) — initial chart data (passed as data-model seed)
-    * `:resume?` (default false) — if true and a checkpoint exists, do not call `start!`
-    * `:trace?` (default false) — write `:runner/tick` events on every loop turn
-    * `:max-iterations` — **DEPRECATED / no-op.** Formerly a lifetime cap on
-                          total pump iterations; removed because it counted
-                          without resetting and so mis-aborted legitimately
-                          infinite *event-driven* charts. The chart owns its own
-                          termination; the only runner backstop is the
-                          `:max-frozen-cycles` wedge guard (which resets on
-                          progress). Still accepted for call-site compatibility,
-                          but ignored.
-    * `:quiescent-sleep-ms` (default 50) — how long to sleep when queue is empty
-                                           but live invocations exist
-    * `:max-frozen-cycles` (default 4000) — number of *consecutive*
-                                           quiescent cycles (queue empty,
-                                           no progress) tolerated while
-                                           live invocations exist before
-                                           the pump declares the config
-                                           wedged and terminates with
-                                           `:runner/error {:reason
-                                           :frozen-config}`. Defaults to
-                                           4000 which, at the default
-                                           50ms `:quiescent-sleep-ms`, is
-                                           a ~200s wall-clock budget. It is
-                                           deliberately larger than any
-                                           chart-level `:safety/stop` timer
-                                           the bundled examples arm (≤150s),
-                                           so a genuinely-stuck chart fires
-                                           its OWN graceful safety stop
-                                           before this runner backstop trips
-                                           a `:frozen-config` error. This
-                                           must comfortably exceed the
-                                           longest *single* no-progress
-                                           span a healthy run produces —
-                                           which, for an `:llm-conversation`,
-                                           is one whole LLM turn: the model
-                                           may think, stream, and make
-                                           several tool round-trips (each
-                                           `fs_read`/`fs_edit`, etc.) with
-                                           NO chart-visible event until the
-                                           turn ends by firing an
-                                           event-tool. On slower backends a
-                                           single such turn routinely
-                                           exceeds 10s, so the historical
-                                           ~200/10s default tripped the
-                                           guard spuriously mid-turn. The
-                                           counter resets to 0 whenever the
-                                           pump makes progress, so the
-                                           budget only needs to cover the
-                                           longest quiet stretch (one
-                                           turn), not the whole run. A
-                                           genuine wedge (a chart stuck in
-                                           an invoking state, or events
-                                           stranded on un-pumped sessions)
-                                           still self-terminates once the
-                                           budget elapses.
-    * `:retain-history?` (optional) — when true, the default file-backed
-                                      store retains an append-only,
-                                      save-index-keyed copy of every
-                                      checkpoint so a Level-3 replay can fork
-                                      the chart from any past point. Off by
-                                      default. Ignored when `:store` is
-                                      supplied.
-    * `:resume-events` (optional) — a vector of send-request maps
-                                    (`{:event … :data …}`) injected into the
-                                    chart AFTER a successful `:resume?` restore
-                                    and after the built-in `:escapement/resumed`
-                                    signal. Each is defaulted to `:target
-                                    session-id`. Lets a host drive post-resume
-                                    behavior a chart can't self-heal. Ignored on
-                                    a fresh (non-resume) start.
-    * `:debug-controller` (optional) — `escapement.debug.controller`
-                                       atom; when supplied, every event
-                                       is gated through pause/step
-                                       before being processed.
-    * `:human-input-active?` (optional) — zero-arg predicate; when it
-                                          returns true the debug gate
-                                          yields so the chart can
-                                          answer a human-input prompt
-                                          without the debugger stealing
-                                          focus."
+(defn- run-session!
+  "The body of `run!`, run while the caller holds the session lock (see `run!`)."
   [{:keys [chart chart-id session-id transcript-path checkpoint-dir
            session-dir backend backend-default-models
            catalog-ratings eligibility-strict? llm-aliases llm-preferences llm-resilience
@@ -321,7 +207,6 @@
            max-iterations     100000
            max-frozen-cycles  4000
            quiescent-sleep-ms 50}}]
-  [:map => :map]
   (assert chart "chart is required")
   (assert session-id "session-id is required")
   (assert transcript-path "transcript-path is required")
@@ -572,3 +457,148 @@
         (throw t))
       (finally
         (transcript/close! sink)))))
+
+
+(>defn run!
+  "Run a chart to quiescence. Returns a summary map.
+
+   `opts`:
+    * `:chart` (required) — a statechart value (e.g. from `chart/statechart`)
+    * `:chart-id` (default `::chart`) — the id under which to register it
+    * `:session-id` (required) — the session id for this run
+    * `:transcript-path` (required) — JSONL output file path
+    * `:checkpoint-dir` (required) — directory for atomic checkpoint files
+    * `:catalog-ratings` (optional) — subjective ratings table
+                             (`id → opinion-map`) threaded to the
+                             llm-conversation eligibility gate.
+                             Resolved ONCE by the caller (CLI: from
+                             disk config at startup). Defaults to `{}`.
+    * `:eligibility-strict?` (optional) — fail-closed flag for the
+                             eligibility gate; default fail-open.
+    * `:backend` (optional) — an `LLMBackend`; required only if chart uses `:llm-conversation`
+    * `:tool-registry` (optional) — tool registry atom
+    * `:store` (optional) — working-memory store override; threaded to
+                            `engine.env/new-env`. When omitted (`nil`) the
+                            default file-backed store is used (CLI behavior
+                            unchanged).
+    * `:run-id` (optional) — opaque correlation id. When supplied it is
+                             echoed on the `:runner/started` event so
+                             callers can correlate every transcript row.
+    * `:cancel` (optional) — a host-supplied cancellation handle: an atom
+                             (or any `IDeref`) whose truthy value, or a
+                             promise/future/delay whose delivered value is
+                             truthy, requests a prompt abort. Checked at a
+                             safe pump-loop boundary (between events, never
+                             mid-write); on cancel the run emits a
+                             `:runner/aborted` event with
+                             `{:reason :cancelled}`, stops pumping cleanly,
+                             and the summary map carries
+                             `:status :aborted`. Omitting it (`nil`)
+                             preserves prior behavior exactly.
+    * `:initial-data` (optional) — initial chart data (passed as data-model seed)
+    * `:resume?` (default false) — if true and a checkpoint exists, do not call `start!`
+    * `:trace?` (default false) — write `:runner/tick` events on every loop turn
+    * `:max-iterations` — **DEPRECATED / no-op.** Formerly a lifetime cap on
+                          total pump iterations; removed because it counted
+                          without resetting and so mis-aborted legitimately
+                          infinite *event-driven* charts. The chart owns its own
+                          termination; the only runner backstop is the
+                          `:max-frozen-cycles` wedge guard (which resets on
+                          progress). Still accepted for call-site compatibility,
+                          but ignored.
+    * `:quiescent-sleep-ms` (default 50) — how long to sleep when queue is empty
+                                           but live invocations exist
+    * `:max-frozen-cycles` (default 4000) — number of *consecutive*
+                                           quiescent cycles (queue empty,
+                                           no progress) tolerated while
+                                           live invocations exist before
+                                           the pump declares the config
+                                           wedged and terminates with
+                                           `:runner/error {:reason
+                                           :frozen-config}`. Defaults to
+                                           4000 which, at the default
+                                           50ms `:quiescent-sleep-ms`, is
+                                           a ~200s wall-clock budget. It is
+                                           deliberately larger than any
+                                           chart-level `:safety/stop` timer
+                                           the bundled examples arm (≤150s),
+                                           so a genuinely-stuck chart fires
+                                           its OWN graceful safety stop
+                                           before this runner backstop trips
+                                           a `:frozen-config` error. This
+                                           must comfortably exceed the
+                                           longest *single* no-progress
+                                           span a healthy run produces —
+                                           which, for an `:llm-conversation`,
+                                           is one whole LLM turn: the model
+                                           may think, stream, and make
+                                           several tool round-trips (each
+                                           `fs_read`/`fs_edit`, etc.) with
+                                           NO chart-visible event until the
+                                           turn ends by firing an
+                                           event-tool. On slower backends a
+                                           single such turn routinely
+                                           exceeds 10s, so the historical
+                                           ~200/10s default tripped the
+                                           guard spuriously mid-turn. The
+                                           counter resets to 0 whenever the
+                                           pump makes progress, so the
+                                           budget only needs to cover the
+                                           longest quiet stretch (one
+                                           turn), not the whole run. A
+                                           genuine wedge (a chart stuck in
+                                           an invoking state, or events
+                                           stranded on un-pumped sessions)
+                                           still self-terminates once the
+                                           budget elapses.
+    * `:retain-history?` (optional) — when true, the default file-backed
+                                      store retains an append-only,
+                                      save-index-keyed copy of every
+                                      checkpoint so a Level-3 replay can fork
+                                      the chart from any past point. Off by
+                                      default. Ignored when `:store` is
+                                      supplied.
+    * `:resume-events` (optional) — a vector of send-request maps
+                                    (`{:event … :data …}`) injected into the
+                                    chart AFTER a successful `:resume?` restore
+                                    and after the built-in `:escapement/resumed`
+                                    signal. Each is defaulted to `:target
+                                    session-id`. Lets a host drive post-resume
+                                    behavior a chart can't self-heal. Ignored on
+                                    a fresh (non-resume) start.
+    * `:lock?` (default true) — take the single-writer session lock (see
+                                `escapement.engine.session-lock`) for the whole
+                                run. Held from before the transcript is opened
+                                until the run ends, so a SECOND process (or a
+                                second `run!` in this process) pointed at the
+                                same `:checkpoint-dir` + `:session-id` fails
+                                immediately with a clear error instead of
+                                silently clobbering checkpoints and colliding
+                                transcript `:seq` numbers. It is an OS advisory
+                                lock: the kernel releases it if this process is
+                                killed, so a crash never leaves a stale lock.
+                                Set false ONLY when the host already guarantees
+                                single-writer access by other means.
+    * `:debug-controller` (optional) — `escapement.debug.controller`
+                                       atom; when supplied, every event
+                                       is gated through pause/step
+                                       before being processed.
+    * `:human-input-active?` (optional) — zero-arg predicate; when it
+                                          returns true the debug gate
+                                          yields so the chart can
+                                          answer a human-input prompt
+                                          without the debugger stealing
+                                          focus."
+  [{:keys [checkpoint-dir session-id lock?] :as opts}]
+  [:map => :map]
+  (assert session-id "session-id is required")
+  (assert checkpoint-dir "checkpoint-dir is required")
+  ;; Single-writer guard (`escapement.engine.session-lock`): taken BEFORE the transcript is opened
+  ;; (opening truncates/appends, already a write to the session) and before any checkpoint can be
+  ;; saved; released after the transcript is closed. It is an OS advisory lock, so the kernel drops
+  ;; it if this process dies and it can never go stale.
+  (let [lock (session-lock/acquire! checkpoint-dir session-id {:lock? (if (some? lock?) lock? true)})]
+    (try
+      (run-session! opts)
+      (finally
+        (session-lock/release! lock)))))
