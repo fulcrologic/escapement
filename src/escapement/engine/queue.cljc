@@ -23,6 +23,25 @@
     (and (string? type)
       (clojure.string/starts-with? (clojure.string/lower-case type) "http://www.w3.org/tr/scxml"))))
 
+(defn- delivery-key [evt]
+  (let [m (meta evt)] [(::delivery-time m) (::ordinal m 0)]))
+
+(defn- take-event!
+  "Remove exactly `event` (by identity) from `session-id`'s queue in `session-queues`. Returns true
+   when it was still there (a `cancel!` in the meantime means it must not be delivered)."
+  [session-queues session-id event]
+  (let [[old _] (swap-vals! session-queues update session-id
+                  (fn [q] (into [] (remove #(identical? % event)) q)))]
+    (boolean (some #(identical? % event) (get old session-id)))))
+
+(defn- deliver-to-handler!
+  "Run `handler` on `event`; a throw is reported, never propagated into the queue."
+  [handler env event]
+  (try (handler env event)
+       (catch #?(:clj Throwable :cljs :default) e
+         (binding [*out* *err*]
+           (println "[engine.queue] handler threw:" (ex-message e))))))
+
 (defrecord InProcessQueue [session-queues next-ordinal clock]
   sp/EventQueue
   (send! [this _env {:keys [event data type target source-session-id send-id invoke-id delay
@@ -64,23 +83,21 @@
       (doseq [sid (keys @session-queues)]
         (sp/receive-events! this env handler {:session-id sid}))
       (let [cutoff  (now-ms this)
-            [old _] (swap-vals! session-queues
-                      (fn [qs]
-                        (let [to-defer (filterv
-                                         (fn [evt] (> (::delivery-time (meta evt)) cutoff))
-                                         (get qs session-id))]
-                          (assoc qs session-id to-defer))))
-            ;; Deliver deliverable events in (delivery-time, ordinal) order — NOT raw
-            ;; insertion order — so simultaneously-due events fire deterministically by
-            ;; the time they were scheduled for, then by insertion as a stable tie-break.
-            to-send (->> (get old session-id)
+            ;; The batch is every event due at `cutoff`, in (delivery-time, ordinal) order — NOT
+            ;; raw insertion order — so simultaneously-due events fire deterministically by the
+            ;; time they were scheduled for, then by insertion as a stable tie-break. Events sent
+            ;; while the batch runs wait for the next pass, as before.
+            to-send (->> (get @session-queues session-id)
                       (filterv (fn [evt] (<= (::delivery-time (meta evt)) cutoff)))
-                      (sort-by (fn [evt] (let [m (meta evt)] [(::delivery-time m) (::ordinal m 0)]))))]
+                      (sort-by delivery-key))]
+        ;; ACK: each event stays IN the queue until its own turn, and is taken out just before its
+        ;; handler runs. The handler processes it and saves the checkpoint, whose queue snapshot
+        ;; therefore holds every other pending event (the rest of this batch included) but not this
+        ;; one: that one atomic write is the event's acknowledgement. A crash mid-batch no longer
+        ;; loses the events not yet handled. (They used to leave the queue all at once.)
         (doseq [event to-send]
-          (try (handler env event)
-               (catch #?(:clj Throwable :cljs :default) e
-                 (binding [*out* *err*]
-                   (println "[engine.queue] handler threw:" (ex-message e))))))))))
+          (when (take-event! session-queues session-id event)
+            (deliver-to-handler! handler env event)))))))
 
 (>defn new-queue
   "Create a new in-process event queue.
@@ -213,3 +230,41 @@
   [queue]
   [any? => any?]
   (clock/clock-or-wall (:clock (backing-queue queue))))
+
+(>defn receive-one!
+  "Deliver AT MOST ONE due event to `handler` — the earliest by (delivery-time, ordinal) — and return
+   it, or nil when nothing is due on the queue's clock. With `:session-id`, only that session's events
+   are considered; without, every session's.
+
+   The event stays in the queue until the moment its handler runs (the same acknowledgement rule as
+   `receive-events!`), and a handler throw is reported, never propagated. Works on the BACKING queue
+   of a wrapper, so a debug gate does not apply: the caller is stepping by hand."
+  ([queue env handler] [any? any? fn? => any?] (receive-one! queue env handler {}))
+  ([queue env handler {:keys [session-id]}]
+   [any? any? fn? [:maybe :map] => any?]
+   (let [bq    (backing-queue queue)
+         sq    (:session-queues bq)
+         now   (now-ms bq)
+         [sid event] (->> @sq
+                       (mapcat (fn [[sid evs]]
+                                 (when (or (nil? session-id) (= sid session-id))
+                                   (keep (fn [evt] (when (<= (::delivery-time (meta evt)) now) [sid evt])) evs))))
+                       (sort-by (comp delivery-key second))
+                       first)]
+     (when (and event (take-event! sq sid event))
+       (deliver-to-handler! handler env event)
+       event))))
+
+(>defn pending-summary
+  "Plain data for `queue`'s pending events (optionally only `session-id`'s), in delivery order:
+   `[{:event <name> :target <sid> :due-at <epoch ms on the queue's clock> :data <map>} …]`."
+  ([queue] [any? => vector?] (pending-summary queue nil))
+  ([queue session-id]
+   [any? any? => vector?]
+   (->> @(backing-session-queues queue)
+     (mapcat (fn [[sid evs]] (when (or (nil? session-id) (= sid session-id)) evs)))
+     (sort-by delivery-key)
+     (mapv (fn [evt] {:event  (:name evt)
+                      :target (:target evt)
+                      :due-at (::delivery-time (meta evt))
+                      :data   (:data evt)})))))

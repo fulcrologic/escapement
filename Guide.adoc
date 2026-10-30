@@ -3856,6 +3856,32 @@ If zero, terminate with `:status :done`.
 Otherwise sleep `:quiescent-sleep-ms` and try again.
 This is what lets the chart park while the LLM is thinking.
 
+**Acknowledgement.** An event leaves the queue only at its own turn, just before it is processed, and the checkpoint written after processing it (working memory plus the remaining queue, in one atomic file) is its acknowledgement.
+A crash therefore leaves each event either still pending in the saved queue (processed again after resume, from the state saved before it) or processed and gone; a crash mid-batch no longer loses the events not yet handled.
+If processing an event throws, nothing is saved for it: the runner records `:runner/event-failed` `{:event-name :session-id :message}` and raises `:error.execution` (data `{:reason :event-processing-threw :message … :escapement/failed-event <name>}`) to the chart, which may transition on it.
+An `:error.execution` whose own processing throws is recorded but raises nothing further.
+
+[[stepping]]
+==== Event-driven stepping: `escapement.engine.step`
+
+A host can drive a session one event at a time instead of handing it to the blocking pump:
+
+[source,clojure]
+----
+(require '[escapement.engine.step :as step])
+(def s (step/open {:chart c :session-id :s1 :transcript-path "t.jsonl" :checkpoint-dir "chk"}))
+(step/step! s)   ;=> {:processed? true :event-name :go :status :running :configuration [...] ...}
+(step/step! s)   ;=> {:processed? false :status :sleeping :next-wake-at 1793319406757 ...}
+(step/close! s)
+----
+
+`open` takes `run!`'s options, starts the chart (or resumes it with `:resume? true`) and holds the session lock until `close!`.
+`step!` processes at most one due event (earliest by due time, then arrival), runs its whole macrostep, checkpoints and acknowledges it; when nothing is due it processes nothing.
+Each result reports `:status` (`:running` — something is due now or an invocation is in flight; `:sleeping` — only delayed events not yet due; `:waiting` — nothing pending, only an outside event can move it; `:final`), `:next-wake-at` (earliest pending due time, epoch ms on the run's `:clock`, or nil), `:configuration`, `:final?`, `:pending-events` and `:live-invocations`.
+A host that sleeps between events closes the session and reopens it with `:resume? true` at `:next-wake-at`; delayed events are in the saved queue and fire at the same due time (saved timers reload only from the default file-backed store).
+`step/step-until-quiet!` steps until nothing is due and nothing is in flight.
+The debug pause gate does not apply while stepping.
+
 [[cli]]
 === CLI
 
