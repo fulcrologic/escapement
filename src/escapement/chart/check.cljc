@@ -346,6 +346,48 @@
         (case kind :ai ":error.llm" :call ":call.error" ":error")
         " (or a :retry with :on-exhausted) so a failure has somewhere to go."))))
 
+(declare did-you-mean)
+
+(def ai-keys
+  "Keys an `:ai` step may carry."
+  #{:id :system :message :initial-messages :verdict-schema :events :tools :chart-tools
+    :model :models :needs :max-turns :budget-ms :resilience :temperature :top-p :top-k
+    :max-tokens :thinking :reasoning :stream? :stop-sequences :on-end-turn-event :metadata})
+
+(def call-keys
+  "Keys a `:call` step may carry."
+  #{:id :tool :input :timeout-ms})
+
+(defn- check-step-keys [{:keys [states order]}]
+  (concat
+    (for [id order
+          :let [s (states id)]
+          [k allowed] [[:ai ai-keys] [:call call-keys]]
+          :let [m (get-in s [:src k])]
+          :when (some? m)
+          p (if-not (map? m)
+              [(problem :error :bad-step id (conj (:at s) k)
+                 (str "State " (kw-str id) "'s " k " must be a map."))]
+              (for [bad (remove allowed (keys m))
+                    :let [hint (when (keyword? bad)
+                                 (did-you-mean (name bad) (map name allowed)))]]
+                (problem :error :unknown-key id (conj (:at s) k bad)
+                  (str "State " (kw-str id) "'s " k " has an unknown key " (pr-str bad) "."
+                    (when hint (str " Did you mean :" hint "?"))
+                    " Allowed: " (str/join ", " (map str (sort allowed))) "."))))]
+      p)
+    (for [id order
+          :let [s (states id) m (get-in s [:src :ai])]
+          :when (and (map? m) (not (contains? m :message)) (not (contains? m :initial-messages)))]
+      (problem :error :no-message id (conj (:at s) :ai)
+        (str "AI step " (kw-str id) " has no :message (what to ask the AI), so it would never start."
+          " Add :message \"…\" or :message {:step :fn-name}.")))
+    (for [id order
+          :let [s (states id) m (get-in s [:src :call])]
+          :when (and (map? m) (not (keyword? (:tool m))))]
+      (problem :error :no-tool id (conj (:at s) :call)
+        (str "Outside call " (kw-str id) " needs :tool, a keyword naming the tool to call.")))))
+
 (defn- check-human-input [{:keys [states order]}]
   (for [id order
         :let [s (states id)]
@@ -455,6 +497,7 @@
          (check-retry-config idx)
          (check-bounded-retries idx)
          (check-delays idx)
+         (check-step-keys idx)
          (check-human-input idx)
          (check-parallels idx))))
 

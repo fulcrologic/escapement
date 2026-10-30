@@ -227,6 +227,16 @@
       (codes (problems {:initial :a :states [{:id :a :on [{:after {:step :approved?} :target :b}]}
                                              {:id :b :type :final}]}))
       => #{}
+      "an AI step with unknown keys and no :message (it would never start)"
+      (codes (problems {:initial :a :states [{:id :a :ai {:max-turns 2 :prompt "x" :verdict {:c "string"}}
+                                              :on [{:event :llm.idle :target :b} {:event :error.llm :target :b}]}
+                                             {:id :b :type :final}]}))
+      => #{:unknown-key :no-message}
+      "an outside call without a tool, or with a misspelt key"
+      (codes (problems {:initial :a :states [{:id :a :call {:toll :x/y} :on [{:event :call.done :target :b}
+                                                                            {:event :call.error :target :b}]}
+                                             {:id :b :type :final}]}))
+      => #{:unknown-key :no-tool}
       "a bad retry"
       (codes (problems {:initial :a :states [{:id :a :ai {:message "x"} :retry {:max 0}
                                               :on [{:event :error.llm :target :b} {:event :llm.idle :target :b}]}
