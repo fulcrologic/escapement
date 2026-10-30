@@ -12,6 +12,15 @@
   means the send is not delivered. The bundled charts that cancel (the haiku
   tournament's safety timers, data-built charts' exit cancels) already relied
   on that meaning.
+- **A run that reaches its top-level final state ends, even with delayed sends
+  still pending.** It used to keep sleeping until the last uncancelled timer
+  fired (an hour for an hour-long timeout), although a finished session can't
+  act on it. SCXML ends the session at a top-level final state and never
+  delivers its pending delayed sends. They are now dropped from the queue and
+  the checkpoint, recorded as `:runner/pending-dropped` `{:count :reason
+  :final-state}`, and the run returns `:done`. This is a defect fix with no
+  opt-in. The bundled charts already cancelled their safety timers on exit
+  (`send-after`, or an on-exit `cancel`) to work around it.
 - **Each event is acknowledged in the checkpoint written after processing it.**
   A crash mid-batch no longer loses the events not yet handled.
 - **An event whose processing throws reaches the chart as `error.execution`**

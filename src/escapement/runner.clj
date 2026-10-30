@@ -562,6 +562,27 @@
               ;; pump (e.g. a multiplex chart run without
               ;; `:multi-session?`) — that is a wedge, not a timer,
               ;; so it falls through to the frozen path below.
+              ;; The chart reached its top-level final state with delayed sends still queued.
+              ;; SCXML ends the session there and never delivers them, so the run ends now
+              ;; instead of sleeping until a timer nobody can act on fires (it would only make
+              ;; the finished interpreter exit again). Drop them, so the checkpoint holds none.
+              (and (zero? live) (pos? pending) (zero? deliverable) (final-config? env session-id))
+              (let [dropped (with-session-lock session
+                              (fn []
+                                (let [n (engine-queue/drop-pending! (::sc/event-queue env) session-id)]
+                                  (when-let [wmem (sp/get-working-memory store env session-id)]
+                                    (sp/save-working-memory! store env session-id wmem))
+                                  n)))]
+                (when (pos? dropped)
+                  (transcript-fn {:event :runner/pending-dropped
+                                  :data  {:session-id (str session-id)
+                                          :count      dropped
+                                          :reason     :final-state}}))
+                ;; Other sessions' events (multi-session children) may remain; the root is done.
+                (if (pos? (engine-queue/deliverable-now-count (::sc/event-queue env)))
+                  (recur 0)
+                  :done))
+
               (and (zero? live) (pos? pending) (zero? deliverable))
               (if park-timers?
                 ;; Opt-in (§runtime.stepping/park-timers): instead of holding this thread

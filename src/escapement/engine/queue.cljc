@@ -278,3 +278,13 @@
                       :target (:target evt)
                       :due-at (::delivery-time (meta evt))
                       :data   (:data evt)})))))
+
+(>defn drop-pending!
+  "Remove every pending event (delayed or due) for `session-id` from `queue` (following a wrapper's
+   `:inner` chain). Returns how many were dropped. Used when a session has reached its top-level
+   final state: SCXML ends the session there, and its delayed sends are never delivered."
+  [queue session-id]
+  [any? any? => :int]
+  (let [sq      (backing-session-queues queue)
+        [old _] (swap-vals! sq dissoc session-id)]
+    (count (get old session-id))))

@@ -309,3 +309,33 @@
                :transcript-tap #(swap! rows conj %)))
     (assertions
       (processed @rows) => [[:human.answer true]])))
+
+;; ---------------------------------------------------------------------------
+;; final state with a pending delayed send (defect fix)
+;; ---------------------------------------------------------------------------
+
+(def final-with-timer-chart
+  "Arms an hour-long timeout it never cancels, then finishes straight away."
+  (chart/statechart {:initial :working}
+    (state {:id :working}
+      (on-entry {} (ele/send {:event :timeout :delay 3600000}) (ele/send {:event :go}))
+      (transition {:event :go :target :finished})
+      (transition {:event :timeout :target :timed-out}))
+    (final {:id :finished})
+    (final {:id :timed-out})))
+
+(specification "regression: a run that reached its final state does not sleep on a pending timer"
+  ;; SCXML ends the session at a top-level final state; its delayed sends are never delivered.
+  ;; The run used to keep sleeping until the hour-long timer fired.
+  (let [dir  (tmp-dir "final-timer-")
+        rows (atom [])
+        fut  (future (lib/run (base dir :final/timer final-with-timer-chart
+                                :transcript-tap #(swap! rows conj %))))
+        r    (deref fut 10000 :still-sleeping)]
+    (assertions
+      "the run ends at once with :done"
+      (:status r) => :done
+      (:final-config r) => []
+      "the dropped timer is recorded and gone from the checkpoint"
+      (boolean (some #(and (= :runner/pending-dropped (:event %)) (= 1 (get-in % [:data :count]))) @rows)) => true
+      (saved-queue dir :final/timer) => [])))
