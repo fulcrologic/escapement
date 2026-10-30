@@ -37,7 +37,8 @@ The LLM can only influence chart progression by calling event-tools the author e
 * Async by construction — the LLM runs on a worker thread, and each parallel region has its own worker.
 Multiple events per turn (fan-out) is natural.
 * Resumability — working memory **and the pending event queue** are checkpointed atomically together (write-temp → rename) after every event-processing pass.
-Resume reloads the configuration, rehydrates the durable queue (so delayed/timer events fire when their time comes — even if it passed during downtime), re-spawns invocations, and emits a chart-observable `:escapement/resumed` signal a chart can transition on to self-heal; processors are written to be idempotent on re-entry.
+Resume reloads the configuration, rehydrates the durable queue (so delayed/timer events fire when their time comes — even if it passed during downtime), restarts the invocations of every active invoking state (an LLM conversation, a child chart, a `:future` or other outside call) as if that state had just been entered, and emits a chart-observable `:escapement/resumed` signal a chart can transition on to self-heal.
+A restarted invocation starts over with the parameters it would get on entry; what it did before the stop is neither undone nor replayed, so an outside call can run twice unless the chart (or the host's effect log) guards against it.
 
 The runtime is **Babashka** for the agent process, CLI, and test suite (`bb test`).
 The statechart library's `simple` and `testing` namespaces transitively pull `promesa`, which crashes under SCI, so escapement assembles the env manually and ships its own bb-friendly `escapement.engine.testing`
@@ -220,7 +221,10 @@ Re-loading the latest checkpoint and continuing.
 The runner detects
 `:resume?` plus an existing non-empty configuration and skips `start!`.
 It rehydrates the durable event queue (delayed events whose time passed during downtime fire immediately, in delivery-time order), re-enters the saved configuration on the next event, and emits a chart-observable `:escapement/resumed` event so a chart can idempotently self-heal; any host-supplied `:resume-events` follow.
-There is no blanket on-entry replay — invocation processors re-spawn workers idempotently.
+There is no blanket on-entry replay (on-entry actions do not run again), but every `<invoke>` of an active state is started again, as if its state had just been entered, and a `:runner/reinvoked {:states [...]}` row records which (`escapement.engine.reinvoke`).
+The statechart engine itself starts an `<invoke>` only on state *entry*, which a checkpoint restore does not perform, so without this a chart parked in an invoking state would resume with nothing running.
+A restarted invocation starts over: an outside call may run twice unless the chart guards against it.
+A chart that already re-enters its invoking state on `:escapement/resumed` keeps working: the re-entry stops the restarted invocation and starts a fresh one.
 
 [[authoring]]
 == Authoring a chart, step by step
@@ -3810,7 +3814,7 @@ append-only, save-index-keyed copy of every checkpoint so a Level-3 replay
 (`escapement.replay.chart/fork!`) can fork the chart from any past point. Off
 by default (per-event full snapshots are heavy). Ignored when `:store` is supplied.
 
-On `:resume?`, the runner rehydrates the durable event queue from the checkpoint (restoring pending delayed/timer events — those whose delivery time has passed fire immediately, in delivery-time order), then emits an `:escapement/resumed` chart event (data `{:config}`) for opt-in self-heal.
+On `:resume?`, the runner rehydrates the durable event queue from the checkpoint (restoring pending delayed/timer events — those whose delivery time has passed fire immediately, in delivery-time order), restarts the invocations of every active invoking state (`:runner/reinvoked`), then emits an `:escapement/resumed` chart event (data `{:config}`) for opt-in self-heal.
 The transcript is opened in **append** mode and its `:seq` continues past the prior run, so the resumed session stays one navigable timeline; a fresh start truncates and restarts `:seq` at 0.
 Additionally, the per-node captured-I/O `visit` counter is seeded from the artifact store on start, so a re-entered node numbers `max+1` across a restart instead of overwriting the prior run.
 
@@ -3851,7 +3855,7 @@ When a debug controller is supplied (`--debug`), the event queue is an
 `escapement.engine.instrumented-queue` that applies the pause/step gate per event as it drains — so the runner loop, the TUI keys, and the api-server control plane all single-step through one primitive.
 With no controller the plain in-process queue is used and there is zero stepping overhead.
 3. After each event, save working memory to the checkpoint store.
-4. When the queue is empty, ask each `InvocationProcessor` how many live workers it has.
+4. When the queue is empty, ask each `InvocationProcessor` how many live workers it has (the LLM and human-input processors, the statecharts `:future` processor, and any processor implementing `escapement.engine.liveness/ActiveCount`).
 If zero, terminate with `:status :done`.
 Otherwise sleep `:quiescent-sleep-ms` and try again.
 This is what lets the chart park while the LLM is thinking.
@@ -3911,7 +3915,7 @@ So an LLM that writes to `notes.md` lands inside the session dir, not wherever t
 Each tool's
 `:llm/tool-result` transcript event carries a `:resolved-path` (the absolute path it actually acted on).
 * `--resume` re-opens the latest checkpoint and skips `start!`.
-It also rehydrates the durable event queue (pending delayed/timer events survive the exit and fire on resume — those whose time passed while down fire immediately) and emits the `:escapement/resumed` chart signal.
+It also rehydrates the durable event queue (pending delayed/timer events survive the exit and fire on resume — those whose time passed while down fire immediately), restarts the invocations of the active invoking states, and emits the `:escapement/resumed` chart signal.
 The transcript is appended (not truncated) and its `:seq` continues past the prior run, so the whole life of the session is one file.
 
 Initial data:

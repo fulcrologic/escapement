@@ -13,7 +13,9 @@
     [escapement.engine.clock :as clock]
     [escapement.engine.env :as engine-env]
     [escapement.engine.instrumented-queue :as iq]
+    [escapement.engine.liveness :as liveness]
     [escapement.engine.queue :as engine-queue]
+    [escapement.engine.reinvoke :as reinvoke]
     [escapement.engine.session-lock :as session-lock]
     [escapement.engine.store :as engine-store]
     [escapement.invocation.human-input :as human-input]
@@ -55,12 +57,25 @@
   (reduce
     (fn [n proc]
       (cond
+        ;; Any processor that says how many it has running (a host's own, via
+        ;; `:invocation-processors`). See `escapement.engine.liveness`.
+        (satisfies? liveness/ActiveCount proc)
+        (+ n (long (or (liveness/active-count proc) 0)))
+
         ;; Our LLM conversation processor — uses the public accessor.
         (instance? escapement.invocation.llm_conversation.LlmConversationProcessor proc)
         (+ n (llm-conv/active-worker-count proc))
 
         (instance? escapement.invocation.human_input.HumanInputProcessor proc)
         (+ n (human-input/active-worker-count proc))
+
+        ;; The statecharts `:future` processor keeps `{child-session-id future}` in an
+        ;; `:active-futures` atom; an entry leaves it (in the future's `finally`) only AFTER
+        ;; the result event is queued, so there is never a moment with neither. Only futures
+        ;; not yet done count: one cancelled before its body's `try` keeps its entry forever.
+        (and (record? proc) (some-> proc :active-futures deref map?))
+        (+ n (count (remove (fn [f] (and (future? f) (future-done? f)))
+                      (vals @(:active-futures proc)))))
 
         ;; Generic fallback: any processor that exposes a `:workers` atom of map entries
         ;; whose vals have a `:worker-state` atom (e.g. test stand-ins) is honored.
@@ -368,6 +383,24 @@
                                 :restored-events (if restored
                                                    (engine-queue/pending-count restored)
                                                    0)}})
+        ;; Restart what was in flight. The statecharts library starts an `<invoke>` only when its
+        ;; state is ENTERED, and restoring a checkpoint enters nothing, so a chart parked in an
+        ;; invoking state (an LLM conversation, a child chart, a `:future` or other outside call)
+        ;; would resume with nothing running. Start the invocations of every active invoking state
+        ;; again, as if just entered (`escapement.engine.reinvoke`). AFTER the queue restore, which
+        ;; resets the queue and would drop a fast invocation's result; the processors key workers
+        ;; by [session invokeid] and replace a same-key worker, so this cannot double-spawn.
+        (let [states (reinvoke/invoking-states-in-config
+                       (try (sp/get-statechart (::sc/statechart-registry env)
+                              (::sc/statechart-src existing))
+                            (catch Throwable _ nil))
+                       existing)]
+          (when (seq states)
+            (let [wmem' (reinvoke/reinvoke-active-invocations! env existing)]
+              (transcript-fn {:event :runner/reinvoked
+                              :data  {:states (vec (sort-by str states))}})
+              (when-not (identical? wmem' existing)
+                (sp/save-working-memory! store env session-id wmem')))))
         ;; Emit a chart-observable resume signal so a chart can idempotently
         ;; re-establish anything a restored TIMER cannot (service registries,
         ;; acquired resources, a timer already consumed pre-exit). This is the
