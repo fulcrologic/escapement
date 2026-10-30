@@ -476,6 +476,8 @@
               :let [g (:guard t)]
               site (concat
                      (when g [{:ref g :role :guard :state id :at (conj (:at t) :guard)}])
+                     (when (and (map? (:after t)) (= [:step] (keys (:after t))))
+                       [{:ref (:step (:after t)) :role :value :state id :at (conj (:at t) :after)}])
                      (map-indexed (fn [i a] {:ref a :role :action :state id :at (conj (:at t) :actions i)})
                        (:actions t)))]
           site)
@@ -493,6 +495,11 @@
               :when (map? (get-in src [:invoke :params]))
               site (value-refs id (conj at :invoke :params) (get-in src [:invoke :params]))]
           site)
+        (for [id order
+              :let [{:keys [src at]} (states id)
+                    tm (get-in src [:wait :timeout-ms])]
+              :when (and (map? tm) (= [:step] (keys tm)))]
+          {:ref (:step tm) :role :value :state id :at (conj at :wait :timeout-ms)})
         (for [id order
               :let [{:keys [src at]} (states id)]
               :when (and (map? (:output src)) (= [:step] (keys (:output src))))]

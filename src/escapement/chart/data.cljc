@@ -233,7 +233,7 @@
 (defn- timer-pieces
   "Entry sends + exit cancels for a state's delayed transitions; returns
    `{:entries [el] :exits [el] :transitions [norm-t with :events rewritten]}`."
-  [{:keys [states] :as _idx} id transitions retry-cfg]
+  [resolve id transitions retry-cfg]
   (reduce
     (fn [acc [i t]]
       (cond
@@ -252,9 +252,15 @@
 
         (:after t)
         (let [ev      (if (= :wait-timeout (:generated t)) (first (:events t)) (check/after-event id i))
-              send-id (str "after:" (check/id-token id) ":" i)]
+              send-id (str "after:" (check/id-token id) ":" i)
+              after   (:after t)
+              timing  (if (and (map? after) (= [:step] (keys after)))
+                        ;; A computed delay: (fn [env data] ms).
+                        (let [f (resolve (:step after))]
+                          {:delayexpr (fn [env data] (long (or (f env data) 0)))})
+                        {:delay (long after)})]
           (-> acc
-            (update :entries conj (elt/Send {:id send-id :event ev :delay (long (:after t))}))
+            (update :entries conj (elt/Send (merge {:id send-id :event ev} timing)))
             (update :exits conj (elt/cancel {:sendid send-id}))
             (update :transitions conj (assoc t :events [ev]))))
 
@@ -303,7 +309,7 @@
         trans     (map (fn [t] (cond-> t (#{:retry :retry-exhausted} (:generated t))
                                  (assoc :retry-cfg (:retry src))))
                     transitions)
-        {:keys [entries exits] trans' :transitions} (timer-pieces idx id trans retry-cfg)
+        {:keys [entries exits] trans' :transitions} (timer-pieces resolve id trans retry-cfg)
         entry-acts (map (fn [a] (action-script (resolve a) a)) (:entry src))
         exit-acts  (map (fn [a] (action-script (resolve a) a)) (:exit src))
         ;; A retrying state forgets its attempts when it is left for good (any
@@ -313,8 +319,20 @@
                                     :expr (fn [_ data]
                                             (when-not (check/error-event? (get-in data [:_event :name]))
                                               (set-attempts data id 0)))})])
-        entry      (when (seq (concat entries entry-acts))
-                     (apply elt/on-entry {} (concat entry-acts entries)))
+        ;; Every entry leaves a `:chart/entered` row, so the exact path is on
+        ;; record — including states passed through within one step (which a
+        ;; before/after configuration diff can't see) and the final state a
+        ;; finished chart ended in (its configuration is then empty).
+        entry-mark (when (:trace-entries? ctx)
+                     [(elt/script {:diagram/label "entered"
+                                   :expr (fn [env _]
+                                           (transcript! env {:event :chart/entered
+                                                             :data  (cond-> {:session-id (str (env-ns/session-id env))
+                                                                             :state      id}
+                                                                      (= kind :final) (assoc :final? true))})
+                                           nil)})])
+        entry      (when (seq (concat entries entry-acts entry-mark))
+                     (apply elt/on-entry {} (concat entry-mark entry-acts entries)))
         exit       (when (seq (concat exits exit-acts retry-reset))
                      (apply elt/on-exit {} (concat exits exit-acts retry-reset)))
         inv        (case (:invoke (get-in idx [:states id]))
@@ -345,8 +363,8 @@
 (defn- top-level-ids [idx]
   (filter #(nil? (get-in idx [:states % :parent])) (:order idx)))
 
-(defn- build-chart [shape idx resolve log?]
-  (let [ctx  {:resolve resolve :idx idx :log? log?}
+(defn- build-chart [shape idx resolve {:keys [log? trace-entries?]}]
+  (let [ctx  {:resolve resolve :idx idx :log? log? :trace-entries? trace-entries?}
         tops (top-level-ids idx)]
     (apply chart/statechart
       (cond-> {:initial (:initial idx)}
@@ -386,18 +404,21 @@
      * `:builtins`   — `{qualified-kw fn}` vocabulary (merged over `std-builtins`);
      * `:chart-id`   — the version's chart id, returned as-is for the host to pass to
                        `run` (`escapement.authoring.loader/version-chart-id`);
-     * `:guard-log?` — log each guard decision as a `:chart/guard` row (default true).
+     * `:guard-log?` — log each guard decision as a `:chart/guard` row (default true);
+     * `:trace-entries?` — log each state entry as a `:chart/entered` row (default
+                       true): the exact path, finals included.
 
    Returns `{:ok? bool :chart chart-or-nil :chart-id id :problems [problem …]}`.
    A shape with errors builds no chart (`:chart nil`); warnings don't block. Never
    throws for mistakes in the shape."
-  [shape {:keys [chart-id guard-log?] :or {guard-log? true} :as opts}]
+  [shape {:keys [chart-id guard-log? trace-entries?] :or {guard-log? true trace-entries? true} :as opts}]
   (let [problems (validate shape opts)]
     (if (has-errors? problems)
       {:ok? false :chart nil :chart-id chart-id :problems problems}
       (let [idx     (check/index shape)
             resolve (resolver opts)
-            built   (try {:chart (build-chart shape idx resolve guard-log?)}
+            built   (try {:chart (build-chart shape idx resolve {:log? guard-log?
+                                                                  :trace-entries? trace-entries?})}
                          (catch #?(:clj Throwable :cljs :default) e
                            {:problems [(check/problem :error :build nil nil
                                          (str "Building the chart failed: " (ex-message e)))]}))
