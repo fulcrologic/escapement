@@ -132,8 +132,15 @@
       (into [{:source id :events [(keyword fam)] :targets [(retry-state-id id)]
               :guard ::retries-left :label "retry" :at (conj at :retry) :generated :retry
               :error? true :automatic? true}
+             ;; Only a RETRYABLE error that ran out of attempts lands here; any other
+             ;; error goes to the state's own error arrows first (see `index`).
              {:source id :events [(keyword fam)] :targets (as-vec (:on-exhausted retry))
+              :guard ::retryable
               :label (or (:label retry) "gave up") :at (conj at :retry) :generated :retry-exhausted
+              :error? true :automatic? true}
+             ;; Last resort: an error none of the state's own arrows took.
+             {:source id :events [(keyword fam)] :targets (as-vec (:on-exhausted retry))
+              :label (or (:label retry) "failed") :at (conj at :retry) :generated :retry-fallback
               :error? true :automatic? true}]))))
 
 (defn index
@@ -170,24 +177,32 @@
                               ik       (invoke-kind s)
                               children (filterv #(and (map? %) (keyword? (:id %))) (:states s))
                               gen      (generated-transitions s ik at)
-                              retry-t  (filter #(#{:retry :retry-exhausted} (:generated %)) gen)
                               own      (map-indexed (fn [j t] (norm-transition s ik j t at))
                                          (as-vec (:on s)))
                               fam      (get invoke-error-families ik)
-                              ;; Document order decides between transitions on the same
-                              ;; event. The shape's exits on SPECIFIC errors of this
-                              ;; step (e.g. :error.call.unknown) come first and win; then
-                              ;; the retry; then everything else, so a generic error exit
-                              ;; (:error.llm, :error) only fires once retries run out.
                               specific? (fn [t] (and fam (seq (:events t))
                                                   (every? #(and (keyword? %)
                                                              (str/starts-with? (name %) (str fam ".")))
                                                     (:events t))))
+                              ;; The fallback is only needed when no own arrow already
+                              ;; takes every error of the family unconditionally.
+                              catch-all? (some (fn [t] (and fam (nil? (:guard t))
+                                                         (some #(event-covers? % fam) (:events t))))
+                                           own)
+                              fallback (when-not catch-all?
+                                         (filter #(= :retry-fallback (:generated %)) gen))
+                              retry-t  (filter #(#{:retry :retry-exhausted} (:generated %)) gen)
+                              ;; Order: own arrows on SPECIFIC errors (:error.call.unknown);
+                              ;; the retry (retryable errors with attempts left); a retryable
+                              ;; error out of attempts -> :on-exhausted; the state's other own
+                              ;; arrows (so non-retryable errors reach its :call.error arrows);
+                              ;; then the fallback to :on-exhausted.
                               trans    (vec (concat
                                               (when (seq retry-t) (filter specific? own))
                                               retry-t
                                               (if (seq retry-t) (remove specific? own) own)
-                                              (remove #(#{:retry :retry-exhausted} (:generated %)) gen)))]
+                                              fallback
+                                              (remove #(#{:retry :retry-exhausted :retry-fallback} (:generated %)) gen)))]
                           (when (and type (not (#{:state :final :parallel} type)))
                             (add-problem! (problem :error :bad-type id at
                                             (str "State " (kw-str id) " has :type " (pr-str type)
@@ -411,7 +426,10 @@
                     (not (:invoke s)) "has a :retry but invokes nothing (:ai or :call)."
                     (= :invoke (:invoke s)) "has a :retry; only :ai and :call states can retry."
                     (not (pos-int? (:max retry))) "has a :retry without a positive :max."
-                    (not (:on-exhausted retry)) "has a :retry without :on-exhausted.")]
+                    (not (:on-exhausted retry)) "has a :retry without :on-exhausted."
+                    (and (contains? retry :on)
+                      (not (and (coll? (:on retry)) (seq (:on retry)) (every? keyword? (:on retry)))))
+                    "has a :retry :on that is not a non-empty set of error codes (keywords).")]
         :when msg]
     (problem :error :bad-retry id (conj (:at s) :retry) (str "State " (kw-str id) " " msg))))
 

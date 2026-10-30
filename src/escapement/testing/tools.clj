@@ -14,8 +14,9 @@
      * `:fn`          — `(fn [input] reply)`;
      * `:schema`      — Malli input schema (default `[:map]`);
      * `:description` — what the model is told (default \"Pretend <tool>\").
-   A reply is a string (a successful result) or `{:result s :is-error bool}`; a
-   non-string `:result` is `pr-str`ed. A spec with no reply answers \"ok\"."
+   A reply is a string (a successful result) or `{:result s :is-error bool …}`; a
+   non-string `:result` is `pr-str`ed and other keys (`:error`, `:value`,
+   `:outcome`) are kept. A spec with no reply answers \"ok\"."
   (:require
     [escapement.tools.protocol :as tp]))
 
@@ -23,8 +24,11 @@
   (cond
     (nil? reply)    {:result "ok" :is-error false}
     (string? reply) {:result reply :is-error false}
-    (map? reply)    {:result   (let [r (:result reply)] (if (string? r) r (pr-str r)))
-                     :is-error (boolean (:is-error reply))}
+    ;; Other keys (:error, :value, :outcome …) pass through, so a test can script
+    ;; e.g. a structured error code or an outcome-unknown call.
+    (map? reply)    (assoc reply
+                      :result   (let [r (:result reply)] (if (string? r) r (pr-str r)))
+                      :is-error (boolean (:is-error reply)))
     :else           {:result (pr-str reply) :is-error false}))
 
 (defrecord PretendTool [kw desc schema answer calls]

@@ -200,13 +200,37 @@
                                :cljs (js/Math.pow factor (max 0 (dec n)))))]
     (long (if max-backoff-ms (min ms max-backoff-ms) ms))))
 
+(defn retryable?
+  "Whether the error event in `data` should be retried by a state's `:retry`.
+   With `:retry {:on #{code …}}` only those codes are. Otherwise every error is,
+   except an outside call whose outcome is unknown (`error.call.unknown`: it may
+   have happened) and an error the tool marks `{:error {:retryable? false}}`.
+   The code is the tool's `[:error :code]` (`:timeout` for a call timeout), or
+   the last part of an AI error's name (`:error.llm.timeout` -> `:timeout`)."
+  [kind retry data]
+  (let [ev    (get-in data [:_event :name])
+        edata (get-in data [:_event :data])
+        en    (some-> ev name)
+        code  (if (= kind :call)
+                (or (get-in edata [:error :code])
+                  (when (= en "error.call.timeout") :timeout))
+                (some-> en (str/split #"\.") last keyword))]
+    (cond
+      (contains? retry :on)                         (contains? (set (:on retry)) code)
+      (and (= kind :call) (= en "error.call.unknown")) false
+      (false? (get-in edata [:error :retryable?]))  false
+      :else                                         true)))
+
 (defn- build-transition
   [{:keys [resolve log?]} t]
   (let [{:keys [source events targets guard actions label condition type generated raw]} t
         retry   (:retry-cfg t)
         cond-fn (cond
                   (= guard ::check/retries-left)
-                  (fn [_ data] (< (attempts data source) (:max retry)))
+                  (fn [_ data] (and (retryable? (:invoke-kind t) retry data)
+                                 (< (attempts data source) (:max retry))))
+                  (= guard ::check/retryable)
+                  (fn [_ data] (retryable? (:invoke-kind t) retry data))
                   guard
                   (guard-fn (resolve guard) {:kw guard :state source :targets targets
                                              :condition (or condition (name guard)) :log? log?}))
@@ -224,9 +248,10 @@
                 cond-fn (assoc :cond cond-fn)
                 label (assoc :diagram/label label)
                 (or condition guard) (assoc :diagram/condition
-                                       (or condition (when (and guard (not= guard ::check/retries-left))
+                                       (or condition (when (and guard (not (#{::check/retries-left ::check/retryable} guard)))
                                                        (name guard))
-                                         (when (= guard ::check/retries-left) "attempts left")))
+                                         (when (= guard ::check/retries-left) "retryable, attempts left")
+                       (when (= guard ::check/retryable) "retryable, no attempts left")))
                 type (assoc :type type))]
     (apply elt/transition attrs children)))
 
@@ -306,8 +331,9 @@
   [{:keys [resolve idx] :as ctx} id]
   (let [{:keys [kind children src transitions generated]} (get-in idx [:states id])
         retry-cfg (into {} (for [[sid st] (:states idx) :when (:retry (:src st))] [sid (:retry (:src st))]))
+        ikind     (get-in idx [:states id :invoke])
         trans     (map (fn [t] (cond-> t (#{:retry :retry-exhausted} (:generated t))
-                                 (assoc :retry-cfg (:retry src))))
+                                 (assoc :retry-cfg (:retry src) :invoke-kind ikind)))
                     transitions)
         {:keys [entries exits] trans' :transitions} (timer-pieces resolve id trans retry-cfg)
         entry-acts (map (fn [a] (action-script (resolve a) a)) (:entry src))
@@ -488,7 +514,7 @@
                        :events     (:events t)
                        :label      (:label t)
                        :condition  (or (:condition t) (when (and (:guard t) (keyword? (:guard t))
-                                                             (not= (:guard t) ::check/retries-left))
+                                                             (not (#{::check/retries-left ::check/retryable} (:guard t))))
                                                         (name (:guard t))))
                        :error?     (boolean (:error? t))
                        :timer?     (boolean (:after t))

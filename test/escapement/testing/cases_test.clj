@@ -4,6 +4,8 @@
   (:require
     [escapement.chart.data :as data]
     [escapement.testing.cases :as cases]
+    [escapement.testing.tools]
+    [escapement.tools.protocol]
     [fulcro-spec.core :refer [=> assertions component specification]]))
 
 (def steps
@@ -111,3 +113,55 @@
     (assertions
       (select-keys (cases/run-cases compiled [happy (assoc happy :expect {:final #{:review}})])
         [:passed :failed]) => {:passed 1 :failed 1})))
+
+(def calling
+  {:initial :check
+   :states
+   [{:id :check
+     :call {:tool :li/status :input {:who "p-52"} :timeout-ms 10000}
+     :retry {:max 2 :backoff-ms 60000 :on-exhausted :failed}
+     :on [{:event :call.done :target :ok}
+          {:event :call.error :guard :gone? :target :next}]}
+    {:id :ok :type :final}
+    {:id :next :type :final}
+    {:id :failed :type :final}]})
+
+(def calling-steps {:gone? (fn [_ d] (= :not-found (get-in d [:_event :data :error :code])))})
+
+(specification "test cases: retries only retry retryable errors"
+  (let [c (data/compile calling {:steps calling-steps})
+        run (fn [replies & [retry]]
+              (cases/run-case (if retry
+                                (data/compile (assoc-in calling [:states 0 :retry] retry) {:steps calling-steps})
+                                c)
+                {:tools {:li/status {:replies replies}}}))]
+    (assertions
+      "the shape builds" (:problems c) => []
+      "a non-retryable error goes straight to the state's own error arrow"
+      (:final (run [{:is-error true :result "404" :error {:code :not-found :retryable? false}}])) => [:next]
+      (:tool-counts (run [{:is-error true :result "404" :error {:code :not-found :retryable? false}}])) => {:li/status 1}
+      "a retryable error is retried, then succeeds"
+      (:final (run [{:is-error true :result "429" :error {:code :rate-limited :retryable? true}} {:result "ok"}])) => [:ok]
+      "a retryable error out of attempts goes to :on-exhausted"
+      (:final (run [{:is-error true :result "503" :error {:code :unavailable}}])) => [:failed]
+      (:tool-counts (run [{:is-error true :result "503" :error {:code :unavailable}}])) => {:li/status 3}
+      "an error without retry information is retried as before"
+      (:tool-counts (run [{:is-error true :result "boom"}])) => {:li/status 3}
+      "an outcome-unknown call is never retried"
+      (:tool-counts (run [{:is-error true :result "?" :outcome :unknown}])) => {:li/status 1}
+      (:final (run [{:is-error true :result "?" :outcome :unknown}])) => [:failed]
+      ":retry :on limits retries to those codes"
+      (:tool-counts (run [{:is-error true :result "x" :error {:code :boom}}]
+                      {:max 2 :backoff-ms 10 :on #{:rate-limited} :on-exhausted :failed})) => {:li/status 1}
+      (:tool-counts (run [{:is-error true :result "x" :error {:code :rate-limited}}]
+                      {:max 2 :backoff-ms 10 :on #{:rate-limited} :on-exhausted :failed})) => {:li/status 3}
+      "a bad :on is a problem"
+      (set (map :code (:problems (data/compile (assoc-in calling [:states 0 :retry :on] "x") {:steps calling-steps}))))
+      => #{:bad-retry})))
+
+(specification "pretend tools keep structured reply keys"
+  (let [reg (escapement.testing.tools/pretend-registry
+              {:x/y {:reply {:is-error true :result {:n 1} :error {:code :limit} :value 3 :outcome :unknown}}})]
+    (assertions
+      (escapement.tools.protocol/invoke (escapement.tools.protocol/lookup reg :x/y) {})
+      => {:is-error true :result "{:n 1}" :error {:code :limit} :value 3 :outcome :unknown})))
