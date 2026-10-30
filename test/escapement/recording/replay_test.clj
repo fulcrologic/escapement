@@ -38,11 +38,26 @@
 (def v2 (data/compile (shape :very-sure?) {:steps steps :chart-id :wf.t/v2}))
 
 (def original-case
-  {:initial-data {:mailbox "support"}
+  {:initial-data {:mailbox "support" :priority :high :tags #{:vip}}
    :ai {"classify" [{:verdict {:confidence 0.95}}]}
    :tools {:email/send {:reply "sent"}}
-   :events [{:event :email/received :data {:subject "Refund" :from "a@b.c"}}
+   :events [{:event :email/received :data {:subject "Refund" :from "a@b.c" :kind :refund}}
             {:event :approval/answered :data {:approved? true} :at-ms 60000}]})
+
+(specification "recording: an older transcript without EDN copies still loads"
+  (let [rows [{:event :runner/started :ts 100 :data {:session-id "s" :chart-id ":c" :resume? false
+                                                    :initial-data {:a "x"}}}
+              {:event :runner/event-processed :ts 160
+               :data {:event-name "go/now" :external? true :event-data {:n 1}}}
+              {:event :runner/event-processed :ts 170
+               :data {:event-name "self" :external? false :event-data {}}}
+              {:event :runner/done :ts 200 :data {:final-config ["b"] :status "done"}}]
+        rec  (rec/from-rows rows)]
+    (assertions
+      (:initial-data rec) => {:a "x"}
+      (:events rec) => [{:event :go/now :data {:n 1} :at-ms 60}]
+      (:final rec) => [:b]
+      (:status rec) => :done)))
 
 (specification "recording: a run records its inputs"
   (let [rows (atom [])
@@ -53,7 +68,7 @@
       "the original run finished"
       (:final r) => [:done]
       "the start row carries the initial data"
-      (:initial-data rec) => {:mailbox "support"}
+      (:initial-data rec) => {:mailbox "support" :priority :high :tags #{:vip}}
       "outside events are recorded, in order, with their data"
       (mapv :event (:events rec)) => [:email/received :approval/answered]
       (get-in rec [:events 0 :data :subject]) => "Refund"
@@ -105,6 +120,14 @@
         (assertions
           (:final s) => [:review]
           (:diverged? s) => true)))
+    (component "a recording read back from the JSONL file keeps its keywords"
+      (let [from-file (rec/from-file (:transcript-path r) {:session-dir dir})]
+        (assertions
+          (:initial-data from-file) => (:initial-data rec)
+          (:events from-file) => (:events rec)
+          "and replays the same way"
+          (:divergences (replay/replay! from-file {:chart (:chart v1)
+                                                   :tools {:email/send {:reply "pretend"}}})) => [])))
     (component "a recording round-trips through EDN"
       (let [f (str (fs/path (fs/create-temp-dir) "rec.edn"))]
         (rec/save! rec f)

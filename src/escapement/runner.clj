@@ -137,6 +137,12 @@
                              :message                 message
                              :escapement/failed-event (:name event)}}))))
 
+(defn- edn-copy
+  "`x` as an EDN string for a transcript row, or nil when it doesn't print readably."
+  [x]
+  (try (binding [*print-length* nil *print-level* nil] (pr-str x))
+       (catch Throwable _ nil)))
+
 (defn- process-targeted-event!
   "Advance session `sid` by `event` against its current `wmem`, checkpoint,
    and emit the `:runner/event-processed` transcript row (with the
@@ -168,16 +174,22 @@
         ;; change first-class data — derivable from before/after, but
         ;; pre-computed here so the UI doesn't have to diff config
         ;; vectors itself.
-        (transcript-fn {:event :runner/event-processed
-                        :ts    ts
-                        :data  {:event-name    (:name event)
-                                :config-before config-before
-                                :config-after  config-after
-                                :entered       entered
-                                :exited        exited
-                                :event-data    (:data event)
-                                :external?     (external-event? event)
-                                :session-id    (str sid)}})
+        (let [external? (external-event? event)]
+          (transcript-fn {:event :runner/event-processed
+                          :ts    ts
+                          :data  (cond-> {:event-name    (:name event)
+                                          :config-before config-before
+                                          :config-after  config-after
+                                          :entered       entered
+                                          :exited        exited
+                                          :event-data    (:data event)
+                                          :external?     external?
+                                          :session-id    (str sid)}
+                                   ;; §runtime.replay/recording, additive: an outside event's
+                                   ;; data as EDN (the JSONL file stores keyword values as
+                                   ;; strings) and the time on the RUN's clock it was processed.
+                                   external? (assoc :event-data-edn (edn-copy (:data event))
+                                               :clock-ms (some-> (:clock session) clock/now-ms)))}))
         (transcript-fn {:event :checkpoint/written
                         :data  {:session-id (str sid)}})))))
 
@@ -386,8 +398,13 @@
                                       :chart-id   (str chart-id)
                                       :resume?    (boolean resume?)}
                                run-id (assoc :run-id (str run-id))
-                               ;; §runtime.replay/recording: what the run started with.
-                               (some? initial-data) (assoc :initial-data initial-data))})
+                               ;; §runtime.replay/recording: what the run started with
+                               ;; (plus an EDN copy that keeps keywords through JSONL), and
+                               ;; when, on the run's clock.
+                               (some? initial-data) (assoc :initial-data initial-data
+                                                      :initial-data-edn (edn-copy initial-data))
+                               true (assoc :clock-ms (clock/now-ms (engine-queue/queue-clock
+                                                                     (::sc/event-queue env)))))})
       (catch Throwable t
         (transcript/close! sink)
         (throw t)))
