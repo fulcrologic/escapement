@@ -1,0 +1,109 @@
+{
+  "§runtime.restarts/checkpoint-version": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/engine/store.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.restarts/inspect": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.stepping/next-wake",
+      "§runtime.restarts/single-writer"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T01:41Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#06e5e62a"
+    },
+    "code": [
+      "src/escapement/runner.clj",
+      "src/escapement/lib.clj"
+    ]
+  },
+  "§runtime.restarts/live-count": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.embedding/invocation-processors"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/engine/liveness.cljc",
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.restarts/reinvoke": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/engine/reinvoke.cljc",
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.restarts/require-checkpoint": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/lib.clj",
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:18Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.restarts/single-writer": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/engine/session_lock.clj",
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime/restarts": {
+    "kind": "surface",
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/runner.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  }
+}

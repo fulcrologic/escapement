@@ -1,0 +1,51 @@
+{
+  "§runtime.replay/recording": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/runner.clj",
+      "src/escapement/recording.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.replay/replay-run": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.replay/recording",
+      "§runtime.testing/scripted-llm"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/recording/replay.clj",
+      "src/escapement/recording.clj",
+      "src/escapement/testing/cases.clj",
+      "src/escapement/testing/tools.clj"
+    ]
+  },
+  "§runtime/replay": {
+    "kind": "surface",
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/recording.clj",
+      "src/escapement/recording/replay.clj"
+    ]
+  }
+}

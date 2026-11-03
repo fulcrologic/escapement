@@ -157,3 +157,15 @@
           still-alive => true
           "continue! then delivers the rest"
           @out => [:one :two])))))
+
+(specification "instrumented queue — the runner's counts see through the wrapper"
+  ;; The runner asks `pending-count` / `deliverable-now-count` of whatever queue the env
+  ;; holds; with a debug controller that is the wrapper, which has no `:session-queues`.
+  (let [iqueue (iq/new-instrumented-queue {})]
+    (sp/send! iqueue {} {:event :now :target :s1})
+    (sp/send! iqueue {} {:event :later :target :s1 :delay 60000})
+    (assertions
+      "pending-count counts the inner queue's events"
+      (queue/pending-count iqueue) => 2
+      "deliverable-now-count excludes the future-dated one"
+      (queue/deliverable-now-count iqueue) => 1)))

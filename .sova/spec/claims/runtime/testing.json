@@ -1,0 +1,53 @@
+{
+  "§runtime.testing/clock": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.stepping/next-wake"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "code": [
+      "src/escapement/engine/clock.cljc",
+      "src/escapement/engine/queue.cljc",
+      "src/escapement/engine/env.cljc",
+      "src/escapement/runner.clj",
+      "src/escapement/lib.clj",
+      "src/escapement/testing/cases.clj"
+    ],
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    }
+  },
+  "§runtime.testing/scripted-llm": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/llm/scripted.cljc",
+      "src/escapement/invocation/llm_conversation.clj",
+      "src/escapement/llm.clj"
+    ]
+  },
+  "§runtime/testing": {
+    "kind": "surface",
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/testing/cases.clj",
+      "src/escapement/testing/tools.clj"
+    ]
+  }
+}

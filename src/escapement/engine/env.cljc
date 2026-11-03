@@ -16,16 +16,25 @@
     [escapement.engine.queue :as queue]
     [escapement.engine.store :as store]
     [escapement.invocation.human-input :as human-input]
-    [escapement.invocation.llm-conversation :as llm-conv]))
+    [escapement.invocation.llm-conversation :as llm-conv]
+    [escapement.invocation.tool-call :as tool-call]))
 
 (defn new-env
   "Build an `::sc/env` map.
 
   `opts`:
     * `:checkpoint-dir` (required) - directory for atomic working-memory checkpoints
-    * `:invocation-processors` (optional, default `[]`) - vector of `InvocationProcessor` instances
+    * `:invocation-processors` (optional, default `[]`) - vector of `InvocationProcessor` instances,
+      installed BEFORE the built-in ones (so a stand-in can take over a built-in type, as
+      `escapement.engine.testing` does)
+    * `:extra-invocation-processors` (optional, default `[]`) - vector of host-supplied
+      `InvocationProcessor`s installed AFTER the built-in ones, so the built-ins keep handling
+      their own types (this is what `runner/run!`'s `:invocation-processors` feeds)
     * `:registry` (optional) - statechart registry; defaults to a fresh `LocalMemoryRegistry`
-    * `:queue` (optional) - event queue; defaults to a fresh in-process queue
+    * `:queue` (optional) - event queue; defaults to a fresh in-process queue on `:clock`
+    * `:clock` (optional) - an `escapement.engine.clock/Clock` for the default queue's due times
+      (ignored when `:queue` is supplied: give that queue its own clock). Also exposed on the env as
+      `:escapement/clock`. Defaults to the wall clock.
     * `:store` (optional) - working-memory store; defaults to a file-backed store at `:checkpoint-dir`
     * `:retain-history?` (optional) - when true, the default file-backed store also retains an
       append-only, save-index-keyed copy of every checkpoint (for Level-3 replay/fork). Ignored when
@@ -44,14 +53,15 @@
     * `:llm-resilience` (optional) - a partial `escapement.llm/default-resilience`
       map (the overrun output-cap + rerun-on-truncation primitive) injected
       run-wide under each node's own `:resilience`. Defaults to `{}`."
-  [{:keys [checkpoint-dir invocation-processors registry queue store
+  [{:keys [checkpoint-dir invocation-processors extra-invocation-processors registry queue store
            llm-backend llm-default-models llm-catalog-ratings llm-eligibility-strict?
            llm-aliases llm-preferences llm-resilience
            tool-registry transcript-fn human-renderer
-           session-dir artifact-store retain-history?]
-    :or   {invocation-processors []}}]
+           session-dir artifact-store retain-history? clock]
+    :or   {invocation-processors       []
+           extra-invocation-processors []}}]
   (let [registry  (or registry (lmr/new-registry))
-        queue     (or queue (queue/new-queue))
+        queue     (or queue (queue/new-queue {:clock clock}))
         store     (or store (store/new-store (or checkpoint-dir "checkpoints")
                              {:retain-history? (boolean retain-history?)}))
         dm        (wmdm/new-flat-model)
@@ -71,13 +81,17 @@
                     [(human-input/new-processor {:renderer      human-renderer
                                                  :transcript-fn transcript-fn})]
                     [])
+        ;; `:type :tool-call`: call a registry Tool as an invocation, off the chart thread
+        ;; (`escapement.invocation.tool-call`). Installed whenever the run has a tool registry.
+        tool-procs (if tool-registry [(tool-call/new-processor)] [])
         ;; Statechart-as-invokable: needed both for plain <invoke type=::sc/chart>
         ;; and as a dependency of the multiplex processor (it spawns its own
         ;; aggregator chart via the statechart processor).
         chart-procs [(chart-invoke/new-invocation-processor)]
         ;; Multiplex: general dynamic-N fanout over any registered invocation type.
         mux-procs [(mux-proc/new-processor)]
-        all-procs (into [] (concat invocation-processors llm-procs hi-procs chart-procs mux-procs))]
+        all-procs (into [] (concat invocation-processors llm-procs hi-procs tool-procs chart-procs mux-procs
+                             extra-invocation-processors))]
     (cond-> {::sc/statechart-registry   registry
              ::sc/data-model            dm
              ::sc/event-queue           queue
@@ -93,6 +107,7 @@
              ;; stamp `:transcript/visit`. The library does not track re-entry,
              ;; so we own it (one atom per run; see `io-refactor-plan.md` §3).
              :escapement/visit-counts   (atom {})}
+      clock (assoc :escapement/clock clock)
       tool-registry (assoc :escapement/tool-registry tool-registry)
       session-dir (assoc :escapement/session-dir session-dir)
       ;; Injected by the host (the bb runner builds a disk store from session-dir;

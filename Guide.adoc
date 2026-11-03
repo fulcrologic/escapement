@@ -37,7 +37,8 @@ The LLM can only influence chart progression by calling event-tools the author e
 * Async by construction — the LLM runs on a worker thread, and each parallel region has its own worker.
 Multiple events per turn (fan-out) is natural.
 * Resumability — working memory **and the pending event queue** are checkpointed atomically together (write-temp → rename) after every event-processing pass.
-Resume reloads the configuration, rehydrates the durable queue (so delayed/timer events fire when their time comes — even if it passed during downtime), re-spawns invocations, and emits a chart-observable `:escapement/resumed` signal a chart can transition on to self-heal; processors are written to be idempotent on re-entry.
+Resume reloads the configuration, rehydrates the durable queue (so delayed/timer events fire when their time comes — even if it passed during downtime), restarts the invocations of every active invoking state (an LLM conversation, a child chart, a `:future` or other outside call) as if that state had just been entered, and emits a chart-observable `:escapement/resumed` signal a chart can transition on to self-heal.
+A restarted invocation starts over with the parameters it would get on entry; what it did before the stop is neither undone nor replayed, so an outside call can run twice unless the chart (or the host's effect log) guards against it.
 
 The runtime is **Babashka** for the agent process, CLI, and test suite (`bb test`).
 The statechart library's `simple` and `testing` namespaces transitively pull `promesa`, which crashes under SCI, so escapement assembles the env manually and ships its own bb-friendly `escapement.engine.testing`
@@ -220,7 +221,10 @@ Re-loading the latest checkpoint and continuing.
 The runner detects
 `:resume?` plus an existing non-empty configuration and skips `start!`.
 It rehydrates the durable event queue (delayed events whose time passed during downtime fire immediately, in delivery-time order), re-enters the saved configuration on the next event, and emits a chart-observable `:escapement/resumed` event so a chart can idempotently self-heal; any host-supplied `:resume-events` follow.
-There is no blanket on-entry replay — invocation processors re-spawn workers idempotently.
+There is no blanket on-entry replay (on-entry actions do not run again), but every `<invoke>` of an active state is started again, as if its state had just been entered, and a `:runner/reinvoked {:states [...]}` row records which (`escapement.engine.reinvoke`).
+The statechart engine itself starts an `<invoke>` only on state *entry*, which a checkpoint restore does not perform, so without this a chart parked in an invoking state would resume with nothing running.
+A restarted invocation starts over: an outside call may run twice unless the chart guards against it.
+A chart that already re-enters its invoking state on `:escapement/resumed` keeps working: the re-entry stops the restarted invocation and starts a fresh one.
 
 [[authoring]]
 == Authoring a chart, step by step
@@ -3626,6 +3630,8 @@ The events emitted across the codebase:
 `:runner/quiescent`, `:runner/tick`, `:runner/done`, `:runner/error`,
 `:runner/aborted`, `:runner/event-processed`
 * `:checkpoint/written`
+* `:runner/metrics` — the run's totals (`escapement.metrics/summarize`), just before `:runner/done`
+* `:chart/entered` (`:state`, `:final?`) and `:chart/guard` (`:state :event :target :guard :condition :result`) — written by charts built from data
 * `:llm/start`, `:llm/request`, `:llm/response`, `:llm/error`,
 `:llm/user-message`, `:llm/worker-exit`, `:llm/context-warning`.
 `:llm/error` (and an `:interrupted-mid-turn` `:llm/worker-exit`) carries `:partial-usage` — the tokens a failed or cancelled streamed turn had already spent, summed across failover candidates — whenever any usage was observed on the wire; the key is absent otherwise.
@@ -3810,7 +3816,7 @@ append-only, save-index-keyed copy of every checkpoint so a Level-3 replay
 (`escapement.replay.chart/fork!`) can fork the chart from any past point. Off
 by default (per-event full snapshots are heavy). Ignored when `:store` is supplied.
 
-On `:resume?`, the runner rehydrates the durable event queue from the checkpoint (restoring pending delayed/timer events — those whose delivery time has passed fire immediately, in delivery-time order), then emits an `:escapement/resumed` chart event (data `{:config}`) for opt-in self-heal.
+On `:resume?`, the runner rehydrates the durable event queue from the checkpoint (restoring pending delayed/timer events — those whose delivery time has passed fire immediately, in delivery-time order), restarts the invocations of every active invoking state (`:runner/reinvoked`), then emits an `:escapement/resumed` chart event (data `{:config}`) for opt-in self-heal.
 The transcript is opened in **append** mode and its `:seq` continues past the prior run, so the resumed session stays one navigable timeline; a fresh start truncates and restarts `:seq` at 0.
 Additionally, the per-node captured-I/O `visit` counter is seeded from the artifact store on start, so a re-entered node numbers `max+1` across a restart instead of overwriting the prior run.
 
@@ -3851,10 +3857,36 @@ When a debug controller is supplied (`--debug`), the event queue is an
 `escapement.engine.instrumented-queue` that applies the pause/step gate per event as it drains — so the runner loop, the TUI keys, and the api-server control plane all single-step through one primitive.
 With no controller the plain in-process queue is used and there is zero stepping overhead.
 3. After each event, save working memory to the checkpoint store.
-4. When the queue is empty, ask each `InvocationProcessor` how many live workers it has.
+4. When the queue is empty, ask each `InvocationProcessor` how many live workers it has (the LLM and human-input processors, the statecharts `:future` processor, and any processor implementing `escapement.engine.liveness/ActiveCount`).
 If zero, terminate with `:status :done`.
 Otherwise sleep `:quiescent-sleep-ms` and try again.
 This is what lets the chart park while the LLM is thinking.
+
+**Acknowledgement.** An event leaves the queue only at its own turn, just before it is processed, and the checkpoint written after processing it (working memory plus the remaining queue, in one atomic file) is its acknowledgement.
+A crash therefore leaves each event either still pending in the saved queue (processed again after resume, from the state saved before it) or processed and gone; a crash mid-batch no longer loses the events not yet handled.
+If processing an event throws, nothing is saved for it: the runner records `:runner/event-failed` `{:event-name :session-id :message}` and raises `:error.execution` (data `{:reason :event-processing-threw :message … :escapement/failed-event <name>}`) to the chart, which may transition on it.
+An `:error.execution` whose own processing throws is recorded but raises nothing further.
+
+[[stepping]]
+==== Event-driven stepping: `escapement.engine.step`
+
+A host can drive a session one event at a time instead of handing it to the blocking pump:
+
+[source,clojure]
+----
+(require '[escapement.engine.step :as step])
+(def s (step/open {:chart c :session-id :s1 :transcript-path "t.jsonl" :checkpoint-dir "chk"}))
+(step/step! s)   ;=> {:processed? true :event-name :go :status :running :configuration [...] ...}
+(step/step! s)   ;=> {:processed? false :status :sleeping :next-wake-at 1793319406757 ...}
+(step/close! s)
+----
+
+`open` takes `run!`'s options, starts the chart (or resumes it with `:resume? true`) and holds the session lock until `close!`.
+`step!` processes at most one due event (earliest by due time, then arrival), runs its whole macrostep, checkpoints and acknowledges it; when nothing is due it processes nothing.
+Each result reports `:status` (`:running` — something is due now or an invocation is in flight; `:sleeping` — only delayed events not yet due; `:waiting` — nothing pending, only an outside event can move it; `:final`), `:next-wake-at` (earliest pending due time, epoch ms on the run's `:clock`, or nil), `:configuration`, `:final?`, `:pending-events` and `:live-invocations`.
+A host that sleeps between events closes the session and reopens it with `:resume? true` at `:next-wake-at`; delayed events are in the saved queue and fire at the same due time (saved timers reload only from the default file-backed store).
+`step/step-until-quiet!` steps until nothing is due and nothing is in flight.
+The debug pause gate does not apply while stepping.
 
 [[cli]]
 === CLI
@@ -3885,7 +3917,7 @@ So an LLM that writes to `notes.md` lands inside the session dir, not wherever t
 Each tool's
 `:llm/tool-result` transcript event carries a `:resolved-path` (the absolute path it actually acted on).
 * `--resume` re-opens the latest checkpoint and skips `start!`.
-It also rehydrates the durable event queue (pending delayed/timer events survive the exit and fire on resume — those whose time passed while down fire immediately) and emits the `:escapement/resumed` chart signal.
+It also rehydrates the durable event queue (pending delayed/timer events survive the exit and fire on resume — those whose time passed while down fire immediately), restarts the invocations of the active invoking states, and emits the `:escapement/resumed` chart signal.
 The transcript is appended (not truncated) and its `:seq` continues past the prior run, so the whole life of the session is one file.
 
 Initial data:
@@ -4149,6 +4181,74 @@ threads where the runtime supports them, otherwise platform daemon threads (see 
 `escapement.lib/run`). Either way they do not prevent bb exit.
 
 [[testing]]
+== Charts from data
+
+Besides charts written as Clojure code, a chart can be built from DATA: a workflow *shape* (plain EDN) plus a namespace of *step functions*.
+A tool or an AI can create and edit the shape deterministically, while the logic stays in ordinary functions.
+The result is an ordinary chart value: it runs, resumes and is inspected exactly like a hand-written one.
+
+[source,clojure]
+----
+(require '[escapement.chart.data :as data])
+
+(def shape
+  {:id      :email-triage
+   :initial :inbox
+   :data    {:category nil}                  ; defaults under the run's :initial-data
+   :states
+   [{:id :inbox :label "Wait for an email"
+     :on [{:event :email/received :target :classify :actions [:store-email]}]}
+    {:id :classify :label "Classify the email"
+     :ai {:id "classify" :system "You triage." :message {:step :prompt}
+          :verdict-schema [:map [:category :keyword] [:confidence number?]]}
+     :retry {:max 2 :backoff-ms 60000 :on-exhausted :review}
+     :on [{:event :llm.idle :guard :confident? :condition "confidence ≥ 0.9" :target :approve}
+          {:event :llm.idle :target :review :label "not sure"}]}
+    {:id :approve :label "Wait for your OK"
+     :wait {:timeout-ms 172800000 :on-timeout :review}
+     :on [{:event :approval/answered :guard :approved? :target :reply}
+          {:event :approval/answered :target :review}]}
+    {:id :reply :call {:tool :email/send :input {:step :reply-input} :timeout-ms 10000}
+     :on [{:event :call.done :target :done} {:event :call.error :target :review}]}
+    {:id :review :type :final}
+    {:id :done :type :final}]})
+
+(data/compile shape {:steps 'wf.email-triage.v1a2b3c4d5e6f :chart-id :wf.email-triage/v1a2b3c4d5e6f})
+;; => {:ok? true :chart <chart> :chart-id … :problems []}
+----
+
+=== The shape
+
+* A state has `:id`, optional `:type` (`:state`, `:parallel`, `:final`), `:label` (the diagram label), `:detail` (`:business`, the default, or `:full` to show it only in the full diagram), `:states` + `:initial` for children, `:entry`/`:exit` actions, and `:on` transitions.
+* At most one invocation per state: `:ai` (an `:llm-conversation`; `:events` become event tools, `:tools` real tools), `:call` (a `:tool-call`; `:call.done`/`:call.error` name its done/error events), or `:invoke` (raw: `{:type kw :id s :params {…}}`). `:human-input` invokes are refused: ask people with wait states, which survive restarts.
+* `:wait {:timeout-ms n :on-timeout :state}` — a plain wait state with an optional timeout.
+* `:retry {:max n :backoff-ms ms :factor f :on-exhausted :state}` on an `:ai`/`:call` state — bounded retries with exponential backoff through a generated `<id>.retry-wait` state. A step's own transitions on *specific* errors of its family (`:error.call.unknown`) win over the retry; generic ones (`:error.llm`, `:call.error`) fire once the retries run out.
+* A transition has `:event` (keyword or vector; omit for an eventless transition), `:target` (keyword or vector; omit for a targetless one), `:guard`, `:actions`, `:label`, `:condition` (the text shown in brackets on the arrow; defaults to the guard's name), `:type`, and `:after` (a delay in ms, or `{:step :fn}` computed on entry).
+* References: an unqualified keyword names a public fn of the step namespace; a qualified keyword names an entry of the `:builtins` vocabulary passed to `compile` (`:std/always`, `:std/never`, `:std/noop`, `:std/store-event-data` ship). In a param position a reference is written `{:step :fn-name}`; any other value is a literal. Unknown references are problems, never literals.
+
+=== Step functions
+
+Every step fn takes `[env data]`; the triggering event is `(:_event data)` and an AI verdict is at `[:_event :data :verdict]`.
+An action returns nil, a vector of statecharts ops, or a map whose entries are assigned into the data model.
+A guard returns truthy or falsey. Effects go through tools: `(data/tool! env :email/send input)` dispatches on the run's tool registry (pretend tools in tests).
+
+=== Problems instead of exceptions
+
+`data/validate` (and `compile`) return every problem as `{:level :error|:warn :code kw :state id :at [path] :message "…"}`.
+The checks: shape errors and duplicate ids, unknown targets and initial states, unknown references (with "did you mean"), every state reachable from the initial state (`:unreachable`), no non-final state without a way out (`:stuck`), an error exit on every `:ai`/`:call`/`:invoke` state (`:no-error-exit`), no automatic error loop without a guard (`:unbounded-retry`), sane delays (`:bad-delay`), `:human-input` refused, and the statecharts library's own problems.
+A shape with errors builds no chart; `compile!` throws with the problems instead.
+
+=== Versions: `escapement.authoring.loader`
+
+Each version of a data-built chart is a fixed snapshot. `load-steps!` loads its step file under a version-unique namespace, `wf.<project>.v<sha12>` (the file's own `ns` name is rewritten), via `load-string` — never `require`, and never reloaded in place: a run on v3 keeps calling v3's functions while v4 loads beside it.
+`version-chart-id` gives the matching chart id, `:wf.<project>/v<sha12>`; pass it as `:chart-id` so the checkpoint names the version (resuming with a chart id that is not available is refused).
+Before loading, `escapement.authoring.portability/check` rejects step code that is not portable: file IO, shell, threads, runtime code loading or redefinition, and host interop, each reported with its line and column.
+
+=== Diagrams and explanations
+
+`(data/diagram shape {:detail :business|:full})` returns `{:initial :nodes :edges}` for drawing; the business view hides `:detail :full` states and reconnects the arrows around them.
+A compiled chart writes a `:chart/entered` row on every state entry (`:final? true` on finals) and a `:chart/guard` row for every guard decision (`:state :event :target :guard :condition :result`), so a host can show the exact path and answer "why did it go here?".
+
 == Testing
 
 Tests run under bb with `bb test`.
@@ -4170,6 +4270,43 @@ The library's
 (dct/data t)               ; current data-model contents
 (dct/run-events! t :foo {:name :bar :data {...}})
 ----
+
+=== The scripted backend: `escapement.llm.scripted`
+
+`(scripted/backend {:script {"classify" [reply …]}})` answers AI steps from a script instead of a provider: no network, no credentials.
+Each AI turn of a step (keyed by its invoke id) takes the next reply: `{:verdict m}`, `{:event kw :data m}` (one of the step's event tools), `{:tool kw :input m}` (a real tool), `{:text s}`, `{:fail category}` (a categorized backend failure; the runtime's retries of that turn repeat it without waiting), `{:malformed true}` (no usable verdict ⇒ the step's `:error.llm.*`), or `{:response r}` (raw).
+A turn the script has no reply for fails clearly, naming the step; `scripted/calls`, `scripted/divergences` and `scripted/remaining` report what happened.
+`escapement.testing.tools/pretend-registry` builds pretend tools (`{:reply …}`, `{:replies […]}` or a fn) that record their calls.
+
+=== Test cases as data: `escapement.testing.cases`
+
+`(cases/run-case compiled case opts)` runs one EDN test case against a chart on a manual clock (`escapement.engine.clock`) through the step API: outside events are delivered when the run settles (or at `:at-ms` of fake time), and timers and retry backoffs are jumped to, so a two-day wait takes milliseconds.
+
+[source,clojure]
+----
+{:name "a sure billing email is answered after approval"
+ :start "2026-11-23T09:00:00Z"
+ :ai {"classify" [{:verdict {:category :billing :confidence 0.95}}]}
+ :tools {:email/send {:reply "sent"}}
+ :events [{:event :email/received :data {:subject "Refund"}}
+          {:event :approval/answered :data {:approved? true} :at-ms 3600000}]
+ :expect {:status :done :final #{:done} :path [:classify :approve :reply]
+          :never #{:review} :data {[:category] :billing} :tool-calls {:email/send 1}
+          :max-ai-calls 1 :ai-request-contains {"classify" "Refund"}
+          :min-elapsed-fake-ms 3600000}}
+----
+
+The result carries `:pass?`, `:failures` (each a readable `:message`), the `:path`, `:final` states, `:data`, tool and AI calls, guard decisions, `:metrics` and `:elapsed-fake-ms`. `run-cases` sums a suite.
+
+=== Recording and replaying runs
+
+`escapement.recording/from-rows` turns a run's transcript rows into a recording: its initial data, its outside events in order (with their time offsets), the AI answers each step got, its path and where it ended. `save!`/`load-recording` keep it as EDN (record from the live rows; the JSONL file stores keyword values as strings).
+`(escapement.recording.replay/replay! recording {:chart c :chart-id id :tool-registry pretend})` replays it against the same or another version on a test clock, answering AI steps from the recording (or a script, or any backend) and using only the tools it is given; it reports `:divergences` (an AI step the recording never answered, recorded answers left unused, a different end or status) and writes its own transcript, never the recorded run's files.
+
+=== What a run used: `escapement.metrics`
+
+Every `:llm/response` row (conversation turns and one-shot `ask`/`map-prompt` calls from a chart env) carries `:cost-usd` from the catalog's pricing, `:cost-basis`, and `:cost-unknown? true` (with a nil cost, never zero) when the model has no price; a replay-cache hit is marked `:replay-cache/hit?`.
+A run's result carries `:metrics` and its transcript a `:runner/metrics` row: AI calls, tokens (input, output, cache read/write), cost, AI time, wall time, by model and by step. `metrics/summarize` folds any rows; `metrics/call-cost` prices a call against your own table.
 
 === Mocking the LLM backend
 
@@ -4502,6 +4639,14 @@ Only these keys are accepted:
 | `:initial-data` | optional | none | data-model seed (`[:maybe :map]`)
 | `:transcript-tap` | optional | none | `(fn [event])` — receives every transcript row in-process
 | `:on-env-ready` | optional | none | `(fn [env])` — called once env is built, before chart start
+| `:human-renderer` | optional | none | a `HumanRenderer` (`escapement.invocation.human-input`); enables `:human-input` invokes shown and answered by the host. Each prompt's opts carry `:invokeid` and `:session-id` so a host serving many sessions can route the answer
+| `:debug-controller` | optional | none | an `escapement.debug.controller` atom — the same pause/step gate as the CLI's `--debug`; every event is gated before it is processed
+| `:human-input-active?` | optional | derived | `(fn [] bool)`; while true the debug gate yields so an open human-input prompt can be answered. When omitted with a `:debug-controller`, it is derived from the run's human-input processor (a live prompt worker = open)
+| `:invocation-processors` | optional | none | `[:vector :any]` — extra statecharts `InvocationProcessor`s (e.g. `(com.fulcrologic.statecharts.invocation.future/new-future-processor)` for `:type :future`), installed after the built-in LLM, human-input, child-chart and multiplex processors, which keep handling their own types
+| `:clock` | optional | wall clock | an `escapement.engine.clock/Clock`: delayed events' due times and the runner's waits for them read it. `(clock/manual-clock {:start-ms 0 :auto-advance? true})` makes a chart that waits two days finish in milliseconds (timers still fire in due-time order); without `:auto-advance?` its time moves only on `clock/advance!` / `clock/set-ms!`
+| `:report-waiting?` | optional | `false` | a run that goes quiet in a NON-final configuration (nothing in flight, nothing pending) returns `:status :waiting` and `:waiting-in` (its active states) instead of `:done`; a final configuration still returns `:done`. See <<outside-events>>
+| `:park-timers?` | optional | `false` | a run whose only remaining work is a delayed event not yet due writes its checkpoint and returns `:status :sleeping` with `:next-wake-at` (epoch ms on the run's clock) instead of holding a thread asleep. Resume it at or after that time; resuming earlier parks again with the same wake time. Needs the default file-backed store (refused with a custom `:store`). See <<outside-events>>
+| `:require-checkpoint?` | optional | `false` | with `:resume? true`: a session with no checkpoint (none saved, or one with no active configuration) fails with `ex-data {:escapement/refused :no-checkpoint :session-id :checkpoint-dir :checkpoint-found?}` and nothing starts, instead of a silent fresh start
 | `:transcript-path` | optional | `<tmp>/transcript.jsonl` | when omitted, a fresh temp dir is created
 | `:checkpoint-dir` | optional | `<tmp>/checkpoints` | when omitted, a fresh temp dir is created
 | `:session-dir` | optional | `<tmp>` | artifact/session dir (`<session-dir>/artifacts/<name>`); defaults to the same temp dir
@@ -4529,7 +4674,10 @@ Supplying both explicitly creates no temp dir.
 |===
 | Key | Type | Value
 | `:run-id` | string | generated 36-char UUID string, stable within the run, unique across runs
-| `:status` | keyword | `:done` (normal quiescence) or `:aborted` (cancel fired, or max-iterations hit)
+| `:status` | keyword | `:done` (normal quiescence) or `:aborted` (cancel fired, or max-iterations hit); also `:frozen-config`; and, only when asked for, `:waiting` (`:report-waiting?`) or `:sleeping` (`:park-timers?`)
+| `:waiting-in` | vector | with `:status :waiting`: the active states the run waits in
+| `:next-wake-at` | long | with `:status :sleeping`: when the earliest delayed event is due (epoch ms on the run's clock)
+| `:data` | map | the chart's data model at the end of the run
 | `:transcript` | string | transcript path actually used (temp or explicit)
 | `:checkpoint-dir` | string | checkpoint dir actually used (temp or explicit)
 | `:session-dir` | string | session/artifact dir actually used (temp or explicit)
@@ -4544,6 +4692,61 @@ Hosts read
 `(:status result)`; `(= :aborted (:status result))` means the run was cancelled or hit the iteration bound.
 Omitting `:cancel` always yields
 `:status :done` for a normal run.
+
+[[tool-call]]
+==== Calling a tool as an invocation: `:type :tool-call`
+
+When the run has a `:tool-registry`, a chart can call a registered `Tool` as an invocation, off the chart's thread:
+
+[source,clojure]
+----
+(state {:id :fetch}
+  (invoke {:id :fetch :type :tool-call
+           :params {:tool :mail/list-new :input {:limit 10} :timeout-ms 5000}})
+  (transition {:event :done.invoke.fetch :target :triage})        ; data = the tool's whole result
+  (transition {:event :error.call.unknown :target :ask-the-user}) ; the tool can't tell if its effect happened
+  (transition {:event :error.call.* :target :failed}))            ; tool / exception / timeout
+----
+
+The input is validated against the tool's schema; the call runs on its own thread, so the chart keeps processing other events meanwhile, and it counts as in-flight work, so the run does not end while it runs.
+Exactly one event comes back: `done.invoke.<id>` (data: the tool's result map) on success, or one of `error.call.tool` (the tool reported `:is-error`, the input was invalid, or there is no such tool), `error.call.unknown` (the result has `:outcome :unknown`), `error.call.exception` (the tool threw; `{:message}`) or `error.call.timeout` (longer than `:timeout-ms`; `{:timeout-ms}` — the effect may still have happened).
+Error data also carries `:escapement/invokeid` and `:escapement/tool`.
+Leaving the state cancels the call; nothing is reported for it afterwards.
+On resume an in-flight call is started again with its state, so an effectful tool needs an at-most-once guard of its own.
+
+[[outside-events]]
+==== Waiting, parking and outside events
+
+A workflow often stops to wait for something outside it (an approval, an incoming email, a webhook) or for a timer ("wait two days").
+A host can tell such a run apart from a finished one and wake it later, without holding a thread for the wait:
+
+* `:report-waiting? true` — a run that goes quiet in a non-final configuration returns `:status :waiting` (and `:waiting-in`), not `:done`.
+A run is never reported waiting (or done) while an invocation it started is still running.
+* `:park-timers? true` — when only a not-yet-due delayed event is left, the run saves its checkpoint and returns `:status :sleeping` with `:next-wake-at`.
+Resume with `:resume? true` (same `:chart-id` and paths) at that time and the timer fires.
+* `escapement.lib/deliver!` — deliver an outside event to a session by id:
++
+[source,clojure]
+----
+(lib/deliver! {:checkpoint-dir dir :session-id sid :event :approval/answered :data {:answer :yes}})
+;; => {:accepted? true :where :running}  a run in this process will process it
+;; => {:accepted? true :where :saved}    saved with the session: resume it to process it
+;; => {:accepted? false :reason :finished | :no-session | :locked-elsewhere | :busy}
+----
++
+The event joins the session's queue and is processed in order like any other; it is written into the session's checkpoint before `deliver!` returns, so an accepted event survives a crash.
+For a saved session on a non-wall clock, pass the session's `:clock`.
+An outside event normally arrives "now"; give it `:at-ms` (epoch ms on the session's clock, on `deliver!` or on a `:resume-events` entry) to order it by when it really arrived. An approval answer that came in before its timeout was due is then processed first even when it is delivered after downtime; an `:at-ms` in the future is never delivered early.
+
+`escapement.lib/inspect` reads where a saved session stands without running it or taking its lock: `(lib/inspect {:checkpoint-dir dir :session-id sid})` returns `{:exists? false}` or `{:exists? true :chart-id :configuration :final? :pending-events [{:event :data :due-at}] :next-wake-at}`. It writes nothing.
+
+A parked approval therefore looks like: `run` with `:report-waiting? true` → `:waiting`; later `deliver!` the answer (`:where :saved`) and `run` again with `:resume? true` → it continues.
+`:resume-events` keeps working for the same purpose.
+
+Each processed outside event (delivered, a `:resume-events` entry, a human's answer) is marked `:external? true` on its `:runner/event-processed` row, and `:runner/started` carries the run's `:initial-data`, so a recorded run holds what it needs to be replayed.
+
+A resumed checkpoint names the chart id it was running (`::sc/statechart-src`); if no chart is available under that id, the resume is refused with `ex-data {:escapement/refused :chart-id-mismatch :checkpoint-chart-id … :chart-id …}` instead of running it against another chart.
+Give each chart version its own `:chart-id`.
 
 ==== Cancellation
 

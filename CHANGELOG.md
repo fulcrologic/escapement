@@ -1,5 +1,102 @@
 # Changelog
 
+## [unreleased] — feat/builder-runtime
+
+### Changed
+
+- **A cancelled send is never delivered, even when it was already due.** The
+  in-process queue used to take a whole batch of due events out at once, so an
+  event cancelled (SCXML `<cancel>`) by an earlier event in the same batch was
+  still delivered. Each event now leaves the queue only at its own turn, and a
+  cancelled one is skipped. This is a defect fix with no opt-in: `<cancel>`
+  means the send is not delivered. The bundled charts that cancel (the haiku
+  tournament's safety timers, data-built charts' exit cancels) already relied
+  on that meaning.
+- **A run that reaches its top-level final state ends, even with delayed sends
+  still pending.** It used to keep sleeping until the last uncancelled timer
+  fired (an hour for an hour-long timeout), although a finished session can't
+  act on it. SCXML ends the session at a top-level final state and never
+  delivers its pending delayed sends. They are now dropped from the queue and
+  the checkpoint, recorded as `:runner/pending-dropped` `{:count :reason
+  :final-state}`, and the run returns `:done`. This is a defect fix with no
+  opt-in. The bundled charts already cancelled their safety timers on exit
+  (`send-after`, or an on-exit `cancel`) to work around it.
+- **Each event is acknowledged in the checkpoint written after processing it.**
+  A crash mid-batch no longer loses the events not yet handled.
+- **An event whose processing throws reaches the chart as `error.execution`**
+  (data `{:reason :event-processing-threw :message … :escapement/failed-event
+  <name>}`) with a `:runner/event-failed` transcript row, instead of being
+  printed and dropped.
+- **Resume restarts the invocations of active invoking states** (LLM
+  conversations, child charts, `:future` and `:tool-call` calls), recorded as
+  `:runner/reinvoked`. A restarted outside call can run twice.
+- **A run never ends while a `:future` invocation (or any processor
+  implementing `escapement.engine.liveness/ActiveCount`) is in flight.**
+- **Resuming a checkpoint whose chart id is not registered is refused**
+  (`{:escapement/refused :chart-id-mismatch}`), instead of failing every event.
+- Single-writer session lock and versioned checkpoint records (from
+  `durability/checkpoint-authority`).
+
+### Added
+
+- `escapement.lib/run` options `:human-renderer`, `:debug-controller`,
+  `:human-input-active?`, `:invocation-processors`, `:clock`,
+  `:report-waiting?` (`:status :waiting`), `:park-timers?` (`:status
+  :sleeping` + `:next-wake-at`) and `:require-checkpoint?`. `runner/run!` takes
+  the same. The result gains `:data`, plus `:waiting-in` and `:next-wake-at`
+  where they apply.
+- `escapement.engine.clock`: `wall-clock`, and `manual-clock` with
+  `:auto-advance?`.
+- `escapement.engine.step`: event-by-event stepping (`open`, `step!`, `state`,
+  `close!`, `step-until-quiet!`).
+- `escapement.lib/deliver!`: deliver an outside event to a running or saved
+  session. Optional `:at-ms` (also on `:resume-events` entries) orders it by
+  its real arrival time.
+- `escapement.lib/inspect`: read a saved session's state (chart id,
+  configuration, pending events, next wake) without running or locking it.
+- The `:tool-call` invocation type (`escapement.invocation.tool-call`),
+  installed whenever the run has a tool registry.
+- Transcript: `:initial-data` on `:runner/started`, and `:external?` on
+  `:runner/event-processed`.
+- Human-input renderer opts carry `:invokeid` and `:session-id`.
+- **Charts from data** (`escapement.chart.data`, `escapement.chart.check`): build
+  a chart from an EDN shape whose guards and actions are keywords naming step
+  fns — AI steps, outside calls, wait states, delays (literal or computed),
+  bounded retries with backoff, labels and conditions for the diagram — with
+  structural checks returned as readable problems (reachability, stuck states,
+  error exits, bounded retries, delays, the library's own checks). Compiled
+  charts write `:chart/entered` and `:chart/guard` rows. `data/diagram` gives a
+  drawable graph. A state's `:retry` retries only retryable errors: never an
+  outside call whose outcome is unknown (`error.call.unknown`, it may already
+  have happened), never an error marked `{:error {:retryable? false}}`, and with
+  `:retry {:on #{code …}}` only those codes. Other errors go to the state's own
+  error arrows; a retryable error out of attempts, or one no arrow takes, goes
+  to `:on-exhausted`. Unknown `:ai`/`:call` keys, an AI step without
+  `:message` and a call without `:tool` are problems.
+- `escapement.authoring.loader`: step code loads per version as
+  `wf.<project>.v<sha12>` (never reloaded in place), with per-version chart
+  ids; `escapement.authoring.portability` rejects non-portable step code.
+- `escapement.llm.scripted`: a scripted `LLMBackend` for tests and replays;
+  `escapement.testing.tools`: pretend tools that record calls (replies keep
+  `:error`, `:value`, `:outcome`).
+- `escapement.testing.cases`: run EDN test cases on a manual clock (path,
+  expectations, metrics).
+- `escapement.recording` and `escapement.recording.replay`: record a run's
+  inputs from its transcript and replay them against another chart version,
+  reporting divergences.
+- `escapement.metrics`: per-call cost from the catalog on `:llm/response` rows
+  (nil, never zero, when unknown), `:replay-cache/hit?`, `:llm/response` rows
+  for one-shot `ask`/`map-prompt` from a chart env, and run totals on the run
+  result (`:metrics`) and in a `:runner/metrics` row.
+- LLM requests carry the asking step's identity as Clojure metadata
+  (`:escapement/invokeid`, `:escapement/visit`, `:escapement/turn`); it is
+  never sent to a provider.
+
+### Fixed
+
+- Runs with a `:debug-controller` no longer crash with an NPE the first time
+  they go quiet: the queue counts now see through the instrumented queue.
+
 ## [unreleased] — fix/nested-tool-input-keys — 2026-09-29
 
 ### Fixed

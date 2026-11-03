@@ -1,0 +1,65 @@
+{
+  "§runtime.chart-data/build": {
+    "kind": "behavior",
+    "requires": [],
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/chart/data.cljc",
+      "src/escapement/chart/check.cljc"
+    ]
+  },
+  "§runtime.chart-data/validation": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.chart-data/build"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/chart/check.cljc",
+      "src/escapement/chart/data.cljc"
+    ]
+  },
+  "§runtime.chart-data/version-identity": {
+    "kind": "behavior",
+    "requires": [
+      "§runtime.chart-data/build"
+    ],
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/authoring/loader.clj",
+      "src/escapement/authoring/portability.clj",
+      "src/escapement/runner.clj"
+    ]
+  },
+  "§runtime/chart-data": {
+    "kind": "surface",
+    "authority": "accepted",
+    "evidence": "verified",
+    "agreed": {
+      "by": "Omar (user)",
+      "at": "2026-10-30T00:12Z",
+      "source": "pi-session:01a189c7-3845-772d-8e4d-2c27424ce667#ac7480c3"
+    },
+    "code": [
+      "src/escapement/chart/data.cljc"
+    ]
+  }
+}

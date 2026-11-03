@@ -172,14 +172,18 @@
   (try (transcript-fn ev) (catch Throwable _ nil)))
 
 (defn- post-event-to-parent!
-  [{:keys [env queue parent-session-id invokeid]} event data]
-  (sp/send! queue env
-    {:target            parent-session-id
-     :source-session-id parent-session-id
-     :sendid            (str parent-session-id "." invokeid "." (name event))
-     :invokeid          invokeid
-     :event             event
-     :data              data}))
+  ([parent-ctx event data] (post-event-to-parent! parent-ctx event data nil))
+  ([{:keys [env queue parent-session-id invokeid]} event data origintype]
+   (sp/send! queue env
+     (cond-> {:target            parent-session-id
+              :source-session-id parent-session-id
+              :sendid            (str parent-session-id "." invokeid "." (name event))
+              :invokeid          invokeid
+              :event             event
+              :data              data}
+       ;; A person's answer (or cancel) is an OUTSIDE input to the chart: the runner marks it
+       ;; `:external?` in the transcript so a recorded run can be replayed.
+       origintype (assoc :origintype origintype)))))
 
 (defn- humanize-malli-errors [schema input]
   (-> (m/explain schema input) me/humanize pr-str))
@@ -208,6 +212,12 @@
          :or   {on-answer-event :human.answer
                 on-cancel-event :human.cancelled}} params
         env         (:env parent-ctx)
+        ;; What the renderer sees: the chart-author params plus WHICH prompt this is, so a
+        ;; host renderer serving many sessions can route the answer back (`:invokeid` is the
+        ;; key `escapement.ui.remote-renderer` already reads; `:session-id` names the session).
+        render-opts (assoc params
+                      :invokeid   (:invokeid parent-ctx)
+                      :session-id (:parent-session-id parent-ctx))
         ;; Same attribution contract as `:error.llm.*` — an `:error.human.*` rail
         ;; must be able to guard on which human-input invoke failed. Normalized
         ;; the same way `llm-conversation/->id-str` does (chart authors may write
@@ -236,12 +246,12 @@
         ;; Progress is fundamentally event-driven; for v1 just end immediately
         ;; and let the chart drive updates by other means. Future: park on a
         ;; queue and consume forwarded :human.progress events.
-        (let [handle (start-progress renderer params)]
+        (let [handle (start-progress renderer render-opts)]
           (end-progress renderer handle)
-          (post-event-to-parent! parent-ctx on-answer-event {:answer :done}))
+          (post-event-to-parent! parent-ctx on-answer-event {:answer :done} :escapement/human))
 
         :else
-        (let [answer (p/await! (dispatch-kind! renderer params env data))]
+        (let [answer (p/await! (dispatch-kind! renderer render-opts env data))]
           (cond
             (= :dying @worker-state)
             (transcript! transcript-fn {:event :human-input/cancelled :ts (now-ms)
@@ -265,7 +275,7 @@
                                  :invokeid (:invokeid parent-ctx)}
                           (get params :record-answer? true)
                           (assoc :answer answer))})
-              (post-event-to-parent! parent-ctx on-answer-event {:answer answer})))))
+              (post-event-to-parent! parent-ctx on-answer-event {:answer answer} :escapement/human)))))
       (catch InterruptedException _
         (transcript! transcript-fn {:event :human-input/interrupted :ts (now-ms)
                                     :data  {:invokeid (:invokeid parent-ctx)}}))
@@ -277,7 +287,7 @@
                :ts    (now-ms)
                :data  {:invokeid (:invokeid parent-ctx)}})
             (try
-              (post-event-to-parent! parent-ctx on-cancel-event {})
+              (post-event-to-parent! parent-ctx on-cancel-event {} :escapement/human)
               (catch Throwable _ nil)))
           (do
             (transcript! transcript-fn
